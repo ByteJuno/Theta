@@ -3,7 +3,7 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
-// 只有发版工作流会传这四个变量，签名材料不进仓库，也不离开 GitHub Actions。
+// 只有发版工作流会传这四个变量。签名材料不进仓库，CI 用的那份放在 GitHub 的 release environment 里。
 val releaseStoreFile = providers.environmentVariable("THETA_RELEASE_STORE_FILE").orNull
 val releaseStorePassword = providers.environmentVariable("THETA_RELEASE_STORE_PASSWORD").orNull
 val releaseKeyAlias = providers.environmentVariable("THETA_RELEASE_KEY_ALIAS").orNull
