@@ -183,9 +183,9 @@ def run(host, probe, hello):
     wait_for("re-enabled Probe", lambda t: PROBE_PASSED.match(t) is not None, fail=lambda t: t.startswith("FAIL "))
     adb("shell", "input", "keyevent", "KEYCODE_BACK")
     tap_text("Disable Probe")
-    wait_for("second disable", lambda t: t == "Enable Probe")
+    wait_for("second disable finished", lambda t: t == "Disabled; restart required before loading again")
     tap_text("Enable Probe")
-    wait_for("enable preference saved", lambda t: t == "Disable Probe")
+    wait_for("reenable deferred", lambda t: t == "Enabled for next start; restart required")
     if find(screen(), lambda t: t == "Probe") is not None:
         raise TestFailure("closed plugin reloaded in the same process")
 
