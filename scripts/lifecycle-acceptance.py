@@ -7,7 +7,7 @@ FIXTURE_APK_ROOT defaults to samples/fixtures/build/outputs/apk.
 Each flavor is <root>/<flavor>/release/fixtures-<flavor>-release.apk.
 --check-device checks the destructive-test guard without modifying the device.
 TEST_TIMEOUT (default 180), TEST_OUTPUT (default build/lifecycle-acceptance),
-S1_TOTAL_TIMEOUT (default 3600 seconds) bound waits and retain evidence.
+S1_TOTAL_TIMEOUT (default 5400 seconds) bound waits and retain evidence.
 
 No run-as, root, host internals, signature gate, or hot unloading assumptions.
 A timeout proves bounded host waiting, NOT termination of full-trust dex.
@@ -34,7 +34,7 @@ spec.loader.exec_module(em)
 OUTPUT = Path(os.environ.get("TEST_OUTPUT", "build/lifecycle-acceptance"))
 ADB = shlex.split(os.environ.get("ADB", "adb"))
 TIMEOUT = int(os.environ.get("TEST_TIMEOUT", "180"))
-FLAVORS = ("normalV1", "normalV2", "initThrow", "initBlock", "disableThrow", "cleanupThrow", "cleanupBlock")
+FLAVORS = ("normalV1", "normalV2", "initThrow", "initBlock", "initThrowV2", "initBlockV2", "disableThrow", "cleanupThrow", "cleanupBlock")
 PACKAGE = em.PACKAGE
 FAIL = em.TestFailure
 RESULTS = []
@@ -409,6 +409,80 @@ def rejected_packages(host, apks):
     page("normalV1", 0)  # Rejection must leave installation usable.
 
 
+def update_to_broken(host, apks, flavor):
+    fresh(host)
+    install(apks["normalV1"])
+    page("normalV1", 0)
+    increment(1)
+    back()
+    install(apks[flavor], "2.0")
+    text("Update installed; restart required")
+    clear_logs()
+
+
+def rolled_back(flavor):
+    """The fixture wrote 99 over the counter, so 1 proves a snapshot restore, not merely v1 code."""
+    matching("rollback report", lambda t: "rolled back to version 1" in t)
+    page("normalV1", 1)
+    require(not events(flavor), "Broken update executed after rollback")
+    back()
+    absent("Roll back Fixture")
+
+
+def rollback_failed_update(host, apks, flavor):
+    update_to_broken(host, apks, flavor)
+    restart()
+    event(flavor, "data:damaged")
+    text("Update failed; rollback on next start")
+    absent("Fixture page")
+    clear_logs()
+    restart()
+    rolled_back(flavor)
+
+
+def rollback_interrupted(host, apks):
+    flavor = "initBlockV2"
+    update_to_broken(host, apks, flavor)
+    restart()
+    event(flavor, "enable:block:start")
+    require("enable:block:end" not in events(flavor), "Missed interrupted-update window")
+    adb("shell", "am", "force-stop", PACKAGE)
+    stopped = events(flavor)
+    require("data:damaged" in stopped and "enable:block:end" not in stopped,
+            "Inconclusive: update initialization returned before force-stop completed")
+    clear_logs()
+    start()
+    rolled_back(flavor)
+
+
+def rollback_manual(host, apks):
+    fresh(host)
+    install(apks["normalV1"])
+    page("normalV1", 0)
+    increment(1)
+    back()
+    install(apks["normalV2"], "2.0")
+    text("Update installed; restart required")
+    install(apks["normalV2"], "2.0")  # A second update must wait for the first to activate.
+    text("Update or rollback pending; restart required")
+    restart()
+    page("normalV2", 1)
+    increment(2)
+    back()
+    tap("Roll back Fixture")
+    tap("Confirm rollback")
+    text("Rollback scheduled; restart required")
+    absent("Fixture page")
+    clear_logs()
+    restart()
+    rolled_back("normalV2")
+    # The rolled-back version stays installable: rollback must leave no stale package behind.
+    install(apks["normalV2"], "2.0")
+    text("Update installed; restart required")
+    restart()
+    page("normalV2", 1)
+
+
 def evidence(label):
     directory = OUTPUT / label
     directory.mkdir(parents=True, exist_ok=True)
@@ -461,14 +535,15 @@ def main():
     parser.add_argument("--case", action="append", choices=(
         "upgrade-and-data", "disableThrow", "cleanupThrow", "cleanupBlock",
         "initThrow", "initBlock", "interrupted-initialization", "interrupted-uninstall",
-        "rejected-packages"), help="Run only named cases; report explicitly records partial coverage")
+        "rejected-packages", "rollback-init-throw", "rollback-init-block", "rollback-interrupted",
+        "rollback-manual"), help="Run only named cases; report explicitly records partial coverage")
     args = parser.parse_args()
     OUTPUT.mkdir(parents=True, exist_ok=True)
     report = {"cases": RESULTS, "limitations": [
         "Full-trust dex: timeouts do not terminate noncooperative code; restart is required.",
         "Compose throwing fixture omitted: no promised per-page crash containment in this host.",
         "Interrupted uninstall tests durable tombstone during cleanup, not a kill inside filesystem deletion.",
-        "No signatures, data snapshot rollback, prefs/secrets or hot unloading acceptance claimed.",
+        "No signatures, prefs/secrets snapshots, observation-period expiry or hot unloading acceptance claimed.",
     ], "evidence_errors": EVIDENCE_ERRORS}
     try:
         report["serial"] = check_device()
@@ -482,7 +557,7 @@ def main():
         report["apk_sha256"] = {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
         # InstaBox/Linux: global deadline also bounds command loops and XML retries.
         signal.signal(signal.SIGALRM, expired)
-        signal.alarm(int(os.environ.get("S1_TOTAL_TIMEOUT", "3600")))
+        signal.alarm(int(os.environ.get("S1_TOTAL_TIMEOUT", "5400")))
         cases = {"upgrade-and-data": lambda: upgrade_data(args.host, apks)}
         for flavor in ("disableThrow", "cleanupThrow", "cleanupBlock"):
             cases[flavor] = lambda f=flavor: cleanup_fault(args.host, apks, f)
@@ -492,6 +567,10 @@ def main():
             "interrupted-initialization": lambda: interrupted_initialization(args.host, apks),
             "interrupted-uninstall": lambda: interrupted_uninstall(args.host, apks),
             "rejected-packages": lambda: rejected_packages(args.host, apks),
+            "rollback-init-throw": lambda: rollback_failed_update(args.host, apks, "initThrowV2"),
+            "rollback-init-block": lambda: rollback_failed_update(args.host, apks, "initBlockV2"),
+            "rollback-interrupted": lambda: rollback_interrupted(args.host, apks),
+            "rollback-manual": lambda: rollback_manual(args.host, apks),
         })
         selected = args.case or list(cases)
         report["selected_cases"] = selected

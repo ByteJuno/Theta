@@ -86,6 +86,7 @@ private fun ThetaCoreApp(
     var openPage by remember { mutableStateOf<SettingsPage?>(null) }
     var staged by remember { mutableStateOf<StagedPlugin?>(null) }
     var uninstalling by remember { mutableStateOf<ManagedPlugin?>(null) }
+    var rollingBack by remember { mutableStateOf<ManagedPlugin?>(null) }
     var removingRejected by remember { mutableStateOf<String?>(null) }
     var clearData by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -159,6 +160,7 @@ private fun ThetaCoreApp(
                         onPick = { picker.launch(arrayOf("*/*")) },
                         onToggle = { plugin -> operate { manager.setEnabled(plugin.manifest.id, !plugin.enabled) } },
                         onUninstall = { plugin -> clearData = false; uninstalling = plugin },
+                        onRollback = { rollingBack = it },
                         onRemoveRejected = { removingRejected = it },
                     )
                 }
@@ -170,6 +172,7 @@ private fun ThetaCoreApp(
                     text = {
                         Column(Modifier.verticalScroll(rememberScrollState())) {
                             Text("${plugin.manifest.id}\nInstall and enable. Updates take effect after restarting the app.")
+                            Text("A rollback only restores this plugin's data directory. Other changes it made stay.")
                             Text("Integrity verified; author identity not authenticated.")
                             Text("Current signer certificate SHA-256:")
                             plugin.signers.sha256.forEach { Text(it) }
@@ -202,6 +205,22 @@ private fun ThetaCoreApp(
                     },
                     dismissButton = {
                         TextButton(onClick = { removingRejected = null }) { Text(stringResource(R.string.cancel)) }
+                    },
+                )
+            }
+            rollingBack?.let { plugin ->
+                AlertDialog(
+                    onDismissRequest = { rollingBack = null },
+                    title = { Text("Roll back ${plugin.manifest.name}?") },
+                    text = { Text("After a restart the previous version returns with its data from before the update. Anything this plugin saved since then is lost.") },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            rollingBack = null
+                            operate { manager.rollback(plugin.manifest.id) }
+                        }) { Text("Confirm rollback") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { rollingBack = null }) { Text(stringResource(R.string.cancel)) }
                     },
                 )
             }
@@ -244,6 +263,7 @@ private fun PluginList(
     onPick: () -> Unit,
     onToggle: (ManagedPlugin) -> Unit,
     onUninstall: (ManagedPlugin) -> Unit,
+    onRollback: (ManagedPlugin) -> Unit,
     onRemoveRejected: (String) -> Unit,
 ) {
     Column(
@@ -272,6 +292,12 @@ private fun PluginList(
                     onClick = { onUninstall(plugin) },
                     enabled = !plugin.busy && !plugin.pendingDelete,
                 ) { Text("Uninstall ${plugin.manifest.name}") }
+            }
+            if (plugin.canRollback) {
+                TextButton(
+                    onClick = { onRollback(plugin) },
+                    enabled = !plugin.busy && !plugin.pendingDelete,
+                ) { Text("Roll back ${plugin.manifest.name}") }
             }
             plugin.pages.forEach { page ->
                 Text(

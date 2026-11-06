@@ -75,8 +75,7 @@ internal class PluginStore(
         val manifest = staged.manifest
         checkId(manifest.id)
         val pluginDir = pluginPath(root, manifest.id)
-        val highest = pluginDir.listFiles().orEmpty().filter { File(it, "plugin.apk").exists() }
-            .mapNotNull { it.name.toLongOrNull() }.maxOrNull()
+        val highest = versions(manifest.id).lastOrNull()
         if (highest != null && manifest.versionCode <= highest) {
             throw PluginPackageException("Install requires a higher version than $highest")
         }
@@ -121,6 +120,23 @@ internal class PluginStore(
         val signers = verifier.verify(expected)
         trust.requireMatch(manifest.id, signers)
         if (readPluginManifest(expected) != manifest) throw PluginPackageException("Installed manifest changed")
+    }
+
+    /** Published versions of one ID, lowest first. */
+    fun versions(id: String): List<Long> {
+        checkId(id)
+        return pluginPath(root, id).listFiles().orEmpty().filter { File(it, "plugin.apk").exists() }
+            .mapNotNull { it.name.toLongOrNull() }.sorted()
+    }
+
+    fun verifyVersion(id: String, version: Long) {
+        val apk = pluginPath(root, "$id/$version/plugin.apk")
+        verifyForLoad(InstalledPlugin(apk, readPluginManifest(apk)))
+    }
+
+    fun deleteVersion(id: String, version: Long) {
+        checkId(id)
+        deletePluginTree(pluginPath(root, id), version.toString())
     }
 
     /** Highest installed version only; a broken package never aborts other IDs. */

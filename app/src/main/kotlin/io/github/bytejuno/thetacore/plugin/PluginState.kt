@@ -54,27 +54,29 @@ internal class PluginStateStore(private val filesDir: File) {
 
     fun write(id: String, state: PluginState) {
         checkId(id)
-        val dir = root
-        Files.createDirectories(dir.toPath())
-        val target = pluginPath(dir, "$id.properties")
-        val temp = pluginPath(dir, "${UUID.randomUUID()}.tmp")
-        try {
-            val properties = Properties().apply {
-                setProperty("enabled", state.enabled.toString())
-                setProperty("pendingDelete", state.pendingDelete.toString())
-                setProperty("clearData", state.clearData.toString())
-                setProperty("initializing", state.initializing.toString())
-            }
-            FileOutputStream(temp).use { out -> properties.store(out, null); out.fd.sync() }
-            Files.move(temp.toPath(), target.toPath(), ATOMIC_MOVE, REPLACE_EXISTING)
-        } finally {
-            Files.deleteIfExists(temp.toPath())
-        }
+        writePluginProperties(root, "$id.properties", Properties().apply {
+            setProperty("enabled", state.enabled.toString())
+            setProperty("pendingDelete", state.pendingDelete.toString())
+            setProperty("clearData", state.clearData.toString())
+            setProperty("initializing", state.initializing.toString())
+        })
     }
 
     fun remove(id: String) {
         checkId(id)
         Files.deleteIfExists(pluginPath(root, "$id.properties").toPath())
+    }
+}
+
+internal fun writePluginProperties(dir: File, name: String, properties: Properties) {
+    Files.createDirectories(dir.toPath())
+    val target = pluginPath(dir, name)
+    val temp = pluginPath(dir, "${UUID.randomUUID()}.tmp")
+    try {
+        FileOutputStream(temp).use { out -> properties.store(out, null); out.fd.sync() }
+        Files.move(temp.toPath(), target.toPath(), ATOMIC_MOVE, REPLACE_EXISTING)
+    } finally {
+        Files.deleteIfExists(temp.toPath())
     }
 }
 

@@ -13,7 +13,7 @@ fixtures=samples/fixtures/build/outputs/apk
 android_jar="${ANDROID_HOME:?ANDROID_HOME must be set}/platforms/android-37.0/android.jar"
 python3 -I scripts/check-plugin-links.py "$host" "$hello" "$android_jar"
 python3 -I scripts/check-plugin-links.py "$host" "$probe" "$android_jar"
-for flavor in normalV1 normalV2 initThrow initBlock disableThrow cleanupThrow cleanupBlock; do
+for flavor in normalV1 normalV2 initThrow initBlock initThrowV2 initBlockV2 disableThrow cleanupThrow cleanupBlock; do
   apk="$fixtures/$flavor/release/fixtures-$flavor-release.apk"
   test -s "$apk"
   python3 -I scripts/check-plugin-links.py "$host" "$apk" "$android_jar"

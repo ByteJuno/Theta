@@ -35,6 +35,8 @@ internal class ManagedPlugin(val manifest: PluginManifest, state: PluginState) {
         private set
     var pendingDelete by mutableStateOf(state.pendingDelete)
         private set
+    var canRollback by mutableStateOf(false)
+        internal set
     internal var runtime by mutableStateOf<PluginRuntime?>(null)
     val pages: List<SettingsPage>
         get() = runtime?.takeIf { it.active }?.context?.extensions?.filterIsInstance<SettingsPage>().orEmpty()
@@ -61,9 +63,12 @@ internal class PluginManager(context: Context) {
     private val app = context.applicationContext
     private val store = PluginStore(app.filesDir, app.cacheDir, PlatformPluginSignatureVerifier(app.packageManager))
     private val states = PluginStateStore(app.filesDir)
+    private val updates = PluginUpdates(app.filesDir, store)
     private val host = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val operations = Mutex()
     private val gate = PluginLoadGate()
+    // 已安排更新或回滚的 ID：这个进程里不能再加载，等冷启动切换。
+    private val deferred = mutableSetOf<String>()
     private var restored = false
     private var skipLoading = false
 
@@ -97,8 +102,9 @@ internal class PluginManager(context: Context) {
                     val state = states.read(id)
                     if (state.pendingDelete) {
                         blocked += id
-                        store.delete(id, state.clearData)
-                        states.remove(id)
+                        deleteStored(id, state.clearData)
+                    } else if (updates.recover(id, state.initializing, skipPlugins, messages::add)) {
+                        if (state.initializing) states.write(id, state.copy(initializing = false))
                     } else if (state.initializing) {
                         states.write(id, state.copy(enabled = false, initializing = false))
                         interrupted += id
@@ -124,6 +130,7 @@ internal class PluginManager(context: Context) {
                 PluginState(enabled = false)
             }
             val plugin = ManagedPlugin(installedPlugin.manifest, state)
+            plugin.canRollback = canRollback(id)
             plugins += plugin
             when {
                 id in blocked -> plugin.status(if (state.pendingDelete) "Uninstall pending; restart required" else "State unavailable; restart required")
@@ -178,18 +185,25 @@ internal class PluginManager(context: Context) {
             val (installed, state) = withContext(Dispatchers.IO) {
                 val state = states.read(id)
                 if (state.pendingDelete) throw PluginPackageException("Uninstall pending; restart required")
+                if (id in deferred) throw PluginPackageException("Update or rollback pending; restart required")
+                if (updates.read(id)?.phase == UpdatePhase.ROLLBACK) {
+                    throw PluginPackageException("Update or rollback pending; restart required")
+                }
                 if (staged.manifest.apiLevel !in 1..THETA_API_LEVEL) throw PluginPackageException("Unsupported API level")
                 // Upgrades preserve desired state; first install defaults to enabled.
                 states.write(id, state)
                 store.install(staged) to state
             }
             rejectedIds.remove(id)
+            val update = withContext(Dispatchers.IO) { store.versions(id).size > 1 }
+            if (update) deferred += id
             val plugin = ManagedPlugin(installed.manifest, state)
+            plugin.canRollback = canRollback(id)
             plugin.runtime = old?.runtime
             if (old == null) plugins += plugin else plugins[plugins.indexOf(old)] = plugin
             busy(plugin) {
                 when {
-                    gate.wasAttempted(id) -> plugin.status("Update installed; restart required")
+                    update || gate.wasAttempted(id) -> plugin.status("Update installed; restart required")
                     skipLoading -> plugin.status("Safe mode; loading skipped until restart")
                     !state.enabled -> plugin.status("Disabled")
                     else -> load(plugin, installed)
@@ -218,7 +232,7 @@ internal class PluginManager(context: Context) {
             } else when {
                 skipLoading -> plugin.status("Safe mode; loading skipped until restart")
                 plugin.runtime?.active == true -> Unit
-                gate.wasAttempted(id) -> plugin.status("Enabled for next start; restart required")
+                id in deferred || gate.wasAttempted(id) -> plugin.status("Enabled for next start; restart required")
                 else -> {
                     val apk = withContext(Dispatchers.IO) {
                         pluginPath(pluginPath(app.filesDir.canonicalFile, "plugins"), "$id/${plugin.manifest.versionCode}/plugin.apk")
@@ -242,7 +256,7 @@ internal class PluginManager(context: Context) {
             plugin.status("Uninstall pending; restart required")
             close(plugin)
             if (!gate.wasAttempted(id)) {
-                withContext(Dispatchers.IO) { store.delete(id, state.clearData); states.remove(id) }
+                withContext(Dispatchers.IO) { deleteStored(id, state.clearData) }
                 plugins.remove(plugin)
             }
         }
@@ -258,11 +272,35 @@ internal class PluginManager(context: Context) {
         withContext(Dispatchers.IO) {
             // Do not need to parse possibly corrupt old state to authorize deletion.
             states.write(id, PluginState(enabled = false, pendingDelete = true, clearData = true))
-            store.delete(id, clearData = true)
-            states.remove(id)
+            deleteStored(id, clearData = true)
         }
         rejectedIds.remove(id)
     }
+
+    /** 观察期内手动回滚。数据要等冷启动才恢复，这里只保存决定并撤销当前实例。 */
+    suspend fun rollback(id: String) = operation {
+        restoreInternal()
+        val plugin = managed(id)
+        busy(plugin) {
+            withContext(Dispatchers.IO) {
+                if (states.read(id).pendingDelete) throw PluginPackageException("Uninstall pending; restart required")
+                updates.requestRollback(id)
+            }
+            deferred += id
+            plugin.canRollback = false
+            plugin.status("Rollback scheduled; restart required")
+            close(plugin)
+        }
+    }
+
+    private fun deleteStored(id: String, clearData: Boolean) {
+        store.delete(id, clearData)
+        updates.forget(id)
+        states.remove(id)
+    }
+
+    private suspend fun canRollback(id: String): Boolean =
+        withContext(Dispatchers.IO) { updates.read(id)?.phase == UpdatePhase.OBSERVING }
 
     private fun managed(id: String): ManagedPlugin {
         checkId(id)
@@ -303,13 +341,21 @@ internal class PluginManager(context: Context) {
             result.getOrThrow()
             withContext(Dispatchers.IO) {
                 states.write(manifest.id, states.read(manifest.id).copy(initializing = false))
+                updates.started(manifest.id, manifest.versionCode)
             }
             runtime.active = true
             plugin.status("Running")
         } catch (error: Throwable) {
             failures += "${manifest.name}: initialization failed: $error"
             close(plugin)
-            plugin.status("Initialization failed; restart required")
+            // 写不进去也没关系：initializing 标记还在，下次启动同样会回滚。
+            val rollback = try {
+                withContext(Dispatchers.IO) { updates.failed(manifest.id, manifest.versionCode) }
+            } catch (_: IOException) {
+                false
+            }
+            if (rollback) plugin.canRollback = false
+            plugin.status(if (rollback) "Update failed; rollback on next start" else "Initialization failed; restart required")
             // Keep the marker after timeout/failure: next start disables conservatively.
         }
     }

@@ -19,6 +19,7 @@ import java.io.File
 private const val TAG = "ThetaFixture"
 // Longer than the host's 10s enable + 5s close deadlines, but finite: no leaked forever-loop.
 private const val BLOCK_MS = 60_000L
+private val BROKEN_UPDATES = setOf("initThrowV2", "initBlockV2")
 private fun event(message: String) { Log.i(TAG, "${BuildConfig.SCENARIO}|$message") }
 
 /** Intentionally broken callbacks. Never ship this fixture as a real plugin. */
@@ -41,13 +42,17 @@ class FixturePlugin : ThetaPlugin {
             }
             event("cleanup:second:end")
         }
+        if (BuildConfig.SCENARIO in BROKEN_UPDATES) {
+            File(ctx.dataDir, "counter.txt").writeText("99") // Only a real snapshot restore undoes this.
+            event("data:damaged")
+        }
         when (BuildConfig.SCENARIO) {
-            "initThrow" -> {
+            "initThrow", "initThrowV2" -> {
                 ctx.register(FixturePage(ctx.dataDir))
                 event("enable:throw")
                 error("fixture initialization failure")
             }
-            "initBlock" -> {
+            "initBlock", "initBlockV2" -> {
                 event("enable:block:start")
                 SystemClock.sleep(BLOCK_MS)
                 event("enable:block:end")

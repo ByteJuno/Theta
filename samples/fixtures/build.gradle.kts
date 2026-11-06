@@ -14,13 +14,15 @@ android {
     }
     // All cases deliberately share an ID. The runner clears the dedicated host between cases.
     // normalV1 -> normalV2 is a real same-ID upgrade, not two independent plugins.
+    // initThrowV2/initBlockV2 are broken updates of normalV1 that damage its data first.
     flavorDimensions += "scenario"
     productFlavors {
-        listOf("normalV1", "normalV2", "initThrow", "initBlock", "disableThrow", "cleanupThrow", "cleanupBlock").forEach { scenario ->
+        listOf("normalV1", "normalV2", "initThrow", "initBlock", "initThrowV2", "initBlockV2", "disableThrow", "cleanupThrow", "cleanupBlock").forEach { scenario ->
             create(scenario) {
                 dimension = "scenario"
-                versionCode = if (scenario == "normalV2") 2 else 1
-                versionName = if (scenario == "normalV2") "2.0" else "1.0"
+                val second = scenario.endsWith("V2")
+                versionCode = if (second) 2 else 1
+                versionName = if (second) "2.0" else "1.0"
                 buildConfigField("String", "SCENARIO", "\"$scenario\"")
             }
         }

@@ -13,7 +13,7 @@ mock verifier, or Android installation of fixture APKs. Real import, publication
 cold-start load and UI state exercise the platform verifier in the supplied host.
 Host uninstall destroys host data: existing lifecycle.check_device gates EVERY
 mutation sequence. No automatic cleanup: retain APKs, results and final device state.
-TEST_TIMEOUT=180; S1_SIGNATURE_TOTAL_TIMEOUT=2400; all commands bounded as well.
+TEST_TIMEOUT=180; S1_SIGNATURE_TOTAL_TIMEOUT=5400; all commands bounded as well.
 --case selects partial coverage, recorded explicitly. Output directory must be new.
 Tool resolution/environment is shared with signature-artifacts.py.
 """
@@ -367,7 +367,7 @@ def main():
     run = None
     try:
         signal.signal(signal.SIGALRM, expired)
-        signal.alarm(int(os.environ.get("S1_SIGNATURE_TOTAL_TIMEOUT", "2400")))
+        signal.alarm(int(os.environ.get("S1_SIGNATURE_TOTAL_TIMEOUT", "5400")))
         lifecycle = load("s1_lifecycle", "lifecycle-acceptance.py")
         run = Acceptance(lifecycle, output, args.host.resolve() if args.host else None,
                          args.artifacts.resolve() if args.artifacts else None, report)
