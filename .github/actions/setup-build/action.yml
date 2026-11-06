@@ -16,4 +16,4 @@ runs:
         packages: ""
     - name: Install the Android platform
       shell: bash
-      run: sdkmanager --channel=3 "platforms;android-37.0"
+      run: sdkmanager "platforms;android-37.0"
