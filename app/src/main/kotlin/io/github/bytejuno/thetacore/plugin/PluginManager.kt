@@ -13,90 +13,299 @@ import io.github.bytejuno.thetacore.sdk.SettingsPage
 import io.github.bytejuno.thetacore.sdk.THETA_API_LEVEL
 import io.github.bytejuno.thetacore.sdk.ThetaPlugin
 import java.io.File
-import kotlinx.coroutines.CancellationException
+import java.io.IOException
+import java.nio.file.Files
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
-import kotlin.concurrent.thread
-import kotlin.coroutines.resume
 
-internal class LoadedPlugin(val manifest: PluginManifest, private val context: HostPluginContext) {
-    val pages: List<SettingsPage> get() = context.extensions.filterIsInstance<SettingsPage>()
+private const val ENABLE_TIMEOUT_MS = 10_000L
+private const val CLOSE_TIMEOUT_MS = 5_000L
+
+internal class ManagedPlugin(val manifest: PluginManifest, state: PluginState) {
+    var enabled by mutableStateOf(state.enabled)
+        private set
+    var status by mutableStateOf(if (state.enabled) "Not running" else "Disabled")
+        private set
+    var busy by mutableStateOf(false)
+        private set
+    var pendingDelete by mutableStateOf(state.pendingDelete)
+        private set
+    internal var runtime by mutableStateOf<PluginRuntime?>(null)
+    val pages: List<SettingsPage>
+        get() = runtime?.takeIf { it.active }?.context?.extensions?.filterIsInstance<SettingsPage>().orEmpty()
+
+    internal fun state(state: PluginState) {
+        enabled = state.enabled
+        pendingDelete = state.pendingDelete
+    }
+    internal fun status(value: String) { status = value }
+    internal fun busy(value: Boolean) { busy = value }
 }
 
-internal class PluginManager(private val app: Context) {
-    private val store = PluginStore(app.filesDir, app.cacheDir)
-    private var restored = false
+/** Retained even after failure/disable: dex cannot be unloaded safely in this process. */
+internal class PluginRuntime(val context: HostPluginContext) {
+    @Volatile var loader: ClassLoader? = null
+    @Volatile var entry: ThetaPlugin? = null
+    var active by mutableStateOf(false)
+    var initialization: PluginWorker<Unit>? = null
+    var closing: PluginWorker<List<Throwable>>? = null
+    var closeFailed = false
+}
 
-    val plugins = mutableStateListOf<LoadedPlugin>()
+internal class PluginManager(context: Context) {
+    private val app = context.applicationContext
+    private val store = PluginStore(app.filesDir, app.cacheDir)
+    private val states = PluginStateStore(app.filesDir)
+    private val host = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val operations = Mutex()
+    private val gate = PluginLoadGate()
+    private var restored = false
+    private var skipLoading = false
+
+    val plugins = mutableStateListOf<ManagedPlugin>()
     val failures = mutableStateListOf<String>()
 
-    suspend fun restore() {
+    // Replaces the UI Job: caller cancellation cannot interrupt durable transitions.
+    private suspend fun <T> operation(block: suspend () -> T): T = withContext(host.coroutineContext) {
+        operations.withLock {
+            try { block() } catch (error: SecurityException) {
+                throw IOException("Plugin storage access failed", error)
+            }
+        }
+    }
+
+    suspend fun restore(skipPlugins: Boolean = false) = operation { restoreInternal(skipPlugins) }
+
+    private suspend fun restoreInternal(skipPlugins: Boolean = false) {
         if (restored) return
-        restored = true
-        val installed = withContext(Dispatchers.IO) { store.installed() }
-        installed.forEach { load(it) }
-    }
-
-    suspend fun stage(uri: Uri): StagedPlugin = withContext(Dispatchers.IO) {
-        if (uri.scheme == "file" && File(requireNotNull(uri.path)).canonicalPath.startsWith(app.dataDir.canonicalPath)) {
-            throw PluginPackageException("Refusing to read app data")
-        }
-        val input = app.contentResolver.openInputStream(uri) ?: throw PluginPackageException("Cannot open the file")
-        val staged = input.use(store::stage)
-        val apiLevel = staged.manifest.apiLevel
-        if (apiLevel !in 1..THETA_API_LEVEL) {
-            staged.file.delete()
-            throw PluginPackageException("Unsupported API level $apiLevel")
-        }
-        staged
-    }
-
-    suspend fun install(staged: StagedPlugin) {
-        load(withContext(Dispatchers.IO) { store.install(staged) })
-    }
-
-    private suspend fun load(plugin: InstalledPlugin) {
-        val manifest = plugin.manifest
-        val context = HostPluginContext(manifest.id, app, File(app.filesDir, "plugin-data/${manifest.id}"))
-        var enabled = false
-        try {
-            withContext(Dispatchers.Default) {
-                val loader = createPluginClassLoader(plugin.apk, app.classLoader)
-                val entry = loader.loadClass(manifest.entry).getDeclaredConstructor().newInstance() as ThetaPlugin
-                entry.onEnable(context)
-            }
-            plugins += LoadedPlugin(manifest, context)
-            enabled = true
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Throwable) {
-            // 插件的代码什么都可能抛，包括链接错误。这里不能让它带崩宿主。
-            failures += "${manifest.name}: $e"
-        } finally {
-            if (!enabled) {
-                val actions = context.beginClose()
-                val cleanupFailures = withContext(NonCancellable) {
-                    withTimeoutOrNull(5_000) {
-                        suspendCancellableCoroutine<List<Throwable>> { continuation ->
-                            thread(name = "theta-cleanup-${manifest.id}", isDaemon = true) {
-                                val errors = actions.mapNotNull { runCatching(it).exceptionOrNull() }
-                                continuation.resume(errors)
-                            }
-                        }
+        skipLoading = skipPlugins
+        val blocked = mutableSetOf<String>()
+        val interrupted = mutableSetOf<String>()
+        val messages = mutableListOf<String>()
+        val installed = withContext(Dispatchers.IO) {
+            // Tombstones precede package parsing, including corrupt APKs.
+            states.ids().forEach { id ->
+                try {
+                    val state = states.read(id)
+                    if (state.pendingDelete) {
+                        blocked += id
+                        store.delete(id, state.clearData)
+                        states.remove(id)
+                    } else if (state.initializing) {
+                        states.write(id, state.copy(enabled = false, initializing = false))
+                        interrupted += id
                     }
-                }
-                if (cleanupFailures == null) {
-                    failures += "${manifest.name}: cleanup timed out; restart required"
-                } else {
-                    cleanupFailures.forEach { failures += "${manifest.name}: cleanup failed: $it" }
+                } catch (error: Exception) {
+                    blocked += id
+                    messages += "$id: state recovery failed: ${error.message}"
                 }
             }
+            store.installed(messages::add)
+        }
+        failures.addAll(messages)
+        installed.forEach { installedPlugin ->
+            val id = installedPlugin.manifest.id
+            val state = try {
+                withContext(Dispatchers.IO) { states.read(id) }
+            } catch (error: Exception) {
+                blocked += id
+                failures += "$id: ${error.message}"
+                PluginState(enabled = false)
+            }
+            val plugin = ManagedPlugin(installedPlugin.manifest, state)
+            plugins += plugin
+            when {
+                id in blocked -> plugin.status(if (state.pendingDelete) "Uninstall pending; restart required" else "State unavailable; restart required")
+                id in interrupted -> {
+                    plugin.status("Previous initialization interrupted; disabled")
+                    failures += "$id: previous initialization interrupted; disabled conservatively (cause unknown)"
+                }
+                skipLoading -> plugin.status("Safe mode; loading skipped until restart")
+                !state.enabled -> plugin.status("Disabled")
+                else -> busy(plugin) { load(plugin, installedPlugin) }
+            }
+        }
+        restored = true
+    }
+
+    suspend fun stage(uri: Uri): StagedPlugin = operation {
+        withContext(Dispatchers.IO) {
+            if (uri.scheme == "file") {
+                val path = uri.path ?: throw PluginPackageException("Invalid file URI")
+                if (File(path).canonicalFile.toPath().startsWith(app.dataDir.canonicalFile.toPath())) {
+                    throw PluginPackageException("Refusing to read app data")
+                }
+            }
+            val input = try { app.contentResolver.openInputStream(uri) } catch (error: IllegalArgumentException) {
+                throw PluginPackageException("Cannot open the file: ${error.message}")
+            } ?: throw PluginPackageException("Cannot open the file")
+            val staged = input.use(store::stage)
+            if (staged.manifest.apiLevel !in 1..THETA_API_LEVEL) {
+                staged.file.delete()
+                throw PluginPackageException("Unsupported API level ${staged.manifest.apiLevel}")
+            }
+            staged
+        }
+    }
+
+    suspend fun install(staged: StagedPlugin) = operation {
+        restoreInternal()
+        val id = staged.manifest.id
+        val old = plugins.firstOrNull { it.manifest.id == id }
+        old?.busy(true)
+        try {
+            val (installed, state) = withContext(Dispatchers.IO) {
+                val state = states.read(id)
+                if (state.pendingDelete) throw PluginPackageException("Uninstall pending; restart required")
+                if (staged.manifest.apiLevel !in 1..THETA_API_LEVEL) throw PluginPackageException("Unsupported API level")
+                // Upgrades preserve desired state; first install defaults to enabled.
+                states.write(id, state)
+                store.install(staged) to state
+            }
+            val plugin = ManagedPlugin(installed.manifest, state)
+            plugin.runtime = old?.runtime
+            if (old == null) plugins += plugin else plugins[plugins.indexOf(old)] = plugin
+            busy(plugin) {
+                when {
+                    gate.wasAttempted(id) -> plugin.status("Update installed; restart required")
+                    skipLoading -> plugin.status("Safe mode; loading skipped until restart")
+                    !state.enabled -> plugin.status("Disabled")
+                    else -> load(plugin, installed)
+                }
+            }
+        } finally {
+            old?.busy(false)
+            withContext(Dispatchers.IO) { staged.file.delete() }
+        }
+    }
+
+    suspend fun setEnabled(id: String, enabled: Boolean) = operation {
+        restoreInternal()
+        val plugin = managed(id)
+        busy(plugin) {
+            val state = withContext(Dispatchers.IO) {
+                val previous = states.read(id)
+                if (previous.pendingDelete) throw PluginPackageException("Uninstall pending; restart required")
+                previous.copy(enabled = enabled).also { states.write(id, it) }
+            }
+            plugin.state(state) // Durable BEFORE callbacks/cancellation.
+            if (!enabled) {
+                close(plugin)
+                plugin.status(when {
+                    plugin.runtime?.closeFailed == true -> "Disabled; cleanup failed; restart required"
+                    gate.wasAttempted(id) -> "Disabled; restart required before loading again"
+                    else -> "Disabled"
+                })
+            } else when {
+                skipLoading -> plugin.status("Safe mode; loading skipped until restart")
+                plugin.runtime?.active == true -> Unit
+                gate.wasAttempted(id) -> plugin.status("Enabled for next start; restart required")
+                else -> {
+                    val apk = withContext(Dispatchers.IO) {
+                        pluginPath(pluginPath(app.filesDir.canonicalFile, "plugins"), "$id/${plugin.manifest.versionCode}/plugin.apk")
+                    }
+                    load(plugin, InstalledPlugin(apk, plugin.manifest))
+                }
+            }
+        }
+    }
+
+    suspend fun uninstall(id: String, clearData: Boolean) = operation {
+        restoreInternal()
+        val plugin = managed(id)
+        busy(plugin) {
+            val state = withContext(Dispatchers.IO) {
+                val previous = states.read(id)
+                previous.copy(enabled = false, pendingDelete = true, clearData = previous.clearData || clearData)
+                    .also { states.write(id, it) }
+            }
+            plugin.state(state)
+            plugin.status("Uninstall pending; restart required")
+            close(plugin)
+            if (!gate.wasAttempted(id)) {
+                withContext(Dispatchers.IO) { store.delete(id, state.clearData); states.remove(id) }
+                plugins.remove(plugin)
+            }
+        }
+    }
+
+    private fun managed(id: String): ManagedPlugin {
+        checkId(id)
+        return plugins.firstOrNull { it.manifest.id == id } ?: throw PluginPackageException("Plugin is not installed")
+    }
+
+    private suspend fun busy(plugin: ManagedPlugin, action: suspend () -> Unit) {
+        plugin.busy(true)
+        try { action() } finally { plugin.busy(false) }
+    }
+
+    private suspend fun load(plugin: ManagedPlugin, installed: InstalledPlugin) {
+        val manifest = installed.manifest
+        if (skipLoading || gate.wasAttempted(manifest.id)) return
+        try {
+            withContext(Dispatchers.IO) {
+                if (manifest.apiLevel !in 1..THETA_API_LEVEL) throw PluginPackageException("Unsupported API level")
+                val data = pluginPath(pluginPath(app.filesDir.canonicalFile, "plugin-data"), manifest.id)
+                Files.createDirectories(data.toPath())
+                states.write(manifest.id, states.read(manifest.id).copy(initializing = true))
+            }
+            gate.begin(manifest.id)
+            val runtime = PluginRuntime(HostPluginContext(manifest.id, app, File(app.filesDir, "plugin-data/${manifest.id}")))
+            plugin.runtime = runtime
+            plugin.status("Initializing")
+            val worker = PluginWorker("theta-enable-${manifest.id}") {
+                val loader = createPluginClassLoader(installed.apk, app.classLoader)
+                runtime.loader = loader
+                val entry = loader.loadClass(manifest.entry).getDeclaredConstructor().newInstance() as ThetaPlugin
+                runtime.entry = entry
+                entry.onEnable(runtime.context)
+            }
+            runtime.initialization = worker
+            val result = worker.await(ENABLE_TIMEOUT_MS)
+            if (result == null) throw PluginPackageException("Initialization timed out; restart required")
+            result.getOrThrow()
+            withContext(Dispatchers.IO) {
+                states.write(manifest.id, states.read(manifest.id).copy(initializing = false))
+            }
+            runtime.active = true
+            plugin.status("Running")
+        } catch (error: Throwable) {
+            failures += "${manifest.name}: initialization failed: $error"
+            close(plugin)
+            plugin.status("Initialization failed; restart required")
+            // Keep the marker after timeout/failure: next start disables conservatively.
+        }
+    }
+
+    private suspend fun close(plugin: ManagedPlugin) {
+        val runtime = plugin.runtime ?: return
+        runtime.active = false
+        if (runtime.closing != null) return
+        val actions = runtime.context.beginClose() // Admission closes BEFORE cancellation.
+        val worker = pluginCleanupWorker(
+            "theta-close-${plugin.manifest.id}",
+            cancel = {
+                try { runtime.context.scope.cancel() } finally { runtime.initialization?.cancel() }
+            },
+            onDisable = {
+                // Do not race onDisable with onEnable; a late enable sees a closed registry.
+                runtime.initialization?.join()
+                runtime.entry?.onDisable()
+            },
+            actions = actions,
+        )
+        runtime.closing = worker
+        val result = worker.await(CLOSE_TIMEOUT_MS)
+        val errors = result?.getOrNull()
+        runtime.closeFailed = result == null || result.isFailure || !errors.isNullOrEmpty()
+        if (runtime.closeFailed) {
+            failures += "${plugin.manifest.name}: cleanup failed or timed out; restart required"
+            errors.orEmpty().forEach { failures += "${plugin.manifest.name}: cleanup: $it" }
         }
     }
 }
@@ -126,6 +335,6 @@ internal class HostPluginContext(
 
     fun beginClose(): List<() -> Unit> {
         val actions = registrations.beginClose() ?: return emptyList()
-        return listOf<() -> Unit>({ scope.cancel() }) + actions
+        return actions
     }
 }

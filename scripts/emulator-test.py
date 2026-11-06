@@ -152,6 +152,69 @@ def run(host, probe, hello):
     tap_text("Probe")
     wait_for("probe after restart", lambda t: PROBE_PASSED.match(t) is not None, fail=lambda t: t.startswith("FAIL "))
 
+    step("disable Probe and verify registration removal")
+    adb("shell", "input", "keyevent", "KEYCODE_BACK")
+    adb("logcat", "-c")
+    tap_text("Disable Probe")
+    wait_for("Probe disabled", lambda t: t == "Enable Probe")
+    deadline = time.monotonic() + TIMEOUT
+    expected = ["onDisable", "cleanup:second", "cleanup:first"]
+    while time.monotonic() < deadline:
+        logs = adb("logcat", "-d", "-v", "raw", "ThetaProbeLifecycle:I", "*:S")
+        events = [line.strip() for line in logs.splitlines() if line.strip() in expected]
+        if events == expected:
+            break
+        time.sleep(1)
+    else:
+        raise TestFailure(f"lifecycle order: expected {expected}, got {events}")
+    if find(screen(), lambda t: t == "Probe") is not None:
+        raise TestFailure("disabled Probe still exposes its page")
+
+    step("disabled preference survives process restart")
+    adb("shell", "am", "force-stop", PACKAGE)
+    adb("shell", "am", "start", "-W", "-n", f"{PACKAGE}/.MainActivity")
+    wait_for("disabled after restart", lambda t: t == "Enable Probe")
+    if find(screen(), lambda t: t == "Probe") is not None:
+        raise TestFailure("disabled Probe loaded after restart")
+
+    step("enable a not-yet-loaded plugin in the fresh process")
+    tap_text("Enable Probe")
+    tap_text("Probe")
+    wait_for("re-enabled Probe", lambda t: PROBE_PASSED.match(t) is not None, fail=lambda t: t.startswith("FAIL "))
+    adb("shell", "input", "keyevent", "KEYCODE_BACK")
+    tap_text("Disable Probe")
+    wait_for("second disable", lambda t: t == "Enable Probe")
+    tap_text("Enable Probe")
+    wait_for("enable preference saved", lambda t: t == "Disable Probe")
+    if find(screen(), lambda t: t == "Probe") is not None:
+        raise TestFailure("closed plugin reloaded in the same process")
+
+    step("recovery cold-start skips enabled plugins")
+    adb("shell", "am", "force-stop", PACKAGE)
+    adb("shell", "am", "start", "-W", "-n", f"{PACKAGE}/.MainActivity", "--ez", "skip_plugins", "true")
+    wait_for("recovery controls", lambda t: t == "Disable Probe")
+    if find(screen(), lambda t: t in ("Probe", "Hello")) is not None:
+        raise TestFailure("recovery launched a plugin page")
+
+    step("normal restart restores enabled Probe")
+    adb("shell", "am", "force-stop", PACKAGE)
+    adb("shell", "am", "start", "-W", "-n", f"{PACKAGE}/.MainActivity", "--ez", "skip_plugins", "false")
+    tap_text("Probe")
+    wait_for("Probe after recovery", lambda t: PROBE_PASSED.match(t) is not None, fail=lambda t: t.startswith("FAIL "))
+    adb("shell", "input", "keyevent", "KEYCODE_BACK")
+
+    step("uninstall loaded Probe and finish deletion on restart")
+    tap_text("Uninstall Probe")
+    tap_text("Confirm uninstall")
+    wait_for("uninstall pending", lambda t: "restart" in t.lower() and "uninstall" in t.lower())
+    if find(screen(), lambda t: t == "Probe") is not None:
+        raise TestFailure("pending uninstall still exposes its page")
+    adb("shell", "am", "force-stop", PACKAGE)
+    adb("shell", "am", "start", "-W", "-n", f"{PACKAGE}/.MainActivity")
+    wait_for("host restored after deletion", lambda t: t == ("Hello" if hello else "No plugins installed"))
+    if find(screen(), lambda t: "Probe" in t) is not None:
+        raise TestFailure("Probe still installed after deferred deletion")
+
     if crashed():
         raise TestFailure("app crashed")
 

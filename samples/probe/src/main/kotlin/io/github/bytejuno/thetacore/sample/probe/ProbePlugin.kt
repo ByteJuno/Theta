@@ -1,5 +1,6 @@
 package io.github.bytejuno.thetacore.sample.probe
 
+import android.util.Log
 import androidx.compose.runtime.Composable
 import io.github.bytejuno.thetacore.sdk.PluginContext
 import io.github.bytejuno.thetacore.sdk.SettingsPage
@@ -9,6 +10,12 @@ import io.github.bytejuno.thetacore.sdk.ThetaPlugin
 class ProbePlugin : ThetaPlugin {
     override suspend fun onEnable(ctx: PluginContext) {
         ctx.register(ProbePage())
+        ctx.onCleanup { Log.i("ThetaProbeLifecycle", "cleanup:first") }
+        ctx.onCleanup { Log.i("ThetaProbeLifecycle", "cleanup:second") }
+    }
+
+    override suspend fun onDisable() {
+        Log.i("ThetaProbeLifecycle", "onDisable")
     }
 }
 
