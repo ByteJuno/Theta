@@ -14,16 +14,28 @@ S1 尚未完成。此台账区分现有证据、待实现能力与需真机的�
 | 项目 | 当前证据 / 状态 | 剩余工作 |
 |---|---|---|
 | A R8 + Compose | Hello/Probe 已设备通过 | 仅证明已覆盖 API，不是任意 Compose 兼容性证明 |
-| B 安装、更新、卸载 | 实际同 ID v1→v2、重启切换、保留/删除数据及重装通过 | 数据 ZIP 路径、写入中断及更多坏包路径 |
+| B 安装、更新、卸载 | 实际同 ID v1→v2、重启切换、保留/删除数据及重装在 `95fb4ed` 回归通过 | 数据 ZIP 路径、写入中断及更多坏包路径 |
 | C 运行实例回收 | 已按重启方案验证撤销入口、进程内不重复加载、重启删除；旧设计已明确修订 | 不承诺原进程 GC 卸载；要求变更不等于旧 C 通过 |
 | D 异常恢复 | 初始化、onDisable、cleanup 抛异常的设备用例通过 | 受管理 scope 异常、Compose/线程崩溃后的自动恢复、工具调用边界 |
 | E 非协作超时 | 初始化/清理阻塞、迟到登记拒绝及界面响应的初版用例通过 | 严格时间窗口复验已通过；资源预算、入口 ready 仍缺。工具资源租约和冷启动隔离记录已挪到 S2 |
-| F 更新回滚 | 尚未实现快照事务和回退指针 | 冷启动快照、失败版本回滚、数据一致性、中断恢复 |
+| F 更新回滚 | `dataDir` 快照、首次启动失败/卡死/被中断后的冷启动回滚、手动回滚设备通过；观察期到期、快照失败取消和回滚重入有单元测试 | `prefs`/`secrets` 快照（接口未实现）、不做快照继续的选项、观察期内主动提示 |
 | G 性能量化 | 未完成 | 同条件 APK 体积对照及固定真机帧耗时 |
-| H 共享库不重复打包 | Hello/Probe/7 种 fixture 的链接预检通过 | 预检不等于完整 ABI 证明 |
-| I APK 签名 | 平台签名验证、指纹展示、签名绑定和清除数据恢复已实现，尚未构建/设备验证 | 原构建结果待取回；真实未签名/篡改/换签/同签升级及旧生命周期回归待运行 |
+| H 共享库不重复打包 | Hello/Probe/9 种 fixture 的链接预检通过，已进 PR Check | 预检不等于完整 ABI 证明 |
+| I APK 签名 | 真实未签名、字节篡改、换签、同签升级与指纹、保留数据绑定、清除数据恢复 7 项设备通过（Android 14 模拟器） | 不含私有存储篡改、签名轮转、多签名；厂商系统未验证 |
 | J Hook 远程加载 | 未实现、未验证 | Modern API 最小链路、requestScope、完整框架真机 |
 | K Hook 救援 | 未实现、未验证 | 崩溃循环跳过、全局开关及框架外恢复的真机证据 |
+
+## 2026-11-06 完整验证（`95fb4ed`）
+
+InstaBox Android 14 x86_64 软件模拟器，日志 `/data/work/theta-s1-20261106-153456.log`，证据 `/data/work/theta-s1-20261106-153456-evidence/results.json`、`/data/work/theta-sig-20261106-153456/device/results.json`。`VERIFY_S1_EXIT=0`，`SIGNATURES_EXIT=0`，两份报告都没有证据采集错误和未运行用例。宿主 APK 13,674,845 字节，SHA-256 前缀 `90de2fbf9395`。
+
+- 构建、lint 通过；单元测试 61 项：PluginLifecycleTest 11、PluginRegistrationsTest 8、PluginSignaturePolicyTest 20、PluginUpdatesTest 22。
+- 链接预检：Hello、Probe 和 9 种 fixture 均 0 bundled、0 missing。
+- Probe/Hello 设备流程通过，用时 499 秒。
+- 生命周期 13/13：upgrade-and-data、disableThrow、cleanupThrow、cleanupBlock、initThrow、initBlock、interrupted-initialization、interrupted-uninstall、rejected-packages、rollback-init-throw、rollback-init-block、rollback-interrupted、rollback-manual。回滚用例里的坏版本先把计数器改成 99，回滚后读到原值才通过。
+- 签名 7/7：signed-upgrade-and-fingerprints、unsigned、byte-tampered、different-signer-update、retained-data-binding、clear-data-uninstall、retained-clear-data-recovery。
+
+此前 `2621606` 一轮生命周期 8/9、签名 5/7，缺的项都是撞上 2400 秒总时限，不是断言失败。两个总时限已提到 5400 秒，这些用例在上面一轮重跑通过。
 
 ## 2026-11-06 故障测试记录
 
@@ -36,6 +48,8 @@ S1 尚未完成。此台账区分现有证据、待实现能力与需真机的�
 设备报告记录 APK SHA-256。各轮日志与 evidence/results.json 独立保存；源码后续变更必须重新核对，未验证项保持未验证。
 
 ## 2026-11-06 签名增量：实现与阻塞
+
+后续：InstaBox 恢复后读到 194728 任务构建成功，单元测试 39 项全部通过。下面保留当时的记录，设备结果见上面的完整验证。
 
 - 12 个签名实现/测试文件经原始 SHA-256 核对后应用到 lab，覆盖平台验证、完整当前 signer 集合、确认后绑定、发布前及加载前复验、显式清除数据恢复。首次发布失败可即时显示恢复入口；清理异常不覆盖原始安装异常。单元测试使用 fake verifier，只验证策略，不证明密码学验证正确。
 - InstaBox 同步 62 个文件后启动构建，返回 PID `3398450`；原日志 `/data/work/theta-s1-20261106-194728.log`，退出文件 `/data/work/theta-s1-20261106-194728.exit`。请求包括 assembleDebug、assembleRelease、lintDebug、testDebugUnitTest。
