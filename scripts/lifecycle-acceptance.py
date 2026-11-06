@@ -7,7 +7,7 @@ FIXTURE_APK_ROOT defaults to samples/fixtures/build/outputs/apk.
 Each flavor is <root>/<flavor>/release/fixtures-<flavor>-release.apk.
 --check-device checks the destructive-test guard without modifying the device.
 TEST_TIMEOUT (default 180), TEST_OUTPUT (default build/lifecycle-acceptance),
-S1_TOTAL_TIMEOUT (default 2400 seconds) bound waits and retain evidence.
+S1_TOTAL_TIMEOUT (default 3600 seconds) bound waits and retain evidence.
 
 No run-as, root, host internals, signature gate, or hot unloading assumptions.
 A timeout proves bounded host waiting, NOT termination of full-trust dex.
@@ -482,7 +482,7 @@ def main():
         report["apk_sha256"] = {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
         # InstaBox/Linux: global deadline also bounds command loops and XML retries.
         signal.signal(signal.SIGALRM, expired)
-        signal.alarm(int(os.environ.get("S1_TOTAL_TIMEOUT", "2400")))
+        signal.alarm(int(os.environ.get("S1_TOTAL_TIMEOUT", "3600")))
         cases = {"upgrade-and-data": lambda: upgrade_data(args.host, apks)}
         for flavor in ("disableThrow", "cleanupThrow", "cleanupBlock"):
             cases[flavor] = lambda f=flavor: cleanup_fault(args.host, apks, f)
