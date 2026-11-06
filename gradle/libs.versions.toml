@@ -1,0 +1,23 @@
+[versions]
+agp = "9.4.1"
+kotlin = "2.4.20"
+android-compileSdk = "37"
+android-targetSdk = "37"
+android-minSdk = "33"
+activity-compose = "1.13.0"
+compose-bom = "2026.09.00"
+kotlinx-coroutines = "1.11.0"
+
+[libraries]
+android-gradle-api = { group = "com.android.tools.build", name = "gradle-api", version.ref = "agp" }
+kotlin-gradle-plugin = { group = "org.jetbrains.kotlin", name = "kotlin-gradle-plugin", version.ref = "kotlin" }
+androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activity-compose" }
+androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "compose-bom" }
+androidx-compose-material3 = { group = "androidx.compose.material3", name = "material3" }
+androidx-compose-runtime = { group = "androidx.compose.runtime", name = "runtime" }
+kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "kotlinx-coroutines" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+android-library = { id = "com.android.library", version.ref = "agp" }
+kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
