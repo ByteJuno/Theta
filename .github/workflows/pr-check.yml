@@ -1,0 +1,25 @@
+name: PR Check
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-check-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: ./.github/actions/setup-build
+      - name: Build, lint and test
+        run: ./gradlew --no-daemon assembleDebug assembleRelease lintDebug testDebugUnitTest
+      - name: Check the sample plugin
+        run: scripts/verify-sample-plugin.sh

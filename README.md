@@ -4,8 +4,8 @@
 
 An Android AI assistant base where almost everything is a plugin. The core only owns the agent loop and safety; everything else can be installed and removed at any time.
 
-> **状态：设计阶段，还没有可用版本。**
-> Status: design stage. Nothing is usable yet.
+> **状态：工程骨架阶段，还没有可用版本。**
+> Status: project skeleton. Nothing is usable yet.
 
 ## 为什么要做
 
@@ -20,6 +20,23 @@ Eta 社区有几十个 fork 在各自重复改同样的东西：模型提供商�
 | dex 插件 | 协议适配、厂商 Hook、通知、原生界面 | 用 Kotlin 编写并编译 |
 
 dex 插件和 App 同进程运行，信任模型与 LSPosed 模块相同：只安装你信任的作者的插件。卸载时立即撤销宿主注册，彻底清理可能需要重启。
+
+## 构建
+
+需要 JDK 17 或更高版本（CI 用 JDK 25）和 Android SDK（platform 37）。
+
+```bash
+./gradlew assembleDebug
+```
+
+| 模块 | 内容 |
+|---|---|
+| `app` | 宿主 App |
+| `sdk` | 插件接口 |
+| `samples/hello` | 示例 dex 插件 |
+| `build-logic` | 插件作者用的 Gradle 插件 |
+
+设计见 [docs/DESIGN.md](docs/DESIGN.md)，插件接口见 [docs/PLUGIN_API.md](docs/PLUGIN_API.md)。
 
 ## 许可证
 
