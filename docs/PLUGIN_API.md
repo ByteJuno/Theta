@@ -1,12 +1,12 @@
 # Theta Core 插件 API
 
-草案 v0.2，对应 API 等级 1，2026-11-06。S1 可行性验证通过之前，这里的接口都可能改。背景和取舍见 [DESIGN.md](DESIGN.md)，模型和工具调用的完整约定见 [PROTOCOL.md](PROTOCOL.md)。
+草案 v0.3，对应 API 等级 1，2026-11-06。S1 可行性验证通过之前，这里的接口都可能改。背景和取舍见 [DESIGN.md](DESIGN.md)，模型和工具调用的完整约定见 [PROTOCOL.md](PROTOCOL.md)。
 
 ## 1. 约定
 
 - 回调默认在后台线程，`@Composable` 除外。
 - 所有 `suspend` 函数都要响应取消，宿主停用插件时会取消。
-- 宿主调用插件都有时限。超时判定失败，不保证终止非协作代码，所以不要在回调里阻塞线程。
+- 初始化、清理和单次调用有时限；模型流使用协议规定的超时，`EntryAdapter.attach` 的常驻监听期不设总超时。超时判定失败，不保证终止非协作代码，所以不要在回调里阻塞线程。
 - 插件抛出的异常由宿主捕获，并记到这个插件头上。
 - 同一插件内扩展的 `id` 不能重复。全局 ID 是 `插件ID/扩展ID`。
 
@@ -81,7 +81,7 @@ interface BlobStore {
 }
 ```
 
-停用后这个 `PluginContext` 就关闭了，再调用注册接口会抛 `PluginClosedException`。`dataDir`、`prefs`、`secrets` 是更新回滚时能恢复的全部数据，边界见 DESIGN.md 第 6 节。
+开始停用或回收启用失败的插件时，宿主先原子关闭 `PluginContext` 的登记入口，再撤销已有注册并取消作用域。`register` 和 `onCleanup` 都与关闭操作同步：已成功登记的内容必须纳入清理，关闭后调用会抛 `PluginClosedException`。`onCleanup` 登记失败时，插件负责立即释放尚未交接的资源。`onDisable` 在独立有界清理任务中执行，不能重新登记扩展。`dataDir`、`prefs`、`secrets` 是更新回滚时能恢复的全部数据，边界见 DESIGN.md 第 6 节。
 
 示例：
 
@@ -115,6 +115,7 @@ interface EntryAdapter : Extension {
 }
 
 interface EntryHost {
+    fun ready()    // 初始化完成；每次 attach 仅调用一次
     suspend fun open(request: EntryRequest): EntrySession
 }
 
@@ -134,6 +135,8 @@ sealed interface SessionEvent {
 ```
 
 入口适配器看到的是整理过的会话事件，不是模型的原始事件。
+
+`attach` 在插件作用域的独立子任务中运行。完成监听器注册后调用 `host.ready()`，之后持续挂起到停用，并在 `finally` 中释放监听器。初始化默认限时 30 秒；逾期未 ready 则取消任务并判定挂接失败，迟到的 ready 不改变失败状态。ready 之后不设监听期总超时，也不因长时间没有输入判失败。正常停用引发的取消不计作插件错误；意外返回或抛异常则将入口标为不可用，不自动反复重启。
 
 ### 输出位置
 
