@@ -343,12 +343,12 @@ private fun CustomShape(report: Report) {
 }
 
 /** 插件继承宿主的 `Painter`。 */
-private class DotPainter(private val onDraw: () -> Unit) : Painter() {
+private class DotPainter(private val onPainted: () -> Unit) : Painter() {
     override val intrinsicSize = Size(24f, 24f)
 
     override fun DrawScope.onDraw() {
         drawCircle(Color.Cyan)
-        onDraw()
+        onPainted()
     }
 }
 
