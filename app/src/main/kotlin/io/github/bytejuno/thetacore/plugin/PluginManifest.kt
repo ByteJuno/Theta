@@ -10,7 +10,7 @@ private const val MANIFEST_MAX_BYTES = 64 * 1024L
 
 internal class PluginPackageException(message: String) : Exception(message)
 
-internal class PluginManifest(
+internal data class PluginManifest(
     val id: String,
     val name: String,
     val version: String,
@@ -21,7 +21,11 @@ internal class PluginManifest(
 
 internal fun readPluginManifest(apk: File): PluginManifest {
     val text = ZipFile(apk).use { zip ->
-        val entry = zip.getEntry(MANIFEST_PATH) ?: throw PluginPackageException("Missing $MANIFEST_PATH")
+        val entries = zip.entries().asSequence().filter { it.name == MANIFEST_PATH }.toList()
+        if (entries.isEmpty()) throw PluginPackageException("Missing $MANIFEST_PATH")
+        if (entries.size != 1) throw PluginPackageException("Duplicate $MANIFEST_PATH")
+        val entry = entries.single()
+        if (entry.isDirectory) throw PluginPackageException("Invalid $MANIFEST_PATH")
         if (entry.size > MANIFEST_MAX_BYTES) throw PluginPackageException("Manifest is too large")
         zip.getInputStream(entry).use {
             val bytes = it.readNBytes(MANIFEST_MAX_BYTES.toInt() + 1)
@@ -31,6 +35,8 @@ internal fun readPluginManifest(apk: File): PluginManifest {
     }
     val manifest = try {
         val json = JSONObject(text)
+        if (json.get("schema") != 1) throw PluginPackageException("Unsupported plugin schema; expected 1")
+        if (json.get("type") != "dex") throw PluginPackageException("Unsupported plugin type; only dex is implemented")
         PluginManifest(
             id = json.getString("id"),
             name = json.getString("name"),

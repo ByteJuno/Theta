@@ -59,7 +59,7 @@ internal class PluginRuntime(val context: HostPluginContext) {
 
 internal class PluginManager(context: Context) {
     private val app = context.applicationContext
-    private val store = PluginStore(app.filesDir, app.cacheDir)
+    private val store = PluginStore(app.filesDir, app.cacheDir, PlatformPluginSignatureVerifier(app.packageManager))
     private val states = PluginStateStore(app.filesDir)
     private val host = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val operations = Mutex()
@@ -69,6 +69,8 @@ internal class PluginManager(context: Context) {
 
     val plugins = mutableStateListOf<ManagedPlugin>()
     val failures = mutableStateListOf<String>()
+    // Rejected packages remain removable without executing or trusting their manifest.
+    val rejectedIds = mutableStateListOf<String>()
 
     // Replaces the UI Job: caller cancellation cannot interrupt durable transitions.
     private suspend fun <T> operation(block: suspend () -> T): T = withContext(host.coroutineContext) {
@@ -87,6 +89,7 @@ internal class PluginManager(context: Context) {
         val blocked = mutableSetOf<String>()
         val interrupted = mutableSetOf<String>()
         val messages = mutableListOf<String>()
+        val rejected = mutableSetOf<String>()
         val installed = withContext(Dispatchers.IO) {
             // Tombstones precede package parsing, including corrupt APKs.
             states.ids().forEach { id ->
@@ -105,8 +108,11 @@ internal class PluginManager(context: Context) {
                     messages += "$id: state recovery failed: ${error.message}"
                 }
             }
-            store.installed(messages::add)
+            store.installed(messages::add) { rejected += it }.also { accepted ->
+                rejected += store.retainedIds() - accepted.map { it.manifest.id }.toSet()
+            }
         }
+        rejectedIds.addAll(rejected)
         failures.addAll(messages)
         installed.forEach { installedPlugin ->
             val id = installedPlugin.manifest.id
@@ -158,7 +164,17 @@ internal class PluginManager(context: Context) {
         val id = staged.manifest.id
         val old = plugins.firstOrNull { it.manifest.id == id }
         old?.busy(true)
-        try {
+        withPluginInstallRecovery(
+            id = id,
+            isManaged = { plugins.any { it.manifest.id == id } },
+            retainedIds = { withContext(Dispatchers.IO) { store.retainedIds() } },
+            rejectedIds = rejectedIds,
+            cleanup = {
+                withPluginCleanup(cleanup = { withContext(Dispatchers.IO) { staged.file.delete() } }) {
+                    old?.busy(false)
+                }
+            },
+        ) {
             val (installed, state) = withContext(Dispatchers.IO) {
                 val state = states.read(id)
                 if (state.pendingDelete) throw PluginPackageException("Uninstall pending; restart required")
@@ -167,6 +183,7 @@ internal class PluginManager(context: Context) {
                 states.write(id, state)
                 store.install(staged) to state
             }
+            rejectedIds.remove(id)
             val plugin = ManagedPlugin(installed.manifest, state)
             plugin.runtime = old?.runtime
             if (old == null) plugins += plugin else plugins[plugins.indexOf(old)] = plugin
@@ -178,9 +195,6 @@ internal class PluginManager(context: Context) {
                     else -> load(plugin, installed)
                 }
             }
-        } finally {
-            old?.busy(false)
-            withContext(Dispatchers.IO) { staged.file.delete() }
         }
     }
 
@@ -234,6 +248,22 @@ internal class PluginManager(context: Context) {
         }
     }
 
+    /** Explicit clear-data recovery for packages excluded by signature/trust checks. */
+    suspend fun uninstallRejected(id: String) = operation {
+        restoreInternal()
+        checkId(id)
+        if (id !in rejectedIds || plugins.any { it.manifest.id == id } || gate.wasAttempted(id)) {
+            throw PluginPackageException("Rejected package cannot be removed in this process")
+        }
+        withContext(Dispatchers.IO) {
+            // Do not need to parse possibly corrupt old state to authorize deletion.
+            states.write(id, PluginState(enabled = false, pendingDelete = true, clearData = true))
+            store.delete(id, clearData = true)
+            states.remove(id)
+        }
+        rejectedIds.remove(id)
+    }
+
     private fun managed(id: String): ManagedPlugin {
         checkId(id)
         return plugins.firstOrNull { it.manifest.id == id } ?: throw PluginPackageException("Plugin is not installed")
@@ -259,6 +289,8 @@ internal class PluginManager(context: Context) {
             plugin.runtime = runtime
             plugin.status("Initializing")
             val worker = PluginWorker("theta-enable-${manifest.id}") {
+                // Covers first install, restore and re-enable, immediately before dex loading.
+                store.verifyForLoad(installed)
                 val loader = createPluginClassLoader(installed.apk, app.classLoader)
                 runtime.loader = loader
                 val entry = loader.loadClass(manifest.entry).getDeclaredConstructor().newInstance() as ThetaPlugin

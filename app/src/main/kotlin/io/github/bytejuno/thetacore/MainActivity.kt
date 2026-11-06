@@ -86,6 +86,7 @@ private fun ThetaCoreApp(
     var openPage by remember { mutableStateOf<SettingsPage?>(null) }
     var staged by remember { mutableStateOf<StagedPlugin?>(null) }
     var uninstalling by remember { mutableStateOf<ManagedPlugin?>(null) }
+    var removingRejected by remember { mutableStateOf<String?>(null) }
     var clearData by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var staging by remember { mutableStateOf(false) }
@@ -158,6 +159,7 @@ private fun ThetaCoreApp(
                         onPick = { picker.launch(arrayOf("*/*")) },
                         onToggle = { plugin -> operate { manager.setEnabled(plugin.manifest.id, !plugin.enabled) } },
                         onUninstall = { plugin -> clearData = false; uninstalling = plugin },
+                        onRemoveRejected = { removingRejected = it },
                     )
                 }
             }
@@ -165,7 +167,15 @@ private fun ThetaCoreApp(
                 AlertDialog(
                     onDismissRequest = { plugin.file.delete(); staged = null },
                     title = { Text(stringResource(R.string.install_title, plugin.manifest.name, plugin.manifest.version)) },
-                    text = { Text("${plugin.manifest.id}\nInstall and enable. Updates take effect after restarting the app.") },
+                    text = {
+                        Column(Modifier.verticalScroll(rememberScrollState())) {
+                            Text("${plugin.manifest.id}\nInstall and enable. Updates take effect after restarting the app.")
+                            Text("Integrity verified; author identity not authenticated.")
+                            Text("Current signer certificate SHA-256:")
+                            plugin.signers.sha256.forEach { Text(it) }
+                            Text("This signer set is pinned until an explicit clear-data uninstall. Plugins execute with the host's full privileges.")
+                        }
+                    },
                     confirmButton = {
                         TextButton(onClick = {
                             staged = null
@@ -176,6 +186,22 @@ private fun ThetaCoreApp(
                         TextButton(onClick = { plugin.file.delete(); staged = null }) {
                             Text(stringResource(R.string.cancel))
                         }
+                    },
+                )
+            }
+            removingRejected?.let { id ->
+                AlertDialog(
+                    onDismissRequest = { removingRejected = null },
+                    title = { Text("Clear-data uninstall $id?") },
+                    text = { Text("Delete this rejected package, all its data and its signer binding. This does not trust or run the package.") },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            removingRejected = null
+                            operate { manager.uninstallRejected(id) }
+                        }) { Text("Delete package and data") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { removingRejected = null }) { Text(stringResource(R.string.cancel)) }
                     },
                 )
             }
@@ -218,6 +244,7 @@ private fun PluginList(
     onPick: () -> Unit,
     onToggle: (ManagedPlugin) -> Unit,
     onUninstall: (ManagedPlugin) -> Unit,
+    onRemoveRejected: (String) -> Unit,
 ) {
     Column(
         modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(16.dp),
@@ -229,6 +256,9 @@ private fun PluginList(
         Button(onClick = onPick, enabled = !staging) { Text(stringResource(R.string.install_plugin)) }
         error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         manager.failures.forEach { Text(it, color = MaterialTheme.colorScheme.error) }
+        manager.rejectedIds.forEach { id ->
+            TextButton(onClick = { onRemoveRejected(id) }) { Text("Clear-data uninstall $id") }
+        }
         if (manager.plugins.isEmpty()) Text(stringResource(R.string.no_plugins))
         manager.plugins.forEach { plugin ->
             Text("${plugin.manifest.name} · ${plugin.manifest.version}", style = MaterialTheme.typography.titleMedium)

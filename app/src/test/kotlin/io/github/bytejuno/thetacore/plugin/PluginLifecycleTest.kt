@@ -11,6 +11,9 @@ import org.junit.Test
 
 class PluginLifecycleTest {
     private val id = "test.lifecycle"
+    // Policy-only fake: these lifecycle tests are NOT APK cryptographic proof.
+    private val signers = PluginSigners(listOf("a".repeat(64)))
+    private val verifier = PluginSignatureVerifier { signers }
 
     @Test fun disableAndPendingDeleteSurviveStoreRecreation() {
         val root = Files.createTempDirectory("theta-state").toFile()
@@ -67,7 +70,7 @@ class PluginLifecycleTest {
             Files.createSymbolicLink(installed.resolve("external").toPath(), outside.toPath())
             val data = root.resolve("plugin-data/$id").apply { mkdirs() }
             data.resolve("state").writeText("data")
-            val store = PluginStore(root, root.resolve("cache"))
+            val store = PluginStore(root, root.resolve("cache"), verifier)
             store.delete(id, false)
             assertFalse(root.resolve("plugins/$id").exists())
             assertTrue(keep.exists())
@@ -83,10 +86,10 @@ class PluginLifecycleTest {
         try {
             val installed = root.resolve("plugins/$id/2").apply { mkdirs() }.resolve("plugin.apk")
             installed.writeText("live bytes")
-            val store = PluginStore(root, root.resolve("cache"))
+            val store = PluginStore(root, root.resolve("cache"), verifier)
             for (version in listOf(1L, 2L)) {
                 val stagedFile = root.resolve("staged-$version.apk").apply { writeText("new bytes") }
-                val staged = StagedPlugin(stagedFile, PluginManifest(id, "Test", "v$version", version, 1, "Entry"), "hash")
+                val staged = StagedPlugin(stagedFile, PluginManifest(id, "Test", "v$version", version, 1, "Entry"), "hash", signers)
                 assertThrows(PluginPackageException::class.java) { store.install(staged) }
                 assertFalse(stagedFile.exists())
                 assertEquals("live bytes", installed.readText())
@@ -98,8 +101,8 @@ class PluginLifecycleTest {
         val root = Files.createTempDirectory("theta-publish").toFile()
         try {
             val stagedFile = root.resolve("staged.apk").apply { writeText("not an APK") }
-            val staged = StagedPlugin(stagedFile, PluginManifest(id, "Test", "v1", 1, 1, "Entry"), "wrong hash")
-            assertThrows(PluginPackageException::class.java) { PluginStore(root, root).install(staged) }
+            val staged = StagedPlugin(stagedFile, PluginManifest(id, "Test", "v1", 1, 1, "Entry"), "wrong hash", signers)
+            assertThrows(PluginPackageException::class.java) { PluginStore(root, root, verifier).install(staged) }
             assertFalse(stagedFile.exists())
             assertFalse(root.resolve("plugins/$id/1").exists())
         } finally { root.deleteRecursively() }

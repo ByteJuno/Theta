@@ -59,4 +59,6 @@ dependencies {
     implementation(libs.androidx.compose.material3)
     implementation(libs.kotlinx.serialization.json)
     testImplementation("junit:junit:4.13.2")
+    // Real JSON parser for JVM policy tests, not Android's throwing stub.
+    testImplementation("org.json:json:20240303")
 }
