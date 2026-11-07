@@ -100,7 +100,7 @@ def scroll(down):
     adb("shell", "input", "swipe", str(width // 2), str(bottom if down else top), str(width // 2), str(top if down else bottom), "200")
 
 
-def matching(description, predicate):
+def matching(description, predicate, timeout=None):
     attempts = 0
 
     def locate():
@@ -112,7 +112,7 @@ def matching(description, predicate):
             attempts += 1
         return node
 
-    return wait(description, locate)
+    return wait(description, locate, timeout)
 
 
 def text(value):
@@ -503,9 +503,10 @@ def managed_scope_fault(host, apks, hello, flavor):
     event(flavor, "scope:throw" if flavor == "scopeThrow" else "scope:init:throw", timeout=20)
     if flavor == "scopeInitThrow":
         event(flavor, "late-register:rejected", timeout=20)
-    # An independent short deadline, not the generic 180s test timeout.
-    wait("managed scope disabled promptly", lambda: em.find(em.screen(), lambda t:
-         t == "Managed scope failed; disabled; restart required"), timeout=20)
+    # An independent short deadline, not the generic 180s test timeout. The
+    # Data packages section pushes the fixture card below the fold, so sweep.
+    matching("managed scope disabled promptly",
+             lambda t: t == "Managed scope failed; disabled; restart required", timeout=20)
     require(adb("shell", "pidof", PACKAGE).strip() == pid, "Managed fault restarted/killed host")
     absent("Fixture page")
     tap("Hello")
@@ -523,8 +524,8 @@ def managed_scope_fault(host, apks, hello, flavor):
     if flavor == "scopeThrow":
         page(flavor, 0)
         tap("Throw in managed scope")
-    wait("automatic scope disable", lambda: em.find(em.screen(), lambda t:
-         t == "Managed scope failed; disabled; restart required"), timeout=20)
+    matching("automatic scope disable",
+             lambda t: t == "Managed scope failed; disabled; restart required", timeout=20)
     clear_logs()
     restart()
     text("Enable Fixture")
@@ -558,13 +559,51 @@ def stage_data(path):
     tap("Data ZIP")
 
 
+def rect(node):
+    return tuple(map(int, re.findall(r"\d+", node.get("bounds"))))
+
+
+def acknowledgement_locator():
+    """Locate a tap point on the visible part of the acknowledgement checkbox.
+
+    The checkbox sits at the end of the dialog's own scroll body, which clips it
+    on a small screen, so its centre can fall outside the body and hit nothing.
+    Swipe the body (never the activity behind the dialog) once towards its end,
+    then tap the middle of whatever part of the box is visible inside it.
+    """
+    swiped = False
+
+    def locate():
+        nonlocal swiped
+        nodes = em.screen()
+        box = next((n for n in nodes if n.get("checkable") == "true"), None)
+        if box is None:
+            return None
+        x1, y1, x2, y2 = rect(box)
+        body = next((n for n in nodes if n.get("scrollable") == "true"), None)
+        if body is None:
+            return (x1 + x2) // 2, (y1 + y2) // 2
+        bx1, by1, bx2, by2 = rect(body)
+        if (y1 < by1 or y2 > by2) and not swiped:
+            swiped = True
+            x = (bx1 + bx2) // 2
+            adb("shell", "input", "swipe", str(x), str(by2 - 20), str(x), str(by1 + 20), "300")
+            return None  # look again at the scrolled body
+        top, bottom = max(y1, by1), min(y2, by2)
+        if bottom - top < 16:
+            return None
+        return (max(x1, bx1) + min(x2, bx2)) // 2, (top + bottom) // 2
+
+    return locate
+
+
 def install_data(path, version):
     stage_data(path)
     text("Confirm data ZIP / unsigned update")
     # The dialog must show the digest of these exact bytes.
     text("SHA-256: " + hashlib.sha256(path.read_bytes()).hexdigest())
-    box = wait("unsigned-data acknowledgement", lambda: next((n for n in em.screen() if n.get("checkable") == "true"), None))
-    em.tap(box)
+    point = wait("unsigned-data acknowledgement", acknowledgement_locator())
+    adb("shell", "input", "tap", *map(str, point))
     wait("acknowledgement checked", lambda: any(n.get("checkable") == "true" and n.get("checked") == "true" for n in em.screen()))
     tap("Confirm this ZIP")
     text(f"Fixture data · {version}.0")
