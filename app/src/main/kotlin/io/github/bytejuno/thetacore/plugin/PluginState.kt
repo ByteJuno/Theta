@@ -19,6 +19,8 @@ internal data class PluginState(
     val pendingDelete: Boolean = false,
     val clearData: Boolean = false,
     val initializing: Boolean = false,
+    // Only a failed first initialization may resume the restored OLD version.
+    val resumeAfterRollback: Boolean = false,
 )
 
 /** Desired state is independent of whether this process has a running instance. */
@@ -49,7 +51,10 @@ internal class PluginStateStore(private val filesDir: File) {
             "false" -> false
             else -> throw IOException("Invalid $key state for $id")
         }
-        return PluginState(flag("enabled"), flag("pendingDelete"), flag("clearData"), flag("initializing"))
+        return PluginState(
+            flag("enabled"), flag("pendingDelete"), flag("clearData"), flag("initializing"),
+            if (properties.containsKey("resumeAfterRollback")) flag("resumeAfterRollback") else false,
+        )
     }
 
     fun write(id: String, state: PluginState) {
@@ -59,6 +64,7 @@ internal class PluginStateStore(private val filesDir: File) {
             setProperty("pendingDelete", state.pendingDelete.toString())
             setProperty("clearData", state.clearData.toString())
             setProperty("initializing", state.initializing.toString())
+            setProperty("resumeAfterRollback", state.resumeAfterRollback.toString())
         })
     }
 

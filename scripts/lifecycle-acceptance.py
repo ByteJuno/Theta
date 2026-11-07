@@ -34,7 +34,7 @@ spec.loader.exec_module(em)
 OUTPUT = Path(os.environ.get("TEST_OUTPUT", "build/lifecycle-acceptance"))
 ADB = shlex.split(os.environ.get("ADB", "adb"))
 TIMEOUT = int(os.environ.get("TEST_TIMEOUT", "180"))
-FLAVORS = ("normalV1", "normalV2", "initThrow", "initBlock", "initThrowV2", "initBlockV2", "disableThrow", "cleanupThrow", "cleanupBlock")
+FLAVORS = ("normalV1", "normalV2", "initThrow", "initBlock", "initThrowV2", "initBlockV2", "disableThrow", "cleanupThrow", "cleanupBlock", "scopeThrow", "scopeInitThrow", "scopeInitThrowV2")
 PACKAGE = em.PACKAGE
 FAIL = em.TestFailure
 RESULTS = []
@@ -483,6 +483,52 @@ def rollback_manual(host, apks):
     page("normalV2", 1)
 
 
+def managed_scope_fault(host, apks, hello, flavor):
+    fresh(host)
+    stage(hello)
+    text("Install Hello 0.1.0?")
+    tap("Install")
+    tap("Hello")
+    text("Hello from a plugin")
+    back()
+    pid = adb("shell", "pidof", PACKAGE).strip()
+    require(bool(pid), "Host PID missing before managed fault")
+    install(apks[flavor])
+    if flavor == "scopeThrow":
+        page(flavor, 0)
+        tap("Throw in managed scope")
+    event(flavor, "scope:throw" if flavor == "scopeThrow" else "scope:init:throw", timeout=20)
+    # An independent short deadline, not the generic 180s test timeout.
+    wait("managed scope disabled promptly", lambda: em.find(em.screen(), lambda t:
+         t == "Managed scope failed; disabled; restart required"), timeout=20)
+    require(adb("shell", "pidof", PACKAGE).strip() == pid, "Managed fault restarted/killed host")
+    absent("Fixture page")
+    tap("Hello")
+    text("Hello from a plugin")
+    back()
+    require(events(flavor).count("enable:start") == 1, "Repeated instantiation after fault")
+    tap("Enable Fixture")
+    text("Enabled for next start; restart required")
+    require(events(flavor).count("enable:start") == 1, "Re-enable instantiated faulty ID")
+    tap("Disable Fixture")
+    text("Disabled; restart required before loading again")
+    # Keep gate assertions separate from automatic-fault persistence evidence.
+    fresh(host)
+    install(apks[flavor])
+    if flavor == "scopeThrow":
+        page(flavor, 0)
+        tap("Throw in managed scope")
+    wait("automatic scope disable", lambda: em.find(em.screen(), lambda t:
+         t == "Managed scope failed; disabled; restart required"), timeout=20)
+    clear_logs()
+    restart()
+    text("Enable Fixture")
+    absent("Fixture page")
+    require(not events(flavor), "Disabled scope fixture executed on cold start")
+    (OUTPUT / (CURRENT + "-pid.json")).write_text(json.dumps({"before": pid,
+        "fault_handled_same_pid": True}), encoding="utf-8")
+
+
 def evidence(label):
     directory = OUTPUT / label
     directory.mkdir(parents=True, exist_ok=True)
@@ -531,12 +577,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("host", nargs="?")
     parser.add_argument("fixtures", nargs="?", default="samples/fixtures/build/outputs/apk")
+    parser.add_argument("--hello", default="samples/hello/build/outputs/apk/release/hello-release.apk")
     parser.add_argument("--check-device", action="store_true")
     parser.add_argument("--case", action="append", choices=(
         "upgrade-and-data", "disableThrow", "cleanupThrow", "cleanupBlock",
         "initThrow", "initBlock", "interrupted-initialization", "interrupted-uninstall",
         "rejected-packages", "rollback-init-throw", "rollback-init-block", "rollback-interrupted",
-        "rollback-manual"), help="Run only named cases; report explicitly records partial coverage")
+        "rollback-manual", "scopeThrow", "scopeInitThrow", "rollback-scope-init"), help="Run only named cases; report explicitly records partial coverage")
     args = parser.parse_args()
     OUTPUT.mkdir(parents=True, exist_ok=True)
     report = {"cases": RESULTS, "limitations": [
@@ -552,7 +599,7 @@ def main():
             return 0
         require(args.host is not None, "HOST.apk is required")
         apks = {f: Path(args.fixtures) / f / "release" / f"fixtures-{f}-release.apk" for f in FLAVORS}
-        paths = [Path(args.host), *apks.values()]
+        paths = [Path(args.host), Path(args.hello), *apks.values()]
         require(all(p.is_file() for p in paths), f"Missing APKs: {[str(p) for p in paths if not p.is_file()]}")
         report["apk_sha256"] = {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
         # InstaBox/Linux: global deadline also bounds command loops and XML retries.
@@ -571,6 +618,9 @@ def main():
             "rollback-init-block": lambda: rollback_failed_update(args.host, apks, "initBlockV2"),
             "rollback-interrupted": lambda: rollback_interrupted(args.host, apks),
             "rollback-manual": lambda: rollback_manual(args.host, apks),
+            "scopeThrow": lambda: managed_scope_fault(args.host, apks, args.hello, "scopeThrow"),
+            "scopeInitThrow": lambda: managed_scope_fault(args.host, apks, args.hello, "scopeInitThrow"),
+            "rollback-scope-init": lambda: rollback_failed_update(args.host, apks, "scopeInitThrowV2"),
         })
         selected = args.case or list(cases)
         report["selected_cases"] = selected
