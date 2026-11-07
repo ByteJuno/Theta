@@ -36,13 +36,13 @@ class PluginSignaturePolicyTest {
     }
 
     private class Fixture(val root: File, val verifier: FakeVerifier) {
-        val store = PluginStore(root, root.resolve("cache"), verifier)
+        val store = fixturePluginStore(root, root.resolve("cache"), verifier)
         val trust = PluginTrustStore(root)
     }
 
     private fun fixture(block: (Fixture) -> Unit) {
         val root = Files.createTempDirectory("theta-signature-policy").toFile()
-        try { block(Fixture(root, FakeVerifier(signerA))) } finally { root.deleteRecursively() }
+        try { block(Fixture(root, FakeVerifier(signerA))) } finally { deleteFixtureRoot(root) }
     }
 
     private fun manifest(version: Long = 1, schema: String = "1", type: String = "dex"): String =
@@ -107,7 +107,8 @@ class PluginSignaturePolicyTest {
         assertNull(f.trust.read(id))
         val installed = f.store.install(staged)
         assertEquals(2, f.verifier.calls)
-        assertTrue(f.verifier.files[1].name.endsWith(".tmp"))
+        assertEquals("plugin.apk", f.verifier.files[1].name)
+        assertEquals("plugin-code-publication", f.verifier.files[1].parentFile.parentFile.name)
         assertEquals(signerA, f.trust.read(id))
         f.store.installed { fail(it) }
         assertEquals(3, f.verifier.calls)
@@ -305,17 +306,19 @@ class PluginSignaturePolicyTest {
     }
 
     @Test fun storeStageCleanupFailurePreservesVerifierErrorAndRecoveryVisibility() = fixture { f ->
-        val staged = stage(f)
         val cleanup = SecurityException("stage deletion denied")
-        val undeletable = object : File(staged.file.absolutePath) {
-            override fun delete(): Boolean = throw cleanup
-        }
-        val candidate = StagedPlugin(undeletable, staged.manifest, staged.sha256, staged.signers)
+        var deny = true
+        val store = fixturePluginStore(f.root, f.root.resolve("cache"), f.verifier,
+            deleteStage = { file ->
+                if (deny && file.parentFile.name == "plugin-staging") throw cleanup
+                deleteFixtureFile(f.root, file)
+            })
+        val staged = store.stage(apk().inputStream())
         val rejected = mutableListOf<String>()
         f.verifier.reject = true
         val thrown = assertThrows(PluginPackageException::class.java) {
-            withPluginInstallRecovery(id, { false }, f.store::retainedIds, rejected,
-                cleanup = { candidate.file.delete() }) { f.store.install(candidate) }
+            withPluginInstallRecovery(id, { false }, store::retainedIds, rejected,
+                cleanup = { store.discard(staged) }) { store.install(staged) }
         }
         assertSame(f.verifier.rejection, thrown)
         assertTrue(thrown.suppressed.isNotEmpty())
@@ -323,7 +326,10 @@ class PluginSignaturePolicyTest {
         assertEquals(listOf(id), rejected)
         assertEquals(signerA, f.trust.read(id))
         noPublication(f)
-        assertTrue(staged.file.delete()) // Remove using the real File, not the test double.
+        assertTrue(staged.file.exists())
+        deny = false
+        store.retryCleanup()
+        assertFalse(staged.file.exists())
     }
 
     @Test fun cleanupOnlyFailureRemainsVisibleWithoutRejectingManagedInstall() = fixture { f ->
@@ -369,8 +375,15 @@ class PluginSignaturePolicyTest {
             }
             assertThrows(PluginPackageException::class.java) { f.store.install(candidate) }
             noPublication(f)
-            assertFalse(staged.file.exists())
-            assertEquals(signerA, f.trust.read(id))
+            if (change == "manifest") {
+                // Forged object cannot borrow cleanup ownership from the real confirmation.
+                assertTrue(staged.file.exists())
+                assertNull(f.trust.read(id))
+                f.store.discard(staged)
+            } else {
+                assertFalse(staged.file.exists())
+                assertEquals(signerA, f.trust.read(id))
+            }
         }
     }
 
@@ -408,7 +421,7 @@ class PluginSignaturePolicyTest {
             Files.delete(link.toPath())
             // Same sequence as PluginManager.restoreInternal(), after interruption.
             val recovered = states.read(id)
-            PluginStore(f.root, f.root.resolve("cache"), f.verifier).delete(id, recovered.clearData)
+            fixturePluginStore(f.root, f.root.resolve("cache"), f.verifier).delete(id, recovered.clearData)
             states.remove(id)
             assertNull(f.trust.read(id))
             assertTrue(states.ids().isEmpty())

@@ -93,6 +93,7 @@ def install_plugin(apk, name):
         "shell", "am", "start", "-W", "-a", "android.intent.action.VIEW",
         "-d", f"file://{remote}", "-n", f"{PACKAGE}/.MainActivity",
     )
+    tap_text("Code APK")  # ACTION_VIEW always requires an explicit package-kind choice.
     wait_for(f"confirm {name}", lambda t: t.startswith(f"Install {name} "))
     tap_text("Install")
 

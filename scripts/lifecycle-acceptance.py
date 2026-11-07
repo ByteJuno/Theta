@@ -181,6 +181,9 @@ def stage(apk):
     adb("push", str(apk), remote, timeout=120)
     adb("shell", "chmod", "644", remote)
     adb("shell", "am", "start", "-W", "-a", "android.intent.action.VIEW", "-d", f"file://{remote}", "-n", f"{PACKAGE}/.MainActivity")
+    # Shared by lifecycle AND signature acceptance, including rejection cases.
+    # Missing selector is a hard bounded UI failure, not an optional dialog.
+    tap("Code APK")
 
 
 def install(apk, version="1.0"):
@@ -203,11 +206,11 @@ def increment(count):
 def responsive_while_blocked(flavor, end_marker):
     require(end_marker not in events(flavor), "Blocking callback finished before responsiveness check")
     # Picker is a real user action independent of the serialized plugin operations.
-    tap("Install plugin")
+    tap("Import code APK")
     wait("system file picker opened", lambda: any("documentsui" in n.get("package", "").lower() for n in em.screen()))
     require(end_marker not in events(flavor), "Inconclusive: picker observation missed blocking window")
     back()
-    text("Install plugin")
+    text("Import code APK")
 
 
 def uninstall(clear=False, check_page=True):

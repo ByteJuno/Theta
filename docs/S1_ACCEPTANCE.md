@@ -2,6 +2,24 @@
 
 S1 尚未完成。此台账区分现有证据、待实现能力与需真机的项目；不以单次脚本退出 0 代替整个阶段验收。
 
+## 2026-11-07 数据 ZIP revision-5 本机增量验收
+
+本轮实现、源码绑定、原始证据摘要及未覆盖项见 [数据 ZIP 集成本机验收](DATA_ZIP_ACCEPTANCE.md)。JVM 173 项中 172 通过、1 项因 Windows POSIX 执行位条件跳过；Debug/Release 构建、lint 及 14 个 Release 插件静态链接预检通过。数据设备流程 11 项、原生回归 7 项通过；双向类型归属由两轮覆盖 7 项（3+4），原始失败和未重跑项明确保留。
+
+这些局部结果不代表完整 S1 通过；此前完整签名、异常、阻塞和回滚设备矩阵未在这份 APK 上全部重跑。以下 revision-3 段落保留当时的未执行状态，不能代替最新证据。
+
+## 历史：revision-3 导入恢复增量（当时 NOT COMPILED / NOT TESTED）
+
+以下仅为后续 InstaBox 空闲时的设备步骤；本轮未构建、未运行测试、未调用设备。
+
+- APK 与 data 各导入一次并取消确认；删除空的 cache/plugin-import-sources 根目录后，在同一 PID 再导入，应重新建目录。
+- 使用阻塞 open/read/close 的测试 ContentProvider；点 Cancel reading 后两个导入按钮立即恢复。重复取消再选，两个未退出的 worker 占满共享配额后拒绝第三次，不增加线程/文件；释放 provider 后恢复。
+- 读取时旋转/离开界面，旧 request 的 finally 或迟到完成不得清除新 request 的 reading 状态、显示旧确认、删除新 stage。确认安装与旋转竞争必须只由持有 mutation gate 的安装接管 stage。
+- 故障注入实际 APK/data stage 删除失败（包括本地 input.close 原异常）：检查原错误及 suppressed 清理错误；反复导入不得新增 stage。修复存储后点 Retry import cleanup，原路径可重试删除；已发布 plugin.apk/plugin.zip 不得被删除。
+- 持有实际 manager mutation gate 时取消尚无 stage 的来源等待/排队，不应等 gate 才结束。取消时已交接 stage 的后台清理只处理旧 request，失败仍保留有界 ticket。
+- 已启用 ZIP 被损坏/删除后先点 View data content：内容入口撤销，管理卡显示隔离原因、durable ID/version/digest，Disable/Uninstall 仍可用。冷启动坏 ZIP 同样保留卡；禁用先提交 false；非法包不得启用。混合 code/data 目录拒绝删除 code 文件。
+- 本轮新增 PluginRevisionThreeTest 及更新已有测试都是回归源码，不代表 JVM 或 Android 调度验证通过。
+
 ## 已确认的实现口径
 
 - dex 为全信任、同进程代码，不提供沙箱或强制终止保证。
@@ -99,6 +117,34 @@ InstaBox Android 14 x86_64 软件模拟器，日志 `/data/work/theta-s1-2026110
 - lab 证据归档：`/home/ubuntu/ai-work/theta-tools/managed-fault-verification-20261107-021814`，含失败及成功日志、退出码、产物清单、PID 和源码差异说明。
 
 本增量不证明 Compose/任意线程/native 崩溃隔离、真实断电、prefs/secrets 快照或完整 S1 完成。helper 单测与这七项设备断言分别记录，不互相替代。这一轮没覆盖的旧用例已在上面的 `c06c789` 完整验证中补齐。
+
+## 2026-11-07 数据 ZIP 集成候选（未编译 / NOT RUN）
+
+固定基线 `4eb39fb883646831395090f032c3c26f59bf7177` 的独立归档副本；不代表已合入当前分支，不沿用上面的 APK 或测试结果。基础四文件先按本地 patch-manifest.json 核对；集成另扩展共享 ZIP 校验器的内部内容访问回调，并修正单进程锁说明。原基础目录不变。
+
+- 两个显式导入入口；ACTION_VIEW 先选 APK/data。数据确认显示名称、ID、版本/API、provides/declares、全部完整 URL 和 host、摘要及作者未验证提示。每次无签名更新都需对当前 staged digest 重新确认；APK 失败不回退。
+- 独立 `plugin-data-catalog/<id>/selection.properties` 保存已确认选择、摘要、启用及删除意图；code/data store 暂存、发布和状态操作共用单例 manager mutex。revision-2 外部 URI open/read/close 完全在锁外，进程级两槽立即准入、无等待队列，最多两条 copy 和两条 close daemon；APK 256 MiB/data 16 MiB 上限。调用者取消可停止等待，关闭立即通知 active/迟到 stream；提供方或内核不响应关闭时占用槽位到真正结束，耗尽则拒绝后续导入，不声称能杀死 native IO。IO 不在 Main，无跨进程锁。
+- 发布文件不等于接受版本；状态提交失败保留旧选择，孤立新版本不自动激活。恢复复验所选包和摘要，损坏记录按 ID 隔离。data ID 卸载仍保留 ownership；代码导入、加载、恢复和删除拒绝 data-owned ID。混合归属不自动清理，没有显式释放入口。
+- 数据独立列表，启用/禁用不用 dex 一次加载门控；safe mode 不发布数据页。禁用只要求归属和可写生命周期记录，不读取已损坏/删除的 ZIP；先保存 disabled 再撤销页面，返回卡片只复用匹配的内存 manifest，没有匹配项就不生成卡片。启用和内容读取仍完整复验。卸载先保存意图、撤销页面，再删包，冷启动继续未完成删除。
+- 宿主只读页面绑定不可变选择身份；更新/禁用/卸载撤销旧页面，不偷偷切版本。每次读取使用同一严格 ZIP 校验器，16 MiB 压缩、32 MiB 展开、1 MiB 单项、512 项；Compose 只留路径和当前单项，文本分块，不抽取文件、不执行、不连网、不初始化插件私有数据。
+- Provider/MCP 仅元数据，schemas 尚不完整；没有 provider engine、MCP 连接/认证、persona 应用、locale override、Skill frontmatter/执行或新公开 SDK。DESIGN 的“下一次运行生效”依赖未来 agent，当前仅撤销并替换宿主内容页，不声称 agent-run 语义已经实现。
+- 新增真实文件系统回归源码 PluginDataLifecycleTest：确认/摘要变化、孤立发布、状态提交失败、禁用持久化、同进程重启用、安全模式选择谓词、恢复损坏隔离、删除失败重试、跨类型归属及内容限制。它不是完整 Android manager/UI 集成测试。
+
+- revision-2 新增 PluginImportSourceTest 源码，调用生产两阶段 copy/stage helper 和真实 APK/data store：阻塞读取时同一 mutation gate 仍可用、调用者取消、迟到 open、阻塞 close 和准入上限、外部/本地 close 抛错、pending stage 清理、异常 suppressed、交接前取消及字节上限。PluginDataLifecycleTest 增加 ZIP 损坏/删除后的禁用持久化与生产页面 membership helper、无缓存 manifest、失败提交不撤销。它们均不是已经通过的测试，也不等同完整 Android Manager/Compose 端到端覆盖。
+- 临时副本直到消费者释放才删除；失败删除保留准入槽，避免反复失败累积无限文件。独立 cache 子目录在进程首次使用时清理上次遗留；永久阻塞可保留最多两个有上限的副本直至重启。stagePluginInput 在 stream.close 前记录暂存所有权，任何关闭/校验失败均消费暂存，清理异常保留为 suppressed。
+
+**本轮验证：NOT COMPILED / NOT TESTED；构建、lint、JVM/设备测试全部 NOT RUN。InstaBox 被占用，未调用。** 仅源文件阅读、哈希及补丁格式检查，不宣称 B/I 验收完成。
+
+### 后续 InstaBox 设备验收步骤（独立于 JVM 源码测试；本轮未执行）
+
+1. 在新的 InstaBox 副本应用候选补丁并核对清单；运行构建/lint/完整 JVM 回归，确保 PluginDataStoreTest、PluginDataLifecycleTest 和 PluginImportSourceTest 被实际发现。记录命令、退出码、新鲜 XML、源码及 APK SHA-256，不复用历史通过。
+2. 制作 v1/v2 data ZIP（根 manifest，skills/hello/SKILL.md、persona/lang JSON、含完整路径和查询串的 provider/MCP URL），用两按钮和外部 ACTION_VIEW 验证选型。取消、换包、旋转、后台销毁及大文件 staging 中退出，检查合作提供方退出后 staging/cache 无遗留；安装期间销毁不得删除 manager 正消费的 stage。分别注入阻塞 open/read/close 和 close 抛错；同时操作另一插件，确认共享门不被占用；两槽耗尽后立即拒绝新导入，不新增线程/任务；迟到 open 关闭且不发布，只有真实退出后恢复容量。不可取消提供方只允许保留文档声明的有界资源，不以“超时成功清理”记账。
+3. 确认页逐项核对所有字段和每个完整 URL/host；不勾选不可安装。v1 安装后进入独立列表/只读页，核对文本；故意通过 APK 按钮导入 ZIP，必须失败且无 data fallback。
+4. 禁用时已打开的页消失；同一 PID 再启用可查看。另在激活后分别破坏/删除选中 ZIP，禁用仍持久化 false 并撤销旧页，重新启用必须失败。force-stop/冷启动保留禁用；force-stop 后携带 skip_plugins=true 启动，启用意愿可保留但不发布页。不要把已有进程收到恢复 intent 当冷启动。
+5. v2 必须新确认；保留旧选择的禁用意愿。已打开 v1 页撤销；重新打开才看 v2。故障注入选中状态提交失败，旧选择保持；冷启动绝不因更高目录自动激活。恢复时分别破坏一个状态和一个 ZIP，其他 ID 正常。
+6. 卸载先观察 intent/页撤销，再中断删除并冷启动恢复；完成后归属仍保留。尝试同 ID 代码包及 rejected-code 清理，不得删 data 归属/包。植入混合 APK/ZIP 树只隔离，不自动删除。
+7. 超限/坏 CRC/重复路径等坏包无活跃页；打开最大允许单项观察内存和交互响应。确认无网络、dex 加载、Skill 执行、locale/persona 应用或私有 dataDir。记录 PID、前后状态、路径、日志和 NOT RUN 项。
+8. 重跑既有代码签名/生命周期/回滚设备回归，确认原生全信任及重启模型没有变化。UI 异步竞态、实际磁盘满/atomic move、断电与内存峰值仍需专门证据。
 
 ## 仍需设备条件
 

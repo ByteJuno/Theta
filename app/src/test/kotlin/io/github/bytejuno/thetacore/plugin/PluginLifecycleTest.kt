@@ -81,7 +81,7 @@ class PluginLifecycleTest {
         } finally { root.deleteRecursively(); outside.deleteRecursively() }
     }
 
-    @Test fun equalAndLowerVersionsAreRejectedWithoutTouchingPublishedApk() {
+    @Test fun forgedStagesAreRejectedWithoutTouchingPublishedOrUnownedFiles() {
         val root = Files.createTempDirectory("theta-version").toFile()
         try {
             val installed = root.resolve("plugins/$id/2").apply { mkdirs() }.resolve("plugin.apk")
@@ -91,19 +91,19 @@ class PluginLifecycleTest {
                 val stagedFile = root.resolve("staged-$version.apk").apply { writeText("new bytes") }
                 val staged = StagedPlugin(stagedFile, PluginManifest(id, "Test", "v$version", version, 1, "Entry"), "hash", signers)
                 assertThrows(PluginPackageException::class.java) { store.install(staged) }
-                assertFalse(stagedFile.exists())
+                assertTrue(stagedFile.exists()) // Unknown object has no store-owned cleanup ticket.
                 assertEquals("live bytes", installed.readText())
             }
         } finally { root.deleteRecursively() }
     }
 
-    @Test fun failedPublicationDoesNotLeaveVersionDirectoryOrConsumeStage() {
+    @Test fun unregisteredStageCannotPublishOrAuthorizeFileDeletion() {
         val root = Files.createTempDirectory("theta-publish").toFile()
         try {
             val stagedFile = root.resolve("staged.apk").apply { writeText("not an APK") }
             val staged = StagedPlugin(stagedFile, PluginManifest(id, "Test", "v1", 1, 1, "Entry"), "wrong hash", signers)
             assertThrows(PluginPackageException::class.java) { PluginStore(root, root, verifier).install(staged) }
-            assertFalse(stagedFile.exists())
+            assertTrue(stagedFile.exists()) // Unknown object has no store-owned cleanup ticket.
             assertFalse(root.resolve("plugins/$id/1").exists())
         } finally { root.deleteRecursively() }
     }
