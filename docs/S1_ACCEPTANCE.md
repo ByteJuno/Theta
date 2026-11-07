@@ -14,16 +14,31 @@ S1 尚未完成。此台账区分现有证据、待实现能力与需真机的�
 | 项目 | 当前证据 / 状态 | 剩余工作 |
 |---|---|---|
 | A R8 + Compose | Hello/Probe 已设备通过 | 仅证明已覆盖 API，不是任意 Compose 兼容性证明 |
-| B 安装、更新、卸载 | 实际同 ID v1→v2、重启切换、保留/删除数据及重装在 `95fb4ed` 回归通过 | 数据 ZIP 路径、写入中断及更多坏包路径 |
+| B 安装、更新、卸载 | 实际同 ID v1→v2、重启切换、保留/删除数据及重装在 `c06c789` 回归通过 | 数据 ZIP 路径、写入中断及更多坏包路径 |
 | C 运行实例回收 | 已按重启方案验证撤销入口、进程内不重复加载、重启删除；旧设计已明确修订 | 不承诺原进程 GC 卸载；要求变更不等于旧 C 通过 |
-| D 异常恢复 | 初始化、onDisable、cleanup 历史用例通过；受管 scope 初始化/运行期故障及升级首启故障本轮设备通过，宿主 PID 保持 | Compose/线程崩溃后的自动恢复、工具调用边界 |
+| D 异常恢复 | 初始化、onDisable、cleanup 历史用例通过；受管 scope 初始化/运行期故障及升级首启故障在 `c06c789` 设备通过，宿主 PID 保持 | Compose/线程崩溃后的自动恢复、工具调用边界 |
 | E 非协作超时 | 初始化/清理阻塞、迟到登记拒绝及界面响应的初版用例通过 | 严格时间窗口复验已通过；资源预算、入口 ready 仍缺。工具资源租约和冷启动隔离记录已挪到 S2 |
-| F 更新回滚 | `dataDir` 快照、首次启动失败/卡死/被中断后的冷启动回滚、手动回滚设备通过；观察期到期、快照失败取消和回滚重入有单元测试。本地受管 scope 增量补充损坏记录隔离、期限检查与恢复回执等修正，87 项单测及 7 项重点设备回归通过 | `prefs`/`secrets` 快照（接口未实现）、不做快照继续的选项、观察期内主动提示 |
+| F 更新回滚 | `dataDir` 快照、首次启动失败/卡死/被中断后的冷启动回滚、手动回滚设备通过；观察期到期、快照失败取消和回滚重入有单元测试。受管 scope 增量补充损坏记录隔离、期限检查与恢复回执等修正，`c06c789` 全量回归通过 | `prefs`/`secrets` 快照（接口未实现）、不做快照继续的选项、观察期内主动提示 |
 | G 性能量化 | 未完成 | 同条件 APK 体积对照及固定真机帧耗时 |
 | H 共享库不重复打包 | Hello/Probe/12 种 fixture 的链接预检本轮通过，静态检查已进 PR Check | 预检不等于完整 ABI 证明 |
 | I APK 签名 | 真实未签名、字节篡改、换签、同签升级与指纹、保留数据绑定、清除数据恢复 7 项设备通过（Android 14 模拟器） | 不含私有存储篡改、签名轮转、多签名；厂商系统未验证 |
 | J Hook 远程加载 | 未实现、未验证 | Modern API 最小链路、requestScope、完整框架真机 |
 | K Hook 救援 | 未实现、未验证 | 崩溃循环跳过、全局开关及框架外恢复的真机证据 |
+
+## 2026-11-07 完整验证（`c06c789`）
+
+PR #4 = `6ba24a4`（另一台电脑开发的受管 scope 故障隔离）加 `c06c789`（审查修复）。InstaBox Android 14 x86_64 软件模拟器，日志 `/data/work/theta-s1-20261107-014234.log`，证据 `/data/work/theta-s1-20261107-014234-evidence/results.json`、`/data/work/theta-sig-20261107-014234/device/results.json`。`VERIFY_S1_EXIT=0`（4815 秒），`SIGNATURES_EXIT=0`（3245 秒），两份报告都没有证据采集错误和未运行用例。宿主 Release APK SHA-256：`f6a78d2448ba9b91144760987a532cde29c358c762f0dc9b24d24b052b8a7240`。
+
+- 构建、lint 通过；单元测试 93 项：PluginFaultBoundaryTest 16、PluginLifecycleTest 11、PluginRegistrationsTest 8、PluginSignaturePolicyTest 20、PluginUpdatesTest 38。
+- 链接预检：Hello、Probe 和 12 种 fixture 均 0 bundled、0 missing。
+- Probe/Hello 设备流程通过。
+- 生命周期 16/16：上面 `95fb4ed` 的 13 项，加 scopeThrow、scopeInitThrow、rollback-scope-init。
+- 签名 7/7，用例同 `95fb4ed`。
+- 迟到登记断言有实际效果：scopeInitThrow 用新 ID 登记，在 worker 被取消后仍执行，事件为 `late-register:rejected`，全部证据中没有 `late-register:ACCEPTED`。
+
+这一轮把 `S1_TOTAL_TIMEOUT` 临时放宽到 7200 秒作保险。生命周期阶段实际约 4400 秒，没超过默认 5400 秒，所以仓库默认值不变，但余量已不大，再加用例要先看这个值。
+
+审查修复中，排队的故障处理不覆盖用户操作、同进程删除后清掉 `deferred` 这两条在 PluginManager 内，没有单元测试，也没有专门的设备用例，靠代码审查和既有回归兜底。
 
 ## 2026-11-06 完整验证（`95fb4ed`）
 
@@ -59,7 +74,7 @@ InstaBox Android 14 x86_64 软件模拟器，日志 `/data/work/theta-s1-2026110
 
 ## 2026-11-07 受管 scope 增量：实现时记录
 
-以下保留实现阶段的未验证状态；后续实际结果以本节之后的验证记录为准。
+以下保留实现阶段的未验证状态，当时补丁尚未提交，后来提交为 `6ba24a4`（PR #4）。最终结果以上面的 `c06c789` 完整验证为准。
 
 原始补丁基线 `95fb4ed8bc1a1838a925fbb06713ffdf50d9344b`；文档已协调到 `a5e1d8bfd7a7498051059e20b9e4bac05d004d49`，该提交只更新四份文档，非文档目标原始哈希及新增路径不存在均已核对。保留上文 `95fb4ed` 完整验证证据和 `2243d80` 的现行 E 要求；这些证据不证明本地增量通过。本轮仅本地暂存修改与内容哈希核对，lab 只读，未构建/编译/单测/链接检查/设备测试、未触发 CI、未提交或推送。此前六项修正及全部非文档补丁内容保持不变。
 
@@ -83,7 +98,7 @@ InstaBox Android 14 x86_64 软件模拟器，日志 `/data/work/theta-s1-2026110
 - Release APK SHA-256：`b5cc88e3e74ccfee3589dced53524c7e26be01733f64754e08df404ce12adc9e`。
 - lab 证据归档：`/home/ubuntu/ai-work/theta-tools/managed-fault-verification-20261107-021814`，含失败及成功日志、退出码、产物清单、PID 和源码差异说明。
 
-本增量不证明 Compose/任意线程/native 崩溃隔离、真实断电、prefs/secrets 快照或完整 S1 完成。helper 单测与这七项设备断言分别记录，不互相替代。
+本增量不证明 Compose/任意线程/native 崩溃隔离、真实断电、prefs/secrets 快照或完整 S1 完成。helper 单测与这七项设备断言分别记录，不互相替代。这一轮没覆盖的旧用例已在上面的 `c06c789` 完整验证中补齐。
 
 ## 仍需设备条件
 
