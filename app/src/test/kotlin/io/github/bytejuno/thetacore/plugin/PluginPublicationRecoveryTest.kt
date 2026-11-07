@@ -234,4 +234,40 @@ class PluginPublicationRecoveryTest {
         assertFalse(dataDir.resolve("plugins/$id/1/plugin.zip").exists())
         assertNull(PluginDataStateStore(dataDir).read(id))
     }
+
+    @Test fun updatesKeepOnlyCurrentAndPreviousArchives() = root { dir ->
+        val catalog = PluginDataCatalog(dir, 1)
+        (1L..4L).forEach { install(catalog, it) }
+        val versions = dir.resolve("plugins/$id").list()!!.sorted()
+        assertEquals(listOf("3", "4"), versions)
+        assertEquals(4L, catalog.restore { fail(it) }.single().state.version)
+    }
+
+    @Test fun interruptedPruneLeavesEmptyVersionThatDoesNotBlockUpdates() = root { dir ->
+        val catalog = PluginDataCatalog(dir, 1)
+        install(catalog, 1)
+        install(catalog, 2)
+        dir.resolve("plugins/$id/1").listFiles()!!.forEach { assertTrue(it.delete()) }
+        install(catalog, 3)
+        assertEquals(listOf("2", "3"), dir.resolve("plugins/$id").list()!!.sorted())
+    }
+
+    @Test fun codeRecoveryToleratesRuntimeFilesInOlderVersions() = root { base ->
+        val live = base.resolve("live").apply { mkdirs() }
+        val first = fixturePluginStore(live, live.resolve("cache"), verifier)
+        first.install(first.stage(bundle(1, data = false).inputStream()))
+        live.resolve("plugins/$id/1/oat/x86_64/plugin.odex").apply { parentFile.mkdirs(); writeText("art") }
+        val store = fixturePluginStore(live, live.resolve("cache"), verifier)
+        store.install(store.stage(bundle(2, data = false).inputStream()))
+        assertFalse(live.resolve("plugin-code-publication/intent.properties").exists())
+        assertEquals("art", live.resolve("plugins/$id/1/oat/x86_64/plugin.odex").readText())
+        assertTrue(live.resolve("plugins/$id/2/plugin.apk").isFile)
+    }
+
+    @Test fun malformedIntentIsAnIoErrorNotACrash() = root { dir ->
+        val intent = dir.resolve("plugin-data-publication/intent.properties").apply { parentFile.mkdirs(); writeText("id=\\u12\n") }
+        val publication = PluginPackagePublication(dir, PluginPublicationKind.DATA, PluginStageCleanup())
+        assertThrows(IOException::class.java) { publication.recoverOnce() }
+        assertTrue(intent.isFile)
+    }
 }

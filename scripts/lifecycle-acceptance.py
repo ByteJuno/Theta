@@ -534,6 +534,92 @@ def managed_scope_fault(host, apks, hello, flavor):
         "fault_handled_same_pid": True}), encoding="utf-8")
 
 
+# Same ID as the code fixture on purpose: data ownership must refuse that code APK.
+DATA_ID = "io.github.bytejuno.thetacore.sample.fixture"
+
+
+def data_archive(version, body, extra=None):
+    path = OUTPUT / f"data-v{version}{'-' + extra if extra else ''}.zip"
+    manifest = {"schema": 1, "type": "data", "id": DATA_ID, "name": "Fixture data",
+                "version": f"{version}.0", "versionCode": version, "apiLevel": 1}
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("theta-plugin.json", json.dumps(manifest))
+        archive.writestr("skills/demo/SKILL.md", body)
+        if extra:
+            archive.writestr(extra, b"dex\n035\0")
+    return path
+
+
+def stage_data(path):
+    remote = "/data/local/tmp/theta-s1-data.zip"
+    adb("push", str(path), remote, timeout=120)
+    adb("shell", "chmod", "644", remote)
+    adb("shell", "am", "start", "-W", "-a", "android.intent.action.VIEW", "-d", f"file://{remote}", "-n", f"{PACKAGE}/.MainActivity")
+    tap("Data ZIP")
+
+
+def install_data(path, version):
+    stage_data(path)
+    text("Confirm data ZIP / unsigned update")
+    # The dialog must show the digest of these exact bytes.
+    text("SHA-256: " + hashlib.sha256(path.read_bytes()).hexdigest())
+    box = wait("unsigned-data acknowledgement", lambda: next((n for n in em.screen() if n.get("checkable") == "true"), None))
+    em.tap(box)
+    wait("acknowledgement checked", lambda: any(n.get("checkable") == "true" and n.get("checked") == "true" for n in em.screen()))
+    tap("Confirm this ZIP")
+    text(f"Fixture data · {version}.0")
+
+
+def data_content(body):
+    tap("View data content")
+    text("Untrusted plain text / JSON. No links, execution, authentication or network requests.")
+    tap("skills/demo/SKILL.md")
+    matching("data file content", lambda t: body in t)
+    tap("Back")
+
+
+def code_refused():
+    stage(next(iter(APKS.values())))
+    matching("code APK refused for data-owned ID", lambda t: "Data-owned ID; code action refused" in t)
+    absent("Install Fixture 1.0?")
+    require(not events("normalV1"), "Code fixture ran under a data-owned ID")
+
+
+def data_zip(host, apks):
+    APKS.clear()
+    APKS["normalV1"] = apks["normalV1"]
+    fresh(host)
+    text("No selected data packages")
+    stage_data(data_archive(1, "Fixture skill one", extra="classes.dex"))
+    matching("code payload rejected", lambda t: "Unsupported data ZIP payload: classes.dex" in t)
+    text("No selected data packages")
+    install_data(data_archive(1, "Fixture skill one"), 1)
+    data_content("Fixture skill one")
+    code_refused()
+    install_data(data_archive(2, "Fixture skill two"), 2)
+    restart()
+    text("Fixture data · 2.0")
+    data_content("Fixture skill two")
+    tap("Disable data")
+    text("Enable data")
+    absent("View data content")
+    restart()
+    text("Enable data")
+    absent("View data content")
+    tap("Enable data")
+    data_content("Fixture skill two")
+    tap("Uninstall data")
+    text(f"Uninstall data {DATA_ID}?")
+    em.tap(wait("uninstall confirmation", lambda: ([n for n in em.screen() if n.get("text") == "Uninstall data"] or [None])[-1]))
+    text("No selected data packages")
+    restart()
+    text("No selected data packages")
+    code_refused()  # Ownership survives uninstall and cold start.
+
+
+APKS = {}
+
+
 def evidence(label):
     directory = OUTPUT / label
     directory.mkdir(parents=True, exist_ok=True)
@@ -588,7 +674,7 @@ def main():
         "upgrade-and-data", "disableThrow", "cleanupThrow", "cleanupBlock",
         "initThrow", "initBlock", "interrupted-initialization", "interrupted-uninstall",
         "rejected-packages", "rollback-init-throw", "rollback-init-block", "rollback-interrupted",
-        "rollback-manual", "scopeThrow", "scopeInitThrow", "rollback-scope-init"), help="Run only named cases; report explicitly records partial coverage")
+        "rollback-manual", "scopeThrow", "scopeInitThrow", "rollback-scope-init", "data-zip"), help="Run only named cases; report explicitly records partial coverage")
     args = parser.parse_args()
     OUTPUT.mkdir(parents=True, exist_ok=True)
     report = {"cases": RESULTS, "limitations": [
@@ -626,6 +712,7 @@ def main():
             "scopeThrow": lambda: managed_scope_fault(args.host, apks, args.hello, "scopeThrow"),
             "scopeInitThrow": lambda: managed_scope_fault(args.host, apks, args.hello, "scopeInitThrow"),
             "rollback-scope-init": lambda: rollback_failed_update(args.host, apks, "scopeInitThrowV2"),
+            "data-zip": lambda: data_zip(args.host, apks),
         })
         selected = args.case or list(cases)
         report["selected_cases"] = selected

@@ -129,7 +129,7 @@ internal class PluginPackagePublication(
             Files.delete(preparing.toPath())
         }
         val record = readIntent() ?: return
-        val (id, _, token, newParent) = record
+        val (id, version, token, newParent) = record
         when (kind) {
             PluginPublicationKind.DATA -> {
                 requireNoCodeOwnership(files, id)
@@ -142,12 +142,19 @@ internal class PluginPackagePublication(
         }
         val parent = pluginPath(files.canonicalFile, "plugins/$id")
         // A changed/mixed tree is quarantined, never cleanup input, even with a valid intent.
+        // This intent's version must be exactly its payload. Older versions only must not hold the
+        // other kind's archive: the runtime may add files there (for example oat/ from secondary
+        // dex optimization), and requiring an exact tree would block every later import.
         if (!Files.notExists(parent.toPath(), NOFOLLOW_LINKS)) {
             dataRequire(Files.isDirectory(parent.toPath(), NOFOLLOW_LINKS), "Invalid publication parent")
+            val foreign = PluginPublicationKind.entries.single { it != kind }.archive
             Files.newDirectoryStream(parent.toPath()).use { versions -> versions.forEach {
                 val name = it.fileName.toString()
                 dataRequire(name.toLongOrNull()?.let { n -> n > 0 && n.toString() == name } == true, "Ambiguous publication tree")
-                requirePayload(pluginPath(parent, name))
+                val dir = pluginPath(parent, name)
+                if (name == version.toString()) requirePayload(dir)
+                else dataRequire(Files.isDirectory(dir.toPath(), NOFOLLOW_LINKS) &&
+                    Files.notExists(pluginPath(dir, foreign).toPath(), NOFOLLOW_LINKS), "Mixed publication tree isolated")
             } }
         }
         val temporary = pluginPath(journal, token)
@@ -165,7 +172,10 @@ internal class PluginPackagePublication(
     private fun readIntent(): Intent? {
         if (Files.notExists(intent.toPath(), NOFOLLOW_LINKS)) return null
         dataRequire(Files.isRegularFile(intent.toPath(), NOFOLLOW_LINKS) && intent.length() <= 4096, "Invalid publication intent")
-        val p = Properties().apply { intent.inputStream().use { load(it) } }
+        val p = Properties()
+        try { intent.inputStream().use { p.load(it) } } catch (e: IllegalArgumentException) {
+            throw java.io.IOException("Invalid publication intent", e)
+        }
         dataRequire(p.stringPropertyNames() == setOf("schema", "kind", "id", "version", "token", "newParent"), "Invalid publication fields")
         dataRequire(p.getProperty("schema") == "1" && p.getProperty("kind") == kind.name, "Invalid publication kind")
         val id = p.getProperty("id").also(::checkId)

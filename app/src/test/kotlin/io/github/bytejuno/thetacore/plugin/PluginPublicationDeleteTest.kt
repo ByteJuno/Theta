@@ -138,7 +138,8 @@ class PluginPublicationDeleteTest {
                 deleteFixtureFile(files, it) },
             publicationBoundary = { if (it == PluginPublicationBoundary.PARENT_READY) throw IOException("before move") })
         assertThrows(IOException::class.java) { store.install(store.stage(bundle().inputStream())) }
-        val unknown = files.resolve("plugins/$id/9/unknown").apply { parentFile.mkdirs(); writeText("keep") }
+        // The other kind's archive makes the tree mixed. Runtime files alone (oat/) do not.
+        val unknown = files.resolve("plugins/$id/9/plugin.zip").apply { parentFile.mkdirs(); writeText("keep") }
         assertThrows(PluginPackageException::class.java) { store.delete(id, true) }
         assertEquals("keep", unknown.readText())
         assertEquals(signer, PluginTrustStore(files).read(id))

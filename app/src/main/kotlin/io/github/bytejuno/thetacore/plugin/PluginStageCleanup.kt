@@ -31,10 +31,6 @@ internal class PluginStageCleanup(private val capacity: Int = 8) {
             tickets.remove(ticket) // only AFTER successful deletion
         } finally { hasPending = tickets.any { it.abandoned } }
     }
-    fun forgetMoved(ticket: Ticket) {
-        check(!ticket.abandoned)
-        tickets.remove(ticket) // only after atomic rename moved the unpublished path
-    }
     fun retry() {
         var failure: Throwable? = null
         tickets.filter { it.abandoned }.toList().forEach {

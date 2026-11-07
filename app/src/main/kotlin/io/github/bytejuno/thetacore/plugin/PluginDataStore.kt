@@ -127,16 +127,9 @@ internal class PluginDataStore(
         cleanup.discard(owned.ticket)
     }
 
-    private fun checkCodeResidue(id: String) {
-        checkId(id)
-        // Existence, NOT successful parsing, reserves code identity. Corrupt retained trust/data
-        // or lifecycle records must never be adopted by an unsigned package.
-        val reserved = listOf("plugin-trust/$id.signers", "plugin-data/$id", "plugin-state/$id.properties",
-            "plugin-updates/$id.properties", "plugin-snapshots/$id")
-        reserved.forEach { path ->
-            dataRequire(Files.notExists(pluginPath(files, path).toPath(), NOFOLLOW_LINKS), "Code namespace is reserved for $id")
-        }
-    }
+    // Existence, NOT successful parsing, reserves code identity. Corrupt retained trust/data
+    // or lifecycle records must never be adopted by an unsigned package.
+    private fun checkCodeResidue(id: String) = requireNoCodeOwnership(files, id)
 
     private fun checkNamespaceAndVersion(manifest: PluginDataManifest) {
         checkCodeResidue(manifest.id)
@@ -147,12 +140,15 @@ internal class PluginDataStore(
         // Empty or interrupted directories have unknown ownership; explicit recovery is required.
         dataRequire(versions.isNotEmpty(), "Unowned plugin directory; recovery required")
         var highest = 0L
+        // An empty version is an interrupted prune, but only for an ID with a committed selection.
+        val selected = PluginDataStateStore(files).read(manifest.id)?.let { it.version > 0 } == true
         for (path in versions) {
             val version = path.fileName.toString().toLongOrNull()
             dataRequire(version != null && version > 0 && version.toString() == path.fileName.toString(), "Unrecognized plugin storage")
             val dir = pluginPath(idDir, path.fileName.toString())
             requireDirectory(dir)
             val children = Files.newDirectoryStream(dir.toPath()).use { it.map { child -> child.fileName.toString() }.toList() }
+            if (children.isEmpty() && selected) continue
             dataRequire(children == listOf("plugin.zip"), "Code/data namespace collision or incomplete publication")
             val previous = validatePluginDataZip(readRegular(pluginPath(dir, "plugin.zip")), hostApiLevel, limits).manifest
             dataRequire(previous.id == manifest.id && previous.versionCode == version, "Stored data identity mismatch")

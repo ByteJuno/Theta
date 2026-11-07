@@ -56,7 +56,21 @@ internal class PluginDataCatalog(
             enabled = old?.takeIf { it.version > 0 }?.enabled ?: true)
         // Publication is not activation. A failed commit leaves old selection intact and a non-active orphan.
         save(id, state)
+        // Keep the new selection and the previous one. Best effort: the next update retries.
+        try { prune(id, setOfNotNull(state.version, old?.version?.takeIf { it > 0 })) } catch (_: Exception) { }
         return SelectedPluginData(published.manifest, state)
+    }
+
+    /** Runs only after the new selection is durable, and only inside a verified data-only tree. */
+    private fun prune(id: String, keep: Set<Long>) {
+        ensureDataOnlyTree(id)
+        val dir = pluginPath(files, "plugins/$id")
+        if (!dir.exists()) return
+        val stale = Files.newDirectoryStream(dir.toPath()).use { versions ->
+            versions.map { it.fileName.toString() }.filter { it.toLong() !in keep }
+        }
+        // An interruption leaves an empty version directory, which checkNamespaceAndVersion accepts.
+        stale.forEach { (deletePackages ?: ::deletePluginTree).invoke(dir, it) }
     }
 
     fun restore(onFailure: (String) -> Unit): List<SelectedPluginData> =
