@@ -288,4 +288,46 @@ class PluginFaultBoundaryTest {
             fail("missing request error")
         } catch (caught: java.io.IOException) { assertSame(original, caught) }
     }
+
+    @Test fun failureIdentityKeepsHostPackageMessagesOnly() {
+        assertEquals("Initialization timed out", pluginFailureIdentity(PluginPackageException("Initialization timed out")))
+        assertEquals("java.lang.IllegalStateException", pluginFailureIdentity(IllegalStateException("plugin text")))
+    }
+
+    @Test fun failedStartPersistenceKeepsConcurrentFaultFirstStart() = runBlocking {
+        val boundary = PluginFaultBoundary({}, {})
+        val failure = java.io.IOException("disk")
+        try {
+            boundary.completeStart(
+                {
+                    boundary.report(IllegalStateException("late"))
+                    throw failure
+                },
+                { fail("nothing durable was written") },
+            )
+            fail("missing IO error")
+        } catch (caught: java.io.IOException) { assertSame(failure, caught) }
+        assertTrue(boundary.takeFault(boundary)!!.duringInitialization)
+    }
+
+    @Test fun faultAfterSuccessfulStartPersistenceStaysRuntime() = runBlocking {
+        val boundary = PluginFaultBoundary({}, {})
+        assertFalse(boundary.completeStart(
+            { boundary.report(IllegalStateException("late")) },
+            { fail("faulted instance published") },
+        ))
+        assertFalse(boundary.takeFault(boundary)!!.duringInitialization)
+    }
+
+    @Test fun cleanupFailureDoesNotReplaceFaultPersistenceFailure() = runBlocking {
+        val failure = java.io.IOException("persist")
+        try {
+            finishPluginFault(
+                persist = { throw failure },
+                report = { fail("nothing to report") },
+                close = { error("close") },
+            )
+            fail("missing IO error")
+        } catch (caught: java.io.IOException) { assertSame(failure, caught) }
+    }
 }

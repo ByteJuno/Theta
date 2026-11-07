@@ -1,5 +1,6 @@
 package io.github.bytejuno.thetacore.plugin
 
+import java.io.IOException
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -10,8 +11,12 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
-/** Never use Throwable.toString/message/stackTrace/cause: those may execute plugin code. */
-internal fun pluginFailureIdentity(error: Throwable): String = error.javaClass.name
+/**
+ * Never use Throwable.toString/message/stackTrace/cause: those may execute plugin code.
+ * PluginPackageException is final and invisible to plugins, so its message is the host's own.
+ */
+internal fun pluginFailureIdentity(error: Throwable): String =
+    (error as? PluginPackageException)?.message ?: error.javaClass.name
 
 internal fun reportPluginFailure(report: (String) -> Unit, prefix: String, error: Throwable) {
     try { report("$prefix: ${pluginFailureIdentity(error)}") } catch (_: Throwable) { }
@@ -39,11 +44,11 @@ internal suspend fun <T> finishPluginFault(
     report: (T) -> Unit,
     close: suspend () -> Unit,
 ): T {
-    try {
+    return withPluginCleanup(cleanup = { close() }) {
         val result = persist()
         try { report(result) } catch (_: Throwable) { }
-        return result
-    } finally { close() }
+        result
+    }
 }
 
 /** No eligibility IO on the accepted branch; failed refresh cannot replace request error. */
@@ -57,7 +62,7 @@ internal suspend fun requestPluginRollback(
         try { refreshRejected() } catch (_: Throwable) { }
         throw error
     }
-    try { accepted() } finally { close() }
+    withPluginCleanup(cleanup = { close() }) { accepted() }
 }
 
 /** Called by serialized host operations; keep the quarantine on any deletion failure. */
@@ -123,7 +128,16 @@ internal class PluginFaultBoundary(
 
     suspend fun completeStart(persist: suspend () -> Unit, publish: () -> Unit): Boolean {
         if (!beginStart()) return false
-        persist()
+        try {
+            persist()
+        } catch (error: Throwable) {
+            // Nothing durable says the first start succeeded, so faults keep first-start semantics.
+            synchronized(lock) {
+                started = false
+                fault = fault?.copy(duringInitialization = true)
+            }
+            throw error
+        }
         return publishStarted(publish)
     }
 
@@ -173,20 +187,27 @@ internal fun persistPluginFault(
     duringInitialization: Boolean,
 ): PluginFaultPersistence {
     val errors = mutableListOf<Throwable>()
-    var disabled = PluginState(enabled = false, initializing = duringInitialization)
-    try {
-        val previous = states.read(id)
-        disabled = previous.copy(
-            enabled = false,
-            initializing = duringInitialization,
-            resumeAfterRollback = duringInitialization && previous.enabled && !previous.pendingDelete,
-        )
-        states.write(id, disabled)
-    } catch (error: Throwable) { errors += error }
+    val previous = try { states.read(id) } catch (error: Throwable) { errors += error; null }
+    // An unreadable state must still be replaced: a transient read error leaves enabled=true on disk.
+    val disabled = (previous ?: PluginState()).copy(
+        enabled = false,
+        initializing = duringInitialization,
+        resumeAfterRollback = duringInitialization && previous?.enabled == true && !previous.pendingDelete,
+    )
+    try { states.write(id, disabled) } catch (error: Throwable) { errors += error }
     val rollback = if (duringInitialization) {
         try { updates.failed(id, version) } catch (error: Throwable) { errors += error; false }
     } else false
     return PluginFaultPersistence(disabled, rollback, errors)
+}
+
+/** IO only. Uninstall is the way out of a corrupt state file, so it must not need to parse it. */
+internal fun persistPluginUninstall(states: PluginStateStore, id: String, clearData: Boolean): PluginState {
+    val previous = try { states.read(id) } catch (_: IOException) { PluginState() }
+    return previous.copy(
+        enabled = false, pendingDelete = true,
+        clearData = previous.clearData || clearData, resumeAfterRollback = false,
+    ).also { states.write(id, it) }
 }
 
 /** Recovery of one corrupt ID must not abort restore or retry the same broken record

@@ -15,7 +15,9 @@ import io.github.bytejuno.thetacore.sdk.PluginContext
 import io.github.bytejuno.thetacore.sdk.SettingsPage
 import io.github.bytejuno.thetacore.sdk.ThetaPlugin
 import java.io.File
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private const val TAG = "ThetaFixture"
 // Longer than the host's 10s enable + 5s close deadlines, but finite: no leaked forever-loop.
@@ -58,12 +60,15 @@ class FixturePlugin : ThetaPlugin {
             "scopeInitThrow", "scopeInitThrowV2" -> {
                 ctx.register(FixturePage(ctx.dataDir))
                 // Join observes completion, not the failure of this independent supervisor child.
-                ctx.scope.launch {
+                val child = ctx.scope.launch {
                     event("scope:init:throw")
                     error("fixture managed initialization failure")
-                }.join()
+                }
+                // Closing cancels this worker; the probe below must still run.
+                withContext(NonCancellable) { child.join() }
                 try {
-                    ctx.register(FixturePage(ctx.dataDir))
+                    // A new ID: a repeated one would throw "duplicate" even with admission open.
+                    ctx.register(FixturePage(ctx.dataDir, "fixture-late"))
                     event("late-register:ACCEPTED")
                 } catch (_: PluginClosedException) {
                     event("late-register:rejected")
@@ -106,8 +111,11 @@ class FixturePlugin : ThetaPlugin {
     }
 }
 
-private class FixturePage(private val dir: File, private val throwInScope: (() -> Unit)? = null) : SettingsPage {
-    override val id = "fixture"
+private class FixturePage(
+    private val dir: File,
+    override val id: String = "fixture",
+    private val throwInScope: (() -> Unit)? = null,
+) : SettingsPage {
     override val title = "Fixture page"
 
     @Composable

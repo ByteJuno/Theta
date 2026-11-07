@@ -101,8 +101,9 @@ internal class PluginUpdates(
             store.verifyVersion(id, to)
             snapshot(id, from)
         } catch (error: Exception) {
+            // Before any plugin loads, so only host and JDK exceptions reach this message.
             store.deleteVersion(id, to)
-            report("$id: update to version $to cancelled: ${pluginFailureIdentity(error)}")
+            report("$id: update to version $to cancelled: ${error.message}")
             return
         }
         write(id, PluginUpdate(from, to))

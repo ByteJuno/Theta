@@ -375,6 +375,26 @@ class PluginUpdatesTest {
         assertNull(updates.read(id)!!.startedAt)
     }
 
+    @Test fun unreadableStateIsStillReplacedByDisabledFault() = fixture {
+        activated()
+        val states = PluginStateStore(root)
+        states.write(id, PluginState())
+        root.resolve("plugin-state").resolve("$id.properties").writeText("enabled=maybe\n")
+        val result = persistPluginFault(states, updates, id, 2, false)
+        assertTrue(result.errors.isNotEmpty())
+        assertFalse(states.read(id).enabled)
+    }
+
+    @Test fun uninstallReplacesCorruptStateWithoutLosingTheRequest() = fixture {
+        val states = PluginStateStore(root)
+        states.write(id, PluginState())
+        root.resolve("plugin-state").resolve("$id.properties").writeText("enabled=maybe\n")
+        val state = persistPluginUninstall(states, id, true)
+        assertTrue(state.pendingDelete)
+        assertTrue(state.clearData)
+        assertEquals(state, states.read(id))
+    }
+
     @Test fun durableStartStorageIsCompleteBeforePublicationAndWriteFailurePreventsIt() = fixture {
         activated()
         val states = PluginStateStore(root)

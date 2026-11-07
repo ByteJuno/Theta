@@ -498,6 +498,8 @@ def managed_scope_fault(host, apks, hello, flavor):
         page(flavor, 0)
         tap("Throw in managed scope")
     event(flavor, "scope:throw" if flavor == "scopeThrow" else "scope:init:throw", timeout=20)
+    if flavor == "scopeInitThrow":
+        event(flavor, "late-register:rejected", timeout=20)
     # An independent short deadline, not the generic 180s test timeout.
     wait("managed scope disabled promptly", lambda: em.find(em.screen(), lambda t:
          t == "Managed scope failed; disabled; restart required"), timeout=20)

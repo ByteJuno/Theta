@@ -260,11 +260,7 @@ internal class PluginManager(context: Context) {
         restoreInternal()
         val plugin = managed(id)
         busy(plugin) {
-            val state = withContext(Dispatchers.IO) {
-                val previous = states.read(id)
-                previous.copy(enabled = false, pendingDelete = true, clearData = previous.clearData || clearData, resumeAfterRollback = false)
-                    .also { states.write(id, it) }
-            }
+            val state = withContext(Dispatchers.IO) { persistPluginUninstall(states, id, clearData) }
             plugin.state(state)
             plugin.status("Uninstall pending; restart required")
             close(plugin)
@@ -272,6 +268,7 @@ internal class PluginManager(context: Context) {
                 deletePluginRecovery(id, recoveryBlocked) {
                     withContext(Dispatchers.IO) { deleteStored(id, state.clearData) }
                 }
+                deferred -= id // Nothing is left to switch to, so a reinstall need not wait.
                 plugins.remove(plugin)
             }
         }
@@ -291,6 +288,7 @@ internal class PluginManager(context: Context) {
                 deleteStored(id, clearData = true)
             }
         }
+        deferred -= id
         rejectedIds.remove(id)
     }
 
@@ -411,6 +409,11 @@ internal class PluginManager(context: Context) {
 
     private suspend fun handleFault(plugin: ManagedPlugin, runtime: PluginRuntime) {
         val fault = runtime.context.faults.takeFault(plugin.runtime?.context?.faults) ?: return
+        // A user operation closed this instance first. Its durable decision and status stand.
+        if (runtime.closing != null) {
+            reportPluginFailure(failures::add, "${plugin.manifest.name}: managed scope failed", fault.error)
+            return
+        }
         runtime.active = false
         // Durable intent BEFORE scope cancellation and plugin callbacks. Persistence
         // failure still closes the runtime; it must never fall through to Running.
@@ -433,18 +436,16 @@ internal class PluginManager(context: Context) {
             },
             close = { close(plugin) },
         )
-        run {
-            plugin.canRollback = try { canRollback(plugin.manifest.id) } catch (error: Throwable) {
-                reportPluginFailure(failures::add, "${plugin.manifest.name}: update state unavailable", error)
-                false
-            }
-            plugin.status(when {
-                persisted.errors.isNotEmpty() -> "Managed scope failed; disabled in process; persistence failed; restart required"
-                persisted.rollback -> "Update failed; rollback on next start"
-                runtime.closeFailed -> "Managed scope failed; disabled; cleanup failed; restart required"
-                else -> "Managed scope failed; disabled; restart required"
-            })
+        plugin.canRollback = try { canRollback(plugin.manifest.id) } catch (error: Throwable) {
+            reportPluginFailure(failures::add, "${plugin.manifest.name}: update state unavailable", error)
+            false
         }
+        plugin.status(when {
+            persisted.errors.isNotEmpty() -> "Managed scope failed; disabled in process; persistence failed; restart required"
+            persisted.rollback -> "Update failed; rollback on next start"
+            runtime.closeFailed -> "Managed scope failed; disabled; cleanup failed; restart required"
+            else -> "Managed scope failed; disabled; restart required"
+        })
     }
 
     private suspend fun close(plugin: ManagedPlugin) {
