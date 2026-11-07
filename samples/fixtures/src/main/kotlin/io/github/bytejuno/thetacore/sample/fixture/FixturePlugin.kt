@@ -15,11 +15,14 @@ import io.github.bytejuno.thetacore.sdk.PluginContext
 import io.github.bytejuno.thetacore.sdk.SettingsPage
 import io.github.bytejuno.thetacore.sdk.ThetaPlugin
 import java.io.File
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private const val TAG = "ThetaFixture"
 // Longer than the host's 10s enable + 5s close deadlines, but finite: no leaked forever-loop.
 private const val BLOCK_MS = 60_000L
-private val BROKEN_UPDATES = setOf("initThrowV2", "initBlockV2")
+private val BROKEN_UPDATES = setOf("initThrowV2", "initBlockV2", "scopeInitThrowV2")
 private fun event(message: String) { Log.i(TAG, "${BuildConfig.SCENARIO}|$message") }
 
 /** Intentionally broken callbacks. Never ship this fixture as a real plugin. */
@@ -47,6 +50,30 @@ class FixturePlugin : ThetaPlugin {
             event("data:damaged")
         }
         when (BuildConfig.SCENARIO) {
+            "scopeThrow" -> ctx.register(FixturePage(ctx.dataDir) {
+                // The UI only launches; failure is in the managed scope, not Compose.
+                ctx.scope.launch {
+                    event("scope:throw")
+                    error("fixture managed runtime failure")
+                }
+            })
+            "scopeInitThrow", "scopeInitThrowV2" -> {
+                ctx.register(FixturePage(ctx.dataDir))
+                // Join observes completion, not the failure of this independent supervisor child.
+                val child = ctx.scope.launch {
+                    event("scope:init:throw")
+                    error("fixture managed initialization failure")
+                }
+                // Closing cancels this worker; the probe below must still run.
+                withContext(NonCancellable) { child.join() }
+                try {
+                    // A new ID: a repeated one would throw "duplicate" even with admission open.
+                    ctx.register(FixturePage(ctx.dataDir, "fixture-late"))
+                    event("late-register:ACCEPTED")
+                } catch (_: PluginClosedException) {
+                    event("late-register:rejected")
+                }
+            }
             "initThrow", "initThrowV2" -> {
                 ctx.register(FixturePage(ctx.dataDir))
                 event("enable:throw")
@@ -84,8 +111,11 @@ class FixturePlugin : ThetaPlugin {
     }
 }
 
-private class FixturePage(private val dir: File) : SettingsPage {
-    override val id = "fixture"
+private class FixturePage(
+    private val dir: File,
+    override val id: String = "fixture",
+    private val throwInScope: (() -> Unit)? = null,
+) : SettingsPage {
     override val title = "Fixture page"
 
     @Composable
@@ -96,6 +126,7 @@ private class FixturePage(private val dir: File) : SettingsPage {
             // Compiled constants expose which dex is actually executing, not installed metadata.
             Text("Fixture runtime ${BuildConfig.SCENARIO}")
             Text("Counter $count")
+            throwInScope?.let { action -> Button(onClick = action) { Text("Throw in managed scope") } }
             Button(onClick = {
                 val next = count + 1
                 counter.writeText(next.toString())

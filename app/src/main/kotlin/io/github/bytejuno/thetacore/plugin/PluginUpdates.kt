@@ -17,7 +17,7 @@ import java.util.UUID
 
 internal const val UPDATE_OBSERVATION_MS = 24L * 60 * 60 * 1000
 
-internal enum class UpdatePhase { OBSERVING, ROLLBACK }
+internal enum class UpdatePhase { OBSERVING, ROLLBACK, RECOVERED }
 
 /** [startedAt] 是新版本第一次启用成功的时间，观察期从这里算。 */
 internal data class PluginUpdate(
@@ -75,9 +75,13 @@ internal class PluginUpdates(
         }
         if (update?.phase == UpdatePhase.ROLLBACK) {
             rollback(id, update)
+            // Retain a durable receipt until the manager restores desired enabled state.
+            write(id, update.copy(phase = UpdatePhase.RECOVERED))
             report("$id: rolled back to version ${update.from}")
             return true
         }
+        // Never restore data again while waiting for the state write/acknowledgement.
+        if (update?.phase == UpdatePhase.RECOVERED) return true
         val versions = store.versions(id)
         val highest = versions.lastOrNull() ?: return false
         when {
@@ -97,6 +101,7 @@ internal class PluginUpdates(
             store.verifyVersion(id, to)
             snapshot(id, from)
         } catch (error: Exception) {
+            // Before any plugin loads, so only host and JDK exceptions reach this message.
             store.deleteVersion(id, to)
             report("$id: update to version $to cancelled: ${error.message}")
             return
@@ -130,6 +135,10 @@ internal class PluginUpdates(
             Files.move(snapshot.toPath(), pluginPath(data, id).toPath(), ATOMIC_MOVE)
         }
         store.versions(id).filter { it > update.from }.forEach { store.deleteVersion(id, it) }
+    }
+
+    fun acknowledgeRecovery(id: String) {
+        check(read(id)?.phase == UpdatePhase.RECOVERED)
         forget(id)
     }
 
@@ -155,10 +164,16 @@ internal class PluginUpdates(
     private fun PluginUpdate.isFirstStartOf(version: Long) =
         phase == UpdatePhase.OBSERVING && to == version && startedAt == null
 
+    private fun eligible(update: PluginUpdate?): Boolean =
+        update?.phase == UpdatePhase.OBSERVING && !expired(update)
+
+    fun canRollback(id: String): Boolean = eligible(read(id))
+
     fun requestRollback(id: String) {
         val update = read(id)
-        if (update?.phase != UpdatePhase.OBSERVING) throw PluginPackageException("No update to roll back")
-        write(id, update.copy(phase = UpdatePhase.ROLLBACK))
+        // Recheck the injected clock at the action, even when the UI flag is stale.
+        if (!eligible(update)) throw PluginPackageException("No update within the rollback observation period")
+        write(id, requireNotNull(update).copy(phase = UpdatePhase.ROLLBACK))
     }
 
     /** 删除快照和记录。记录放最后：中断时下次启动还知道要接着做。 */
@@ -194,4 +209,26 @@ internal fun copyPluginTree(source: File, target: File) {
             return FileVisitResult.CONTINUE
         }
     })
+}
+
+/** IO only: package/data recovery -> state intent -> receipt acknowledgement.
+ * A failed state write leaves RECOVERED for the next cold start; no plugin is loaded
+ * before all three succeed. writeState is a cutpoint seam, not a second recovery path.
+ */
+internal fun recoverPluginUpdate(
+    states: PluginStateStore,
+    updates: PluginUpdates,
+    id: String,
+    state: PluginState,
+    safeMode: Boolean,
+    report: (String) -> Unit,
+    writeState: (String, PluginState) -> Unit = states::write,
+): Boolean {
+    if (!updates.recover(id, state.initializing, safeMode, report)) return false
+    writeState(id, state.copy(
+        enabled = state.enabled || state.resumeAfterRollback,
+        initializing = false, resumeAfterRollback = false,
+    ))
+    updates.acknowledgeRecovery(id)
+    return true
 }

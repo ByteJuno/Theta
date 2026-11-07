@@ -17,7 +17,7 @@ android {
     // initThrowV2/initBlockV2 are broken updates of normalV1 that damage its data first.
     flavorDimensions += "scenario"
     productFlavors {
-        listOf("normalV1", "normalV2", "initThrow", "initBlock", "initThrowV2", "initBlockV2", "disableThrow", "cleanupThrow", "cleanupBlock").forEach { scenario ->
+        listOf("normalV1", "normalV2", "initThrow", "initBlock", "initThrowV2", "initBlockV2", "disableThrow", "cleanupThrow", "cleanupBlock", "scopeThrow", "scopeInitThrow", "scopeInitThrowV2").forEach { scenario ->
             create(scenario) {
                 dimension = "scenario"
                 val second = scenario.endsWith("V2")

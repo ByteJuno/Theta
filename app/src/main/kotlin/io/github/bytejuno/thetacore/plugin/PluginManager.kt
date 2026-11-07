@@ -15,7 +15,10 @@ import io.github.bytejuno.thetacore.sdk.ThetaPlugin
 import java.io.File
 import java.io.IOException
 import java.nio.file.Files
+import android.util.Log
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
@@ -39,7 +42,8 @@ internal class ManagedPlugin(val manifest: PluginManifest, state: PluginState) {
         internal set
     internal var runtime by mutableStateOf<PluginRuntime?>(null)
     val pages: List<SettingsPage>
-        get() = runtime?.takeIf { it.active }?.context?.extensions?.filterIsInstance<SettingsPage>().orEmpty()
+        get() = runtime?.takeIf { it.active && !it.context.faults.hasFault() }
+            ?.context?.extensions?.filterIsInstance<SettingsPage>().orEmpty()
 
     internal fun state(state: PluginState) {
         enabled = state.enabled
@@ -50,7 +54,7 @@ internal class ManagedPlugin(val manifest: PluginManifest, state: PluginState) {
 }
 
 /** Retained even after failure/disable: dex cannot be unloaded safely in this process. */
-internal class PluginRuntime(val context: HostPluginContext) {
+internal class PluginRuntime(val context: HostPluginContext, val version: Long) {
     @Volatile var loader: ClassLoader? = null
     @Volatile var entry: ThetaPlugin? = null
     var active by mutableStateOf(false)
@@ -64,9 +68,13 @@ internal class PluginManager(context: Context) {
     private val store = PluginStore(app.filesDir, app.cacheDir, PlatformPluginSignatureVerifier(app.packageManager))
     private val states = PluginStateStore(app.filesDir)
     private val updates = PluginUpdates(app.filesDir, store)
-    private val host = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    // Last-resort handling for application-owned launch jobs; never recursively launch
+    // from this handler and never touch Compose state from an arbitrary thread.
+    private val host = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate +
+        CoroutineExceptionHandler { _, error -> logHostFailure(error) })
     private val operations = Mutex()
     private val gate = PluginLoadGate()
+    private val recoveryBlocked = mutableSetOf<String>()
     // 已安排更新或回滚的 ID：这个进程里不能再加载，等冷启动切换。
     private val deferred = mutableSetOf<String>()
     private var restored = false
@@ -91,33 +99,33 @@ internal class PluginManager(context: Context) {
     private suspend fun restoreInternal(skipPlugins: Boolean = false) {
         if (restored) return
         skipLoading = skipPlugins
-        val blocked = mutableSetOf<String>()
+        val blocked = recoveryBlocked.toMutableSet()
         val interrupted = mutableSetOf<String>()
         val messages = mutableListOf<String>()
         val rejected = mutableSetOf<String>()
         val installed = withContext(Dispatchers.IO) {
             // Tombstones precede package parsing, including corrupt APKs.
             states.ids().forEach { id ->
-                try {
+                isolatePluginRecovery(id, blocked, messages::add) {
                     val state = states.read(id)
                     if (state.pendingDelete) {
                         blocked += id
-                        deleteStored(id, state.clearData)
-                    } else if (updates.recover(id, state.initializing, skipPlugins, messages::add)) {
-                        if (state.initializing) states.write(id, state.copy(initializing = false))
+                        deletePluginRecovery(id, blocked) { deleteStored(id, state.clearData) }
+                    } else if (recoverPluginUpdate(states, updates, id, state, skipPlugins, messages::add)) {
+                        // Recovery restores state before acknowledging its durable completion.
                     } else if (state.initializing) {
-                        states.write(id, state.copy(enabled = false, initializing = false))
+                        states.write(id, state.copy(enabled = false, initializing = false, resumeAfterRollback = false))
                         interrupted += id
                     }
-                } catch (error: Exception) {
-                    blocked += id
-                    messages += "$id: state recovery failed: ${error.message}"
                 }
             }
             store.installed(messages::add) { rejected += it }.also { accepted ->
                 rejected += store.retainedIds() - accepted.map { it.manifest.id }.toSet()
             }
         }
+        // IO used local sets; publish quarantine changes only on serialized Main.
+        recoveryBlocked.clear()
+        recoveryBlocked.addAll(blocked)
         rejectedIds.addAll(rejected)
         failures.addAll(messages)
         installed.forEach { installedPlugin ->
@@ -126,11 +134,11 @@ internal class PluginManager(context: Context) {
                 withContext(Dispatchers.IO) { states.read(id) }
             } catch (error: Exception) {
                 blocked += id
-                failures += "$id: ${error.message}"
+                failures += "$id: ${pluginFailureIdentity(error)}"
                 PluginState(enabled = false)
             }
             val plugin = ManagedPlugin(installedPlugin.manifest, state)
-            plugin.canRollback = canRollback(id)
+            plugin.canRollback = isolatePluginRecovery(id, blocked, failures::add) { canRollback(id) } ?: false
             plugins += plugin
             when {
                 id in blocked -> plugin.status(if (state.pendingDelete) "Uninstall pending; restart required" else "State unavailable; restart required")
@@ -143,6 +151,7 @@ internal class PluginManager(context: Context) {
                 else -> busy(plugin) { load(plugin, installedPlugin) }
             }
         }
+        recoveryBlocked.addAll(blocked)
         restored = true
     }
 
@@ -155,7 +164,7 @@ internal class PluginManager(context: Context) {
                 }
             }
             val input = try { app.contentResolver.openInputStream(uri) } catch (error: IllegalArgumentException) {
-                throw PluginPackageException("Cannot open the file: ${error.message}")
+                throw PluginPackageException("Cannot open the file: ${pluginFailureIdentity(error)}")
             } ?: throw PluginPackageException("Cannot open the file")
             val staged = input.use(store::stage)
             if (staged.manifest.apiLevel !in 1..THETA_API_LEVEL) {
@@ -186,7 +195,7 @@ internal class PluginManager(context: Context) {
                 val state = states.read(id)
                 if (state.pendingDelete) throw PluginPackageException("Uninstall pending; restart required")
                 if (id in deferred) throw PluginPackageException("Update or rollback pending; restart required")
-                if (updates.read(id)?.phase == UpdatePhase.ROLLBACK) {
+                if (updates.read(id)?.phase in setOf(UpdatePhase.ROLLBACK, UpdatePhase.RECOVERED)) {
                     throw PluginPackageException("Update or rollback pending; restart required")
                 }
                 if (staged.manifest.apiLevel !in 1..THETA_API_LEVEL) throw PluginPackageException("Unsupported API level")
@@ -199,6 +208,9 @@ internal class PluginManager(context: Context) {
             if (update) deferred += id
             val plugin = ManagedPlugin(installed.manifest, state)
             plugin.canRollback = canRollback(id)
+            // State/update records and the replacement package have all validated durably.
+            // This does not reset gate.wasAttempted or an accepted deferred transition.
+            recoveryBlocked.remove(id)
             plugin.runtime = old?.runtime
             if (old == null) plugins += plugin else plugins[plugins.indexOf(old)] = plugin
             busy(plugin) {
@@ -219,7 +231,8 @@ internal class PluginManager(context: Context) {
             val state = withContext(Dispatchers.IO) {
                 val previous = states.read(id)
                 if (previous.pendingDelete) throw PluginPackageException("Uninstall pending; restart required")
-                previous.copy(enabled = enabled).also { states.write(id, it) }
+                if (enabled && id in recoveryBlocked) throw PluginPackageException("State unavailable; restart required")
+                previous.copy(enabled = enabled, resumeAfterRollback = false).also { states.write(id, it) }
             }
             plugin.state(state) // Durable BEFORE callbacks/cancellation.
             if (!enabled) {
@@ -247,16 +260,15 @@ internal class PluginManager(context: Context) {
         restoreInternal()
         val plugin = managed(id)
         busy(plugin) {
-            val state = withContext(Dispatchers.IO) {
-                val previous = states.read(id)
-                previous.copy(enabled = false, pendingDelete = true, clearData = previous.clearData || clearData)
-                    .also { states.write(id, it) }
-            }
+            val state = withContext(Dispatchers.IO) { persistPluginUninstall(states, id, clearData) }
             plugin.state(state)
             plugin.status("Uninstall pending; restart required")
             close(plugin)
             if (!gate.wasAttempted(id)) {
-                withContext(Dispatchers.IO) { deleteStored(id, state.clearData) }
+                deletePluginRecovery(id, recoveryBlocked) {
+                    withContext(Dispatchers.IO) { deleteStored(id, state.clearData) }
+                }
+                deferred -= id // Nothing is left to switch to, so a reinstall need not wait.
                 plugins.remove(plugin)
             }
         }
@@ -269,11 +281,14 @@ internal class PluginManager(context: Context) {
         if (id !in rejectedIds || plugins.any { it.manifest.id == id } || gate.wasAttempted(id)) {
             throw PluginPackageException("Rejected package cannot be removed in this process")
         }
-        withContext(Dispatchers.IO) {
-            // Do not need to parse possibly corrupt old state to authorize deletion.
-            states.write(id, PluginState(enabled = false, pendingDelete = true, clearData = true))
-            deleteStored(id, clearData = true)
+        deletePluginRecovery(id, recoveryBlocked) {
+            withContext(Dispatchers.IO) {
+                // Do not need to parse possibly corrupt old state to authorize deletion.
+                states.write(id, PluginState(enabled = false, pendingDelete = true, clearData = true))
+                deleteStored(id, clearData = true)
+            }
         }
+        deferred -= id
         rejectedIds.remove(id)
     }
 
@@ -282,14 +297,24 @@ internal class PluginManager(context: Context) {
         restoreInternal()
         val plugin = managed(id)
         busy(plugin) {
-            withContext(Dispatchers.IO) {
-                if (states.read(id).pendingDelete) throw PluginPackageException("Uninstall pending; restart required")
-                updates.requestRollback(id)
-            }
-            deferred += id
-            plugin.canRollback = false
-            plugin.status("Rollback scheduled; restart required")
-            close(plugin)
+            requestPluginRollback(
+                request = {
+                    withContext(Dispatchers.IO) {
+                        if (states.read(id).pendingDelete) throw PluginPackageException("Uninstall pending; restart required")
+                        updates.requestRollback(id)
+                    }
+                },
+                refreshRejected = {
+                    plugin.canRollback = false
+                    plugin.canRollback = canRollback(id)
+                },
+                accepted = {
+                    deferred += id
+                    plugin.canRollback = false
+                    plugin.status("Rollback scheduled; restart required")
+                },
+                close = { close(plugin) },
+            )
         }
     }
 
@@ -300,7 +325,7 @@ internal class PluginManager(context: Context) {
     }
 
     private suspend fun canRollback(id: String): Boolean =
-        withContext(Dispatchers.IO) { updates.read(id)?.phase == UpdatePhase.OBSERVING }
+        withContext(Dispatchers.IO) { updates.canRollback(id) }
 
     private fun managed(id: String): ManagedPlugin {
         checkId(id)
@@ -323,7 +348,17 @@ internal class PluginManager(context: Context) {
                 states.write(manifest.id, states.read(manifest.id).copy(initializing = true))
             }
             gate.begin(manifest.id)
-            val runtime = PluginRuntime(HostPluginContext(manifest.id, app, File(app.filesDir, "plugin-data/${manifest.id}")))
+            val context = HostPluginContext(
+                manifest.id, app, File(app.filesDir, "plugin-data/${manifest.id}"), host,
+            ) { faultContext ->
+                // Enqueue only: load/restore already holds operations. Never wait here.
+                postPluginOperation(host, Dispatchers.Main, operations, ::logHostFailure) {
+                    val current = plugins.firstOrNull { it.manifest.id == manifest.id }
+                    val runtime = current?.runtime
+                    if (current != null && runtime != null && runtime.context === faultContext) handleFault(current, runtime)
+                }
+            }
+            val runtime = PluginRuntime(context, manifest.versionCode)
             plugin.runtime = runtime
             plugin.status("Initializing")
             val worker = PluginWorker("theta-enable-${manifest.id}") {
@@ -336,17 +371,29 @@ internal class PluginManager(context: Context) {
                 entry.onEnable(runtime.context)
             }
             runtime.initialization = worker
-            val result = worker.await(ENABLE_TIMEOUT_MS)
+            val result = worker.await(ENABLE_TIMEOUT_MS, context.faults)
             if (result == null) throw PluginPackageException("Initialization timed out; restart required")
             result.getOrThrow()
-            withContext(Dispatchers.IO) {
-                states.write(manifest.id, states.read(manifest.id).copy(initializing = false))
-                updates.started(manifest.id, manifest.versionCode)
-            }
-            runtime.active = true
-            plugin.status("Running")
+            val published = context.faults.completeStart(
+                persist = {
+                    withContext(Dispatchers.IO) {
+                        updates.started(manifest.id, manifest.versionCode)
+                        states.write(manifest.id, states.read(manifest.id).copy(initializing = false))
+                    }
+                },
+                publish = {
+                    runtime.active = true
+                    plugin.status("Running")
+                },
+            )
+            if (!published) handleFault(plugin, runtime)
         } catch (error: Throwable) {
-            failures += "${manifest.name}: initialization failed: $error"
+            val runtime = plugin.runtime
+            if (runtime?.context?.faults?.hasFault() == true) {
+                handleFault(plugin, runtime)
+                return
+            }
+            reportPluginFailure(failures::add, "${manifest.name}: initialization failed", error)
             close(plugin)
             // 写不进去也没关系：initializing 标记还在，下次启动同样会回滚。
             val rollback = try {
@@ -358,6 +405,47 @@ internal class PluginManager(context: Context) {
             plugin.status(if (rollback) "Update failed; rollback on next start" else "Initialization failed; restart required")
             // Keep the marker after timeout/failure: next start disables conservatively.
         }
+    }
+
+    private suspend fun handleFault(plugin: ManagedPlugin, runtime: PluginRuntime) {
+        val fault = runtime.context.faults.takeFault(plugin.runtime?.context?.faults) ?: return
+        // A user operation closed this instance first. Its durable decision and status stand.
+        if (runtime.closing != null) {
+            reportPluginFailure(failures::add, "${plugin.manifest.name}: managed scope failed", fault.error)
+            return
+        }
+        runtime.active = false
+        // Durable intent BEFORE scope cancellation and plugin callbacks. Persistence
+        // failure still closes the runtime; it must never fall through to Running.
+        val persisted = finishPluginFault(
+            persist = {
+                try {
+                    withContext(Dispatchers.IO) {
+                        persistPluginFault(states, updates, plugin.manifest.id, runtime.version, fault.duringInitialization)
+                    }
+                } catch (error: Throwable) {
+                    PluginFaultPersistence(PluginState(enabled = false), false, listOf(error))
+                }
+            },
+            report = { result ->
+                plugin.state(result.state)
+                reportPluginFailure(failures::add, "${plugin.manifest.name}: managed scope failed", fault.error)
+                result.errors.forEach {
+                    reportPluginFailure(failures::add, "${plugin.manifest.name}: fault persistence failed", it)
+                }
+            },
+            close = { close(plugin) },
+        )
+        plugin.canRollback = try { canRollback(plugin.manifest.id) } catch (error: Throwable) {
+            reportPluginFailure(failures::add, "${plugin.manifest.name}: update state unavailable", error)
+            false
+        }
+        plugin.status(when {
+            persisted.errors.isNotEmpty() -> "Managed scope failed; disabled in process; persistence failed; restart required"
+            persisted.rollback -> "Update failed; rollback on next start"
+            runtime.closeFailed -> "Managed scope failed; disabled; cleanup failed; restart required"
+            else -> "Managed scope failed; disabled; restart required"
+        })
     }
 
     private suspend fun close(plugin: ManagedPlugin) {
@@ -383,23 +471,40 @@ internal class PluginManager(context: Context) {
         runtime.closeFailed = result == null || result.isFailure || !errors.isNullOrEmpty()
         if (runtime.closeFailed) {
             failures += "${plugin.manifest.name}: cleanup failed or timed out; restart required"
-            errors.orEmpty().forEach { failures += "${plugin.manifest.name}: cleanup: $it" }
+            errors.orEmpty().forEach { reportPluginFailure(failures::add, "${plugin.manifest.name}: cleanup", it) }
         }
     }
+}
+
+/** Logging must itself be nonthrowing, including JVM tests with Android stubs. */
+private fun logHostFailure(error: Throwable) {
+    try { Log.e("ThetaPlugins", "Host plugin task failed: ${pluginFailureIdentity(error)}") } catch (_: Throwable) { }
 }
 
 internal class HostPluginContext(
     override val pluginId: String,
     override val appContext: Context,
     override val dataDir: File,
+    private val host: CoroutineScope,
+    onFault: (HostPluginContext) -> Unit,
 ) : PluginContext {
     override val hostApiLevel = THETA_API_LEVEL
-    override val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-
     var extensions by mutableStateOf<List<Extension>>(emptyList())
         private set
 
-    private val registrations = PluginRegistrations<Extension> { extensions = it }
+    private val publication: PluginPublication<Extension> = PluginPublication<Extension> {
+        // Always enqueue, even on Main: never acquire the registry lock in reverse
+        // order from the fault boundary. Read latest when dispatched, not captured data.
+        try {
+            host.launch(Dispatchers.Main) { extensions = publicationSnapshot() }
+        } catch (error: Throwable) { logHostFailure(error) }
+    }
+    private fun publicationSnapshot(): List<Extension> = publication.current()
+    private val registrations = PluginRegistrations<Extension>(publication::update)
+    private val closeLock = Any()
+    private var pendingCleanup: List<() -> Unit>? = null
+    val faults = PluginFaultBoundary(::closeAdmission, { onFault(this) }, ::logHostFailure)
+    override val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default + faults.handler)
 
     override fun register(extension: Extension): Registration {
         val revoke = registrations.register(extension.id, extension)
@@ -411,8 +516,19 @@ internal class HostPluginContext(
         return Registration { revoke() }
     }
 
+    // Memory only. The exception handler never cancels jobs or invokes cleanup.
+    private fun closeAdmission() {
+        synchronized(closeLock) {
+            registrations.beginClose()?.let { pendingCleanup = it }
+        }
+    }
+
     fun beginClose(): List<() -> Unit> {
-        val actions = registrations.beginClose() ?: return emptyList()
-        return actions
+        faults.close()
+        closeAdmission()
+        extensions = emptyList() // Caller is the serialized Main host operation.
+        return synchronized(closeLock) {
+            pendingCleanup.orEmpty().also { pendingCleanup = null }
+        }
     }
 }

@@ -23,6 +23,14 @@ internal class PluginWorker<T>(name: String, action: suspend () -> T) {
     }
 
     suspend fun await(timeoutMillis: Long): Result<T>? = withTimeoutOrNull(timeoutMillis) { result.await() }
+    suspend fun await(timeoutMillis: Long, faults: PluginFaultBoundary): Result<T>? =
+        withTimeoutOrNull(timeoutMillis) {
+            kotlinx.coroutines.selects.select {
+                faults.failure.onAwait { Result.failure<T>(it) }
+                result.onAwait { it }
+            }
+        }
+
     suspend fun join(): Result<T> = result.await()
 
     // Cancellation handlers belong to plugin code too: call only on the bounded cleanup worker.
