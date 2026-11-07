@@ -54,10 +54,24 @@ def crashed():
     return PACKAGE in adb("logcat", "-d", "-b", "crash", check=False)
 
 
-def wait_for(description, matches, fail=None):
-    """等界面上出现匹配的文字。`fail` 匹配到时立刻失败，不用等到超时。"""
+def scroll(down):
+    """滑动宿主列表。数据包和代码包两栏会把后面的插件卡片挤出首屏。"""
+    size = re.findall(r"(\d+)x(\d+)", adb("shell", "wm", "size"))[-1]
+    width, height = map(int, size)
+    top, bottom = int(height * 0.25), int(height * 0.80)
+    adb("shell", "input", "swipe", str(width // 2), str(bottom if down else top),
+        str(width // 2), str(top if down else bottom), "200")
+
+
+def wait_for(description, matches, fail=None, sweep=False):
+    """等界面上出现匹配的文字。`fail` 匹配到时立刻失败，不用等到超时。
+
+    `sweep` 只用于宿主列表上的卡片：没找到就先往下、再往上来回滑。弹窗按钮
+    不要用，滑动落在弹窗外会把它关掉。
+    """
     deadline = time.monotonic() + TIMEOUT
     texts = []
+    attempts = 0
     while time.monotonic() < deadline:
         nodes = screen()
         texts = [n.get("text") for n in nodes if n.get("text")]
@@ -68,8 +82,20 @@ def wait_for(description, matches, fail=None):
             raise TestFailure(f"{description}: {[t for t in texts if fail(t)]}")
         if crashed():
             raise TestFailure(f"{description}: app crashed")
+        if sweep and nodes:
+            scroll(attempts % 6 < 3)
+            attempts += 1
         time.sleep(1)
     raise TestFailure(f"{description}: timed out, screen has {texts}")
+
+
+def absent(description, matches):
+    """宿主列表从顶到底再回到顶都没有匹配项。屏幕外不算不存在。"""
+    for down in (None, True, True, True, False, False, False):
+        if down is not None:
+            scroll(down)
+        if find(screen(), matches) is not None:
+            raise TestFailure(description)
 
 
 def tap(node):
@@ -77,8 +103,12 @@ def tap(node):
     adb("shell", "input", "tap", str((x1 + x2) // 2), str((y1 + y2) // 2))
 
 
-def tap_text(text):
-    tap(wait_for(f"find {text!r}", lambda t: t == text))
+def tap_text(text, sweep=False):
+    tap(wait_for(f"find {text!r}", lambda t: t == text, sweep=sweep))
+
+
+def tap_card(text):
+    tap_text(text, sweep=True)
 
 
 def step(message):
@@ -115,14 +145,14 @@ def run(host, probe, hello):
     if hello:
         step("install Hello")
         install_plugin(hello, "Hello")
-        tap_text("Hello")
+        tap_card("Hello")
         wait_for("Hello page", lambda t: t == "Hello from a plugin")
         adb("shell", "input", "keyevent", "KEYCODE_BACK")
         wait_for("back on the list", lambda t: t == "Hello")
 
     step("install Probe")
     install_plugin(probe, "Probe")
-    tap_text("Probe")
+    tap_card("Probe")
 
     step("wait for every probe check")
     summary = wait_for(
@@ -150,14 +180,14 @@ def run(host, probe, hello):
     step("leave and restart: the plugin comes back from disk")
     adb("shell", "am", "force-stop", PACKAGE)
     adb("shell", "am", "start", "-W", "-n", f"{PACKAGE}/.MainActivity")
-    tap_text("Probe")
+    tap_card("Probe")
     wait_for("probe after restart", lambda t: PROBE_PASSED.match(t) is not None, fail=lambda t: t.startswith("FAIL "))
 
     step("disable Probe and verify registration removal")
     adb("shell", "input", "keyevent", "KEYCODE_BACK")
     adb("logcat", "-c")
-    tap_text("Disable Probe")
-    wait_for("Probe disabled", lambda t: t == "Enable Probe")
+    tap_card("Disable Probe")
+    wait_for("Probe disabled", lambda t: t == "Enable Probe", sweep=True)
     deadline = time.monotonic() + TIMEOUT
     expected = ["onDisable", "cleanup:second", "cleanup:first"]
     while time.monotonic() < deadline:
@@ -168,53 +198,47 @@ def run(host, probe, hello):
         time.sleep(1)
     else:
         raise TestFailure(f"lifecycle order: expected {expected}, got {events}")
-    if find(screen(), lambda t: t == "Probe") is not None:
-        raise TestFailure("disabled Probe still exposes its page")
+    absent("disabled Probe still exposes its page", lambda t: t == "Probe")
 
     step("disabled preference survives process restart")
     adb("shell", "am", "force-stop", PACKAGE)
     adb("shell", "am", "start", "-W", "-n", f"{PACKAGE}/.MainActivity")
-    wait_for("disabled after restart", lambda t: t == "Enable Probe")
-    if find(screen(), lambda t: t == "Probe") is not None:
-        raise TestFailure("disabled Probe loaded after restart")
+    wait_for("disabled after restart", lambda t: t == "Enable Probe", sweep=True)
+    absent("disabled Probe loaded after restart", lambda t: t == "Probe")
 
     step("enable a not-yet-loaded plugin in the fresh process")
-    tap_text("Enable Probe")
-    tap_text("Probe")
+    tap_card("Enable Probe")
+    tap_card("Probe")
     wait_for("re-enabled Probe", lambda t: PROBE_PASSED.match(t) is not None, fail=lambda t: t.startswith("FAIL "))
     adb("shell", "input", "keyevent", "KEYCODE_BACK")
-    tap_text("Disable Probe")
-    wait_for("second disable finished", lambda t: t == "Disabled; restart required before loading again")
-    tap_text("Enable Probe")
-    wait_for("reenable deferred", lambda t: t == "Enabled for next start; restart required")
-    if find(screen(), lambda t: t == "Probe") is not None:
-        raise TestFailure("closed plugin reloaded in the same process")
+    tap_card("Disable Probe")
+    wait_for("second disable finished", lambda t: t == "Disabled; restart required before loading again", sweep=True)
+    tap_card("Enable Probe")
+    wait_for("reenable deferred", lambda t: t == "Enabled for next start; restart required", sweep=True)
+    absent("closed plugin reloaded in the same process", lambda t: t == "Probe")
 
     step("recovery cold-start skips enabled plugins")
     adb("shell", "am", "force-stop", PACKAGE)
     adb("shell", "am", "start", "-W", "-n", f"{PACKAGE}/.MainActivity", "--ez", "skip_plugins", "true")
-    wait_for("recovery controls", lambda t: t == "Disable Probe")
-    if find(screen(), lambda t: t in ("Probe", "Hello")) is not None:
-        raise TestFailure("recovery launched a plugin page")
+    wait_for("recovery controls", lambda t: t == "Disable Probe", sweep=True)
+    absent("recovery launched a plugin page", lambda t: t in ("Probe", "Hello"))
 
     step("normal restart restores enabled Probe")
     adb("shell", "am", "force-stop", PACKAGE)
     adb("shell", "am", "start", "-W", "-n", f"{PACKAGE}/.MainActivity", "--ez", "skip_plugins", "false")
-    tap_text("Probe")
+    tap_card("Probe")
     wait_for("Probe after recovery", lambda t: PROBE_PASSED.match(t) is not None, fail=lambda t: t.startswith("FAIL "))
     adb("shell", "input", "keyevent", "KEYCODE_BACK")
 
     step("uninstall loaded Probe and finish deletion on restart")
-    tap_text("Uninstall Probe")
+    tap_card("Uninstall Probe")
     tap_text("Confirm uninstall")
-    wait_for("uninstall pending", lambda t: "restart" in t.lower() and "uninstall" in t.lower())
-    if find(screen(), lambda t: t == "Probe") is not None:
-        raise TestFailure("pending uninstall still exposes its page")
+    wait_for("uninstall pending", lambda t: "restart" in t.lower() and "uninstall" in t.lower(), sweep=True)
+    absent("pending uninstall still exposes its page", lambda t: t == "Probe")
     adb("shell", "am", "force-stop", PACKAGE)
     adb("shell", "am", "start", "-W", "-n", f"{PACKAGE}/.MainActivity")
     wait_for("host restored after deletion", lambda t: t == ("Hello" if hello else "No plugins installed"))
-    if find(screen(), lambda t: "Probe" in t) is not None:
-        raise TestFailure("Probe still installed after deferred deletion")
+    absent("Probe still installed after deferred deletion", lambda t: "Probe" in t)
 
     if crashed():
         raise TestFailure("app crashed")
