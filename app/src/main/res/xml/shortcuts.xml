@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut android:shortcutId="plugin_recovery"
+        android:enabled="true"
+        android:shortcutShortLabel="@string/recovery_shortcut">
+        <intent android:action="android.intent.action.VIEW"
+            android:targetPackage="io.github.bytejuno.thetacore"
+            android:targetClass="io.github.bytejuno.thetacore.MainActivity">
+            <extra android:name="skip_plugins" android:value="true" />
+        </intent>
+    </shortcut>
+</shortcuts>

@@ -16,6 +16,11 @@ android {
         versionName = "0.1.0"
     }
 
+    buildTypes {
+        // Local verification sample only; debug signing does not authenticate an author.
+        release { signingConfig = signingConfigs.getByName("debug") }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17

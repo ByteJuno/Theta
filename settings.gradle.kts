@@ -26,3 +26,5 @@ rootProject.name = "theta-core"
 include(":app")
 include(":sdk")
 include(":samples:hello")
+include(":samples:probe")
+include(":samples:fixtures")
