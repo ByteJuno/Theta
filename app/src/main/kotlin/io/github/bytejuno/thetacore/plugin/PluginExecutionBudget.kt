@@ -133,7 +133,7 @@ internal class PluginExecutionBudget(
 
     fun occupiedSlots(): Int = synchronized(lock) { active.size }
 
-    private fun pumpCancellation() = synchronized(lock) {
+    private fun pumpCancellation(): Unit = synchronized(lock) {
         active.toList().forEach { lease ->
             if (!lease.cancelRequested || lease.cancelRunning || lease.cancelDelivered) return@forEach
             lease.cancelRunning = true
@@ -159,7 +159,7 @@ internal class PluginExecutionBudget(
     private fun armRetry() {
         if (retryArmed) return
         try {
-            clock.schedule({
+            clock.schedule(Runnable {
                 synchronized(lock) { retryArmed = false }
                 pumpCancellation()
             }, 5, TimeUnit.MILLISECONDS)
