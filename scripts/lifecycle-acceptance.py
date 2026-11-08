@@ -101,15 +101,20 @@ def scroll(down):
 
 
 def matching(description, predicate, timeout=None):
-    attempts = 0
+    # Sweep up to the top, then down to the bottom, flipping when a swipe no longer
+    # changes the screen. A fixed down-3/up-3 cycle returns to its start and never
+    # reaches the far end once the host list is longer than a few screens.
+    sweep = {"down": False, "last": None}
 
     def locate():
-        nonlocal attempts
-        node = em.find(em.screen(), predicate)
+        nodes = em.screen()
+        node = em.find(nodes, predicate)
         if node is None:
-            # Sweep down then up; bounded by wait(), never an unbounded search.
-            scroll(attempts % 6 < 3)
-            attempts += 1
+            signature = tuple((n.get("text", ""), n.get("bounds", "")) for n in nodes)
+            if nodes and signature == sweep["last"]:
+                sweep["down"] = not sweep["down"]
+            sweep["last"] = signature
+            scroll(sweep["down"])  # Bounded by wait(), never an unbounded search.
         return node
 
     return wait(description, locate, timeout)
@@ -125,11 +130,20 @@ def tap(value):
 
 def absent(value):
     # Cases use a single plugin card, but wrapping diagnostics can push its page
-    # below the fold. Inspect both ends rather than treating offscreen as absent.
-    for down in (False, False, True, True):
-        require(em.find(em.screen(), lambda t: t == value) is None, f"Unexpected visible text: {value}")
-        scroll(down)
-    require(em.find(em.screen(), lambda t: t == value) is None, f"Unexpected visible text: {value}")
+    # below the fold. Inspect the whole list (top to bottom) rather than treating
+    # offscreen as absent; each direction ends when a swipe no longer moves the screen.
+    for down in (False, True):
+        last = None
+        for _ in range(30):
+            nodes = em.screen()
+            require(em.find(nodes, lambda t: t == value) is None, f"Unexpected visible text: {value}")
+            signature = tuple((n.get("text", ""), n.get("bounds", "")) for n in nodes)
+            if nodes and signature == last:
+                break
+            last = signature
+            scroll(down)
+        else:
+            raise FAIL(f"Could not reach the list end while checking absence of {value!r}")
 
 
 def event(flavor, value, timeout=None):
