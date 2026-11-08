@@ -100,7 +100,7 @@ def scroll(down):
     adb("shell", "input", "swipe", str(width // 2), str(bottom if down else top), str(width // 2), str(top if down else bottom), "200")
 
 
-def matching(description, predicate):
+def matching(description, predicate, timeout=None):
     attempts = 0
 
     def locate():
@@ -112,7 +112,7 @@ def matching(description, predicate):
             attempts += 1
         return node
 
-    return wait(description, locate)
+    return wait(description, locate, timeout)
 
 
 def text(value):
@@ -181,6 +181,9 @@ def stage(apk):
     adb("push", str(apk), remote, timeout=120)
     adb("shell", "chmod", "644", remote)
     adb("shell", "am", "start", "-W", "-a", "android.intent.action.VIEW", "-d", f"file://{remote}", "-n", f"{PACKAGE}/.MainActivity")
+    # Shared by lifecycle AND signature acceptance, including rejection cases.
+    # Missing selector is a hard bounded UI failure, not an optional dialog.
+    tap("Code APK")
 
 
 def install(apk, version="1.0"):
@@ -203,11 +206,11 @@ def increment(count):
 def responsive_while_blocked(flavor, end_marker):
     require(end_marker not in events(flavor), "Blocking callback finished before responsiveness check")
     # Picker is a real user action independent of the serialized plugin operations.
-    tap("Install plugin")
+    tap("Import code APK")
     wait("system file picker opened", lambda: any("documentsui" in n.get("package", "").lower() for n in em.screen()))
     require(end_marker not in events(flavor), "Inconclusive: picker observation missed blocking window")
     back()
-    text("Install plugin")
+    text("Import code APK")
 
 
 def uninstall(clear=False, check_page=True):
@@ -500,9 +503,10 @@ def managed_scope_fault(host, apks, hello, flavor):
     event(flavor, "scope:throw" if flavor == "scopeThrow" else "scope:init:throw", timeout=20)
     if flavor == "scopeInitThrow":
         event(flavor, "late-register:rejected", timeout=20)
-    # An independent short deadline, not the generic 180s test timeout.
-    wait("managed scope disabled promptly", lambda: em.find(em.screen(), lambda t:
-         t == "Managed scope failed; disabled; restart required"), timeout=20)
+    # An independent short deadline, not the generic 180s test timeout. The
+    # Data packages section pushes the fixture card below the fold, so sweep.
+    matching("managed scope disabled promptly",
+             lambda t: t == "Managed scope failed; disabled; restart required", timeout=20)
     require(adb("shell", "pidof", PACKAGE).strip() == pid, "Managed fault restarted/killed host")
     absent("Fixture page")
     tap("Hello")
@@ -520,8 +524,8 @@ def managed_scope_fault(host, apks, hello, flavor):
     if flavor == "scopeThrow":
         page(flavor, 0)
         tap("Throw in managed scope")
-    wait("automatic scope disable", lambda: em.find(em.screen(), lambda t:
-         t == "Managed scope failed; disabled; restart required"), timeout=20)
+    matching("automatic scope disable",
+             lambda t: t == "Managed scope failed; disabled; restart required", timeout=20)
     clear_logs()
     restart()
     text("Enable Fixture")
@@ -529,6 +533,130 @@ def managed_scope_fault(host, apks, hello, flavor):
     require(not events(flavor), "Disabled scope fixture executed on cold start")
     (OUTPUT / (CURRENT + "-pid.json")).write_text(json.dumps({"before": pid,
         "fault_handled_same_pid": True}), encoding="utf-8")
+
+
+# Same ID as the code fixture on purpose: data ownership must refuse that code APK.
+DATA_ID = "io.github.bytejuno.thetacore.sample.fixture"
+
+
+def data_archive(version, body, extra=None):
+    path = OUTPUT / f"data-v{version}{'-' + extra if extra else ''}.zip"
+    manifest = {"schema": 1, "type": "data", "id": DATA_ID, "name": "Fixture data",
+                "version": f"{version}.0", "versionCode": version, "apiLevel": 1}
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("theta-plugin.json", json.dumps(manifest))
+        archive.writestr("skills/demo/SKILL.md", body)
+        if extra:
+            archive.writestr(extra, b"dex\n035\0")
+    return path
+
+
+def stage_data(path):
+    remote = "/data/local/tmp/theta-s1-data.zip"
+    adb("push", str(path), remote, timeout=120)
+    adb("shell", "chmod", "644", remote)
+    adb("shell", "am", "start", "-W", "-a", "android.intent.action.VIEW", "-d", f"file://{remote}", "-n", f"{PACKAGE}/.MainActivity")
+    tap("Data ZIP")
+
+
+def rect(node):
+    return tuple(map(int, re.findall(r"\d+", node.get("bounds"))))
+
+
+def acknowledgement_locator():
+    """Locate a tap point on the visible part of the acknowledgement checkbox.
+
+    The checkbox sits at the end of the dialog's own scroll body, which clips it
+    on a small screen, so its centre can fall outside the body and hit nothing.
+    Swipe the body (never the activity behind the dialog) once towards its end,
+    then tap the middle of whatever part of the box is visible inside it.
+    """
+    swiped = False
+
+    def locate():
+        nonlocal swiped
+        nodes = em.screen()
+        box = next((n for n in nodes if n.get("checkable") == "true"), None)
+        if box is None:
+            return None
+        x1, y1, x2, y2 = rect(box)
+        body = next((n for n in nodes if n.get("scrollable") == "true"), None)
+        if body is None:
+            return (x1 + x2) // 2, (y1 + y2) // 2
+        bx1, by1, bx2, by2 = rect(body)
+        if (y1 < by1 or y2 > by2) and not swiped:
+            swiped = True
+            x = (bx1 + bx2) // 2
+            adb("shell", "input", "swipe", str(x), str(by2 - 20), str(x), str(by1 + 20), "300")
+            return None  # look again at the scrolled body
+        top, bottom = max(y1, by1), min(y2, by2)
+        if bottom - top < 16:
+            return None
+        return (max(x1, bx1) + min(x2, bx2)) // 2, (top + bottom) // 2
+
+    return locate
+
+
+def install_data(path, version):
+    stage_data(path)
+    text("Confirm data ZIP / unsigned update")
+    # The dialog must show the digest of these exact bytes.
+    text("SHA-256: " + hashlib.sha256(path.read_bytes()).hexdigest())
+    point = wait("unsigned-data acknowledgement", acknowledgement_locator())
+    adb("shell", "input", "tap", *map(str, point))
+    wait("acknowledgement checked", lambda: any(n.get("checkable") == "true" and n.get("checked") == "true" for n in em.screen()))
+    tap("Confirm this ZIP")
+    text(f"Fixture data · {version}.0")
+
+
+def data_content(body):
+    tap("View data content")
+    text("Untrusted plain text / JSON. No links, execution, authentication or network requests.")
+    tap("skills/demo/SKILL.md")
+    matching("data file content", lambda t: body in t)
+    tap("Back")
+
+
+def code_refused():
+    stage(next(iter(APKS.values())))
+    matching("code APK refused for data-owned ID", lambda t: "Data-owned ID; code action refused" in t)
+    absent("Install Fixture 1.0?")
+    require(not events("normalV1"), "Code fixture ran under a data-owned ID")
+
+
+def data_zip(host, apks):
+    APKS.clear()
+    APKS["normalV1"] = apks["normalV1"]
+    fresh(host)
+    text("No selected data packages")
+    stage_data(data_archive(1, "Fixture skill one", extra="classes.dex"))
+    matching("code payload rejected", lambda t: "Unsupported data ZIP payload: classes.dex" in t)
+    text("No selected data packages")
+    install_data(data_archive(1, "Fixture skill one"), 1)
+    data_content("Fixture skill one")
+    code_refused()
+    install_data(data_archive(2, "Fixture skill two"), 2)
+    restart()
+    text("Fixture data · 2.0")
+    data_content("Fixture skill two")
+    tap("Disable data")
+    text("Enable data")
+    absent("View data content")
+    restart()
+    text("Enable data")
+    absent("View data content")
+    tap("Enable data")
+    data_content("Fixture skill two")
+    tap("Uninstall data")
+    text(f"Uninstall data {DATA_ID}?")
+    em.tap(wait("uninstall confirmation", lambda: ([n for n in em.screen() if n.get("text") == "Uninstall data"] or [None])[-1]))
+    text("No selected data packages")
+    restart()
+    text("No selected data packages")
+    code_refused()  # Ownership survives uninstall and cold start.
+
+
+APKS = {}
 
 
 def evidence(label):
@@ -585,7 +713,7 @@ def main():
         "upgrade-and-data", "disableThrow", "cleanupThrow", "cleanupBlock",
         "initThrow", "initBlock", "interrupted-initialization", "interrupted-uninstall",
         "rejected-packages", "rollback-init-throw", "rollback-init-block", "rollback-interrupted",
-        "rollback-manual", "scopeThrow", "scopeInitThrow", "rollback-scope-init"), help="Run only named cases; report explicitly records partial coverage")
+        "rollback-manual", "scopeThrow", "scopeInitThrow", "rollback-scope-init", "data-zip"), help="Run only named cases; report explicitly records partial coverage")
     args = parser.parse_args()
     OUTPUT.mkdir(parents=True, exist_ok=True)
     report = {"cases": RESULTS, "limitations": [
@@ -623,6 +751,7 @@ def main():
             "scopeThrow": lambda: managed_scope_fault(args.host, apks, args.hello, "scopeThrow"),
             "scopeInitThrow": lambda: managed_scope_fault(args.host, apks, args.hello, "scopeInitThrow"),
             "rollback-scope-init": lambda: rollback_failed_update(args.host, apks, "scopeInitThrowV2"),
+            "data-zip": lambda: data_zip(args.host, apks),
         })
         selected = args.case or list(cases)
         report["selected_cases"] = selected

@@ -6,11 +6,10 @@ import java.io.InputStream
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
-import java.nio.file.StandardCopyOption.ATOMIC_MOVE
 import java.security.MessageDigest
 import java.util.UUID
 
-private const val PACKAGE_MAX_BYTES = 256L * 1024 * 1024
+internal const val PACKAGE_MAX_BYTES = 256L * 1024 * 1024
 
 internal class StagedPlugin(
     val file: File,
@@ -26,6 +25,11 @@ internal class PluginStore(
     private val filesDir: File,
     private val cacheDir: File,
     private val verifier: PluginSignatureVerifier,
+    private val cleanup: PluginStageCleanup = PluginStageCleanup(),
+    private val deleteStage: (File) -> Unit = { Files.deleteIfExists(it.toPath()); Unit },
+    publicationBoundary: (PluginPublicationBoundary) -> Unit = {},
+    deletePublicationIntent: (File) -> Unit = { Files.delete(it.toPath()) },
+    private val deletePackages: (File, String) -> Unit = ::deletePluginTree,
 ) {
     // Resolve only trusted Android storage aliases; plugin-controlled descendants stay checked.
     private val root get() = pluginPath(filesDir.canonicalFile, "plugins")
@@ -33,10 +37,33 @@ internal class PluginStore(
     private val data get() = pluginPath(filesDir.canonicalFile, "plugin-data")
     private val trust = PluginTrustStore(filesDir)
 
+    private val publication = PluginPackagePublication(filesDir, PluginPublicationKind.CODE, cleanup,
+        deleteTemporary = { parent, name ->
+            val dir = pluginPath(parent, name)
+            deleteStage(pluginPath(dir, "plugin.apk"))
+            Files.deleteIfExists(dir.toPath())
+        }, boundary = publicationBoundary, deleteIntent = deletePublicationIntent)
+    private val pending = java.util.IdentityHashMap<StagedPlugin, PluginStageCleanup.Ticket>()
+    fun retryCleanup() = cleanup.retry()
+    fun cleanupColdStages() {
+        check(pending.isEmpty())
+        withPluginCleanup(cleanup = {
+            val stale = cleanup.reserveRecovery { deletePluginTree(cacheDir.canonicalFile, "plugin-staging") }
+            cleanup.discard(stale)
+        }) { publication.recoverOnce() }
+    }
+    fun discard(stage: StagedPlugin) { pending[stage]?.let(cleanup::discard) }
+
     fun stage(source: InputStream): StagedPlugin {
+        publication.recoverOnce()
         pluginPath(staging, ".")
         Files.createDirectories(staging.toPath())
         val file = File(staging, "${UUID.randomUUID()}.apk")
+        var registered: StagedPlugin? = null
+        val ticket = cleanup.reserve {
+            deleteStage(file)
+            registered?.let { pending.remove(it) }
+        }
         try {
             file.outputStream().use { out -> copyLimited(source, out) }
             // Keep malformed-ZIP/manifest errors specific. This is metadata parsing,
@@ -44,18 +71,25 @@ internal class PluginStore(
             val manifest = readPluginManifest(file)
             val signers = verifier.verify(file)
             checkTrustForInstall(manifest.id, signers)
-            return StagedPlugin(file, manifest, sha256(file), signers)
-        } catch (e: Exception) {
-            file.delete()
-            throw e
+            return StagedPlugin(file, manifest, sha256(file), signers).also {
+                registered = it
+                pending[it] = ticket
+            }
+        } catch (e: Throwable) {
+            withPluginCleanup(cleanup = { cleanup.discard(ticket) }) { throw e }
         }
     }
 
     /** The caller must obtain user confirmation before entering this method. */
     fun install(staged: StagedPlugin): InstalledPlugin =
-        withPluginCleanup(cleanup = { staged.file.delete() }) { installPackage(staged) }
+        withCommittedPluginCleanup(cleanup = { discard(staged) }) {
+            val ticket = pending[staged] ?: throw PluginPackageException("Unknown code stage")
+            dataRequire(!ticket.abandoned, "Code stage awaits cleanup")
+            installPackage(staged)
+        }
 
     private fun checkTrustForInstall(id: String, signers: PluginSigners) {
+        requireNoDataOwnership(filesDir, id)
         val bound = trust.read(id)
         if (bound != null) {
             trust.requireMatch(id, signers)
@@ -74,7 +108,7 @@ internal class PluginStore(
     private fun installPackage(staged: StagedPlugin): InstalledPlugin {
         val manifest = staged.manifest
         checkId(manifest.id)
-        val pluginDir = pluginPath(root, manifest.id)
+        requireNoDataOwnership(filesDir, manifest.id)
         val highest = versions(manifest.id).lastOrNull()
         if (highest != null && manifest.versionCode <= highest) {
             throw PluginPackageException("Install requires a higher version than $highest")
@@ -83,31 +117,24 @@ internal class PluginStore(
         // Confirmation pins trust before creating any published APK. Failed first
         // publication may retain this binding; only the same signer can retry.
         trust.bindConfirmed(manifest.id, staged.signers)
-        val dir = pluginPath(pluginDir, manifest.versionCode.toString())
-        Files.createDirectories(dir.toPath())
+        val dir = publication.publish(manifest.id, manifest.versionCode,
+            write = { temp ->
+                // Read-only before writing dex; only a verified complete directory is published.
+                FileOutputStream(temp).use { out ->
+                    if (!temp.setReadOnly()) throw PluginPackageException("Cannot make the package read-only")
+                    staged.file.inputStream().use { copyLimited(it, out) }
+                    out.fd.sync()
+                }
+                if (sha256(temp) != staged.sha256) throw PluginPackageException("Package changed while installing")
+                val copiedSigners = verifier.verify(temp)
+                if (copiedSigners != staged.signers) throw PluginPackageException("Package signers changed while installing")
+                trust.requireMatch(manifest.id, copiedSigners)
+                if (readPluginManifest(temp) != manifest) {
+                    throw PluginPackageException("Package manifest changed while installing")
+                }
+            }, beforeMove = { requireNoDataOwnership(filesDir, manifest.id) },
+        )
         val target = pluginPath(dir, "plugin.apk")
-        if (target.exists()) throw PluginPackageException("Package version already exists")
-        val temp = File(dir, "${UUID.randomUUID()}.tmp")
-        withPluginCleanup(cleanup = {
-            withPluginCleanup(cleanup = { dir.delete() }) { temp.delete() }
-            // Removes a failed empty version only, never a published package.
-        }) {
-            // Android 14 起不能加载可写的 dex。文件要先设成只读，内容再经已打开的描述符写入，
-            // 写完核验过才改名发布，半截文件不会被当成可用版本。
-            FileOutputStream(temp).use { out ->
-                if (!temp.setReadOnly()) throw PluginPackageException("Cannot make the package read-only")
-                staged.file.inputStream().use { copyLimited(it, out) }
-                out.fd.sync()
-            }
-            if (sha256(temp) != staged.sha256) throw PluginPackageException("Package changed while installing")
-            val copiedSigners = verifier.verify(temp)
-            if (copiedSigners != staged.signers) throw PluginPackageException("Package signers changed while installing")
-            trust.requireMatch(manifest.id, copiedSigners)
-            if (readPluginManifest(temp) != manifest) {
-                throw PluginPackageException("Package manifest changed while installing")
-            }
-            Files.move(temp.toPath(), target.toPath(), ATOMIC_MOVE)
-        }
         return InstalledPlugin(target, manifest)
     }
 
@@ -115,6 +142,7 @@ internal class PluginStore(
     fun verifyForLoad(installed: InstalledPlugin) {
         val manifest = installed.manifest
         checkId(manifest.id)
+        requireNoDataOwnership(filesDir, manifest.id)
         val expected = pluginPath(root, "${manifest.id}/${manifest.versionCode}/plugin.apk")
         if (installed.apk.absoluteFile != expected.absoluteFile) throw PluginPackageException("Unexpected package path")
         val signers = verifier.verify(expected)
@@ -136,7 +164,8 @@ internal class PluginStore(
 
     fun deleteVersion(id: String, version: Long) {
         checkId(id)
-        deletePluginTree(pluginPath(root, id), version.toString())
+        requireNoDataOwnership(filesDir, id)
+        deletePackages(pluginPath(root, id), version.toString())
     }
 
     /** Highest installed version only; a broken package never aborts other IDs. */
@@ -148,6 +177,9 @@ internal class PluginStore(
         return (root.listFiles() ?: throw IOException("Cannot list plugins")).mapNotNull { pluginDir ->
             try {
                 checkId(pluginDir.name)
+                if (hasDataOwnership(filesDir, pluginDir.name)) {
+                    return@mapNotNull null // Data (including ambiguous ownership) is never code cleanup input.
+                }
                 pluginPath(root, pluginDir.name)
                 val versions = pluginDir.listFiles() ?: throw IOException("Cannot list ${pluginDir.name}")
                 val dir = versions.filter { it.name.toLongOrNull() != null && File(it, "plugin.apk").exists() }.maxByOrNull { it.name.toLong() }
@@ -160,7 +192,7 @@ internal class PluginStore(
                 InstalledPlugin(apk, manifest).also(::verifyForLoad)
             } catch (error: Exception) {
                 onFailure("${pluginDir.name}: ${error.message}")
-                if (validPluginId(pluginDir.name)) onRejected(pluginDir.name)
+                if (validPluginId(pluginDir.name) && runCatching { !hasDataOwnership(filesDir, pluginDir.name) }.getOrDefault(false)) onRejected(pluginDir.name)
                 null
             }
         }
@@ -173,12 +205,18 @@ internal class PluginStore(
             return (dir.listFiles() ?: throw IOException("Cannot list retained plugin storage"))
                 .map { it.name }.filter(::validPluginId)
         }
-        return (children(root) + children(data) + trust.ids()).toSet()
+        return (children(root) + children(data) + trust.ids()).toSet().filter { id ->
+            runCatching { !hasDataOwnership(filesDir, id) }.getOrDefault(false)
+        }.toSet()
     }
 
     fun delete(id: String, clearData: Boolean) {
         checkId(id)
-        deletePluginTree(root, id)
+        requireNoDataOwnership(filesDir, id)
+        // Manager keeps its tombstone until this returns. Never release the signer needed
+        // by a pending publication: retry its exact journal/ticket before deleting packages.
+        publication.recoverBeforeDelete(id)
+        deletePackages(root, id)
         if (clearData) {
             deletePluginTree(data, id)
             trust.removeAfterClearData(id)

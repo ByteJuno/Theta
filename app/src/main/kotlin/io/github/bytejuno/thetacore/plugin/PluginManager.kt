@@ -65,8 +65,12 @@ internal class PluginRuntime(val context: HostPluginContext, val version: Long) 
 
 internal class PluginManager(context: Context) {
     private val app = context.applicationContext
-    private val store = PluginStore(app.filesDir, app.cacheDir, PlatformPluginSignatureVerifier(app.packageManager))
+    private val stageCleanup = PluginStageCleanup()
+    private val store = PluginStore(app.filesDir, app.cacheDir, PlatformPluginSignatureVerifier(app.packageManager), stageCleanup)
     private val states = PluginStateStore(app.filesDir)
+    private val dataCatalog = PluginDataCatalog(app.filesDir, THETA_API_LEVEL, cleanup = stageCleanup)
+    val dataPlugins = mutableStateListOf<ManagedPluginData>()
+    val dataInventory = mutableStateListOf<ManagedDataRecord>()
     private val updates = PluginUpdates(app.filesDir, store)
     // Last-resort handling for application-owned launch jobs; never recursively launch
     // from this handler and never touch Compose state from an arbitrary thread.
@@ -85,7 +89,8 @@ internal class PluginManager(context: Context) {
     // Rejected packages remain removable without executing or trusting their manifest.
     val rejectedIds = mutableStateListOf<String>()
 
-    // Replaces the UI Job: caller cancellation cannot interrupt durable transitions.
+    // Replaces the UI Job only for serialized durable transitions. External URI acquisition,
+    // copy and provider close NEVER enter here; their bounded wait preserves the caller Job.
     private suspend fun <T> operation(block: suspend () -> T): T = withContext(host.coroutineContext) {
         operations.withLock {
             try { block() } catch (error: SecurityException) {
@@ -103,10 +108,15 @@ internal class PluginManager(context: Context) {
         val interrupted = mutableSetOf<String>()
         val messages = mutableListOf<String>()
         val rejected = mutableSetOf<String>()
+        val restoredData = withContext(Dispatchers.IO) { dataCatalog.restoreInventory(messages::add) }
+        restoredData.forEach { replaceDataInventory(dataInventory, dataPlugins, it, skipLoading) }
         val installed = withContext(Dispatchers.IO) {
+            try { store.cleanupColdStages() }
+            catch (e: Exception) { messages += "Code stage cleanup failed: ${e.message}" }
             // Tombstones precede package parsing, including corrupt APKs.
             states.ids().forEach { id ->
                 isolatePluginRecovery(id, blocked, messages::add) {
+                    requireNoDataOwnership(app.filesDir, id)
                     val state = states.read(id)
                     if (state.pendingDelete) {
                         blocked += id
@@ -155,43 +165,175 @@ internal class PluginManager(context: Context) {
         restored = true
     }
 
-    suspend fun stage(uri: Uri): StagedPlugin = operation {
-        withContext(Dispatchers.IO) {
-            if (uri.scheme == "file") {
-                val path = uri.path ?: throw PluginPackageException("Invalid file URI")
-                if (File(path).canonicalFile.toPath().startsWith(app.dataDir.canonicalFile.toPath())) {
-                    throw PluginPackageException("Refusing to read app data")
+    /** Main/UI lifetime: signal the bounded source worker before waiting for mutation cleanup. */
+    fun closeImport(session: PluginImportSession) {
+        if (session.closed) return
+        session.closed = true
+        session.source?.cancel()
+        // An in-flight stage has not transferred ownership yet and will discard itself.
+        if (session.code == null && session.data == null) return
+        host.launch { operation { discardImportInternal(session) } }
+    }
+
+    suspend fun discardImport(session: PluginImportSession) = withContext(Dispatchers.Main.immediate) {
+        session.source?.cancel()
+        operation { discardImportInternal(session) }
+    }
+
+    private suspend fun discardImportInternal(session: PluginImportSession) {
+        val code = session.code
+        val data = session.data
+        // Store tickets already own every path. Even if a session is disposed or replaced,
+        // failed deletion remains in the bounded shared registry and blocks new stages.
+        try {
+            withContext(Dispatchers.IO) {
+                withPluginCleanup(cleanup = { code?.let(store::discard) }) {
+                    data?.let(dataCatalog::discard)
                 }
             }
-            val input = try { app.contentResolver.openInputStream(uri) } catch (error: IllegalArgumentException) {
-                throw PluginPackageException("Cannot open the file: ${pluginFailureIdentity(error)}")
-            } ?: throw PluginPackageException("Cannot open the file")
-            val staged = input.use(store::stage)
-            if (staged.manifest.apiLevel !in 1..THETA_API_LEVEL) {
-                staged.file.delete()
-                throw PluginPackageException("Unsupported API level ${staged.manifest.apiLevel}")
-            }
-            staged
+        } finally {
+            session.code = null
+            session.data = null
         }
     }
 
-    suspend fun install(staged: StagedPlugin) = operation {
+    private fun openImport(uri: Uri): java.io.InputStream {
+        if (uri.scheme == "file") {
+            val path = uri.path ?: throw PluginPackageException("Invalid file URI")
+            if (File(path).canonicalFile.toPath().startsWith(app.dataDir.canonicalFile.toPath())) {
+                throw PluginPackageException("Refusing to read app data")
+            }
+        }
+        return try { app.contentResolver.openInputStream(uri) } catch (e: IllegalArgumentException) {
+            throw PluginPackageException("Cannot open selected file")
+        } ?: throw PluginPackageException("Cannot open selected file")
+    }
+
+    private suspend fun <T : Any> importSource(
+        uri: Uri, session: PluginImportSession, maxBytes: Long,
+        stageLocal: (File) -> T, discard: (T) -> Unit, assign: (T) -> Unit,
+    ): T? = withContext(Dispatchers.Main.immediate) {
+        if (session.closed) return@withContext null
+        dataRequire(!stageCleanup.hasPending, "Import cleanup pending; use Retry import cleanup")
+        session.source?.cancel()
+        // Fail-fast process-wide admission BEFORE any host job/queue or provider acquisition.
+        val copy = pluginImportSources.start(File(app.cacheDir, "plugin-import-sources"), maxBytes,
+            { openImport(uri) }, ::logHostFailure)
+        session.source = copy
+        try {
+            stagePluginCopy(copy,
+                serialized = { action -> serializedPluginImport(operations, host.coroutineContext) {
+                    restoreInternal()
+                    if (session.closed || session.source !== copy) null
+                    else { discardImportInternal(session); action() }
+                } },
+                stage = { file -> withContext(Dispatchers.IO) { stageLocal(file) } },
+                discard = { value -> withContext(Dispatchers.IO) { discard(value) } },
+                publish = { value ->
+                    if (session.closed || session.source !== copy) false
+                    else { assign(value); true }
+                },
+            )
+        } catch (error: Throwable) {
+            // Covers cancellation at the host-to-caller return boundary after publication.
+            // A replacement import owns its own token; never discard its stage here.
+            copy.cancel()
+            transferImportFailure(session, copy, error,
+                enqueue = { action -> host.launch { operation { action() } }; Unit },
+                discard = { owned -> discardImportInternal(owned) }, report = ::logHostFailure)
+            throw error
+        } finally {
+            if (session.source === copy) session.source = null
+        }
+    }
+
+    suspend fun retryImportCleanup() = operation { withContext(Dispatchers.IO) { stageCleanup.retry() } }
+
+    suspend fun stage(uri: Uri, session: PluginImportSession): StagedPlugin? = importSource(
+        uri, session, PACKAGE_MAX_BYTES,
+        stageLocal = { file -> stagePluginInput(
+            open = { file.inputStream() }, stage = store::stage,
+            discard = store::discard,
+            validate = { dataRequire(it.manifest.apiLevel in 1..THETA_API_LEVEL, "Unsupported API level") },
+        ) },
+        discard = store::discard,
+        assign = { session.code = it },
+    )
+
+    suspend fun stageData(uri: Uri, session: PluginImportSession): StagedPluginData? = importSource(
+        uri, session, PluginDataLimits().compressedBytes.toLong(),
+        stageLocal = { file -> stagePluginInput(
+            open = { file.inputStream() }, stage = dataCatalog::stage, discard = dataCatalog::discard,
+        ) },
+        discard = dataCatalog::discard,
+        assign = { session.data = it },
+    )
+
+    suspend fun installData(session: PluginImportSession, staged: StagedPluginData, digest: String, acknowledged: Boolean) = operation {
+        dataRequire(!session.closed && session.source == null && session.data === staged, "Unknown data confirmation")
+        session.data = null // ownership transfers to install, disposal cannot delete it.
+        val selected = withContext(Dispatchers.IO) { dataCatalog.install(staged, digest, acknowledged) }
+        if (stageCleanup.hasPending) failures += "Data installed; import cleanup pending; use Retry import cleanup"
+        replaceDataInventory(dataInventory, dataPlugins,
+            PluginDataRecord(selected.manifest.id, selected.state, selected), skipLoading)
+    }
+
+    suspend fun setDataEnabled(id: String, enabled: Boolean) = operation {
+        val previous = dataPlugins.firstOrNull { it.selection.manifest.id == id }?.selection
+        withContext(Dispatchers.IO) { dataCatalog.setEnabled(id, enabled, previous) }
+        // Durable disable precedes revocation; management survives invalid or missing bytes.
+        dataPlugins.removeAll { it.selection.manifest.id == id }
+        val record = withContext(Dispatchers.IO) { dataCatalog.managementRecord(id) }
+        replaceDataInventory(dataInventory, dataPlugins, record, skipLoading)
+    }
+
+    suspend fun uninstallData(id: String) = operation {
+        withContext(Dispatchers.IO) { dataCatalog.beginDelete(id) }
+        dataPlugins.removeAll { it.selection.manifest.id == id }
+        val pending = withContext(Dispatchers.IO) { dataCatalog.managementRecord(id) }
+        replaceDataInventory(dataInventory, dataPlugins, pending, skipLoading)
+        try {
+            withContext(Dispatchers.IO) { dataCatalog.finishDelete(id) }
+            dataInventory.removeAll { it.id == id }
+        } catch (e: Exception) {
+            failures += "$id: data uninstall pending; retry uninstall: ${e.message}"
+            throw e
+        }
+    }
+
+    fun isDataPageActive(page: ManagedPluginData): Boolean = isManagedDataPageActive(dataPlugins, page)
+
+    suspend fun readDataPage(page: ManagedPluginData, path: String?): PluginDataContent = operation {
+        dataRequire(isDataPageActive(page), "Data page revoked")
+        try { withContext(Dispatchers.IO) { dataCatalog.content(page.selection, path) } }
+        catch (e: Exception) {
+            quarantineDataPage(dataInventory, dataPlugins, page, e.message ?: "Invalid data content")
+            failures += "${page.selection.manifest.id}: data page isolated: ${e.message}"
+            throw e
+        }
+    }
+
+    suspend fun install(staged: StagedPlugin, session: PluginImportSession) = operation {
         restoreInternal()
+        dataRequire(!session.closed && session.source == null && session.code === staged, "Unknown code confirmation")
+        session.code = null
         val id = staged.manifest.id
         val old = plugins.firstOrNull { it.manifest.id == id }
         old?.busy(true)
+        var published = false
         withPluginInstallRecovery(
             id = id,
             isManaged = { plugins.any { it.manifest.id == id } },
             retainedIds = { withContext(Dispatchers.IO) { store.retainedIds() } },
             rejectedIds = rejectedIds,
             cleanup = {
-                withPluginCleanup(cleanup = { withContext(Dispatchers.IO) { staged.file.delete() } }) {
+                withPluginCleanup(cleanup = { if (!published) withContext(Dispatchers.IO) { store.discard(staged) } }) {
                     old?.busy(false)
                 }
             },
         ) {
             val (installed, state) = withContext(Dispatchers.IO) {
+                requireNoDataOwnership(app.filesDir, id)
                 val state = states.read(id)
                 if (state.pendingDelete) throw PluginPackageException("Uninstall pending; restart required")
                 if (id in deferred) throw PluginPackageException("Update or rollback pending; restart required")
@@ -201,8 +343,9 @@ internal class PluginManager(context: Context) {
                 if (staged.manifest.apiLevel !in 1..THETA_API_LEVEL) throw PluginPackageException("Unsupported API level")
                 // Upgrades preserve desired state; first install defaults to enabled.
                 states.write(id, state)
-                store.install(staged) to state
+                store.install(staged).also { published = true } to state
             }
+            if (stageCleanup.hasPending) failures += "$id installed; import cleanup pending; use Retry import cleanup"
             rejectedIds.remove(id)
             val update = withContext(Dispatchers.IO) { store.versions(id).size > 1 }
             if (update) deferred += id
@@ -229,6 +372,7 @@ internal class PluginManager(context: Context) {
         val plugin = managed(id)
         busy(plugin) {
             val state = withContext(Dispatchers.IO) {
+                requireNoDataOwnership(app.filesDir, id)
                 val previous = states.read(id)
                 if (previous.pendingDelete) throw PluginPackageException("Uninstall pending; restart required")
                 if (enabled && id in recoveryBlocked) throw PluginPackageException("State unavailable; restart required")
@@ -260,7 +404,10 @@ internal class PluginManager(context: Context) {
         restoreInternal()
         val plugin = managed(id)
         busy(plugin) {
-            val state = withContext(Dispatchers.IO) { persistPluginUninstall(states, id, clearData) }
+            val state = withContext(Dispatchers.IO) {
+                requireNoDataOwnership(app.filesDir, id)
+                persistPluginUninstall(states, id, clearData)
+            }
             plugin.state(state)
             plugin.status("Uninstall pending; restart required")
             close(plugin)
@@ -283,6 +430,7 @@ internal class PluginManager(context: Context) {
         }
         deletePluginRecovery(id, recoveryBlocked) {
             withContext(Dispatchers.IO) {
+                requireNoDataOwnership(app.filesDir, id)
                 // Do not need to parse possibly corrupt old state to authorize deletion.
                 states.write(id, PluginState(enabled = false, pendingDelete = true, clearData = true))
                 deleteStored(id, clearData = true)
@@ -342,6 +490,7 @@ internal class PluginManager(context: Context) {
         if (skipLoading || gate.wasAttempted(manifest.id)) return
         try {
             withContext(Dispatchers.IO) {
+                requireNoDataOwnership(app.filesDir, manifest.id)
                 if (manifest.apiLevel !in 1..THETA_API_LEVEL) throw PluginPackageException("Unsupported API level")
                 val data = pluginPath(pluginPath(app.filesDir.canonicalFile, "plugin-data"), manifest.id)
                 Files.createDirectories(data.toPath())

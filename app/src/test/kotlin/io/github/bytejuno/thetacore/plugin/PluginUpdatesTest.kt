@@ -21,7 +21,7 @@ class PluginUpdatesTest {
         var copyFails = false
         val badFiles = mutableSetOf<String>()
         val reports = mutableListOf<String>()
-        val store = PluginStore(root, root.resolve("cache"), object : PluginSignatureVerifier {
+        val store = fixturePluginStore(root, root.resolve("cache"), object : PluginSignatureVerifier {
             override fun verify(file: File): PluginSigners {
                 if (file.parentFile.name in badFiles) throw PluginPackageException("Bad package")
                 return signers
@@ -62,7 +62,7 @@ class PluginUpdatesTest {
 
     private fun fixture(block: Fixture.() -> Unit) {
         val root = Files.createTempDirectory("theta-update").toFile()
-        try { Fixture(root).block() } finally { root.deleteRecursively() }
+        try { Fixture(root).block() } finally { deleteFixtureRoot(root) }
     }
 
     private fun apk(version: Long): ByteArray {
@@ -101,16 +101,28 @@ class PluginUpdatesTest {
         assertTrue(snapshot.isDirectory)
     }
 
-    @Test fun snapshotKeepsExecutableBitAndDoesNotFollowLinks() = fixture {
+    @Test fun snapshotDoesNotFollowLinks() = fixture {
         publish(1)
         save("old")
         val outside = root.resolve("outside.txt").apply { writeText("secret") }
         Files.createSymbolicLink(data.resolve("link").toPath(), outside.toPath())
+        publish(2)
+        recover()
+        assertTrue(Files.isSymbolicLink(snapshot.resolve("link").toPath()))
+        assertEquals(outside.toPath(), Files.readSymbolicLink(snapshot.resolve("link").toPath()))
+    }
+
+    @Test fun snapshotKeepsExecutableBit() = fixture {
+        val supported = Files.getFileStore(root.toPath()).supportsFileAttributeView("posix")
+        val reason = "POSIX execute-bit assertion requires a POSIX file-attribute view"
+        if (!supported) println("SKIP snapshotKeepsExecutableBit: $reason")
+        org.junit.Assume.assumeTrue(reason, supported)
+        publish(1)
+        save("old")
         val tool = data.resolve("tool").apply { writeText("#!") }
         assertTrue(tool.setExecutable(true))
         publish(2)
         recover()
-        assertTrue(Files.isSymbolicLink(snapshot.resolve("link").toPath()))
         assertTrue(OWNER_EXECUTE in Files.getPosixFilePermissions(snapshot.resolve("tool").toPath()))
     }
 
