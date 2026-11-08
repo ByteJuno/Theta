@@ -23,6 +23,7 @@ dependencyResolutionManagement {
 
 rootProject.name = "theta-core"
 
+include(":agent-core")
 include(":app")
 include(":sdk")
 include(":samples:hello")
