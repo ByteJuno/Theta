@@ -2,6 +2,43 @@
 
 S1 尚未完成。此台账区分现有证据、待实现能力与需真机的项目；不以单次脚本退出 0 代替整个阶段验收。
 
+## 2026-11-08 PR #6 审查修复与完整回归（`0f5a779`）
+
+PR #6 = `55a1e57`（另一台电脑开发的数据 ZIP revision-5）加 lab 审查修复 `a62f016`、设备脚本修复 `5cf33e9`/`0f5a779`。
+
+审查修复（`a62f016`）：
+
+- 代码发布恢复原先要求每个旧版本目录只含归档，运行时生成的 oat 等文件会让此后所有导入永久卡在 intent 恢复；改为只要求本 intent 的版本目录精确等于载荷，旧版本只检查不含另一类型的归档。
+- 数据更新后只保留当前与上一版归档（尽力清理）；清理中断留下的空版本目录在已有选择时不阻塞后续更新。
+- 损坏的 intent.properties（非法转义）原先抛 IllegalArgumentException，点 Retry import cleanup 时宿主崩溃；改为 IOException。
+- 数据侧代码残留检查改用与代码侧同一份保留路径列表；删除未用的 forgetMoved。新增 4 项回归单测。
+
+设备脚本修复：数据包一栏在代码包上方，Hello 卡片之后的插件卡片落到首屏外。冒烟脚本的卡片查找改为上下滑动、不可见断言检查整个列表（`5cf33e9`）；受管 scope 两处 20 秒限时等待改为滑动查找，数据确认弹窗的复选框被弹窗正文裁切时先滚动正文再点可见部分（`0f5a779`）。新增设备用例 `data-zip`。
+
+### 完整回归：GPU 服务器（权威结果）
+
+`0f5a779` 的 `git archive` 原样源码；Ubuntu 22.04 x86_64，KVM 加速的专用 Android 14 x86_64 模拟器（`emulator-5580`，default 镜像，每次 `-wipe-data`），JDK 25.0.5、Gradle 9.7.1（发行包取自国内镜像，SHA-256 与 wrapper 声明一致）。工具链与证据都在 `~/Bai/theta-emu/`（结果目录 `results/20261108-031539/`）。脚本的 `S1_INSTABOX=1` 是“一次性专用环境”的声明，这里同样只操作专用模拟器。
+
+| 检查 | 结果 |
+|---|---|
+| 构建、lint、JVM 单测 | assembleDebug/assembleRelease 冷构建成功；lintDebug 0 errors、8 warnings；JVM 177 项 0 失败 0 跳过 |
+| 链接预检 | Hello、Probe、12 种 fixture 均 0 bundled、0 missing |
+| Probe 冒烟 | 18/18，完整交互、禁用/重启/恢复/卸载流程 OK（185 秒） |
+| 生命周期 | 17/17 一次通过（2032 秒）：upgrade-and-data、disableThrow、cleanupThrow、cleanupBlock、initThrow、initBlock、interrupted-initialization、interrupted-uninstall、rejected-packages、rollback-init-throw、rollback-init-block、rollback-interrupted、rollback-manual、scopeThrow、scopeInitThrow、rollback-scope-init、data-zip |
+| 签名 | 7/7 通过（919 秒）：signed-upgrade-and-fingerprints、unsigned、byte-tampered、different-signer-update、retained-data-binding、clear-data-uninstall、retained-clear-data-recovery |
+
+Release 宿主 SHA-256 `34f9bbfe7069e00bf02dd7b3876bab9fbc98c77bb95c2e2fe56eccc1d4d1a0a5`，Debug 宿主 `282db9869960804711a202940a8a4b5973fde17076c2b672d5bb8741d8bdafa8`。
+
+签名套件第一次在制品预检阶段失败，未进入设备：机器上默认选中 build-tools 37.0.0，其 apksigner 把证书行改为 `V2 Signer: certificate SHA-256 digest`，`signature-artifacts.py` 只认 `Signer #N certificate SHA-256 digest`。按脚本已支持的 `ANDROID_BUILD_TOOLS_VERSION=36.0.0`（与旧格式一致）在同一构建、重新清空的模拟器上重跑，7 项通过。适配 37 的输出格式留作后续脚本改进。
+
+`data-zip` 设备用例：含 classes.dex 的 ZIP 被拒绝；v1 确认页显示该文件的 SHA-256，未勾选不能安装，安装后只读页显示 `skills/demo/SKILL.md`；同 ID 代码 APK 以 Data-owned ID 拒绝且 fixture 未运行；v2 需重新确认，重启后内容为 v2；禁用跨重启保持、再启用可读；卸载后冷启动无数据包，同 ID 代码 APK 仍被拒绝。
+
+### 补充：InstaBox 同一提交（未完成，不作为通过依据）
+
+InstaBox（无 KVM 软件模拟器）上同一提交：冒烟 18/18、生命周期前 12 项、签名 7/7 通过；rollback-manual 期间免费版冷却把整台机器冻结约 2 小时 11 分（模拟器 logcat 16:09:32→18:20:15 UTC 无输出），恢复后首次 uiautomator dump 超时而失败，证据 `/data/work/theta-s1-20261107-145548-evidence/FAILED-rollback-manual`。补跑又遇到冷却，改到 GPU 服务器完成上面的完整回归。
+
+不覆盖：阻塞 ContentProvider、旋转与请求交接的完整 Android 矩阵；数据包写入中断、断电、磁盘满；Provider/MCP 执行等其余见 [数据 ZIP 集成本机验收](DATA_ZIP_ACCEPTANCE.md)。完整 S1 仍未完成。
+
 ## 2026-11-07 数据 ZIP revision-5 本机增量验收
 
 本轮实现、源码绑定、原始证据摘要及未覆盖项见 [数据 ZIP 集成本机验收](DATA_ZIP_ACCEPTANCE.md)。JVM 173 项中 172 通过、1 项因 Windows POSIX 执行位条件跳过；Debug/Release 构建、lint 及 14 个 Release 插件静态链接预检通过。数据设备流程 11 项、原生回归 7 项通过；双向类型归属由两轮覆盖 7 项（3+4），原始失败和未重跑项明确保留。
@@ -32,7 +69,7 @@ S1 尚未完成。此台账区分现有证据、待实现能力与需真机的�
 | 项目 | 当前证据 / 状态 | 剩余工作 |
 |---|---|---|
 | A R8 + Compose | Hello/Probe 已设备通过 | 仅证明已覆盖 API，不是任意 Compose 兼容性证明 |
-| B 安装、更新、卸载 | 实际同 ID v1→v2、重启切换、保留/删除数据及重装在 `c06c789` 回归通过 | 数据 ZIP 路径、写入中断及更多坏包路径 |
+| B 安装、更新、卸载 | 代码 APK 同 ID v1→v2、重启切换、保留/删除数据及重装在 `c06c789`、`0f5a779` 回归通过；数据 ZIP 拒绝代码载荷、确认摘要、v1→v2、启停跨重启、卸载保留归属及跨类型拒绝在 `0f5a779` 设备通过（Android 14 模拟器） | 写入中断、断电/磁盘满及更多坏包路径；阻塞来源与旋转交接的 Android 矩阵 |
 | C 运行实例回收 | 已按重启方案验证撤销入口、进程内不重复加载、重启删除；旧设计已明确修订 | 不承诺原进程 GC 卸载；要求变更不等于旧 C 通过 |
 | D 异常恢复 | 初始化、onDisable、cleanup 历史用例通过；受管 scope 初始化/运行期故障及升级首启故障在 `c06c789` 设备通过，宿主 PID 保持 | Compose/线程崩溃后的自动恢复、工具调用边界 |
 | E 非协作超时 | 初始化/清理阻塞、迟到登记拒绝及界面响应的初版用例通过 | 严格时间窗口复验已通过；资源预算、入口 ready 仍缺。工具资源租约和冷启动隔离记录已挪到 S2 |
@@ -118,7 +155,7 @@ InstaBox Android 14 x86_64 软件模拟器，日志 `/data/work/theta-s1-2026110
 
 本增量不证明 Compose/任意线程/native 崩溃隔离、真实断电、prefs/secrets 快照或完整 S1 完成。helper 单测与这七项设备断言分别记录，不互相替代。这一轮没覆盖的旧用例已在上面的 `c06c789` 完整验证中补齐。
 
-## 2026-11-07 数据 ZIP 集成候选（未编译 / NOT RUN）
+## 历史：2026-11-07 数据 ZIP 集成候选（当时未编译 / NOT RUN）
 
 固定基线 `4eb39fb883646831395090f032c3c26f59bf7177` 的独立归档副本；不代表已合入当前分支，不沿用上面的 APK 或测试结果。基础四文件先按本地 patch-manifest.json 核对；集成另扩展共享 ZIP 校验器的内部内容访问回调，并修正单进程锁说明。原基础目录不变。
 
