@@ -2,6 +2,36 @@
 
 S1 尚未完成。此台账区分现有证据、待实现能力与需真机的项目；不以单次脚本退出 0 代替整个阶段验收。
 
+## 2026-11-08 PR #7 审查修复与完整回归（`93142b3`）
+
+PR #7 = 另一台电脑的 S1 运行时增量 `bf18072`（入口/工具、执行预算、prefs/secrets、崩溃恢复、code-only 回滚选项、Modern Hook 接入及样例）加 lab 审查修复：
+
+- `709400b`/`bc44f82`：`PluginExecutionBudget` 原先在进程单例里每 5 ms 固定轮询取消请求，进程存活期间一直空转。改为取消请求和取消投递完成时派发，只有派发被拒（两个取消线程都忙）才排一次 5 ms 重试。CI push 触发分支恢复为只有 main。`signature-artifacts.py` 兼容 build-tools 37 apksigner 的 `V2 Signer:` 输出（要求 `Number of signers: 1` 且证书摘要唯一），本轮签名套件即用默认的 37.0.0 跑通。
+- `bc44f82`：`PluginImportSourceTest.cancelWaiterReachesActiveCloseWithoutHoldingMutationGate` 是测试自身的启动竞争：waiter 协程在 Dispatchers.Default 调度它之前就被取消，`stagePluginCopy` 从未执行、copy 永不取消，复制线程永久阻塞（线程转储：waiter 已完成、copy 未取消）。与 `PluginEntryRuntimeTest` 同 JVM 运行时稳定复现，即 CI push run 的那次失败。改为 `CoroutineStart.ATOMIC`；生产路径的 copy 在已运行的协程内创建，不受影响。
+- `93142b3`：PR #7 在 `store.install` 前调用 `prepareInstall`，同版本/低版本重装的提示从 `Install requires a higher version than N` 变成笼统的 `Update confirmation does not match installed version`（拒绝本身正确、数据不变）。恢复具体提示，仍不写 install intent，新增单测。
+- `6a5b693`：宿主列表因观察期说明、工具按钮、入口状态和 Hook 面板变长到数屏，生命周期脚本固定“下 3 上 3”的查找会回到起点、到不了顶部的错误提示。改为向上滑到屏幕不再变化再向下，交替进行；`absent()` 同样从顶扫到底。
+
+### 完整回归：GPU 服务器
+
+`93142b3` 的 `git archive` 原样源码，环境同下节（`~/Bai/theta-emu/`，KVM 专用 Android 14 x86_64 模拟器 `emulator-5580`，每次 `-wipe-data`），结果目录 `results/20261108-071557/`。
+
+| 检查 | 结果 |
+|---|---|
+| 构建、lint、JVM 单测 | assembleDebug/assembleRelease 成功；lintDebug 0 errors、16 warnings（版本提示、建议改用版本目录、冗余 SDK_INT 判断，以及 Hook 模块在目标进程里反射 `Application.attach`）；JVM 357 项 0 失败 0 跳过（宿主及 blocked-provider、storage-fixture 样例） |
+| 链接预检 | Hello、Probe 及全部 fixture 变体 0 bundled、0 missing |
+| Probe 冒烟 | 18/18，完整交互、禁用/重启/恢复/卸载流程 OK（192 秒） |
+| 生命周期 | 17/17 一次通过（含 data-zip） |
+| 签名 | 7/7 通过（921 秒，默认 build-tools 37.0.0）：signed-upgrade-and-fingerprints、unsigned、byte-tampered、different-signer-update、retained-data-binding、clear-data-uninstall、retained-clear-data-recovery |
+| GitHub Actions | PR Check run 42458056673：build 与新增 paired-keep-size 均通过 |
+
+Release 宿主 SHA-256 `866cbc77c8c98fb2661f23c8aee839f7819fe48fef0b2180603d8fafaf8b5a63`，Debug 宿主 `060dd1fe1711e5a02b8e4146a28309dbfcffe64f893173dfa02bc08104d20c42`。
+
+paired-keep-size 首次实际在 Actions 执行（`MEASURED_CI`，非真机、不涉及帧或兼容性）：production 13,937,590 bytes，去掉共享库 keep 的对照 2,473,682 bytes，差 11,463,908 bytes；对照包不能加载外部插件，不是生产替代方案。
+
+中途两次未通过的运行保留在同目录：`20261108-070342`（`6a5b693`，upgrade-and-data 找到的是新提示，签名套件运行时源码目录被替换，整轮作废）与 `20261108-063543`（`bc44f82`，列表扫屏到不了顶部；签名 7/7 用 build-tools 37 已通过）。
+
+本轮不覆盖：G 真机帧耗时、J 真实 LSPosed 框架加载与 `requestScope`、K 目标崩溃循环跳过、开关传播与框架外救援；PR #7 自带的逐候选设备专项证据见 [S1 runtime increment](S1_RUNTIME_INCREMENT.md)，本轮未重跑。完整 S1 仍未完成。
+
 ## 2026-11-08 PR #6 审查修复与完整回归（`0f5a779`）
 
 PR #6 = `55a1e57`（另一台电脑开发的数据 ZIP revision-5）加 lab 审查修复 `a62f016`、设备脚本修复 `5cf33e9`/`0f5a779`。

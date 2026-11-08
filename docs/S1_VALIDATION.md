@@ -1,8 +1,10 @@
 # S1 插件加载原型验证
 
-当前是 S1 的增量原型，不是完整的插件管理器或可发布版本。**S1 尚未完成**。最新完整验证对应 `0f5a779`（PR #6 数据 ZIP，含此前 `c06c789` 受管 scope 故障隔离），结果见 S1_ACCEPTANCE.md；下文的历史通过记录只覆盖当时的代码；后续已接受的本地/JVM/模拟器专项及仍未执行的 Actions、延期真机门槛分层列于本页，不用历史缺口否定后续限定通过。
+当前是 S1 的增量原型，不是完整的插件管理器或可发布版本。**S1 尚未完成**。最新完整验证对应 `93142b3`（PR #7 运行时增量及审查修复，含此前 PR #6 数据 ZIP 与 `c06c789` 受管 scope 故障隔离），结果见 S1_ACCEPTANCE.md；下文的历史通过记录只覆盖当时的代码；后续已接受的本地/JVM/模拟器专项、已执行的 Actions 体积对比及延期真机门槛分层列于本页，不用历史缺口否定后续限定通过。
 
 2026-11-07 数据 ZIP revision-5 的本机增量验证见 [独立记录](DATA_ZIP_ACCEPTANCE.md)。该记录补充当前实现与局部通过范围，不覆盖下文全部 S1 门槛。
+
+2026-11-08 PR #7 合并前的审查修复与完整回归对应 `93142b3`：GPU 服务器上 JVM 357 项、冒烟、生命周期 17/17、签名 7/7 通过，GitHub Actions build 与 paired-keep-size 通过，见 S1_ACCEPTANCE.md。
 
 2026-11-08 PR #6 合并前的审查修复与完整回归对应 `0f5a779`：GPU 服务器 KVM 模拟器上 JVM 177 项、冒烟、生命周期 17/17（含新增 data-zip）、签名 7/7 全部通过，见 S1_ACCEPTANCE.md。
 
@@ -11,7 +13,7 @@
 ## 当前收口状态（2026-11-08）
 
 - **已接受的限定范围**：本地构建/JVM/静态检查、按 candidate7/candidate9 分别绑定的模拟器专项、LOCAL_ONLY 成对体积实验，以及独立 DATA production-store fixture 的 Android expectedSHA staging 拒绝和 10 次进程死亡恢复。已完成专项不再标作待执行，但不宣称全部 S1 通过，也不把历史 FAILED 或候选身份改写。
-- **Actions 仍为 NOT EXECUTED**：paired-size job 只完成准备与静态检查，没有实际 Actions run；用户已授权提交、推送及运行 CI；当前仅完成隔离整合准备，尚未提交、推送或执行 CI，不新建 PR 或合并。本地成对构建通过不等于 Actions 通过；candidate9/storage20 的历史设备证据不证明当前整合后二进制。
+- **Actions 已执行**：PR #7 的 PR Check run 42458056673（`93142b3`）中 paired-keep-size 实际运行并通过（`MEASURED_CI`）：production 13,937,590 bytes、去共享库 keep 的对照 2,473,682 bytes，差 11,463,908 bytes。本地成对构建与 candidate9/storage20 的历史设备证据仍各自独立，不互相追认。
 - **原有真机门槛继续延期**：G 固定真机帧耗时，J 真实框架远程文件加载/生效及 requestScope，K 目标崩溃循环跳过、全局开关传播、目标重启和框架外救援。宿主恢复、模拟器和 JVM helper 不替代这些门槛。
 - **具体证据缺口保留在对应层**：storage20 没有独立导出的底层持久化文件/目录快照，未覆盖 candidate9 主界面的 expectedSHA/publication 切点、Android CODE 发布中断或物理断电。旧专项的 listener host actualExited、私有 tombstone/回滚状态及精确 idle 续期等未观测项仍按下表披露；这些限制不撤销已接受结果，也不扩展成任意包、完整故障矩阵或全量历史重跑的新门槛。
 
@@ -116,7 +118,7 @@ DESIGN.md 第 11 节保留 A–K 原始验收表和全部补充断言。旧 B �
 | D/E | candidate7 有 READY、超时及迟到 ready 不复活专项。candidate9 同实例监听在事件间静默超过 60 秒、ready 后超过 600 秒仍收到事件；停用后 unregister/finally 及外部广播负控已验证。监听页面隐藏后 host STOPPED/actualExited 未观察，不据此推断执行槽释放。 |
 | E | candidate9 已验证每插件 2 槽、全进程 8 槽饱和拒绝及单槽实际释放后复用；另有同一 callId 的 TIMED_OUT 保持、actualExited false→true 直接 UI 配对。独立导入配额也已复核：两次部分读取在UI取消后仍阻塞，第三次busy拒绝且捕获区间无新增来源打开；provider Reset/EIO/FD_RELEASE后，同一观测PID成功接纳完整导入，续跑读取既有marker并正常卸载。后续单次成功仅证明至少恢复一个可用槽，不声称精确释放时刻或两个槽全部恢复；原标题字符匹配失败仍保留FAILED。没有覆盖混合 entry/tool 或多个 manager 的设备组合，不把这些披露自动扩成新门槛。历史非协作初始化/清理证据保留。screen 资源租约、跨会话调用和外部未知状态账本仍属 S2（DESIGN.md 第 13 节第 7 条）。 |
 | F | 快照/恢复与 code-only 选项已有实现；candidate7 已验证 prefs/secrets 默认取消、快照手动回滚、首次启动失败回滚和明确 code-only 保留当前值。历史 `c06c789` 卡死/中断恢复记录独立保留。candidate9 已独立复核手动冷回滚（V2计数5→V1快照旧值4）、首启失败后冷恢复V1/4，以及首次成功运行后观察期起点跨页面重开和冷启不变。损坏数值99没有独立实测，仅有fixture的 data:damaged 标记；预激活 not-started 提示未暴露。两轮FAILED及跨轮记录间隙保留，无公共update token，不能声称连续监控。candidate9 已补首启阻塞后冷回滚V1/4，以及初始化中force-stop后的冷回滚V1/4；后者不是磁盘断电。24小时精确边界、过期动作拒绝及已接受回滚过期后继续恢复已在最新生产helper JVM测试通过，不声称真实等待24小时的设备验收。已激活包下次启动前损坏走拒绝包路径，不自动回滚。 |
-| G | 最新隔离干净成对构建及证据复核已完成：production 13,921,206 bytes，comparison 2,473,682 bytes，差11,447,524 bytes；冻结输入和归一化merged R8配置仅差精确七条keep。对照不是兼容生产替代方案。实验production与candidate9非相同二进制，单方法无用Unit spill差异有静态等价分析，设备结果不转移。CI job已准备/静态检查，但实际Actions仍为 NOT EXECUTED（已授权提交、推送及 CI，尚未执行）；真机帧测量仍缺，按原G门槛延期。 |
+| G | 最新隔离干净成对构建及证据复核已完成：production 13,921,206 bytes，comparison 2,473,682 bytes，差11,447,524 bytes；冻结输入和归一化merged R8配置仅差精确七条keep。对照不是兼容生产替代方案。实验production与candidate9非相同二进制，单方法无用Unit spill差异有静态等价分析，设备结果不转移。Actions 实测（run 42458056673，`93142b3`）：production 13,937,590 bytes、对照 2,473,682 bytes，差 11,463,908 bytes；真机帧测量仍缺，按原G门槛延期。 |
 | J | 真机 Hook 远程文件加载并生效、`requestScope` 作用域申请仍未验证。 |
 | K | 真机目标 App 崩溃循环跳过、远程偏好全局开关传播、目标进程重启及框架外救援仍未验证；Theta 手动恢复入口不替代 Hook 救援链路。 |
 
