@@ -1,5 +1,6 @@
 package io.github.bytejuno.thetacore.sample.probe
 
+import android.util.Log
 import io.github.bytejuno.thetacore.sdk.ThetaPlugin
 import java.util.concurrent.TimeUnit
 import kotlin.random.Random
@@ -28,6 +29,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.TlsVersion
 
 internal class LibraryCheck(val name: String, val run: suspend () -> Unit)
 
@@ -129,13 +131,37 @@ private fun checkClassVisibility() {
     check(OkHttpClient::class.java.classLoader === loader) { "okhttp is not bundled" }
 }
 
+private const val HTTPS_CHECK_ID = "okhttp_https"
+private const val HTTPS_CHECK_URL = "https://www.gstatic.com/generate_204"
+
 private suspend fun checkHttps() = withContext(Dispatchers.IO) {
     val client = OkHttpClient.Builder().callTimeout(60, TimeUnit.SECONDS).build()
-    val request = Request.Builder().url("https://www.gstatic.com/generate_204").build()
-    client.newCall(request).execute().use { response ->
-        check(response.code == 204) { "HTTP ${response.code}" }
-        check(response.handshake != null) { "no TLS handshake" }
+    try {
+        val request = Request.Builder().url(HTTPS_CHECK_URL).build()
+        client.newCall(request).execute().use { response ->
+            val finalUrl = response.request.url
+            val tls = response.handshake?.tlsVersion
+            // Only the fixed public endpoint may appear in diagnostics; never log redirect data.
+            val requestedEvidence = request.url.toString().takeIf { it == HTTPS_CHECK_URL } ?: "unexpected"
+            val finalEvidence = finalUrl.toString().takeIf { it == HTTPS_CHECK_URL } ?: "unexpected"
+            Log.i(
+                "ThetaProbeHttps",
+                "check=$HTTPS_CHECK_ID requested=$requestedEvidence final=$finalEvidence " +
+                    "status=${response.code} tls=${tls?.javaName ?: "none"}",
+            )
+            check(request.url.isHttps && requestedEvidence == HTTPS_CHECK_URL) {
+                "$HTTPS_CHECK_ID: unexpected requested endpoint"
+            }
+            check(finalUrl.isHttps && finalEvidence == HTTPS_CHECK_URL) {
+                "$HTTPS_CHECK_ID: unexpected final endpoint"
+            }
+            check(response.code == 204) { "$HTTPS_CHECK_ID: HTTP ${response.code}" }
+            check(tls == TlsVersion.TLS_1_2 || tls == TlsVersion.TLS_1_3) {
+                "$HTTPS_CHECK_ID: expected TLSv1.2 or TLSv1.3"
+            }
+        }
+    } finally {
+        client.connectionPool.evictAll()
+        client.dispatcher.executorService.shutdown()
     }
-    client.connectionPool.evictAll()
-    client.dispatcher.executorService.shutdown()
 }

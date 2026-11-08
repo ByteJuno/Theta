@@ -19,8 +19,44 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: ./.github/actions/setup-build
+      # Exercise both configuration-cache storage and reuse without compiling first.
+      - name: Verify storage fixture source checks with configuration cache
+        run: |
+          ./gradlew --no-daemon --configuration-cache --configuration-cache-problems=fail :samples:storage-fixture:verifyStorageFixtureSources
+          ./gradlew --no-daemon --configuration-cache --configuration-cache-problems=fail :samples:storage-fixture:verifyStorageFixtureSources
       # 设备测试在 InstaBox 执行，入口见 scripts/verify-s1.sh。
       - name: Build, lint and unit tests
         run: ./gradlew --no-daemon assembleDebug assembleRelease lintDebug testDebugUnitTest
       - name: Check the plugins
         run: scripts/verify-plugins.sh
+
+  paired-keep-size:
+    # Nonphysical measurement only. The stripped APK is NOT plugin-compatible.
+    # No release environment/secrets, device or InstaBox is used by this job.
+    runs-on: ubuntu-latest
+    timeout-minutes: 110
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: ./.github/actions/setup-build
+      - name: Install the paired measurement signing tools
+        run: sdkmanager "build-tools;37.0.0"
+      - name: Measure production keeps against isolated stripped comparison
+        run: >-
+          python3 -I scripts/paired-keep-size.py all
+          --source "$GITHUB_WORKSPACE"
+          --output "$RUNNER_TEMP/paired-keep-size"
+          --context CI
+      - name: Preserve paired summaries, including failures
+        # Explicit allowlist: never upload APKs, R8 outputs or raw build/signing logs.
+        # Full failure evidence remains untouched in the runner's measurement directory.
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: paired-keep-size-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/paired-keep-size/evidence/result.json
+            ${{ runner.temp }}/paired-keep-size/evidence/source-hashes.json
+            ${{ runner.temp }}/paired-keep-size/evidence/production/source-hashes.json
+            ${{ runner.temp }}/paired-keep-size/evidence/comparison/source-hashes.json
+          if-no-files-found: error
+          retention-days: 7

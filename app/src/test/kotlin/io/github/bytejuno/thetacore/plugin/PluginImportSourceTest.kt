@@ -111,7 +111,9 @@ class PluginImportSourceTest {
             }
         })
         val gate = Mutex()
-        val waiter = launch(Dispatchers.Default) {
+        // ATOMIC: a cancellation that lands before the waiter is dispatched must still reach
+        // stagePluginCopy's cancel path (production creates the copy inside a running coroutine).
+        val waiter = launch(Dispatchers.Default, start = kotlinx.coroutines.CoroutineStart.ATOMIC) {
             stagePluginCopy<Any>(copy, { action -> gate.withLock { action() } },
                 { error("cancelled source must never stage") }, {}, { false })
         }

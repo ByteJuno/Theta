@@ -1,0 +1,8 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application android:label="S1 DATA storage fixture" android:allowBackup="false"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        <!-- No permissions, providers, host application class, shared UID or external data. -->
+        <activity android:name="io.github.bytejuno.thetacore.plugin.StorageFixtureActivity"
+            android:exported="true" android:launchMode="singleTop" />
+    </application>
+</manifest>

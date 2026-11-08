@@ -7,6 +7,13 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import io.github.bytejuno.thetacore.sdk.Extension
+import io.github.bytejuno.thetacore.sdk.EntryAdapter
+import io.github.bytejuno.thetacore.sdk.DeviceInfo
+import io.github.bytejuno.thetacore.sdk.Tool
+import io.github.bytejuno.thetacore.sdk.PluginPrefs
+import io.github.bytejuno.thetacore.sdk.PluginSecrets
+import java.util.IdentityHashMap
+import kotlinx.serialization.json.JsonObject
 import io.github.bytejuno.thetacore.sdk.PluginContext
 import io.github.bytejuno.thetacore.sdk.Registration
 import io.github.bytejuno.thetacore.sdk.SettingsPage
@@ -40,10 +47,20 @@ internal class ManagedPlugin(val manifest: PluginManifest, state: PluginState) {
         private set
     var canRollback by mutableStateOf(false)
         internal set
+    var updateObservation by mutableStateOf<PluginUpdate?>(null)
+        internal set
     internal var runtime by mutableStateOf<PluginRuntime?>(null)
     val pages: List<SettingsPage>
         get() = runtime?.takeIf { it.active && !it.context.faults.hasFault() }
             ?.context?.extensions?.filterIsInstance<SettingsPage>().orEmpty()
+
+    val entryCapacityExceeded: Boolean
+        get() = runtime?.takeIf { it.active }?.context?.entryCapacityExceeded == true
+    val entries: List<PluginEntryRuntime>
+        get() = runtime?.takeIf { it.active && !it.context.faults.hasFault() }?.context?.entryRuntimes.orEmpty()
+    val tools: List<Tool>
+        get() = runtime?.takeIf { it.active && !it.context.faults.hasFault() }
+            ?.context?.extensions?.filterIsInstance<Tool>().orEmpty()
 
     internal fun state(state: PluginState) {
         enabled = state.enabled
@@ -65,6 +82,10 @@ internal class PluginRuntime(val context: HostPluginContext, val version: Long) 
 
 internal class PluginManager(context: Context) {
     private val app = context.applicationContext
+    private companion object {
+        // Multiple manager instances must never multiply the process execution allowance.
+        val executionBudget = PluginExecutionBudget()
+    }
     private val stageCleanup = PluginStageCleanup()
     private val store = PluginStore(app.filesDir, app.cacheDir, PlatformPluginSignatureVerifier(app.packageManager), stageCleanup)
     private val states = PluginStateStore(app.filesDir)
@@ -83,6 +104,11 @@ internal class PluginManager(context: Context) {
     private val deferred = mutableSetOf<String>()
     private var restored = false
     private var skipLoading = false
+    private var skipDataLoading = false
+    var dataRecoveryBlocked by mutableStateOf(false)
+        private set
+    private val crashRecovery get() = (app as? io.github.bytejuno.thetacore.ThetaApplication)?.crashRecovery
+    private val crashSuspects = mutableSetOf<String>()
 
     val plugins = mutableStateListOf<ManagedPlugin>()
     val failures = mutableStateListOf<String>()
@@ -103,13 +129,18 @@ internal class PluginManager(context: Context) {
 
     private suspend fun restoreInternal(skipPlugins: Boolean = false) {
         if (restored) return
-        skipLoading = skipPlugins
+        val policy = crashRecovery?.restorePolicy(skipPlugins)
+        skipLoading = policy?.skipCode ?: skipPlugins
+        dataRecoveryBlocked = policy?.skipData == true
+        skipDataLoading = skipPlugins || dataRecoveryBlocked
+        crashSuspects.addAll(policy?.suspects.orEmpty())
         val blocked = recoveryBlocked.toMutableSet()
         val interrupted = mutableSetOf<String>()
         val messages = mutableListOf<String>()
         val rejected = mutableSetOf<String>()
-        val restoredData = withContext(Dispatchers.IO) { dataCatalog.restoreInventory(messages::add) }
-        restoredData.forEach { replaceDataInventory(dataInventory, dataPlugins, it, skipLoading) }
+        val restoredData = if (policy?.skipData == true) emptyList() else
+            withContext(Dispatchers.IO) { dataCatalog.restoreInventory(messages::add, crashSuspects) }
+        restoredData.forEach { replaceDataInventory(dataInventory, dataPlugins, it, skipDataLoading) }
         val installed = withContext(Dispatchers.IO) {
             try { store.cleanupColdStages() }
             catch (e: Exception) { messages += "Code stage cleanup failed: ${e.message}" }
@@ -117,11 +148,15 @@ internal class PluginManager(context: Context) {
             states.ids().forEach { id ->
                 isolatePluginRecovery(id, blocked, messages::add) {
                     requireNoDataOwnership(app.filesDir, id)
-                    val state = states.read(id)
+                    var state = states.read(id)
+                    if (id in crashSuspects && !state.pendingDelete) {
+                        state = state.copy(enabled = false, resumeAfterRollback = false)
+                        states.write(id, state)
+                    }
                     if (state.pendingDelete) {
                         blocked += id
                         deletePluginRecovery(id, blocked) { deleteStored(id, state.clearData) }
-                    } else if (recoverPluginUpdate(states, updates, id, state, skipPlugins, messages::add)) {
+                    } else if (recoverPluginUpdate(states, updates, id, state, skipLoading, messages::add)) {
                         // Recovery restores state before acknowledging its durable completion.
                     } else if (state.initializing) {
                         states.write(id, state.copy(enabled = false, initializing = false, resumeAfterRollback = false))
@@ -149,6 +184,9 @@ internal class PluginManager(context: Context) {
             }
             val plugin = ManagedPlugin(installedPlugin.manifest, state)
             plugin.canRollback = isolatePluginRecovery(id, blocked, failures::add) { canRollback(id) } ?: false
+            plugin.updateObservation = isolatePluginRecovery(id, blocked, failures::add) {
+                withContext(Dispatchers.IO) { updates.observation(id) }
+            }
             plugins += plugin
             when {
                 id in blocked -> plugin.status(if (state.pendingDelete) "Uninstall pending; restart required" else "State unavailable; restart required")
@@ -156,6 +194,7 @@ internal class PluginManager(context: Context) {
                     plugin.status("Previous initialization interrupted; disabled")
                     failures += "$id: previous initialization interrupted; disabled conservatively (cause unknown)"
                 }
+                id in crashSuspects -> plugin.status("Crash suspect; disabled until explicitly enabled")
                 skipLoading -> plugin.status("Safe mode; loading skipped until restart")
                 !state.enabled -> plugin.status("Disabled")
                 else -> busy(plugin) { load(plugin, installedPlugin) }
@@ -260,38 +299,56 @@ internal class PluginManager(context: Context) {
         assign = { session.code = it },
     )
 
-    suspend fun stageData(uri: Uri, session: PluginImportSession): StagedPluginData? = importSource(
-        uri, session, PluginDataLimits().compressedBytes.toLong(),
-        stageLocal = { file -> stagePluginInput(
-            open = { file.inputStream() }, stage = dataCatalog::stage, discard = dataCatalog::discard,
-        ) },
-        discard = dataCatalog::discard,
-        assign = { session.data = it },
-    )
+    suspend fun stageData(uri: Uri, session: PluginImportSession): StagedPluginData? {
+        operation {
+            restoreInternal()
+            dataRequire(!dataRecoveryBlocked, "Data recovery mode; resume on next cold start before importing")
+        }
+        return importSource(
+            uri, session, PluginDataLimits().compressedBytes.toLong(),
+            stageLocal = { file -> stagePluginInput(
+                open = { file.inputStream() }, stage = dataCatalog::stage, discard = dataCatalog::discard,
+            ) },
+            discard = dataCatalog::discard,
+            assign = { session.data = it },
+        )
+    }
 
     suspend fun installData(session: PluginImportSession, staged: StagedPluginData, digest: String, acknowledged: Boolean) = operation {
+        restoreInternal()
+        dataRequire(!dataRecoveryBlocked, "Data recovery mode; importing unavailable")
         dataRequire(!session.closed && session.source == null && session.data === staged, "Unknown data confirmation")
         session.data = null // ownership transfers to install, disposal cannot delete it.
         val selected = withContext(Dispatchers.IO) { dataCatalog.install(staged, digest, acknowledged) }
         if (stageCleanup.hasPending) failures += "Data installed; import cleanup pending; use Retry import cleanup"
-        replaceDataInventory(dataInventory, dataPlugins,
-            PluginDataRecord(selected.manifest.id, selected.state, selected), skipLoading)
+        val record = if (selected.manifest.id in crashSuspects) withContext(Dispatchers.IO) {
+            dataCatalog.managementRecord(selected.manifest.id, crashQuarantined = true)
+        } else PluginDataRecord(selected.manifest.id, selected.state, selected)
+        replaceDataInventory(dataInventory, dataPlugins, record, skipDataLoading)
     }
 
     suspend fun setDataEnabled(id: String, enabled: Boolean) = operation {
+        restoreInternal()
+        dataRequire(!dataRecoveryBlocked, "Data recovery mode; data selection unavailable")
         val previous = dataPlugins.firstOrNull { it.selection.manifest.id == id }?.selection
         withContext(Dispatchers.IO) { dataCatalog.setEnabled(id, enabled, previous) }
         // Durable disable precedes revocation; management survives invalid or missing bytes.
         dataPlugins.removeAll { it.selection.manifest.id == id }
-        val record = withContext(Dispatchers.IO) { dataCatalog.managementRecord(id) }
-        replaceDataInventory(dataInventory, dataPlugins, record, skipLoading)
+        var acknowledgementFailed = false
+        if (enabled && id in crashSuspects) {
+            val acknowledged = withContext(Dispatchers.IO) { crashRecovery?.acknowledgeSuspect(id) == true }
+            if (acknowledged) crashSuspects.remove(id) else acknowledgementFailed = true
+        }
+        val record = withContext(Dispatchers.IO) { dataCatalog.managementRecord(id, id in crashSuspects) }
+        replaceDataInventory(dataInventory, dataPlugins, record, skipDataLoading)
+        if (acknowledgementFailed) throw IOException("Cannot acknowledge data crash quarantine; page remains blocked")
     }
 
     suspend fun uninstallData(id: String) = operation {
         withContext(Dispatchers.IO) { dataCatalog.beginDelete(id) }
         dataPlugins.removeAll { it.selection.manifest.id == id }
         val pending = withContext(Dispatchers.IO) { dataCatalog.managementRecord(id) }
-        replaceDataInventory(dataInventory, dataPlugins, pending, skipLoading)
+        replaceDataInventory(dataInventory, dataPlugins, pending, skipDataLoading)
         try {
             withContext(Dispatchers.IO) { dataCatalog.finishDelete(id) }
             dataInventory.removeAll { it.id == id }
@@ -313,7 +370,7 @@ internal class PluginManager(context: Context) {
         }
     }
 
-    suspend fun install(staged: StagedPlugin, session: PluginImportSession) = operation {
+    suspend fun install(staged: StagedPlugin, session: PluginImportSession, allowCodeOnlyRollback: Boolean = false) = operation {
         restoreInternal()
         dataRequire(!session.closed && session.source == null && session.code === staged, "Unknown code confirmation")
         session.code = null
@@ -321,6 +378,7 @@ internal class PluginManager(context: Context) {
         val old = plugins.firstOrNull { it.manifest.id == id }
         old?.busy(true)
         var published = false
+        var updateRecoveryUncertain = false
         withPluginInstallRecovery(
             id = id,
             isManaged = { plugins.any { it.manifest.id == id } },
@@ -329,6 +387,12 @@ internal class PluginManager(context: Context) {
             cleanup = {
                 withPluginCleanup(cleanup = { if (!published) withContext(Dispatchers.IO) { store.discard(staged) } }) {
                     old?.busy(false)
+                    if (updateRecoveryUncertain) {
+                        recoveryBlocked += id
+                        deferred += id
+                        old?.status("Update publication uncertain; restart required")
+                        failures += "$id: update publication requires cold-start recovery"
+                    }
                 }
             },
         ) {
@@ -343,7 +407,24 @@ internal class PluginManager(context: Context) {
                 if (staged.manifest.apiLevel !in 1..THETA_API_LEVEL) throw PluginPackageException("Unsupported API level")
                 // Upgrades preserve desired state; first install defaults to enabled.
                 states.write(id, state)
-                store.install(staged).also { published = true } to state
+                val from = store.versions(id).lastOrNull()
+                val intent = from?.let {
+                    updates.prepareInstall(id, it, staged.manifest.versionCode, allowCodeOnlyRollback)
+                }
+                val installed = try {
+                    store.install(staged).also {
+                        published = true
+                        intent?.let(updates::commitInstall)
+                    }
+                } catch (error: Exception) {
+                    // A failed publication may already own a package or journal. Do not
+                    // accept a second upgrade or reload this ID before cold recovery.
+                    updateRecoveryUncertain = intent != null
+                    try { intent?.let(updates::cancelInstall) }
+                    catch (cleanup: Exception) { error.addSuppressed(cleanup) }
+                    throw error
+                }
+                installed to state
             }
             if (stageCleanup.hasPending) failures += "$id installed; import cleanup pending; use Retry import cleanup"
             rejectedIds.remove(id)
@@ -351,6 +432,7 @@ internal class PluginManager(context: Context) {
             if (update) deferred += id
             val plugin = ManagedPlugin(installed.manifest, state)
             plugin.canRollback = canRollback(id)
+            plugin.updateObservation = withContext(Dispatchers.IO) { updates.observation(id) }
             // State/update records and the replacement package have all validated durably.
             // This does not reset gate.wasAttempted or an accepted deferred transition.
             recoveryBlocked.remove(id)
@@ -378,7 +460,15 @@ internal class PluginManager(context: Context) {
                 if (enabled && id in recoveryBlocked) throw PluginPackageException("State unavailable; restart required")
                 previous.copy(enabled = enabled, resumeAfterRollback = false).also { states.write(id, it) }
             }
-            plugin.state(state) // Durable BEFORE callbacks/cancellation.
+            plugin.state(state) // Durable BEFORE callbacks/cancellation, including acknowledgement failure.
+            if (enabled && id in crashSuspects) {
+                val acknowledged = withContext(Dispatchers.IO) { crashRecovery?.acknowledgeSuspect(id) == true }
+                if (!acknowledged) {
+                    plugin.status("Crash quarantine acknowledgement failed; loading blocked until restart")
+                    throw IOException("Cannot acknowledge crash quarantine; restart required")
+                }
+                crashSuspects.remove(id)
+            }
             if (!enabled) {
                 close(plugin)
                 plugin.status(when {
@@ -459,11 +549,22 @@ internal class PluginManager(context: Context) {
                 accepted = {
                     deferred += id
                     plugin.canRollback = false
+                    plugin.updateObservation = null
                     plugin.status("Rollback scheduled; restart required")
                 },
                 close = { close(plugin) },
             )
         }
+    }
+
+    /** Admission is serialized, execution and waiting never hold the manager mutation gate. */
+    suspend fun invokeTool(id: String, tool: Tool, args: JsonObject): PluginInvocation = operation {
+        val plugin = managed(id)
+        val runtime = plugin.runtime ?: throw PluginPackageException("Plugin is not running")
+        if (!runtime.active || runtime.context.faults.hasFault() || plugin.tools.none { it === tool }) {
+            throw PluginPackageException("Tool registration is no longer active")
+        }
+        runtime.context.startTool(tool, args)
     }
 
     private fun deleteStored(id: String, clearData: Boolean) {
@@ -487,7 +588,8 @@ internal class PluginManager(context: Context) {
 
     private suspend fun load(plugin: ManagedPlugin, installed: InstalledPlugin) {
         val manifest = installed.manifest
-        if (skipLoading || gate.wasAttempted(manifest.id)) return
+        if (skipLoading || manifest.id in crashSuspects || gate.wasAttempted(manifest.id)) return
+        var phase = "prepare storage"
         try {
             withContext(Dispatchers.IO) {
                 requireNoDataOwnership(app.filesDir, manifest.id)
@@ -497,8 +599,15 @@ internal class PluginManager(context: Context) {
                 states.write(manifest.id, states.read(manifest.id).copy(initializing = true))
             }
             gate.begin(manifest.id)
+            phase = "create settings owner"
+            val dataDir = withContext(Dispatchers.IO) {
+                // Android's trusted filesDir may start at /data/user/0 -> /data/data.
+                // Resolve only that platform root; still reject links in plugin-owned descendants.
+                pluginPath(pluginPath(app.filesDir.canonicalFile, "plugin-data"), manifest.id)
+            }
+            val settings = withContext(Dispatchers.IO) { PluginSettingsStorage.android(manifest.id, dataDir) }
             val context = HostPluginContext(
-                manifest.id, app, File(app.filesDir, "plugin-data/${manifest.id}"), host,
+                manifest.id, app, dataDir, host, executionBudget, settings,
             ) { faultContext ->
                 // Enqueue only: load/restore already holds operations. Never wait here.
                 postPluginOperation(host, Dispatchers.Main, operations, ::logHostFailure) {
@@ -510,6 +619,7 @@ internal class PluginManager(context: Context) {
             val runtime = PluginRuntime(context, manifest.versionCode)
             plugin.runtime = runtime
             plugin.status("Initializing")
+            phase = "verify and enable callback"
             val worker = PluginWorker("theta-enable-${manifest.id}") {
                 // Covers first install, restore and re-enable, immediately before dex loading.
                 store.verifyForLoad(installed)
@@ -523,6 +633,7 @@ internal class PluginManager(context: Context) {
             val result = worker.await(ENABLE_TIMEOUT_MS, context.faults)
             if (result == null) throw PluginPackageException("Initialization timed out; restart required")
             result.getOrThrow()
+            phase = "persist successful start"
             val published = context.faults.completeStart(
                 persist = {
                     withContext(Dispatchers.IO) {
@@ -532,17 +643,23 @@ internal class PluginManager(context: Context) {
                 },
                 publish = {
                     runtime.active = true
+                    context.activateExtensions()
                     plugin.status("Running")
                 },
             )
             if (!published) handleFault(plugin, runtime)
+            else try {
+                plugin.updateObservation = withContext(Dispatchers.IO) { updates.observation(manifest.id) }
+            } catch (error: Exception) {
+                reportPluginFailure(failures::add, "${manifest.id}: observation notice unavailable", error)
+            }
         } catch (error: Throwable) {
             val runtime = plugin.runtime
             if (runtime?.context?.faults?.hasFault() == true) {
                 handleFault(plugin, runtime)
                 return
             }
-            reportPluginFailure(failures::add, "${manifest.name}: initialization failed", error)
+            reportPluginFailure(failures::add, "${manifest.name}: initialization failed ($phase)", error)
             close(plugin)
             // 写不进去也没关系：initializing 标记还在，下次启动同样会回滚。
             val rollback = try {
@@ -610,6 +727,7 @@ internal class PluginManager(context: Context) {
             onDisable = {
                 // Do not race onDisable with onEnable; a late enable sees a closed registry.
                 runtime.initialization?.join()
+                runtime.context.drainSettings()
                 runtime.entry?.onDisable()
             },
             actions = actions,
@@ -635,17 +753,34 @@ internal class HostPluginContext(
     override val appContext: Context,
     override val dataDir: File,
     private val host: CoroutineScope,
+    private val executionBudget: PluginExecutionBudget,
+    private val settings: PluginSettingsStorage,
     onFault: (HostPluginContext) -> Unit,
 ) : PluginContext {
     override val hostApiLevel = THETA_API_LEVEL
-    var extensions by mutableStateOf<List<Extension>>(emptyList())
+    override val prefs: PluginPrefs get() = settings.prefs
+    override val secrets: PluginSecrets get() = settings.secrets
+    private var extensionsActive = false
+    private val entryAttempts = IdentityHashMap<EntryAdapter, PluginEntryRuntime>()
+    private val calls = IdentityHashMap<PluginInvocation, Tool>()
+    private val toolFailures = PluginToolFailureWindow()
+    private val countedCalls = java.util.Collections.newSetFromMap(IdentityHashMap<PluginInvocation, Boolean>())
+    var entryCapacityExceeded by mutableStateOf(false)
+        private set
+    var entryRuntimes by mutableStateOf<List<PluginEntryRuntime>>(emptyList())
+        private set
+    // Extension identity, not plugin-defined equals(), determines registration ownership.
+    var extensions by pluginExtensionState()
         private set
 
     private val publication: PluginPublication<Extension> = PluginPublication<Extension> {
         // Always enqueue, even on Main: never acquire the registry lock in reverse
         // order from the fault boundary. Read latest when dispatched, not captured data.
         try {
-            host.launch(Dispatchers.Main) { extensions = publicationSnapshot() }
+            host.launch(Dispatchers.Main) {
+                extensions = publicationSnapshot()
+                synchronizeExtensions()
+            }
         } catch (error: Throwable) { logHostFailure(error) }
     }
     private fun publicationSnapshot(): List<Extension> = publication.current()
@@ -654,6 +789,70 @@ internal class HostPluginContext(
     private var pendingCleanup: List<() -> Unit>? = null
     val faults = PluginFaultBoundary(::closeAdmission, { onFault(this) }, ::logHostFailure)
     override val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default + faults.handler)
+
+    fun activateExtensions() {
+        extensionsActive = true
+        extensions = publicationSnapshot()
+        synchronizeExtensions()
+    }
+
+    private fun synchronizeExtensions() {
+        val current = publicationSnapshot()
+        entryAttempts.forEach { (adapter, controller) ->
+            if (!extensionsActive || current.none { it === adapter }) controller.close()
+        }
+        calls.forEach { (call, tool) ->
+            if (!extensionsActive || current.none { it === tool }) call.cancel()
+        }
+        if (extensionsActive && !faults.hasFault()) {
+            current.filterIsInstance<EntryAdapter>().forEach { adapter ->
+                if (!entryAttempts.containsKey(adapter) && entryAttempts.size < 32) {
+                    val runtime = PluginEntryRuntime(executionBudget, pluginId, scope, adapter,
+                        DeviceInfo(android.os.Build.VERSION.SDK_INT, android.os.Build.MANUFACTURER, android.os.Build.MODEL))
+                    entryAttempts[adapter] = runtime
+                    runtime.start()
+                }
+            }
+        }
+        entryCapacityExceeded = extensionsActive && current.filterIsInstance<EntryAdapter>().any {
+            !entryAttempts.containsKey(it)
+        }
+        entryRuntimes = entryAttempts.entries.filter { (adapter, _) ->
+            extensionsActive && current.any { it === adapter }
+        }.map { it.value }
+    }
+
+    suspend fun startTool(tool: Tool, args: JsonObject): PluginInvocation {
+        if (!extensionsActive || faults.hasFault() || publicationSnapshot().none { it === tool }) {
+            throw PluginPackageException("Tool registration is no longer active")
+        }
+        // Await only already-completed host terminal signals; no plugin work or waiting
+        // occurs under the manager operation mutex. Count before the next admission.
+        calls.forEach { (call, ownerTool) ->
+            if (call.terminal.isCompleted && countedCalls.add(call)) {
+                toolFailures.record(ownerTool, call.terminal.await().status)
+            }
+        }
+        val retired = calls.keys.filter { it.actualExited.isCompleted && it in countedCalls }
+        retired.forEach { calls.remove(it); countedCalls.remove(it) }
+        if (toolFailures.isQuarantined(tool)) {
+            throw PluginPackageException("Tool quarantined after repeated failures or failure-tracking capacity exhaustion; restart required")
+        }
+        if (calls.size >= 8) throw PluginPackageException("Tool execution capacity unavailable")
+        val invocation = PluginInvocation(executionBudget, pluginId, scope, tool, args,
+            ToolInvocationRequest(runId = "s1-direct", sessionId = "s1-direct"))
+        calls[invocation] = tool
+        invocation.start()
+        host.launch(Dispatchers.Main.immediate) {
+            val outcome = invocation.terminal.await()
+            if (calls.containsKey(invocation) && countedCalls.add(invocation)) {
+                toolFailures.record(tool, outcome.status)
+            }
+        }
+        return invocation
+    }
+
+    fun drainSettings() { settings.close() }
 
     override fun register(extension: Extension): Registration {
         val revoke = registrations.register(extension.id, extension)
@@ -667,6 +866,7 @@ internal class HostPluginContext(
 
     // Memory only. The exception handler never cancels jobs or invokes cleanup.
     private fun closeAdmission() {
+        settings.closeAdmission()
         synchronized(closeLock) {
             registrations.beginClose()?.let { pendingCleanup = it }
         }
@@ -675,6 +875,8 @@ internal class HostPluginContext(
     fun beginClose(): List<() -> Unit> {
         faults.close()
         closeAdmission()
+        extensionsActive = false
+        synchronizeExtensions()
         extensions = emptyList() // Caller is the serialized Main host operation.
         return synchronized(closeLock) {
             pendingCleanup.orEmpty().also { pendingCleanup = null }

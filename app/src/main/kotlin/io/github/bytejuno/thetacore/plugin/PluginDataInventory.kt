@@ -8,13 +8,17 @@ internal data class PluginDataRecord(
     val state: PluginDataState,
     val selection: SelectedPluginData? = null,
     val error: String? = null,
+    val crashQuarantined: Boolean = false,
 )
 internal class ManagedDataRecord(val record: PluginDataRecord, val page: ManagedPluginData?) {
     val id get() = record.id
     val state get() = record.state
+    // Crash-only quarantine permits an explicit validation + acknowledgement attempt;
+    // archive/state errors still block enable and leave uninstall available.
     val canEnable get() = record.error == null && !state.pendingDelete
     val status get() = record.error?.let { "Quarantined: $it" }
-        ?: page?.status ?: "Deletion pending; retry uninstall"
+        ?: if (record.crashQuarantined) "Crash quarantined; explicitly enable to validate and resume"
+        else page?.status ?: "Deletion pending; retry uninstall"
 }
 internal fun replaceDataInventory(
     inventory: MutableList<ManagedDataRecord>, pages: MutableList<ManagedPluginData>,
@@ -22,7 +26,7 @@ internal fun replaceDataInventory(
 ) {
     inventory.removeAll { it.id == record.id }
     pages.removeAll { it.selection.manifest.id == record.id }
-    val page = record.selection?.takeIf { record.error == null && !record.state.pendingDelete }
+    val page = record.selection?.takeIf { !record.crashQuarantined && record.error == null && !record.state.pendingDelete }
         ?.let { ManagedPluginData(it, skipPlugins) }
     if (page != null) pages += page
     inventory += ManagedDataRecord(record, page)
