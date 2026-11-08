@@ -7,7 +7,7 @@ set -euo pipefail
 python3 -I scripts/lifecycle-acceptance.py --check-device
 
 ./gradlew --no-daemon -Pkotlin.compiler.execution.strategy=in-process \
-  -Dorg.gradle.workers.max=3 assembleDebug assembleRelease lintDebug testDebugUnitTest
+  -Dorg.gradle.workers.max=3 assembleDebug assembleRelease lintDebug testDebugUnitTest :agent-core:test
 
 scripts/verify-plugins.sh
 

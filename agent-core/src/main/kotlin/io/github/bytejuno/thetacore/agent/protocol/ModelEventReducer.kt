@@ -53,9 +53,11 @@ interface CollectedCall {
     val argsJson: String
     /** Syntactic completeness, not JSON Schema validation or permission to execute. */
     val complete: Boolean
+    /** The call ended with no arguments. The host may read this as `{}` only if the Schema allows an empty object. */
+    val emptyArguments: Boolean
 }
 private data class CollectedCallValue(override val binding: CallBinding, override val name: String,
-    override val argsJson: String, override val complete: Boolean) : CollectedCall
+    override val argsJson: String, override val complete: Boolean, override val emptyArguments: Boolean) : CollectedCall
 
 enum class HistoryDisposition { DISCARD, KEEP, NEEDS_CANCELLED_NONE_RESULTS }
 
@@ -111,7 +113,7 @@ class ModelEventReducer(private val provider: String, private val requestId: Str
             }
             is ModelEvent.Finished -> {
                 protocol(started && parts.values.all { it.ended }, "Finished with unclosed parts")
-                terminal = if (event.reason == FinishReason.STOP && calls().isNotEmpty() && calls().all { it.complete })
+                terminal = if (event.reason == FinishReason.STOP && calls().isNotEmpty() && calls().all { it.complete || it.emptyArguments })
                     Events.finished(FinishReason.TOOL_CALLS, event.rawReason) else event
             }
         }
@@ -130,7 +132,7 @@ class ModelEventReducer(private val provider: String, private val requestId: Str
     fun calls(): List<CollectedCall> = parts.values.filter { it.kind == Kind.TOOL }.map {
         val args = it.content.toString()
         val complete = it.ended && runCatching { Json.parseToJsonElement(args) is JsonObject }.getOrDefault(false)
-        CollectedCallValue(it.binding!!, it.name, args, complete)
+        CollectedCallValue(it.binding!!, it.name, args, complete, it.ended && args.isEmpty())
     }
     /** Only eligibility for downstream validation, never an execution approval. */
     fun toolCandidates(): List<CollectedCall> {
@@ -169,10 +171,15 @@ fun Flow<ModelEvent>.validated(provider: String, requestId: String,
     try {
         // Catch upstream exceptions in the producer, without cancelling the consumer scope.
         val source = this@validated.catch { error ->
-            if (error is CancellationException) throw error
+            // The producer is only cancelled by us; an adapter's internal cancellation must still end in Failed.
+            if (error is CancellationException) currentCoroutineContext().ensureActive()
             if (error !is Exception) throw error
             emit(Events.failed(modelError(
-                if (error is ProtocolException) ModelErrorCode.PROTOCOL else ModelErrorCode.NETWORK,
+                when (error) {
+                    is ProtocolException -> ModelErrorCode.PROTOCOL
+                    is CancellationException -> ModelErrorCode.UNKNOWN
+                    else -> ModelErrorCode.NETWORK
+                },
                 if (error is ProtocolException) error.message ?: "Protocol error" else "Model transport failed")))
         }.produceIn(CoroutineScope(context + producerJob))
         var first = true
@@ -185,8 +192,9 @@ fun Flow<ModelEvent>.validated(provider: String, requestId: String,
                 }
                 result.exceptionOrNull()?.let { throw it }
                 if (result.isClosed) break
-                first = false
                 val event = result.getOrThrow()
+                // A heartbeat proves liveness, not that the model has begun: the first-event window stays.
+                if (event !is ModelEvent.KeepAlive) first = false
                 try { reducer.accept(event) }
                 catch (error: ProtocolException) {
                     failure = Events.failed(modelError(ModelErrorCode.PROTOCOL, error.message ?: "Protocol error"))

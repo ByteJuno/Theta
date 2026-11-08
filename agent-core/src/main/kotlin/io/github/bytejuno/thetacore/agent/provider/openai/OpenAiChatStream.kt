@@ -9,8 +9,10 @@ internal class OpenAiChatStream(private val config: OpenAiChatConfig, private va
     private val tools = linkedMapOf<Int, Tool>()
     private var nextPart = 0
     private var textIndex: Int? = null
-    // Separate bounded reasoning parts keep opaque replay payloads inside the event budget too.
-    private val reasoningParts = linkedMapOf<Int, String>()
+    // Reasoning is coalesced per part, but a part never outgrows the replay budget:
+    // its opaque payload is carried by a single PartEnd event.
+    private val reasoningParts = linkedMapOf<Int, StringBuilder>()
+    private var reasoningIndex: Int? = null
     private val reasoningFragmentUnits = codec.reasoningFragmentUnits(request.model)
     private var started = false
     private var responseId: String? = null
@@ -19,8 +21,10 @@ internal class OpenAiChatStream(private val config: OpenAiChatConfig, private va
     private var done = false
 
     suspend fun frame(event: String?, data: String?, heartbeat: Boolean, emit: suspend (ModelEvent) -> Unit) {
-        protocol(!done, "SSE frame after terminal")
-        if (heartbeat || event == "ping" || event == "heartbeat") { emit(Events.keepAlive()); return }
+        val keepAlive = heartbeat || event == "ping" || event == "heartbeat"
+        // A heartbeat after the terminal is connection noise, anything else may be a second answer.
+        if (done) { protocol(keepAlive, "SSE frame after terminal"); return }
+        if (keepAlive) { emit(Events.keepAlive()); return }
         if (event == "error" && data == null) throw ProtocolException("Empty stream error")
         if (data == null) return
         if (data == "[DONE]") {
@@ -28,7 +32,7 @@ internal class OpenAiChatStream(private val config: OpenAiChatConfig, private va
             protocol(tools.values.all { it.started }, "Incomplete tool name")
             for (index in 0 until nextPart) {
                 val replay = if (index in reasoningParts && config.compat.replayReasoning)
-                    codec.replay(request.model, reasoningParts.getValue(index)) else null
+                    codec.replay(request.model, reasoningParts.getValue(index).toString()) else null
                 emit(Events.end(index, replay))
             }
             emit(Events.finished(mapReason(reason!!), reason))
@@ -36,8 +40,9 @@ internal class OpenAiChatStream(private val config: OpenAiChatConfig, private va
             return
         }
         val root = Json.parseToJsonElement(data) as? JsonObject ?: throw ProtocolException("Chunk must be an object")
-        if (event == "error" || root["error"] != null) {
-            val error = root["error"] as? JsonObject ?: root
+        val streamError = root["error"]?.takeUnless { it == JsonNull }
+        if (event == "error" || streamError != null) {
+            val error = streamError as? JsonObject ?: root
             emit(Events.failed(decodeError(error, null, null))); done = true; return
         }
         val id = root.string("id")
@@ -64,8 +69,8 @@ internal class OpenAiChatStream(private val config: OpenAiChatConfig, private va
             }
             config.compat.reasoningField?.let { field -> delta.string(field)?.takeIf { it.isNotEmpty() }?.let { text ->
                 eventFragments(text, reasoningFragmentUnits).forEach { fragment ->
-                    val index = nextPart++
-                    reasoningParts[index] = fragment
+                    val index = reasoningPartFor(fragment)
+                    reasoningParts.getValue(index).append(fragment)
                     emit(Events.reasoning(index, fragment))
                 }
             } }
@@ -117,6 +122,12 @@ internal class OpenAiChatStream(private val config: OpenAiChatConfig, private va
             )))
         }
     }
+    private fun reasoningPartFor(fragment: String): Int {
+        // Only the newest part can continue, so reasoning split by text or tools keeps its order.
+        val open = reasoningIndex?.takeIf { it == nextPart - 1 }
+        if (open != null && reasoningParts.getValue(open).length + fragment.length <= reasoningFragmentUnits) return open
+        return nextPart++.also { reasoningIndex = it; reasoningParts[it] = StringBuilder() }
+    }
     private var refused = false
     private fun mapReason(value: String): FinishReason = if (refused) FinishReason.REFUSAL else when (value) {
         "stop" -> FinishReason.STOP
@@ -143,6 +154,12 @@ internal fun decodeError(error: JsonObject?, status: Int?, retryAfterMs: Long?):
             503 -> ModelErrorCode.OVERLOADED
             in 500..599 -> ModelErrorCode.SERVER
             in 400..499 -> ModelErrorCode.INVALID_REQUEST
+            // In-stream errors have no HTTP status to classify by.
+            null -> when (rawCode ?: error?.get("type")?.let { (it as? JsonPrimitive)?.contentOrNull }) {
+                "rate_limit_exceeded" -> ModelErrorCode.RATE_LIMIT
+                "server_error" -> ModelErrorCode.SERVER
+                else -> ModelErrorCode.UNKNOWN
+            }
             else -> ModelErrorCode.UNKNOWN
         }
     }

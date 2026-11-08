@@ -26,7 +26,7 @@ jobs:
           ./gradlew --no-daemon --configuration-cache --configuration-cache-problems=fail :samples:storage-fixture:verifyStorageFixtureSources
       # 设备测试在 InstaBox 执行，入口见 scripts/verify-s1.sh。
       - name: Build, lint and unit tests
-        run: ./gradlew --no-daemon assembleDebug assembleRelease lintDebug testDebugUnitTest
+        run: ./gradlew --no-daemon assembleDebug assembleRelease lintDebug testDebugUnitTest :agent-core:test
       - name: Check the plugins
         run: scripts/verify-plugins.sh
 

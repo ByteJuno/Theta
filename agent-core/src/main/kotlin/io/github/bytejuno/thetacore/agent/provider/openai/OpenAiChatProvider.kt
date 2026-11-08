@@ -3,6 +3,12 @@ package io.github.bytejuno.thetacore.agent.provider.openai
 import io.github.bytejuno.thetacore.agent.protocol.*
 import io.github.bytejuno.thetacore.agent.transport.*
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.catch
@@ -10,6 +16,10 @@ import kotlinx.serialization.json.*
 import java.io.ByteArrayOutputStream
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
+
+/** How long a server may keep the connection open once the response is complete. */
+private const val TERMINAL_GRACE_MS = 2_000L
+private class TerminalGraceExpired : Exception()
 
 class OpenAiChatProvider(
     private val config: OpenAiChatConfig,
@@ -37,7 +47,10 @@ class OpenAiChatProvider(
             if (event is ModelEvent.Finished || event is ModelEvent.Failed) pendingTerminal = event else emit(event)
         }
         val token = auth.accessToken()
-        transport.exchange(config.endpoint.toString(), body, token).collect { event ->
+        var abandoned = false
+        try { coroutineScope {
+            var grace: Job? = null
+            transport.exchange(config.endpoint.toString(), body, token).collect { event ->
             when (event) {
                 is TransportEvent.Headers -> {
                     protocol(headers == null, "Duplicate HTTP headers")
@@ -53,17 +66,28 @@ class OpenAiChatProvider(
                     } else sse.feed(event.bytes) { kind, data, heartbeat -> stream.frame(kind, data, heartbeat, forward) }
                 }
             }
+            // One window from the terminal, so later heartbeats cannot extend it.
+            if (pendingTerminal != null && grace == null) grace = launch { delay(TERMINAL_GRACE_MS); throw TerminalGraceExpired() }
+            }
+            grace?.cancel()
+        } } catch (_: TerminalGraceExpired) {
+            abandoned = true
+        } catch (error: java.io.IOException) {
+            // A reset after the terminal cannot change a response that is already complete.
+            if (pendingTerminal == null || error is java.nio.charset.CharacterCodingException) throw error
+            abandoned = true
         }
         val head = headers ?: throw ProtocolException("Missing HTTP headers")
         if (head.status !in 200..299) {
             val root = runCatching { Json.parseToJsonElement(errorBody.toString("UTF-8")).jsonObject }.getOrNull()
             pendingTerminal = Events.failed(decodeError(root?.get("error") as? JsonObject, head.status, retryAfter(head.retryAfter)))
-        } else {
+        } else if (!abandoned) {
             sse.endOfInput(); stream.endOfInput()
         }
         emit(pendingTerminal ?: Events.failed(modelError(ModelErrorCode.PROTOCOL, "Missing terminal")))
     }.catch { error ->
-        if (error is CancellationException) throw error
+        // Only the collector's own cancellation stays silent; an adapter's internal one is a failure.
+        if (error is CancellationException) currentCoroutineContext().ensureActive()
         if (error !is Exception) throw error
         val code = when (error) {
             is IllegalArgumentException, is java.nio.charset.CharacterCodingException -> ModelErrorCode.PROTOCOL

@@ -60,7 +60,8 @@ class OpenAiChatCodec(private val config: OpenAiChatConfig) {
                 }) }
             }
             put("model", request.model); put("messages", history); put("stream", true); put("n", 1)
-            if (request.tools.isNotEmpty() || request.toolChoice != ToolChoice.Auto) put("tool_choice", when (val choice = request.toolChoice) {
+            // Without tools these fields carry no meaning and strict servers reject them.
+            if (request.tools.isNotEmpty()) put("tool_choice", when (val choice = request.toolChoice) {
                 ToolChoice.Auto -> JsonPrimitive("auto")
                 ToolChoice.None -> JsonPrimitive("none")
                 ToolChoice.Required -> JsonPrimitive("required")
@@ -68,7 +69,7 @@ class OpenAiChatCodec(private val config: OpenAiChatConfig) {
                     put("type", "function"); putJsonObject("function") { put("name", choice.name) }
                 }
             })
-            request.parallelToolCalls?.let { put("parallel_tool_calls", it) }
+            if (request.tools.isNotEmpty()) request.parallelToolCalls?.let { put("parallel_tool_calls", it) }
             request.reasoningLevel?.let { put("reasoning_effort", it) }
             request.maxOutputTokens?.let { put(config.compat.maxTokensField, it) }
             request.temperature?.let { put("temperature", it) }
@@ -114,8 +115,10 @@ class OpenAiChatCodec(private val config: OpenAiChatConfig) {
                     // History includes rejected calls. Preserve even malformed arguments so
                     // the paired rejection reaches the model; execution validation is host-owned.
                     val original = call.binding.wireId?.takeIf { call.binding.provider == config.providerId && it.isNotBlank() }
-                    val wire = original ?: "call_${call.binding.callId.replace("-", "")}"
-                    require(usedWireIds.add(wire)) { "Wire ID collision; host must supply a stable collision-free mapping" }
+                    // Providers may reuse IDs across turns: the first use keeps it, later ones get the stable mapping.
+                    val wire = original?.takeIf { usedWireIds.add(it) } ?: "call_${call.binding.callId.replace("-", "")}".also {
+                        require(usedWireIds.add(it)) { "Wire ID collision; host must supply a stable collision-free mapping" }
+                    }
                     wireIds[call.binding.callId] = wire
                 }
                 output += buildJsonObject {

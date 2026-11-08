@@ -260,7 +260,8 @@ class OpenAiChatTest {
         val actual = assertFailsWith<IllegalStateException> {
             OpenAiChatProvider(config, fake).chat(request(), auth).collect { throw expected }
         }
-        assertSame(expected, actual); assertEquals(1, fake.closed)
+        // Coroutine debug mode (-ea) may rethrow a recovered copy whose cause is the original.
+        assertSame(expected, actual.cause ?: actual); assertEquals(1, fake.closed)
     }
     @Test fun `reasoning replay disabled keeps visible delta without replay`() = runTest {
         val cfg = OpenAiChatConfig("test", "https://example.invalid/v1", compat = OpenAiChatConfig.Compat(reasoningField = "reasoning_content"))
@@ -391,8 +392,104 @@ class OpenAiChatTest {
         )
         invalid.forEach { assertFailure(it.asFlow().validated("p", "r").toList()) }
     }
-    @Test fun `validator does not swallow cancellation`() = runTest {
-        assertFailsWith<CancellationException> { flow<ModelEvent> { throw CancellationException("cancel") }.validated("p", "r").toList() }
+    @Test fun `adapter internal cancellation is Failed while caller stays active`() = runTest {
+        val events = flow<ModelEvent> { throw CancellationException("adapter") }.validated("p", "r").toList()
+        assertFailure(events, ModelErrorCode.UNKNOWN)
+        val timedOut = runBlocking { flow<ModelEvent> { withTimeout(1) { awaitCancellation() } }.validated("p", "r").toList() }
+        assertFailure(timedOut, ModelErrorCode.UNKNOWN)
+        val viaProvider = OpenAiChatProvider(config, ModelTransport { _, _, _ -> flow { throw CancellationException("adapter") } })
+            .chat(request(), auth).toList()
+        assertFailure(viaProvider, ModelErrorCode.UNKNOWN)
+    }
+    private fun finished(events: List<ModelEvent>, reason: FinishReason = FinishReason.STOP) =
+        assertEquals(reason, assertIs<ModelEvent.Finished>(events.last()).reason)
+    private val okStream get() = sse(chunk(text("ok")), chunk(finish = "stop"))
+    @Test fun `null error field is not a stream error`() = runTest {
+        val wire = "data: " + chunk(text("ok")).replaceFirst("{", """{"error":null,""") + "\n\n" + sse(chunk(finish = "stop"))
+        finished(collect(wire))
+    }
+    @Test fun `heartbeat after DONE keeps the completed response`() = runTest {
+        finished(collect(okStream + ": ping\n\n"))
+        finished(collect(okStream + "event: ping\n\n"))
+    }
+    @Test fun `content after DONE still fails`() = runTest {
+        assertFailure(collect(okStream + "data: " + chunk(text("late")) + "\n\n"))
+    }
+    @Test fun `server keeping the connection open after DONE finishes within grace`() = runTest {
+        val fake = Fake(okStream.toByteArray(), hang = true)
+        finished(OpenAiChatProvider(config, fake).chat(request(), auth).validated("test", "r").toList())
+        assertEquals(2_000L, currentTime); assertEquals(1, fake.closed)
+    }
+    @Test fun `heartbeats cannot extend the grace after DONE`() = runTest {
+        val transport = ModelTransport { _, _, _ -> flow {
+            emit(TransportEvent.Headers(200, "text/event-stream", null))
+            emit(TransportEvent.Bytes(okStream.toByteArray()))
+            while (true) { delay(500); emit(TransportEvent.Bytes(": ping\n\n".toByteArray())) }
+        } }
+        finished(OpenAiChatProvider(config, transport).chat(request(), auth).validated("test", "r").toList())
+        assertEquals(2_000L, currentTime)
+    }
+    @Test fun `prompt EOF after DONE does not wait for the grace`() = runTest {
+        finished(collect(okStream)); assertEquals(0L, currentTime)
+    }
+    @Test fun `connection reset after DONE keeps the completed response only`() = runTest {
+        val after = Fake(okStream.toByteArray(), fail = true)
+        finished(OpenAiChatProvider(config, after).chat(request(), auth).toList())
+        val before = Fake(sse(chunk(text("partial")), done = false).toByteArray(), fail = true)
+        assertFailure(OpenAiChatProvider(config, before).chat(request(), auth).toList(), ModelErrorCode.NETWORK)
+    }
+    @Test fun `malformed bytes after DONE are still a protocol failure`() = runTest {
+        val bytes = okStream.toByteArray() + "data: ".toByteArray() + byteArrayOf(0xc3.toByte(), 0x28) + "\n\n".toByteArray()
+        assertFailure(OpenAiChatProvider(config, Fake(bytes)).chat(request(), auth).toList(), ModelErrorCode.PROTOCOL)
+    }
+    @Test fun `tool control fields are only sent with tools`() {
+        val none = Json.parseToJsonElement(OpenAiChatCodec(config).encode(chatRequest("model") {
+            messages = listOf(message(Role.USER, textPart("hi"))); toolChoice = ToolChoice.None; parallelToolCalls = false
+        })).jsonObject
+        assertFalse("tool_choice" in none); assertFalse("parallel_tool_calls" in none)
+        val with = Json.parseToJsonElement(OpenAiChatCodec(config).encode(chatRequest("model") {
+            messages = listOf(message(Role.USER, textPart("hi"))); tools = listOf(modelTool("read", "Read", schema))
+            toolChoice = ToolChoice.None; parallelToolCalls = false
+        })).jsonObject
+        assertEquals("none", with["tool_choice"]!!.jsonPrimitive.content)
+        assertEquals(false, with["parallel_tool_calls"]!!.jsonPrimitive.boolean)
+    }
+    private val reasoningConfig = OpenAiChatConfig("test", "https://example.invalid/v1",
+        compat = OpenAiChatConfig.Compat(reasoningField = "reasoning_content", replayReasoning = true))
+    private fun thought(value: String) = buildJsonObject { put("reasoning_content", value) }
+    @Test fun `reasoning deltas coalesce into one part`() = runTest {
+        val events = collect(sse(chunk(thought("a")), chunk(thought("b")), chunk(thought("c")), chunk(text("x")), chunk(finish = "stop")), cfg = reasoningConfig)
+        assertEquals(setOf(0), events.filterIsInstance<ModelEvent.ReasoningDelta>().map { it.index }.toSet())
+        val ends = events.filterIsInstance<ModelEvent.PartEnd>()
+        assertEquals(2, ends.size)
+        assertEquals("abc", Json.parseToJsonElement(ends[0].replay!!.payload).jsonObject["text"]!!.jsonPrimitive.content)
+    }
+    @Test fun `reasoning coalescing keeps the budget and the order`() = runTest {
+        val small = (1..3000).map { chunk(thought("\u0001".repeat(10))) }.toTypedArray()
+        val big = collect(sse(*small, chunk(finish = "stop")), cfg = reasoningConfig)
+        finished(big); assertTrue(big.all { eventSizeBytes(it) <= 65536 })
+        assertTrue(big.filterIsInstance<ModelEvent.PartEnd>().size in 2..5)
+        val split = collect(sse(chunk(thought("a")), chunk(text("x")), chunk(thought("b")), chunk(finish = "stop")), cfg = reasoningConfig)
+        assertEquals(listOf(0, 2), split.filterIsInstance<ModelEvent.ReasoningDelta>().map { it.index })
+    }
+    @Test fun `empty arguments are candidates the host can validate`() = runTest {
+        val state = reducer(collect(sse(chunk(tool(0, "", "read", "wire")), chunk(finish = "stop"))))
+        assertEquals(FinishReason.TOOL_CALLS, assertIs<ModelEvent.Finished>(state.terminal).reason)
+        val call = state.toolCandidates().single()
+        assertTrue(call.emptyArguments); assertFalse(call.complete); assertEquals("", call.argsJson)
+        val broken = reducer(collect(sse(chunk(tool(0, "{", "read", "wire")), chunk(finish = "stop"))))
+        assertEquals(FinishReason.STOP, assertIs<ModelEvent.Finished>(broken.terminal).reason)
+        assertFalse(broken.toolCandidates().single().emptyArguments)
+    }
+    @Test fun `in-stream errors classify without an HTTP status`() = runTest {
+        assertFailure(collect(sse("""{"error":{"code":"rate_limit_exceeded"}}""", done = false)), ModelErrorCode.RATE_LIMIT)
+        assertFailure(collect(sse("""{"error":{"type":"server_error","code":null}}""", done = false)), ModelErrorCode.SERVER)
+        assertFailure(collect(sse("""{"error":{"code":"something_new"}}""", done = false)), ModelErrorCode.UNKNOWN)
+    }
+    @Test fun `heartbeats keep the first event window`() = runTest {
+        val source = flow { delay(30); emit(Events.keepAlive()); awaitCancellation() }
+        assertFailure(source.validated("p", "r", EventTimeouts(100, 50)).toList(), ModelErrorCode.TIMEOUT)
+        assertEquals(130L, currentTime)
     }
     @Test fun `response identity and tool metadata cannot change midstream`() = runTest {
         assertFailure(collect(sse(chunk(tool(0, "{", "read", "wire")), chunk(tool(0, "}", "other", "wire")), chunk(finish = "tool_calls"))))
@@ -409,13 +506,21 @@ class OpenAiChatTest {
             assertFailure(OpenAiChatProvider(config, transport).chat(request(), auth).toList())
         }
     }
-    @Test fun `wire ID collisions reject instead of silently changing replay`() {
+    @Test fun `wire ID reused across turns keeps the first and remaps later calls`() {
         val a = callBinding("test", "r1", "response1", 0, "same")
         val b = callBinding("test", "r2", "response2", 0, "same")
-        assertFailsWith<IllegalArgumentException> { OpenAiChatCodec(config).encode(chatRequest("model") {
+        val req = chatRequest("model") {
             messages = listOf(message(Role.ASSISTANT, toolCallPart(a, "read", "{}")), message(Role.TOOL, toolResultPart(a.callId, "a")),
                 message(Role.ASSISTANT, toolCallPart(b, "read", "{}")), message(Role.TOOL, toolResultPart(b.callId, "b")))
-        }) }
+        }
+        val codec = OpenAiChatCodec(config)
+        assertEquals(codec.encode(req), codec.encode(req))
+        val history = Json.parseToJsonElement(codec.encode(req)).jsonObject["messages"]!!.jsonArray.map { it.jsonObject }
+        val generated = "call_${b.callId.replace("-", "")}"
+        assertEquals("same", history[0]["tool_calls"]!!.jsonArray[0].jsonObject["id"]!!.jsonPrimitive.content)
+        assertEquals("same", history[1]["tool_call_id"]!!.jsonPrimitive.content)
+        assertEquals(generated, history[2]["tool_calls"]!!.jsonArray[0].jsonObject["id"]!!.jsonPrimitive.content)
+        assertEquals(generated, history[3]["tool_call_id"]!!.jsonPrimitive.content)
     }
     @Test fun `schema downgrade is explicit and never silently drops constraints`() {
         val cfg = OpenAiChatConfig("test", "https://example.invalid", compat = OpenAiChatConfig.Compat(schemaProfile = SchemaProfile.BASIC))
