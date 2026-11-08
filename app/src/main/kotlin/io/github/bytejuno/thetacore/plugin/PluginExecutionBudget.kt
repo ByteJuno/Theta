@@ -58,7 +58,14 @@ internal class PluginExecutionBudget(
         val onExit: () -> Unit,
     ) {
         val actualExited = CompletableDeferred<Unit>()
+        internal var submitted = false
         internal var executionExited = false
+        /** Release a reservation that never entered the executor. */
+        fun abandon() = synchronized(lock) {
+            check(!submitted)
+            executionExited = true
+            releaseIfFinished(this)
+        }
         internal var cancelRequested = false
         internal var cancelRunning = false
         internal var cancelDelivered = false
@@ -82,6 +89,12 @@ internal class PluginExecutionBudget(
         onExit: () -> Unit,
         action: suspend CoroutineScope.() -> Unit,
     ): Lease? = synchronized(lock) {
+        val lease = reserve(pluginId, owner, onCancel, onExit) ?: return null
+        if (commit(lease, action)) lease else null
+    }
+
+    @OptIn(InternalCoroutinesApi::class)
+    fun reserve(pluginId: String, owner: CoroutineScope, onCancel: () -> Unit, onExit: () -> Unit): Lease? = synchronized(lock) {
         val ownerJob = requireNotNull(owner.coroutineContext[Job]) { "Owner scope requires a Job" }
         if (closed || !ownerJob.isActive || active.size >= processSlots ||
             active.count { it.pluginId == pluginId } >= perPluginSlots) return null
@@ -98,6 +111,18 @@ internal class PluginExecutionBudget(
         bridge.invokeOnCompletion(onCancelling = true, invokeImmediately = true) { cause ->
             if (cause != null) lease.cancel()
         }
+        lease
+    }
+
+    /** False is trusted proof the worker was not submitted. Uses the SAME reserved slot. */
+    fun commit(lease: Lease, action: suspend CoroutineScope.() -> Unit): Boolean = synchronized(lock) {
+        check(!lease.submitted)
+        if (lease !in active || closed || lease.cancelRequested) {
+            lease.executionExited = true
+            releaseIfFinished(lease)
+            return false
+        }
+        lease.submitted = true
         try {
             workers.execute {
                 try {
@@ -120,9 +145,9 @@ internal class PluginExecutionBudget(
             // SynchronousQueue can reject briefly while a previously released worker unwinds.
             lease.executionExited = true
             releaseIfFinished(lease)
-            return null
+            return false
         }
-        lease
+        true
     }
 
     /** Timers run host-only transitions on an independent thread, never plugin callbacks. */

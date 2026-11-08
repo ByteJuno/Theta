@@ -49,6 +49,8 @@ internal class PluginInvocation(
     private val requestInput: suspend (String, JsonObject) -> JsonObject? = { _, _ -> null },
     private val defaultTimeoutMillis: Long = 60_000,
     private val totalTimeoutMillis: Long = 600_000,
+    private val frozenSpec: ToolSpec? = null,
+    private val reservation: PluginExecutionBudget.Lease? = null,
 ) : AutoCloseable {
     init { require(defaultTimeoutMillis > 0 && totalTimeoutMillis in 1..600_000) }
     private val completion = CompletableDeferred<PluginInvocationResult>()
@@ -59,26 +61,41 @@ internal class PluginInvocation(
     val spec: StateFlow<ToolSpec?> = mutableSpec.asStateFlow()
     private val mutableProgress = MutableStateFlow<PluginToolProgress?>(null)
     val progress: StateFlow<PluginToolProgress?> = mutableProgress.asStateFlow()
-    private var lease: PluginExecutionBudget.Lease? = null
+    private var lease: PluginExecutionBudget.Lease? = reservation
     private var timer: ScheduledFuture<*>? = null
     private var started = false
     private var startedNanos = 0L
     private var lastProgressNanos = 0L
     private var idleMillis = defaultTimeoutMillis.coerceAtMost(600_000)
 
+    private val returned = CompletableDeferred<PluginInvocationResult>()
+    val returnReported: Deferred<PluginInvocationResult> = returned
+    @Volatile var returnEvidence: PluginInvocationResult? = null
+        private set
+    private fun capture(value: PluginInvocationResult) {
+        returnEvidence = value
+        returned.complete(value)
+    }
+    @Volatile var bodyEntered: Boolean = false
+        private set
+
     fun start(): PluginInvocation = synchronized(budget.gate) {
-        if (started || completion.isCompleted) return this
+        if (started) return this
+        if (completion.isCompleted) {
+            reservation?.let {
+                it.actualExited.invokeOnCompletion { exited.complete(Unit) }
+                it.abandon()
+            }
+            return this
+        }
         started = true
         startedNanos = System.nanoTime()
         lastProgressNanos = startedNanos
-        lease = budget.submit(pluginId, owner,
-            onCancel = { finish(PluginInvocationResult(PluginInvocationStatus.CANCELLED, message = "Invocation cancelled")) },
-            onExit = { exited.complete(Unit); Unit },
-        ) {
+        val action: suspend CoroutineScope.() -> Unit = {
             try {
                 // JsonObject can wrap a plugin-provided Map. Detach it on the bounded worker
                 // before publishing metadata/results for host/Main readers.
-                val rawDefinition = tool.spec
+                val rawDefinition = frozenSpec ?: tool.spec
                 val definition = rawDefinition.copy(
                     inputSchema = Json.parseToJsonElement(rawDefinition.inputSchema.toString()).jsonObject,
                     outputSchema = rawDefinition.outputSchema?.let { Json.parseToJsonElement(it.toString()).jsonObject },
@@ -102,10 +119,17 @@ internal class PluginInvocation(
                             if (completion.isCompleted) null
                             else requestInput(prompt, schema).takeUnless { completion.isCompleted }
                         })
-                    val rawResult = coroutineScope { tool.call(args, env) }
-                    val result = rawResult.copy(structured = rawResult.structured?.let {
-                        Json.parseToJsonElement(it.toString())
-                    })
+                    bodyEntered = true
+                    val result = coroutineScope {
+                        val rawResult = tool.call(args, env)
+                        rawResult.copy(structured = rawResult.structured?.let {
+                            Json.parseToJsonElement(it.toString())
+                        }).also {
+                            // Capture before coroutineScope checks cancellation on return.
+                            capture(PluginInvocationResult(
+                                if (it.isError) PluginInvocationStatus.FAILED else PluginInvocationStatus.SUCCEEDED, it))
+                        }
+                    }
                     synchronized(budget.gate) {
                         // Deadline checks also arbitrate a return racing a delayed timer thread.
                         if (!expireIfDue()) finish(PluginInvocationResult(
@@ -115,15 +139,23 @@ internal class PluginInvocation(
                     }
                 }
             } catch (error: Throwable) {
+                if (returnEvidence == null) capture(PluginInvocationResult(PluginInvocationStatus.FAILED,
+                    message = "Tool failed: ${pluginFailureIdentity(error).take(256)}"))
                 synchronized(budget.gate) {
                     if (!expireIfDue()) finish(PluginInvocationResult(PluginInvocationStatus.FAILED,
                         message = "Tool failed: ${pluginFailureIdentity(error).take(256)}"))
                 }
             }
         }
+        lease = if (reservation != null) {
+            reservation.actualExited.invokeOnCompletion { exited.complete(Unit) }
+            if (budget.commit(reservation, action)) reservation else null
+        } else budget.submit(pluginId, owner,
+            onCancel = { finish(PluginInvocationResult(PluginInvocationStatus.CANCELLED, message = "Invocation cancelled")) },
+            onExit = { exited.complete(Unit); Unit }, action = action)
         if (lease == null) {
             finish(PluginInvocationResult(PluginInvocationStatus.REJECTED, message = "Tool execution capacity unavailable"))
-            exited.complete(Unit)
+            if (reservation == null || reservation.actualExited.isCompleted) exited.complete(Unit)
         } else if (!completion.isCompleted) armDeadline()
         this
     }
@@ -170,7 +202,7 @@ internal class PluginInvocation(
     fun cancel() = synchronized(budget.gate) {
         finish(PluginInvocationResult(PluginInvocationStatus.CANCELLED, message = "Invocation cancelled"))
         lease?.cancel()
-        if (lease == null) exited.complete(Unit)
+        if (lease == null && (reservation == null || reservation.actualExited.isCompleted)) exited.complete(Unit)
     }
     override fun close() = cancel()
 }

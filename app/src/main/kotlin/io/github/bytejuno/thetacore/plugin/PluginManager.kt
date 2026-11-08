@@ -85,7 +85,13 @@ internal class PluginManager(context: Context) {
     private companion object {
         // Multiple manager instances must never multiply the process execution allowance.
         val executionBudget = PluginExecutionBudget()
+        val hostToolBridge = HostToolBridgeRoot(executionBudget)
     }
+
+    /** Internal opt-in only: no UI/model path is changed. The caller supplies a tested durability
+     * adapter; Android on-device persistence is not claimed by the JVM bridge. */
+    suspend fun initializeHostTools(store: io.github.bytejuno.thetacore.agent.ledger.InvocationStore): HostToolExecutionService =
+        hostToolBridge.initialize(store)
     private val stageCleanup = PluginStageCleanup()
     private val store = PluginStore(app.filesDir, app.cacheDir, PlatformPluginSignatureVerifier(app.packageManager), stageCleanup)
     private val states = PluginStateStore(app.filesDir)

@@ -66,6 +66,7 @@ tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach 
 
 dependencies {
     implementation(project(":sdk"))
+    implementation(project(":agent-core"))
     compileOnly("io.github.libxposed:api:102.0.0")
     implementation("io.github.libxposed:service:102.0.0")
     implementation(platform(libs.androidx.compose.bom))

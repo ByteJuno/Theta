@@ -1,6 +1,7 @@
 plugins {
     // Root buildscript already supplies the catalog-pinned Kotlin Gradle plugin.
     id("org.jetbrains.kotlin.jvm")
+    alias(libs.plugins.kotlin.serialization)
 }
 
 kotlin {
@@ -17,6 +18,7 @@ dependencies {
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.okhttp)
+    implementation("com.networknt:json-schema-validator:1.5.3")
     testImplementation(kotlin("test-junit"))
     testImplementation(libs.kotlinx.coroutines.test)
 }
