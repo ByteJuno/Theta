@@ -71,6 +71,20 @@ class PluginUpdatePolicyTest {
         return bytes.toByteArray()
     }
 
+    @Test fun equalOrLowerVersionIsAVersionRejectionWithoutIntent() = fixture {
+        initial()
+        for (to in listOf(1L, 0L)) {
+            try {
+                updates.prepareInstall(id, 1, to)
+                fail("Version $to must be rejected")
+            } catch (e: PluginPackageException) {
+                assertEquals("Install requires a higher version than 1", e.message)
+            }
+        }
+        assertFalse(policy.exists())
+        assertEquals(listOf(1L), store.versions(id))
+    }
+
     @Test fun defaultStillCancelsOnSnapshotFailure() = fixture {
         initial()
         val intent = updates.prepareInstall(id, 1, 2)

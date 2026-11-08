@@ -68,6 +68,11 @@ internal class PluginUpdates(
         val update = read(id)
         readInstallIntent(id) // Never overwrite a malformed recovery owner.
         val versions = store.versions(id)
+        // Same message as PluginStore: an equal/lower version is a user-visible rejection,
+        // not a confirmation mismatch.
+        if (from > 0 && to <= from && versions.lastOrNull() == from) {
+            throw PluginPackageException("Install requires a higher version than $from")
+        }
         if (from <= 0 || to <= from || versions.lastOrNull() != from ||
             (update == null && versions.size != 1) ||
             (update != null && (update.phase != UpdatePhase.OBSERVING || update.to != from))) {
