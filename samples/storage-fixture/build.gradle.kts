@@ -44,47 +44,55 @@ dependencies {
 tasks.register("verifyStorageFixtureSources") {
     group = "verification"
     description = "Verify direct production source inclusion and fixture isolation"
-    // Always inspect the realized compiler inputs, not just the intended inclusion list.
-    // This task deliberately has no dependency on compilation (preBuild depends on it).
+    // Inspect the realized compiler inputs during configuration, not from the task action:
+    // configuration-cache actions cannot access tasks, configurations or the build script.
+    // Querying file trees here also makes source additions/removals invalidate the cache.
+    // Keep only plain values in the action, with no dependency on compilation (preBuild
+    // depends on this task, so compiler task dependencies would create a cycle).
+    val productionFiles = productionStorageSources.map { it.canonicalFile }
+    val expectedProduction = productionFiles.toSet()
+    val rootDir = rootProject.projectDir.canonicalFile
+    val fixturePath = project.path
+    val manifests = layout.buildDirectory.dir("reports/storage-fixture-sources").get().asFile
+    val compilerSources = listOf("Debug", "Release").flatMap { variant ->
+        listOf(false, true).mapNotNull { unitTest ->
+            val compileName = "compile$variant${if (unitTest) "UnitTest" else ""}Kotlin"
+            // Release unit tests are disabled; inspect them too if enabled later.
+            if (unitTest && variant == "Release" && compileName !in tasks.names) return@mapNotNull null
+            val compile = tasks.named<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>(compileName).get()
+            val actual = (compile.sources.files + compile.javaSources.files).map { it.canonicalFile }.toSet()
+            val sourceSets = if (unitTest) listOf("test", "test$variant")
+                else listOf("main", variant.lowercase())
+            val ownSources = sourceSets.flatMap { sourceSet ->
+                fileTree("src/$sourceSet") { include("**/*.kt", "**/*.java") }.files
+            }.map { it.canonicalFile }.toSet()
+            Triple(compileName, actual, ownSources + if (unitTest) emptySet() else expectedProduction)
+        }
+    }
+    // AGP wires unit-test compilation to this application's own main variant using
+    // a self ProjectDependency. Only that self edge is allowed, never :app or :sdk.
+    val projectEdges = configurations.flatMap { configuration ->
+        configuration.dependencies.filterIsInstance<org.gradle.api.artifacts.ProjectDependency>()
+            .map { configuration.name to it.path }
+    }
     doLast {
-        check(productionStorageFiles.size == 14 && productionStorageFiles.distinct().size == 14)
-        val expectedProduction = productionStorageSources.map { it.canonicalFile }.toSet()
+        check(productionFiles.size == 14 && expectedProduction.size == 14)
         expectedProduction.forEach { check(it.isFile) { "Missing production source: $it" } }
-        val manifests = layout.buildDirectory.dir("reports/storage-fixture-sources").get().asFile
         check(manifests.isDirectory || manifests.mkdirs())
-        for (variant in listOf("Debug", "Release")) {
-            for (unitTest in listOf(false, true)) {
-                val compileName = "compile$variant${if (unitTest) "UnitTest" else ""}Kotlin"
-                // This build disables release unit tests; debug tests and both APK variants
-                // remain mandatory, and release tests are checked too if enabled later.
-                if (unitTest && variant == "Release" && compileName !in tasks.names) continue
-                val compile = tasks.named<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>(compileName).get()
-                val actual = (compile.sources.files + compile.javaSources.files).map { it.canonicalFile }.toSet()
-                val sourceSets = if (unitTest) listOf("test", "test$variant")
-                    else listOf("main", variant.lowercase())
-                val ownSources = sourceSets.flatMap { sourceSet ->
-                    fileTree("src/$sourceSet") { include("**/*.kt", "**/*.java") }.files
-                }.map { it.canonicalFile }.toSet()
-                check(ownSources.isNotEmpty()) { "$compileName lost fixture sources" }
-                val expected = ownSources + if (unitTest) emptySet() else expectedProduction
-                check(actual == expected) {
-                    "$compileName source mismatch: missing=${expected - actual}, unexpected=${actual - expected}"
-                }
-                // These manifests are derived from KotlinCompile, not the hand-maintained allowlist.
-                manifests.resolve("$compileName.txt").writeText(actual.map {
-                    it.relativeTo(rootProject.projectDir.canonicalFile).invariantSeparatorsPath
-                }.sorted().joinToString("\n", postfix = "\n"))
-                logger.lifecycle("$compileName verified: ${actual.size} compiler sources, " +
-                    "${actual.intersect(expectedProduction).size} production, ${ownSources.size} fixture")
+        for ((compileName, actual, expected) in compilerSources) {
+            val ownSources = expected - expectedProduction
+            check(ownSources.isNotEmpty()) { "$compileName lost fixture sources" }
+            check(actual == expected) {
+                "$compileName source mismatch: missing=${expected - actual}, unexpected=${actual - expected}"
             }
+            // These manifests are derived from KotlinCompile, not the hand-maintained allowlist.
+            manifests.resolve("$compileName.txt").writeText(actual.map {
+                it.relativeTo(rootDir).invariantSeparatorsPath
+            }.sorted().joinToString("\n", postfix = "\n"))
+            logger.lifecycle("$compileName verified: ${actual.size} compiler sources, " +
+                "${actual.intersect(expectedProduction).size} production, ${ownSources.size} fixture")
         }
-        // AGP wires unit-test compilation to this application's own main variant using
-        // a self ProjectDependency. Only that self edge is allowed, never :app or :sdk.
-        val projectEdges = configurations.flatMap { configuration ->
-            configuration.dependencies.filterIsInstance<org.gradle.api.artifacts.ProjectDependency>()
-                .map { configuration.name to it.path }
-        }
-        check(projectEdges.all { (_, target) -> target == project.path }) {
+        check(projectEdges.all { (_, target) -> target == fixturePath }) {
             "Fixture must not depend on host application or SDK modules: $projectEdges"
         }
         logger.lifecycle("Storage fixture project edges (self only): $projectEdges")

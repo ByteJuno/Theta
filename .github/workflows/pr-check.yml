@@ -19,6 +19,11 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: ./.github/actions/setup-build
+      # Exercise both configuration-cache storage and reuse without compiling first.
+      - name: Verify storage fixture source checks with configuration cache
+        run: |
+          ./gradlew --no-daemon --configuration-cache --configuration-cache-problems=fail :samples:storage-fixture:verifyStorageFixtureSources
+          ./gradlew --no-daemon --configuration-cache --configuration-cache-problems=fail :samples:storage-fixture:verifyStorageFixtureSources
       # 设备测试在 InstaBox 执行，入口见 scripts/verify-s1.sh。
       - name: Build, lint and unit tests
         run: ./gradlew --no-daemon assembleDebug assembleRelease lintDebug testDebugUnitTest
