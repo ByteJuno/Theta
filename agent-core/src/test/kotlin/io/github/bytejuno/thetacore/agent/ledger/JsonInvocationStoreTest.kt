@@ -42,6 +42,19 @@ class JsonInvocationStoreTest {
         }
     }
 
+    @Test fun malformedUtf8FailsClosedInsteadOfBeingReplaced() = Fixture().use { f ->
+        val r = f.record()
+        f.store.close()
+        val file = f.directory.resolve("${r.callId}.json")
+        val valid = Files.readAllBytes(file)
+        Files.write(file, valid + byteArrayOf(0xC3.toByte(), 0x28))
+        val e = assertFailsWith<StoreException> { JsonInvocationStore.open(f.directory, Durability.PROCESS_CRASH_ONLY) }
+        assertTrue(e.message!!.contains(r.callId))
+        Files.write(file, valid)
+        f.store = JsonInvocationStore.open(f.directory, Durability.PROCESS_CRASH_ONLY)
+        assertEquals(r, f.store.records().single())
+    }
+
     @Test fun everyWritePhaseIsOldOrNewCompleteAndUncertainHalts() {
         for (stage in WriteStage.entries) Fixture().use { f ->
             val ready = f.ready()

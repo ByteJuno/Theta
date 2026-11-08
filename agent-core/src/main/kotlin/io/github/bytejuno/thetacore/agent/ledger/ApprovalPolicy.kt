@@ -14,7 +14,8 @@ class DefinitionGate {
         refreshing.remove(definition.toolKey)
     }
     fun beginRefresh(toolKey: String) = withGate { refreshing.add(toolKey); Unit }
-    fun uninstall(toolKey: String) = withGate { definitions.remove(toolKey); Unit }
+    /** A removed tool has nothing left to refresh: its frozen calls must resolve as STALE, not pause forever. */
+    fun uninstall(toolKey: String) = withGate { definitions.remove(toolKey); refreshing.remove(toolKey); Unit }
     fun freezeRun(runId: String, tools: Collection<FrozenDefinition>) = withGate {
         val frozen = tools.associateBy { it.modelName }
         require(frozen.size == tools.size)

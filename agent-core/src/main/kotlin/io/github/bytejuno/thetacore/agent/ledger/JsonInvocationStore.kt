@@ -17,6 +17,10 @@ import java.util.UUID
 enum class Durability { PROCESS_CRASH_ONLY, REQUIRE_DIRECTORY_SYNC }
 enum class WriteStage { BEFORE_TEMP, AFTER_WRITE, AFTER_FILE_SYNC, BEFORE_REPLACE, AFTER_REPLACE, AFTER_DIRECTORY_SYNC }
 
+/** Files.readString does not exist below Android API 36.1. A fresh decoder still rejects malformed UTF-8. */
+private fun readUtf8(path: Path): String =
+    Charsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(Files.readAllBytes(path))).toString()
+
 class JsonInvocationStore private constructor(
     private val directory: Path, private val durability: Durability,
     private val fault: (WriteStage) -> Unit,
@@ -40,7 +44,7 @@ class JsonInvocationStore private constructor(
             val records = Files.newDirectoryStream(directory, "*.json").use { paths ->
                 paths.map { path ->
                     try {
-                        val record = json.decodeFromString<InvocationRecord>(Files.readString(path))
+                        val record = json.decodeFromString<InvocationRecord>(readUtf8(path))
                         record.validate()
                         require(path.fileName.toString() == "${record.callId}.json") { "Filename/binding mismatch" }
                         record
@@ -112,7 +116,7 @@ class JsonInvocationStore private constructor(
         }
         /** Missing marker/directory is NOT treated as a new installation. */
         fun open(directory: Path, durability: Durability, fault: (WriteStage) -> Unit = {}): JsonInvocationStore {
-            require(Files.readString(directory.resolve("ledger.identity")) == MARKER) { "Missing/invalid ledger identity" }
+            require(readUtf8(directory.resolve("ledger.identity")) == MARKER) { "Missing/invalid ledger identity" }
             syncDirectory(directory, durability)
             val channel = FileChannel.open(directory.resolve("writer.lock"), CREATE, WRITE)
             var lock: FileLock? = null

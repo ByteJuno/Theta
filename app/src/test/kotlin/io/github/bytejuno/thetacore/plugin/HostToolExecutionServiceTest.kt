@@ -551,6 +551,85 @@ class HostToolExecutionServiceTest {
         }
     }
 
+    @Test fun cooperativeCancellationDoesNotRequireRestart() = runBlocking {
+        Fixture().use { f ->
+            val entered = CountDownLatch(1)
+            val calls = AtomicInteger()
+            val d = f.register(tool {
+                if (calls.incrementAndGet() == 1) { entered.countDown(); awaitCancellation() }
+                ToolResult("second", effect = ToolEffect.NONE)
+            })
+            val first = f.input(d)
+            f.service.prepare(first); f.service.dispatch(first.binding.callId)
+            assertTrue(entered.await(3, TimeUnit.SECONDS))
+            f.service.cancel(first.binding.callId)
+            withTimeout(5_000) { f.service.awaitObservedExit(first.binding.callId) }
+            assertFalse(f.ledger.get(first.binding.callId)!!.restartRequired)
+            val second = f.input(d, step = "next")
+            f.service.prepare(second)
+            assertNotNull((f.service.dispatch(second.binding.callId) as Mutation.Applied).ticket)
+            withTimeout(5_000) { f.service.awaitObservedExit(second.binding.callId) }
+            assertEquals(2, calls.get())
+        }
+    }
+
+    private fun writer(text: String) = object : Tool {
+        override val id = "writer"
+        override val spec = ToolSpec("writer", "strict output", emptySchema,
+            outputSchema = Json.parseToJsonElement("""{"type":"object","required":["id"]}""").jsonObject,
+            risk = ToolRisk.WRITE, timeoutMs = 2_000)
+        override suspend fun call(args: JsonObject, env: ToolEnv) = ToolResult(text, buildJsonObject { put("wrong", 1) })
+    }
+
+    @Test fun invalidStructuredOutputKeepsContentAndOnlyEmptyResultIsAnError() = runBlocking {
+        for (text in listOf("row written", "")) Fixture().use { f ->
+            val i = f.input(f.register(writer(text)))
+            f.service.prepare(i)
+            approve(f, i.binding.callId)
+            f.service.dispatch(i.binding.callId)
+            withTimeout(5_000) { f.service.awaitObservedExit(i.binding.callId) }
+            val result = f.ledger.get(i.binding.callId)!!.result!!
+            if (text.isEmpty()) {
+                assertEquals(Status.FAILED, result.status)
+                assertEquals("Tool returned invalid structured output", result.text)
+                assertEquals(Effect.UNKNOWN, result.effect)
+            } else {
+                assertEquals(Status.SUCCEEDED, result.status)
+                assertEquals(text, result.text)
+                assertEquals(Effect.APPLIED, result.effect)
+            }
+        }
+    }
+
+    @Test fun completedCallsReleaseServiceBookkeeping() = runBlocking {
+        Fixture().use { f ->
+            val d = f.register()
+            repeat(3) { n ->
+                val i = f.input(d, step = "step-$n")
+                f.service.prepare(i); f.service.dispatch(i.binding.callId)
+                withTimeout(5_000) { f.service.awaitObservedExit(i.binding.callId) }
+            }
+            waitUntil {
+                listOf("active", "observations", "logicalResults").all { name ->
+                    val field = HostToolExecutionService::class.java.getDeclaredField(name).apply { isAccessible = true }
+                    f.gate.withGate { (field.get(f.service) as Map<*, *>).isEmpty() }
+                }
+            }
+        }
+    }
+
+    @Test fun revokeDuringRefreshRejectsFrozenCallInsteadOfPausingForever() = runBlocking {
+        Fixture().use { f ->
+            val d = f.register()
+            f.gate.beginRefresh(d.toolKey)
+            f.catalog.revoke(d.toolKey)
+            val i = f.input(d)
+            assertTrue(f.service.prepare(i) is Mutation.Applied)
+            assertEquals(Status.REJECTED, f.ledger.get(i.binding.callId)!!.state)
+            assertNull(f.ledger.get(i.binding.callId)!!.instance)
+        }
+    }
+
     @Test fun rootReusesCoordinatorAndRejectsNewWriterInSameProcess() = runBlocking {
         val budget = PluginExecutionBudget()
         try {
