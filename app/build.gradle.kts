@@ -52,8 +52,22 @@ android {
     }
 }
 
+// Compile the sample's actual platform-independent ZIP generator only into JVM tests.
+// Do not depend on its Android application or copy the generator into host fixtures.
+tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
+    if (name.endsWith("UnitTestKotlin")) {
+        listOf("FixtureData.kt", "PrefixArchive.kt").forEach { generator ->
+            source(rootProject.file(
+                "samples/blocked-provider/src/main/kotlin/io/github/bytejuno/thetacore/sample/blockedprovider/$generator",
+            ))
+        }
+    }
+}
+
 dependencies {
     implementation(project(":sdk"))
+    compileOnly("io.github.libxposed:api:102.0.0")
+    implementation("io.github.libxposed:service:102.0.0")
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.compose.material3)

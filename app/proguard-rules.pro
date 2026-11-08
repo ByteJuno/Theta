@@ -10,3 +10,10 @@
 -keep public class androidx.collection.** { public protected *; }
 -keep public class androidx.lifecycle.** { public protected *; }
 -keep public class androidx.savedstate.** { public protected *; }
+
+# Modern libxposed module entry; not the legacy constructor/annotation API.
+-dontwarn io.github.libxposed.annotation.**
+-adaptresourcefilecontents META-INF/xposed/java_init.list
+-keep,allowoptimization,allowobfuscation public class * extends io.github.libxposed.api.XposedModule {
+    public <init>();
+}

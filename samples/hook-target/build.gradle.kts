@@ -1,0 +1,17 @@
+plugins { alias(libs.plugins.android.application) }
+android {
+    namespace = "io.github.bytejuno.thetacore.sample.hooktarget"
+    compileSdk = libs.versions.android.compileSdk.get().toInt()
+    defaultConfig {
+        applicationId = "io.github.bytejuno.thetacore.sample.hooktarget"
+        minSdk = libs.versions.android.minSdk.get().toInt()
+        targetSdk = libs.versions.android.targetSdk.get().toInt()
+        versionCode = 1
+        versionName = "1"
+    }
+    buildTypes { release { signingConfig = signingConfigs.getByName("debug") } }
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+}

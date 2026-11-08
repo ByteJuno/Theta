@@ -4,6 +4,11 @@
     <!-- 插件不向系统注册权限，它们用的网络权限由宿主声明。 -->
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <queries>
+        <package android:name="io.github.bytejuno.thetacore.sample.hooktarget" />
+        <intent><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.HOME" /></intent>
+    </queries>
+
     <application
         android:name=".ThetaApplication"
         android:allowBackup="false"

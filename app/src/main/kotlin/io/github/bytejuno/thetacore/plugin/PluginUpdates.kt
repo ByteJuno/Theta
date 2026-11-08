@@ -25,7 +25,19 @@ internal data class PluginUpdate(
     val to: Long,
     val phase: UpdatePhase = UpdatePhase.OBSERVING,
     val startedAt: Long? = null,
+    val dataRestorable: Boolean = true,
 )
+
+/** One confirmation for one install attempt, never a persistent per-plugin preference. */
+internal data class PluginUpdateInstallIntent internal constructor(
+    val id: String,
+    val from: Long,
+    val to: Long,
+    val token: String,
+    val dataRestorable: Boolean,
+)
+
+private data class PendingPluginUpdate(val intent: PluginUpdateInstallIntent, val committed: Boolean)
 
 /**
  * 更新的切换和回滚。只在冷启动、加载任何插件之前动数据：旧代码是否已停，别的时机确认不了。
@@ -42,6 +54,96 @@ internal class PluginUpdates(
     private val root get() = pluginPath(filesDir.canonicalFile, "plugin-updates")
     private val snapshots get() = pluginPath(filesDir.canonicalFile, "plugin-snapshots")
     private val data get() = pluginPath(filesDir.canonicalFile, "plugin-data")
+    private val intents get() = pluginPath(root, "install-intents")
+    private fun intentFile(id: String) = pluginPath(intents, "$id.properties")
+
+    /**
+     * Call under the manager's serialized IO operation, after validation/confirmation and
+     * BEFORE store.install, for EVERY upgrade (including the default false choice).
+     * Preparing is not authorization: only commitInstall after successful publication grants it.
+     * A crash between publication and commit conservatively uses snapshot-or-cancel.
+     */
+    fun prepareInstall(id: String, from: Long, to: Long, allowCodeOnlyRollback: Boolean = false): PluginUpdateInstallIntent {
+        checkId(id)
+        val update = read(id)
+        readInstallIntent(id) // Never overwrite a malformed recovery owner.
+        val versions = store.versions(id)
+        if (from <= 0 || to <= from || versions.lastOrNull() != from ||
+            (update == null && versions.size != 1) ||
+            (update != null && (update.phase != UpdatePhase.OBSERVING || update.to != from))) {
+            throw PluginPackageException("Update confirmation does not match installed version")
+        }
+        return PluginUpdateInstallIntent(id, from, to, UUID.randomUUID().toString(), !allowCodeOnlyRollback).also {
+            writeInstallIntent(PendingPluginUpdate(it, committed = false))
+        }
+    }
+
+    /** Commit only when store.install returned successfully; do not infer success from a catch. */
+    fun commitInstall(intent: PluginUpdateInstallIntent) {
+        requireInstallIntent(intent)
+        val versions = store.versions(intent.id)
+        if (versions.lastOrNull() != intent.to || intent.from !in versions) {
+            throw PluginPackageException("Update package does not match confirmation")
+        }
+        store.verifyVersion(intent.id, intent.to)
+        writeInstallIntent(PendingPluginUpdate(intent, committed = true))
+    }
+
+    /**
+     * Cancel this exact attempt on install/commit failure, not after a successful commit.
+     * If this throws, retain recovery quarantine; a PREPARED record grants no permission.
+     * A stale handle cannot cancel a later confirmation. Packages are owned by PluginStore.
+     */
+    fun cancelInstall(intent: PluginUpdateInstallIntent) {
+        checkId(intent.id)
+        val pending = readInstallIntent(intent.id) ?: return
+        if (pending.intent != intent) throw PluginPackageException("Stale update confirmation")
+        clearInstallIntent(intent.id)
+    }
+
+    private fun requireInstallIntent(intent: PluginUpdateInstallIntent) {
+        checkId(intent.id)
+        if (readInstallIntent(intent.id)?.intent != intent) throw PluginPackageException("Stale update confirmation")
+    }
+
+    private fun clearInstallIntent(id: String) {
+        Files.deleteIfExists(intentFile(id).toPath())
+    }
+
+    private fun readInstallIntent(id: String): PendingPluginUpdate? {
+        checkId(id)
+        val file = intentFile(id)
+        if (!file.exists()) return null
+        val properties = Properties()
+        fun value(key: String) = properties.getProperty(key) ?: throw IOException("Incomplete update policy for $id")
+        try {
+            file.inputStream().use(properties::load)
+            if (properties.stringPropertyNames() != setOf("from", "to", "token", "dataRestorable", "committed")) {
+                throw IOException("Invalid update policy fields for $id")
+            }
+            val from = value("from").toLong()
+            val to = value("to").toLong()
+            val token = value("token")
+            require(from > 0 && to > from && UUID.fromString(token).toString() == token)
+            return PendingPluginUpdate(
+                PluginUpdateInstallIntent(id, from, to, token, value("dataRestorable").toBooleanStrict()),
+                value("committed").toBooleanStrict(),
+            )
+        } catch (error: IllegalArgumentException) {
+            throw IOException("Invalid update policy for $id", error)
+        }
+    }
+
+    private fun writeInstallIntent(pending: PendingPluginUpdate) {
+        val intent = pending.intent
+        writePluginProperties(intents, "${intent.id}.properties", Properties().apply {
+            setProperty("from", intent.from.toString())
+            setProperty("to", intent.to.toString())
+            setProperty("token", intent.token)
+            setProperty("dataRestorable", intent.dataRestorable.toString())
+            setProperty("committed", pending.committed.toString())
+        })
+    }
 
     fun read(id: String): PluginUpdate? {
         checkId(id)
@@ -56,7 +158,10 @@ internal class PluginUpdates(
                 to = value("to").toLong(),
                 phase = UpdatePhase.valueOf(value("phase")),
                 startedAt = properties.getProperty("startedAt")?.toLong(),
-            )
+                dataRestorable = properties.getProperty("dataRestorable")?.toBooleanStrict() ?: true,
+            ).also {
+                require(it.from > 0 && it.to > it.from && (it.startedAt == null || it.startedAt >= 0))
+            }
         } catch (e: IllegalArgumentException) {
             throw IOException("Invalid update record for $id", e)
         }
@@ -70,6 +175,7 @@ internal class PluginUpdates(
      */
     fun recover(id: String, interrupted: Boolean, safeMode: Boolean, report: (String) -> Unit): Boolean {
         var update = read(id)
+        val pending = readInstallIntent(id) // Parse before any destructive recovery; corruption retains its owner.
         if (update != null && interrupted && update.phase == UpdatePhase.OBSERVING && update.startedAt == null) {
             update = update.copy(phase = UpdatePhase.ROLLBACK).also { write(id, it) }
         }
@@ -83,11 +189,20 @@ internal class PluginUpdates(
         // Never restore data again while waiting for the state write/acknowledgement.
         if (update?.phase == UpdatePhase.RECOVERED) return true
         val versions = store.versions(id)
-        val highest = versions.lastOrNull() ?: return false
+        val highest = versions.lastOrNull()
+        if (highest == null) {
+            clearInstallIntent(id)
+            return false
+        }
         when {
-            update == null -> if (versions.size > 1) activate(id, versions[versions.size - 2], highest, report)
-            highest > update.to -> activate(id, update.to, highest, report)
-            !safeMode && expired(update) -> finish(id, update)
+            update == null && versions.size > 1 -> activate(id, versions[versions.size - 2], highest, pending, report)
+            update != null && highest > update.to -> activate(id, update.to, highest, pending, report)
+            else -> {
+                // No pending upgrade, or replay after the update record was committed.
+                // Never let yesterday's confirmation authorize a later reinstall.
+                clearInstallIntent(id)
+                if (update != null && !safeMode && expired(update)) finish(id, update)
+            }
         }
         return false
     }
@@ -96,21 +211,28 @@ internal class PluginUpdates(
         update.startedAt != null && now() - update.startedAt >= UPDATE_OBSERVATION_MS
 
     /** 快照失败默认取消更新，留在旧版本。 */
-    private fun activate(id: String, from: Long, to: Long, report: (String) -> Unit) {
+    private fun activate(id: String, from: Long, to: Long, pending: PendingPluginUpdate?, report: (String) -> Unit) {
+        val codeOnly = pending?.let {
+            it.committed && !it.intent.dataRestorable && it.intent.from == from && it.intent.to == to
+        } == true
         try {
             store.verifyVersion(id, to)
-            snapshot(id, from)
+            if (!codeOnly) snapshot(id, from)
         } catch (error: Exception) {
             // Before any plugin loads, so only host and JDK exceptions reach this message.
             store.deleteVersion(id, to)
+            clearInstallIntent(id)
             report("$id: update to version $to cancelled: ${error.message}")
             return
         }
-        write(id, PluginUpdate(from, to))
+        // Persist mode before retiring intent/snapshots. Replay reads this record, never a
+        // leftover snapshot, even if cleanup or the process fails immediately afterwards.
+        write(id, PluginUpdate(from, to, dataRestorable = !codeOnly))
+        clearInstallIntent(id)
         // 观察期内又来了新版本：上一轮的旧包和快照到这里作废。
         store.versions(id).filter { it != from && it != to }.forEach { store.deleteVersion(id, it) }
         val dir = pluginPath(snapshots, id)
-        dir.list().orEmpty().filter { it != from.toString() }.forEach { deletePluginTree(dir, it) }
+        dir.list().orEmpty().filter { codeOnly || it != from.toString() }.forEach { deletePluginTree(dir, it) }
     }
 
     private fun snapshot(id: String, version: Long) {
@@ -127,12 +249,14 @@ internal class PluginUpdates(
 
     private fun rollback(id: String, update: PluginUpdate) {
         store.verifyVersion(id, update.from)
-        val snapshot = pluginPath(pluginPath(snapshots, id), update.from.toString())
-        // 恢复之后快照就不在了，重入时跳过这一步，不会删掉刚恢复的数据。
-        if (snapshot.exists()) {
-            deletePluginTree(data, id)
-            Files.createDirectories(data.toPath())
-            Files.move(snapshot.toPath(), pluginPath(data, id).toPath(), ATOMIC_MOVE)
+        if (update.dataRestorable) {
+            val snapshot = pluginPath(pluginPath(snapshots, id), update.from.toString())
+            // 恢复之后快照就不在了，重入时跳过这一步，不会删掉刚恢复的数据。
+            if (snapshot.exists()) {
+                deletePluginTree(data, id)
+                Files.createDirectories(data.toPath())
+                Files.move(snapshot.toPath(), pluginPath(data, id).toPath(), ATOMIC_MOVE)
+            }
         }
         store.versions(id).filter { it > update.from }.forEach { store.deleteVersion(id, it) }
     }
@@ -167,6 +291,9 @@ internal class PluginUpdates(
     private fun eligible(update: PluginUpdate?): Boolean =
         update?.phase == UpdatePhase.OBSERVING && !expired(update)
 
+    /** Read-only notice state, including the original first-success time and rollback mode. */
+    fun observation(id: String): PluginUpdate? = read(id)?.takeIf { it.phase == UpdatePhase.OBSERVING }
+
     fun canRollback(id: String): Boolean = eligible(read(id))
 
     fun requestRollback(id: String) {
@@ -180,6 +307,7 @@ internal class PluginUpdates(
     fun forget(id: String) {
         checkId(id)
         deletePluginTree(snapshots, id)
+        clearInstallIntent(id)
         Files.deleteIfExists(pluginPath(root, "$id.properties").toPath())
     }
 
@@ -188,6 +316,7 @@ internal class PluginUpdates(
             setProperty("from", update.from.toString())
             setProperty("to", update.to.toString())
             setProperty("phase", update.phase.name)
+            setProperty("dataRestorable", update.dataRestorable.toString())
             update.startedAt?.let { setProperty("startedAt", it.toString()) }
         })
     }

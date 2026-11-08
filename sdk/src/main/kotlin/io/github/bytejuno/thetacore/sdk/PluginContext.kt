@@ -16,6 +16,12 @@ interface PluginContext {
     /** 插件私有目录。 */
     val dataDir: File
 
+    /** 宿主管理的普通设置，与 dataDir 一同快照和回滚。 */
+    val prefs: PluginPrefs
+
+    /** 加密落盘的设置；完整信任同进程插件之间不构成保密边界。 */
+    val secrets: PluginSecrets
+
     fun register(extension: Extension): Registration
 
     /** 登记自己开的线程、广播接收器等。 */

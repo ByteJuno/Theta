@@ -76,7 +76,14 @@ internal class PluginDataCatalog(
     fun restore(onFailure: (String) -> Unit): List<SelectedPluginData> =
         restoreInventory(onFailure).mapNotNull { it.selection }
 
-    fun restoreInventory(onFailure: (String) -> Unit): List<PluginDataRecord> {
+    // Keep existing trailing-lambda callers source-compatible.
+    fun restoreInventory(onFailure: (String) -> Unit): List<PluginDataRecord> =
+        restoreInventory(onFailure, emptySet())
+
+    fun restoreInventory(
+        onFailure: (String) -> Unit,
+        crashSuspects: Set<String> = emptySet(),
+    ): List<PluginDataRecord> {
         try { store.recoverPublications() }
         catch (e: Exception) { onFailure("Data publication cleanup failed: ${e.message}") }
         // Lost stages have no consent and may never be adopted. There are no live stages at startup.
@@ -94,7 +101,7 @@ internal class PluginDataCatalog(
                         onFailure("$id: data uninstall pending: ${e.message}")
                     }
                 } else if (state.version > 0) {
-                    val record = managementRecord(id)
+                    val record = managementRecord(id, crashQuarantined = id in crashSuspects)
                     result += record
                     record.error?.let { onFailure("$id: data isolated: $it") }
                 }
@@ -103,11 +110,27 @@ internal class PluginDataCatalog(
         return result
     }
 
-    fun managementRecord(id: String): PluginDataRecord {
+    /** Crash quarantine consults lifecycle state only: never open the suspect archive.
+     * The caller owns explicit re-enable/validation and crash-journal acknowledgement.
+     */
+    fun managementRecord(id: String, crashQuarantined: Boolean = false): PluginDataRecord {
         requireNoCodeOwnership(files, id)
         val state = states.read(id) ?: throw PluginPackageException("No selected data record")
         dataRequire(state.version > 0 || state.pendingDelete, "No installed data selection")
-        if (state.pendingDelete) return PluginDataRecord(id, state, error = "Uninstall pending")
+        if (state.pendingDelete) return PluginDataRecord(id, state, error = "Uninstall pending",
+            crashQuarantined = crashQuarantined)
+        if (crashQuarantined) {
+            val disabled = state.copy(enabled = false)
+            try {
+                if (state.enabled) save(id, disabled)
+            } catch (e: Exception) {
+                // Preserve the actual durable intent for management, but never expose a page
+                // or an enable action while the quarantine write remains uncommitted.
+                return PluginDataRecord(id, state, error = "Crash quarantine disable failed: ${e.message}",
+                    crashQuarantined = true)
+            }
+            return PluginDataRecord(id, disabled, crashQuarantined = true)
+        }
         return try { PluginDataRecord(id, state, selected(id, state)) }
         catch (e: Exception) { PluginDataRecord(id, state, error = e.message ?: "Invalid data archive") }
     }

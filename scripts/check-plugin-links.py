@@ -13,6 +13,7 @@ NoSuchMethodError，只跑一遍页面发现不了。这里逐条比对插件 de
 
 给了 android.jar 时，其余找不到的类只作提示。可选依赖常有这种引用（比如 OkHttp 引用 Conscrypt）。
 """
+import json
 import struct
 import sys
 import zipfile
@@ -193,6 +194,13 @@ def main():
 
     bundled = sorted(name for name in plugin if is_shared(name))
     missing = set()
+    # Link references alone cannot prove a manifest entry was compiled into the APK.
+    # A variant with a wrong Kotlin source-set can otherwise pass without its plugin.
+    with zipfile.ZipFile(sys.argv[2]) as archive:
+        manifest = json.loads(archive.read("assets/theta-plugin.json"))
+    entry = manifest.get("entry")
+    if not isinstance(entry, str) or not entry or "L" + entry.replace(".", "/") + ";" not in plugin:
+        missing.add(f"manifest entry class {entry!r} (not defined in plugin dex)")
     unknown = set()
     checked = 0
 
