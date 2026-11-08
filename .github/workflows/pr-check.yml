@@ -3,7 +3,7 @@ name: PR Check
 on:
   pull_request:
   push:
-    branches: [main, feat/s1-local-acceptance-20261108]
+    branches: [main]
 
 permissions:
   contents: read

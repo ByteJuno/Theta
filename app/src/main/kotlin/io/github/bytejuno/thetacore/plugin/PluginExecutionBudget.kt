@@ -45,7 +45,10 @@ internal class PluginExecutionBudget(
     }
     private val active = mutableSetOf<Lease>()
     private var closed = false
-    private val cancellationPump = clock.scheduleWithFixedDelay({ pumpCancellation() }, 0, 5, TimeUnit.MILLISECONDS)
+    // Event-driven: a cancellation request or a finished delivery dispatches pending requests.
+    // Only a rejected dispatch (both threads busy or still unwinding) arms one short retry,
+    // so an idle process never polls.
+    private var retryArmed = false
 
     internal inner class Lease(
         val pluginId: String,
@@ -65,6 +68,7 @@ internal class PluginExecutionBudget(
                 if (this !in active || cancelRequested) return
                 cancelRequested = true
                 onCancel()
+                pumpCancellation()
             }
         }
     }
@@ -141,12 +145,27 @@ internal class PluginExecutionBudget(
                             lease.cancelRunning = false
                             lease.cancelDelivered = true
                             releaseIfFinished(lease)
+                            pumpCancellation()
                         }
                     }
                 }
             } catch (_: RejectedExecutionException) {
                 lease.cancelRunning = false // Retain pending request; bounded by active slots.
+                armRetry()
             }
+        }
+    }
+
+    private fun armRetry() {
+        if (retryArmed) return
+        try {
+            clock.schedule({
+                synchronized(lock) { retryArmed = false }
+                pumpCancellation()
+            }, 5, TimeUnit.MILLISECONDS)
+            retryArmed = true
+        } catch (_: RejectedExecutionException) {
+            // The clock stops only after every lease, including pending cancellations, released.
         }
     }
 
@@ -173,7 +192,6 @@ internal class PluginExecutionBudget(
 
     private fun finishShutdownIfEmpty() {
         if (closed && active.isEmpty()) {
-            cancellationPump.cancel(false)
             cancels.shutdown()
             clock.shutdown()
         }

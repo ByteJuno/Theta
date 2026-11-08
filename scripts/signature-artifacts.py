@@ -145,9 +145,12 @@ def verify_tool(path, toolchain, commands, valid):
     if valid:
         require(result.returncode == 0, f"apksigner rejected valid artifact: {path}")
         require(re.search(r"Verified using v2 scheme.*:\s*true", text), f"v2 signature required: {path}")
-        fingerprints = re.findall(r"^Signer #\d+ certificate SHA-256 digest:\s*([0-9a-fA-F]{64})\s*$", text, re.M)
+        require(re.search(r"^Number of signers: 1\s*$", text, re.M), f"Expected exactly one current signer: {path}")
+        # Build-tools 37 prints "V2 Signer:" (repeated per verified scheme); earlier ones "Signer #1".
+        fingerprints = {value.lower() for value in re.findall(
+            r"^(?:Signer #\d+|V\d+(?:\.\d+)? Signer:) certificate SHA-256 digest:\s*([0-9a-fA-F]{64})\s*$", text, re.M)}
         require(len(fingerprints) == 1, f"Expected exactly one current signer: {path}")
-        return fingerprints[0].lower()
+        return next(iter(fingerprints))
     require(result.returncode != 0 and "DOES NOT VERIFY" in text,
             f"Expected independent signature rejection (not a tool error): {path}")
     return None
