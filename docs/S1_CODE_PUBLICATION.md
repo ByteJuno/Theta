@@ -49,7 +49,7 @@ Debug Host/androidTest 构建通过；app JVM 412 项（411 通过、1 项既有
 
 `863b62f` 的 CI42639462940 又暴露 androidTest 资产的 lint 依赖缺失（配对任务仍通过）。单独增加 lint model 依赖的本地尝试也失败，因为 lint analysis 同样消费该目录，日志保留。最终 androidTest 资产改用类型化 `StageS1PublicationAssets`，通过 AGP deviceTest generated-assets API 注册，不逐个补任务名；仅为加载该构建任务类声明 convention plugin `apply false`，不将插件约定应用到 Host。随后与 CI 相同的完整任务图（全部 Debug/Release、androidTest、lint、单测）3,460 项任务成功、配置缓存保存成功；第二次 3,456 项任务成功并复用缓存。JVM 总计 604 项，603 通过、1 项既有 Windows 条件跳过、零失败。再次确认四个完整 APK 哈希均与实测冻结输入相同；这些构建跟进没有再次操作设备。
 
-审核指出 PR Check 默认上传 APK/R8 配置与注释不一致。本次新增 `workflow_dispatch`，依赖记录及物理测量输入上传仅在手动触发时执行；普通 PR/main CI 继续测量、仅上传原摘要白名单。PR 仍待审，不合并、不启用 auto-merge。
+审核指出 PR Check 默认上传 APK/R8 配置与注释不一致。本次新增 `workflow_dispatch`，依赖记录及物理测量输入上传仅在手动触发时执行；普通 PR/main CI 继续测量、仅上传原摘要白名单。
 
 复现入口（脚本仅接受同名专属 AVD 和 marker，会清空该专属模拟器的 Host 数据）：
 
