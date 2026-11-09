@@ -1,4 +1,4 @@
-# Theta Core 设计文档
+# Theta 设计文档
 
 草案 v0.3，2026-11-06。插件接口见 [PLUGIN_API.md](PLUGIN_API.md)，模型和工具调用的完整约定见 [PROTOCOL.md](PROTOCOL.md)。
 
@@ -6,7 +6,7 @@
 
 Eta 社区的 282 个 fork 里，有 55 个带自己的提交，大多在重复改同样的东西：模型提供商、厂商语音助手适配、通知、本地化。改任何功能都要 fork 再自己编译，而且上游的 31 个外部 PR 全部被关了。
 
-Theta Core 要解决这个问题：
+Theta 要解决这个问题：
 
 - 社区不用 fork，写个插件就能改功能。
 - 插件可以随时安装、卸载、更新。卸载时立即撤销宿主注册，彻底清理可能需要重启。
@@ -215,7 +215,7 @@ Theta 的安全模式只管 Theta 自己的进程。Hook 代码跑在目标进�
 | 2 崩溃循环检测 | 插件让目标 App 反复崩溃，包括 native 崩溃这类捕获不到的情况 | 模块入口在加载插件之前写启动计数，进程稳定运行一段时间后清零。短时间内连续崩溃 3 次，下次启动跳过这个插件 | 目标进程 |
 | 3 全局开关 | Theta 决定暂停某个或全部 Hook | Theta 通过 `XposedService` 写远程偏好，模块入口和 SDK 包装层读取 | Theta 能打开 |
 | 4 重启目标进程 | 让 Hook 代码真正退出 | 有 root 时执行 `am force-stop`，没有 root 时跳到 App 信息页由用户强停 | root 或用户操作 |
-| 5 框架外恢复 | Theta 打不开，或前面几层都挡不住 | 在 LSPosed 管理器里停用 Theta Core 模块或移除目标作用域。再不行就在 KernelSU、Magisk 里停用 LSPosed，或者用 adb 卸载 Theta Core | 框架或 adb |
+| 5 框架外恢复 | Theta 打不开，或前面几层都挡不住 | 在 LSPosed 管理器里停用 Theta 模块或移除目标作用域。再不行就在 KernelSU、Magisk 里停用 LSPosed，或者用 adb 卸载 Theta | 框架或 adb |
 
 **为什么第 2 层写目标 App 自己的目录**：libxposed 的远程偏好和远程文件在被 Hook 的进程里都是只读的，隔离状态写不进去。所以计数放在目标 App 的设备加密存储里，这样解锁前也能用，而且不需要 Theta 在运行。
 
@@ -249,7 +249,7 @@ Theta 的安全模式只管 Theta 自己的进程。Hook 代码跑在目标进�
 
 Hook 是厂商适配的主力，调研里相关改动有 28 个 fork、33 个 issue，也是最容易随系统升级失效的部分。
 
-**架构**：Theta Core 本身是 LSPosed 模块，框架在每个目标进程里创建一个模块实例。模块入口读取清单，把对应的 Hook 插件加载进目标进程。Hook 插件依赖完整的 Xposed 框架，不支持嵌入式框架，因为后者没有远程文件能力。
+**架构**：Theta 本身是 LSPosed 模块，框架在每个目标进程里创建一个模块实例。模块入口读取清单，把对应的 Hook 插件加载进目标进程。Hook 插件依赖完整的 Xposed 框架，不支持嵌入式框架，因为后者没有远程文件能力。
 
 **代码怎么进入目标进程**：目标进程读不了 Theta 的私有目录。Theta 通过 `XposedService` 的 `openRemoteFile` 把插件包写入模块共享目录，目标进程用 `XposedInterface` 的 `openRemoteFile` 只读打开，读进内存后用内存类加载器加载。共享目录的文件名不能带路径分隔符，所以用 `<插件ID>-<versionCode>.apk` 这样的平铺命名。这些接口在 libxposed 的源码里都有，但整条路径还没实测，放在 S1 验证。
 
@@ -267,7 +267,7 @@ Hook 是厂商适配的主力，调研里相关改动有 28 个 fork、33 个 is
 - SystemUI（`com.android.systemui`）、设置（`com.android.settings`）：出错可能让手机无法操作。
 - 当前桌面：出错可能让手机无法操作。各家 ROM 的包名不同，运行时查询默认桌面。
 - 电话：通话服务 `com.android.phone` 和默认拨号 App 都算，出错可能打不了电话。
-- LSPosed 管理器和 Theta Core 自己：出错会破坏第 7 节的恢复入口。
+- LSPosed 管理器和 Theta 自己：出错会破坏第 7 节的恢复入口。
 
 默认桌面和拨号 App 可能在安装之后改变，所以安装时和加载时都要检查。加载时命中受限目标的，这次不加载，并在“扩展”页面提示。
 
@@ -400,7 +400,7 @@ S1 的补充断言（并入现有项目，不新增里程碑）：
 
 2026-11-06 确认：
 
-1. App 显示名：开发期叫 “Theta Core”，和旧 Theta 区分。
+1. App 显示名：Theta（2026-11-09 确认）。仓库名 `theta-core` 和包名 `io.github.bytejuno.thetacore` 不变。
 2. minSdk 33。
 3. 第一版不开放第三方 Hook 关键进程（第 9 节的列表）。
 4. S1 按第 11 节保留的 A–K 范围及补充断言验收，B/C 使用明确批准的替代断言；其余门槛不减免（E 的调整见第 7 条），全部适用项通过才进 S2。

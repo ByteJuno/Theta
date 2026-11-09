@@ -81,6 +81,6 @@ fun HookDiagnosticsPanel() {
             context.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
                 Uri.parse("package:$HOOK_TARGET")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         }) { Text("Open target settings — force-stop, then relaunch") }
-        Text("If Theta cannot open: disable Theta Core or remove target scope in the framework manager, then force-stop target. Last resort: disable the framework in root manager or uninstall Theta Core with adb. Startup quarantine is target/version-local; clearing target data resets it.")
+        Text("If Theta cannot open: disable Theta or remove target scope in the framework manager, then force-stop target. Last resort: disable the framework in root manager or uninstall Theta with adb. Startup quarantine is target/version-local; clearing target data resets it.")
     }
 }
