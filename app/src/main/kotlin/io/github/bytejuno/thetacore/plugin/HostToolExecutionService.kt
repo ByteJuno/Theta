@@ -41,14 +41,17 @@ internal class HostToolExecutionService(
     suspend fun decide(callId: String, requestId: String, decision: Decision): Mutation = withContext(Dispatchers.IO) {
         gate.withGate {
             if (storageFailed) return@withGate Mutation.Blocked("Storage failed; submissions closed")
-            val request = ledger.get(callId)?.pending
+            val record = ledger.get(callId) ?: return@withGate Mutation.Conflict("Unknown call")
+            val request = record.pending
             if (request == null || request.id != requestId) Mutation.Conflict("Approval is not current")
+            else if (catalog.frozen(record.input.runId) == null) Mutation.Blocked("Run catalog not frozen")
             else observe(ledger.resolveApproval(callId, request, decision))
         }
     }
     suspend fun prepare(input: InvocationInput): Mutation = withContext(Dispatchers.IO) {
         gate.withGate {
             if (storageFailed) return@withGate Mutation.Blocked("Storage failed; submissions closed")
+            if (catalog.frozen(input.runId) == null) return@withGate Mutation.Blocked("Run catalog not frozen")
             val registered = observe(ledger.recordInvocation(input))
             if (registered !is Mutation.Applied && registered !is Mutation.AlreadyApplied) registered
             else observe(ledger.validateAndPrepare(input.binding.callId))
@@ -61,7 +64,10 @@ internal class HostToolExecutionService(
             if (storageFailed) return@withGate Mutation.Blocked("Storage failed; submissions closed")
             val existing = ledger.get(callId) ?: return@withGate Mutation.Conflict("Unknown call")
             if (existing.state != Status.READY) return@withGate Mutation.Conflict("Not READY")
-            // Persist stale READY calls as REJECTED even when the catalog entry was removed.
+            // Missing process-local run metadata is not evidence of a stale definition. Do not
+            // reconstruct aliases from durable records; a trusted caller must explicitly freeze.
+            if (catalog.frozen(existing.input.runId) == null) return@withGate Mutation.Blocked("Run catalog not frozen")
+            // With a known run directory, persist genuinely stale READY calls as REJECTED.
             val checked = observe(ledger.validateAndPrepare(callId))
             val record = when (checked) {
                 is Mutation.Applied -> checked.record

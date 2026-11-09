@@ -70,6 +70,32 @@ class HostToolExecutionServiceTest {
         assertTrue(f.service.decide(id, pending.id, Decision.ALLOW_ONCE) is Mutation.Applied)
     }
 
+    @Test fun approvalAfterRestartRequiresExplicitRunDirectoryWithoutMutation() = runBlocking {
+        Fixture().use { f ->
+            val write = tool(risk = ToolRisk.WRITE) { ToolResult(text = "write") }
+            val definition = f.register(write)
+            val pending = (f.service.prepare(f.input(definition)) as Mutation.Applied).record
+            assertNotNull(pending.pending)
+            val coldGate = DefinitionGate()
+            val coldCatalog = FrozenToolCatalog(coldGate, f.budget, f.owner, f.validator)
+            // Reopen the durable content under a fresh process coordinator/catalog.
+            val coldStore = MemoryStore().also { it.data.putAll(f.store.data) }
+            val coldLedger = InvocationLedger(coldStore, coldGate, f.validator)
+            coldLedger.recoverColdStart(UUID.randomUUID().toString())
+            coldCatalog.registerHost("host/test", "1", write)
+            val cold = HostToolExecutionService(f.budget, f.owner, coldCatalog, coldLedger, f.validator)
+            for (decision in Decision.entries) {
+                assertTrue(cold.decide(pending.callId, pending.pending!!.id, decision) is Mutation.Blocked)
+                assertEquals(pending, coldLedger.get(pending.callId))
+            }
+            assertTrue(cold.prepare(pending.input) is Mutation.Blocked)
+            assertEquals(pending, coldLedger.get(pending.callId))
+            coldCatalog.freeze("run")
+            val approved = cold.decide(pending.callId, pending.pending!!.id, Decision.ALLOW_ONCE) as Mutation.Applied
+            assertEquals(Status.READY, approved.record.state)
+        }
+    }
+
     @Test fun collidingModelNamesDispatchToDistinctToolsInFrozenOrder() = runBlocking {
         Fixture().use { f ->
             val keys = listOf("host/a/b", "host/a_b", "host/" + "long.name".repeat(15))
@@ -1144,7 +1170,7 @@ class HostToolExecutionServiceTest {
         var store: JsonInvocationStore? = null
         try {
             store = JsonInvocationStore.create(dir, Durability.PROCESS_CRASH_ONLY)
-            val service = HostToolBridgeRoot(budget).initialize(store)
+            val service = HostToolBridgeRoot(budget).initialize { checkNotNull(store) }
             val d = service.catalog.freeze("run").values.single()
             val reducer = ModelEventReducer("recorded", "disk")
             listOf(Events.started("response", "no-api"), Events.toolStart(0, "wire", d.modelName),
@@ -1241,14 +1267,13 @@ class HostToolExecutionServiceTest {
         }
     }
 
-    @Test fun rootReusesCoordinatorAndRejectsNewWriterInSameProcess() = runBlocking {
+    @Test fun rootReusesCoordinatorWithoutOpeningAnotherWriterInSameProcess() = runBlocking {
         val budget = PluginExecutionBudget()
         try {
             val root = HostToolBridgeRoot(budget)
             val store = MemoryStore()
-            assertSame(root.initialize(store), root.initialize(store))
-            try { root.initialize(MemoryStore()); fail("must not cold recover a new writer") }
-            catch (_: IllegalStateException) {}
+            val service = root.initialize { store }
+            assertSame(service, root.initialize { error("must not open or cold recover a new writer") })
         } finally { budget.close() }
     }
 }
