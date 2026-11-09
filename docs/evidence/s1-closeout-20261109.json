@@ -1,0 +1,650 @@
+{
+  "status": "FROZEN_CANDIDATE_HOOK_PHYSICAL_CASES_PASSED_CI_PAIR_MEASURED",
+  "whole_S1_acceptance_claimed": false,
+  "host_build_source": "09f233da7d30f369cb8a5cca14d053747ceab4bb",
+  "device": {
+    "model": "PLK110",
+    "android_api": 37,
+    "resolution": [
+      1272,
+      2772
+    ],
+    "density_dpi": 560
+  },
+  "installed_candidates": {
+    "io.github.bytejuno.thetacore": "bafeae5ddf2cd1073afba0538c9496b65f14f1512870b13d20e4337bb341d6ed",
+    "io.github.bytejuno.thetacore.sample.hooktarget": "4da24b1790c3b76a1086e9573960dfbbad20cac983ef435ed8e1436d378c11ad"
+  },
+  "normal_fixture_sha256": "673934a00f1be3e96f0f958ebeb9edb778a350d54aca416b9fb76bb6689f30ef",
+  "fault_fixture_signer_sha256": "396eb8e48584e743f151c41c5a490793a5c84d2be8b2bebd7062b6e2edd8946a",
+  "crash_fixture_sha256": "038c4897707ac259ddd26ab1fc289279ed299a950f8b4d6f2c7553355bd8e75a",
+  "recovery_fixture_sha256": "fb56c28ec84ff76e6819193bbd5bb3aec5e0aabad804539cafab946277d66773",
+  "cases": [
+    {
+      "id": "bootstrap-rejection-and-connection",
+      "result": "PASS_IN_DEDICATED_SAMPLE_SCOPE",
+      "assertion": "three SecurityException results, fake Binder transactions 0, legitimate connection retained",
+      "evidence": [
+        "04-bootstrap-rejection-full-result.png",
+        "03-host-after-untrusted-probe.png"
+      ]
+    },
+    {
+      "id": "document-picker",
+      "result": "PASS_IN_DEDICATED_SAMPLE_SCOPE",
+      "assertion": "normal fixture reviewed with target and signer",
+      "evidence": [
+        "23-normal-fixture-reviewed.png"
+      ]
+    },
+    {
+      "id": "scope-timeout",
+      "result": "PASS_IN_DEDICATED_SAMPLE_SCOPE",
+      "assertion": "60000ms timeout; cold Target ORIGINAL, PID19274",
+      "evidence": [
+        "26-request-status.png",
+        "27-timeout-after-deadline.png",
+        "29-timeout-target-fixed-capture.png"
+      ]
+    },
+    {
+      "id": "timeout-late-allow",
+      "result": "PASS_IN_DEDICATED_SAMPLE_SCOPE",
+      "assertion": "real notification Allow; host stays timed out, cold Target ORIGINAL PID25697",
+      "evidence": [
+        "32-timeout-late-allow.png",
+        "33-late-allow-host.png",
+        "34-late-allow-target.png"
+      ]
+    },
+    {
+      "id": "reject",
+      "result": "PASS_IN_DEDICATED_SAMPLE_SCOPE",
+      "assertion": "real Reject; not approved; cold Target ORIGINAL PID12624",
+      "evidence": [
+        "61-real-reject.png",
+        "62-rejected-host.png",
+        "63-reject-cold-original.png"
+      ]
+    },
+    {
+      "id": "dismiss",
+      "result": "PASS_IN_DEDICATED_SAMPLE_SCOPE",
+      "assertion": "real swipe dismissal before deadline; not approved; cold Target ORIGINAL PID16553",
+      "evidence": [
+        "66-real-dismiss.png",
+        "67-dismissed-host.png",
+        "68-dismiss-cold-original.png"
+      ]
+    },
+    {
+      "id": "positive-allow",
+      "result": "PASS_IN_DEDICATED_SAMPLE_SCOPE",
+      "assertion": "real Allow publishes new payload; cold Target HOOKED(ORIGINAL) PID18262",
+      "evidence": [
+        "71-real-positive-allow.png",
+        "72-positive-published.png",
+        "73-positive-cold-hooked.png"
+      ]
+    },
+    {
+      "id": "same-process-disable",
+      "result": "PASS_IN_DEDICATED_SAMPLE_SCOPE",
+      "assertion": "explicit Read changes HOOKED to ORIGINAL with PID18262 unchanged",
+      "evidence": [
+        "74-disable-same-pid.png",
+        "76-read-after-disable.png",
+        "77-same-pid-original.png"
+      ]
+    },
+    {
+      "id": "scope-reuse",
+      "result": "PASS_IN_DEDICATED_SAMPLE_SCOPE",
+      "assertion": "new payload without new scope notification; cold Target HOOKED PID20821",
+      "evidence": [
+        "79-scope-reuse-published.png",
+        "80-scope-reuse-hooked.png"
+      ]
+    },
+    {
+      "id": "pending-disable-late-allow",
+      "result": "PASS_IN_DEDICATED_SAMPLE_SCOPE",
+      "assertion": "superseded action after real Allow; no republish; cold Target ORIGINAL PID28130",
+      "evidence": [
+        "88-pending-disable.png",
+        "90-pending-late-allow.png",
+        "91-pending-disabled-after-allow.png",
+        "92-pending-disabled-original.png"
+      ]
+    },
+    {
+      "id": "activity-disposal-late-allow",
+      "result": "PASS_IN_DEDICATED_SAMPLE_SCOPE",
+      "assertion": "old task34872 disposed, new task34885; composition cancellation, no republish; cold Target ORIGINAL PID2952",
+      "evidence": [
+        "99-disposal-late-allow.png",
+        "100-disposed-after-allow.png",
+        "101-disposed-late-original.png"
+      ]
+    },
+    {
+      "id": "crash-quarantine",
+      "result": "PASS_IN_DEDICATED_SAMPLE_SCOPE",
+      "assertion": "three natural crashes/count1,2,3; fourth PID8678 survives35.38s/count3 and ORIGINAL",
+      "evidence": [
+        "107-fourth-quarantined-original.png"
+      ]
+    },
+    {
+      "id": "same-signer-version-recovery",
+      "result": "PASS_IN_DEDICATED_SAMPLE_SCOPE",
+      "assertion": "v4 PID11481 RECOVERY_HOOKED after >46s, v4 count0 while v3 remains3",
+      "evidence": [
+        "111-recovery-review.png",
+        "113-recovery-hooked.png"
+      ]
+    },
+    {
+      "id": "host-unavailable-manager-rescue",
+      "result": "PASS_IN_DEDICATED_SAMPLE_SCOPE",
+      "assertion": "Host remains absent; normal manager UI revokes only Target scope; cold Target PID14730 ORIGINAL",
+      "evidence": [
+        "114-host-unavailable-rescue-before.png",
+        "114-host-unavailable-rescue-after.png",
+        "115-host-unavailable-original.png"
+      ]
+    },
+    {
+      "id": "final-restoration",
+      "result": "PASS_IN_DEDICATED_SAMPLE_SCOPE",
+      "assertion": "frozen Host restored; global Hook disabled; module on, Target scope off; cold PID31531 ORIGINAL",
+      "evidence": [
+        "118-restored-candidate-host.png",
+        "121-final-module-and-scope.png",
+        "122-final-cold-original.png"
+      ]
+    }
+  ],
+  "crash_observations": {
+    "status": "QUARANTINE_PROCESS_AND_JOURNAL_PASSED_UI_PENDING",
+    "attempts": [
+      {
+        "attempt": 1,
+        "initial_pid": "7841",
+        "remaining_pid": "",
+        "new_exception_lines": [
+          "E/AndroidRuntime( 7841): java.lang.RuntimeException: THETA_S1_DEDICATED_TARGET_CRASH"
+        ],
+        "journal_count": "1",
+        "launch": "Starting: Intent { cmp=io.github.bytejuno.thetacore.sample.hooktarget/.TargetActivity }\r\nStatus: ok\r\nLaunchState: COLD\r\nActivity: io.github.bytejuno.thetacore.sample.hooktarget/.TargetActivity\r\nTotalTime: 232\r\nWaitTime: 235\r\nComplete"
+      },
+      {
+        "attempt": 2,
+        "initial_pid": "8350 8327",
+        "remaining_pid": "",
+        "new_exception_lines": [
+          "E/AndroidRuntime( 8327): java.lang.RuntimeException: THETA_S1_DEDICATED_TARGET_CRASH"
+        ],
+        "journal_count": "2",
+        "launch": "Starting: Intent { cmp=io.github.bytejuno.thetacore.sample.hooktarget/.TargetActivity }\r\nStatus: ok\r\nLaunchState: COLD\r\nActivity: io.github.bytejuno.thetacore.sample.hooktarget/.TargetActivity\r\nTotalTime: 212\r\nWaitTime: 216\r\nComplete"
+      },
+      {
+        "attempt": 3,
+        "initial_pid": "8545",
+        "remaining_pid": "",
+        "new_exception_lines": [
+          "E/AndroidRuntime( 8545): java.lang.RuntimeException: THETA_S1_DEDICATED_TARGET_CRASH"
+        ],
+        "journal_count": "3",
+        "launch": "Starting: Intent { cmp=io.github.bytejuno.thetacore.sample.hooktarget/.TargetActivity }\r\nStatus: ok\r\nLaunchState: COLD\r\nActivity: io.github.bytejuno.thetacore.sample.hooktarget/.TargetActivity\r\nTotalTime: 217\r\nWaitTime: 221\r\nComplete"
+      }
+    ],
+    "host_sha256": "bafeae5ddf2cd1073afba0538c9496b65f14f1512870b13d20e4337bb341d6ed",
+    "crash_fixture_sha256": "038c4897707ac259ddd26ab1fc289279ed299a950f8b4d6f2c7553355bd8e75a",
+    "published_payload": "038c4897707ac259ddd26ab1fc289279ed299a950f8b4d6f2c7553355bd8e75a  /data/adb/lspd/modules/0/io.github.bytejuno.thetacore/files/theta-hook-4f0f3fe8-1466-4046-a1db-fa737f0c671a.apk",
+    "journal": "/data/user_de/0/io.github.bytejuno.thetacore.sample.hooktarget/files/theta-hook-s1/36d2747f3e772b31043baf748859b837b9ddb31c8ae839c6f596c2c093c5221f.state",
+    "fourth_pid": "8678",
+    "stable_seconds": 35.38,
+    "final_journal_count": "3",
+    "fourth_exception_lines": []
+  },
+  "crash_command_log_sha256": "943ce079e03b662265c3b76935d3ea053e28fb832e13573b54500f2f4f80ac35",
+  "crash_ui_completion_evidence": "107-fourth-quarantined-original.png",
+  "recovery_observations": {
+    "utc": "2026-11-09T12:42:32.047731+00:00",
+    "pid": "11481",
+    "journal_counts": {
+      "3": "3",
+      "4": "0"
+    },
+    "published": "fb56c28ec84ff76e6819193bbd5bb3aec5e0aabad804539cafab946277d66773  /data/adb/lspd/modules/0/io.github.bytejuno.thetacore/files/theta-hook-33ce5552-6b82-4284-909f-506c436fa616.apk",
+    "cold_started_utc": "2026-11-09T12:41:45.808980+00:00"
+  },
+  "host_unavailable_observations": {
+    "utc": "2026-11-09T12:44:50.968997+00:00",
+    "host_pid": "",
+    "target_pid": "14730",
+    "scope_evidence": "114-host-unavailable-rescue-after.png",
+    "target_original_evidence": "115-host-unavailable-original.png"
+  },
+  "local_image_evidence": {
+    "04-bootstrap-rejection-full-result.png": {
+      "sha256": "8b2b6d84bfbe63d6e6998f1b386bc80189a99d2d274ba88c57c168cc93c42a07",
+      "bytes": 115687
+    },
+    "03-host-after-untrusted-probe.png": {
+      "sha256": "505d2adc7748a45203c90325b96951bbff8f65a1c65357d3b213ff5ff9a56204",
+      "bytes": 205196
+    },
+    "23-normal-fixture-reviewed.png": {
+      "sha256": "2357ad60df50d76b3c614d06b6fc3b2a80bb45ed945c01e2b47270f1b6c4e742",
+      "bytes": 1812543
+    },
+    "26-request-status.png": {
+      "sha256": "a4fe188e55cc41acf3d15e12fbbd5d20d7a53a9191e98477515f74b7fd289dd0",
+      "bytes": 1203208
+    },
+    "27-timeout-after-deadline.png": {
+      "sha256": "6a11fb52ec312f8b16afa48099bf4b2345365ae4376c787e93e39003af53d6cd",
+      "bytes": 1315508
+    },
+    "29-timeout-target-fixed-capture.png": {
+      "sha256": "f6391685b5805a2b6e60044fabcc5ad9590380376fd3327d32f795fa9d76760d",
+      "bytes": 91579
+    },
+    "32-timeout-late-allow.png": {
+      "sha256": "48c7ec250b2ea79d7ed27f973ff007fa88e6652b058268d825d8fe2ca910185b",
+      "bytes": 351042
+    },
+    "33-late-allow-host.png": {
+      "sha256": "32bc3eabdcf7078b199f20398f6067a5d648fa34a1119378d19dcc64e15b6f32",
+      "bytes": 1271440
+    },
+    "34-late-allow-target.png": {
+      "sha256": "14c0a47f6526495857a96840851d5a88e1ff13e16633731105e94090ebdccd7a",
+      "bytes": 142649
+    },
+    "61-real-reject.png": {
+      "sha256": "6caf1bcb3160c2c332cf99b0889bcff394c6ea556b7b684957becfa6320883fb",
+      "bytes": 341784
+    },
+    "62-rejected-host.png": {
+      "sha256": "edadd61d721b736a0634612f363bef587d4798321c5fbf1a85a6f047c71a3b74",
+      "bytes": 1355507
+    },
+    "63-reject-cold-original.png": {
+      "sha256": "4e72d240dc66237b5b4ea4643b85007f21f506c8d8ec9309dd0a9140f741588c",
+      "bytes": 140521
+    },
+    "66-real-dismiss.png": {
+      "sha256": "0892aaf2e8014aadcd64ac2d4802e5eeef46841c71818422b9629aff2bdaa927",
+      "bytes": 359977
+    },
+    "67-dismissed-host.png": {
+      "sha256": "a16e7d2b1b68870f1117141c46b8ad70e4d0efe6b52255552bd79a718f180727",
+      "bytes": 1360631
+    },
+    "68-dismiss-cold-original.png": {
+      "sha256": "42758f6529f91d53c2be046f7972867e5f5b10865b3bb5f100b87b77f5922f05",
+      "bytes": 144473
+    },
+    "71-real-positive-allow.png": {
+      "sha256": "a79a1e1161d9e7b92aaa55ea0cb8f323171f3d31baa7cbc640d97349ab86898f",
+      "bytes": 340430
+    },
+    "72-positive-published.png": {
+      "sha256": "b015fff02f653d17c76fcf694c07bd909524c9742d3a7a5b39cd973ff1bd07d4",
+      "bytes": 1367881
+    },
+    "73-positive-cold-hooked.png": {
+      "sha256": "4411da256dc86fa831c24d80b0e13c96cc268e7b238fa446e103243716755035",
+      "bytes": 156865
+    },
+    "74-disable-same-pid.png": {
+      "sha256": "59082ccc191b1fd6af7a3b33ae48556672171588f8746011843babfed457fcd3",
+      "bytes": 73984
+    },
+    "76-read-after-disable.png": {
+      "sha256": "2784282b338313a4669a372b4a911331b59be5fd3dbaa0144f035a09d7a164c9",
+      "bytes": 56472
+    },
+    "77-same-pid-original.png": {
+      "sha256": "9b4eeca84e421243b206638ee6e556272f3c6c57a822aa24d90b6f2aa53d714f",
+      "bytes": 142675
+    },
+    "79-scope-reuse-published.png": {
+      "sha256": "dd8340928c747b7acc7a64de61f5f049dd19f7b4af4688089ebd9f6be3b2f050",
+      "bytes": 1365317
+    },
+    "80-scope-reuse-hooked.png": {
+      "sha256": "d70af2ee3a9688430267905ba8b7c2c30d2b5f2914e1fe435d27a576044481e3",
+      "bytes": 157922
+    },
+    "88-pending-disable.png": {
+      "sha256": "59082ccc191b1fd6af7a3b33ae48556672171588f8746011843babfed457fcd3",
+      "bytes": 73984
+    },
+    "90-pending-late-allow.png": {
+      "sha256": "6a9674e09bdf226fc75a44732e93d37b0b805a21cb276142c7b7ccf4d3a384c9",
+      "bytes": 343473
+    },
+    "91-pending-disabled-after-allow.png": {
+      "sha256": "d79ab4b5c4b5223d491a0aa4cffd46c6b606c5e7e0636862769042d7cfa787a3",
+      "bytes": 1379059
+    },
+    "92-pending-disabled-original.png": {
+      "sha256": "899bd72b4b172142fef29a9b94aa91fb49a22be475f8910a5fca16accb501e99",
+      "bytes": 139139
+    },
+    "99-disposal-late-allow.png": {
+      "sha256": "6ec0115502c637b0acc68eab1b3ef7336df9796a37a41ed1bf45bf098f6d966b",
+      "bytes": 346741
+    },
+    "100-disposed-after-allow.png": {
+      "sha256": "761441f240af4cf1b25d751b28eba97401ae1774a7ac0fa8575bd3be12d8d76a",
+      "bytes": 1244124
+    },
+    "101-disposed-late-original.png": {
+      "sha256": "faaba594fc1940f034426199db666a057a8c1a90e12fa41dbc455a3442c1a388",
+      "bytes": 141276
+    },
+    "107-fourth-quarantined-original.png": {
+      "sha256": "39416920dac63ebfe9177d991654f567fbb6adda79ab64b7a23079dad5388d30",
+      "bytes": 138567
+    },
+    "111-recovery-review.png": {
+      "sha256": "ea5b113435670b5168003730f6b7f218802b15a533602e7f825864a409533a2a",
+      "bytes": 1798292
+    },
+    "113-recovery-hooked.png": {
+      "sha256": "0386fb88b24d0af9f677ed6a63b3cd9f7651661b87893470cdafbfd5d32f1901",
+      "bytes": 167749
+    },
+    "114-host-unavailable-rescue-before.png": {
+      "sha256": "752fffaa99d5dea3dcfc74175dda90ff5c7ff2f373774d76bf1d796e3126b701",
+      "bytes": 150221
+    },
+    "114-host-unavailable-rescue-after.png": {
+      "sha256": "93c5dd75d351783d381f986e2b7e21f7cbee768d67ff7651ebae397792c1675e",
+      "bytes": 131174
+    },
+    "115-host-unavailable-original.png": {
+      "sha256": "52a64f142fa5f7a7f9cb4eada2fbc998082844d9c6bdaab86729092465f09aaa",
+      "bytes": 140887
+    },
+    "118-restored-candidate-host.png": {
+      "sha256": "6878b76ca88a32d81d612a4f899efa65781f8f2b2da24da9c2a50dc248094873",
+      "bytes": 1238404
+    },
+    "121-final-module-and-scope.png": {
+      "sha256": "3fbbee5492827b25cee4530708b3b618f44fbb163105166fff4e147d01e65f14",
+      "bytes": 439620
+    },
+    "122-final-cold-original.png": {
+      "sha256": "cf0877146b0c3328c384016a1b71d75c821d6fcf31e570385bb45880983e6505",
+      "bytes": 140503
+    }
+  },
+  "physical_performance": {
+    "ci_input_verification": {
+      "ci_run": 42599041866,
+      "ci_head": "09f233da7d30f369cb8a5cca14d053747ceab4bb",
+      "artifact_id": 13664838517,
+      "input_differences": [
+        "app/proguard-rules.pro"
+      ],
+      "effective_config_only_seven_shared_keeps_differ": true,
+      "runtime_dependencies_match": true,
+      "artifacts": {
+        "production": {
+          "ci_apk_sha256": "9445892ab875884ebc458608951f8d85ff98e0ac9ea313cdfb261f25acedfcb3",
+          "bytes": 14084636,
+          "raw_r8_sha256": "45796c20c223065760e3b88d876f22f9d5672c2b0f4d74288f889fc92e4f9ca2",
+          "normalized_r8_without_shared_keeps_sha256": "36d206460a559d59b582dbd24856ddd11123d04ed4172c4f4ff3bbb8ce7d7a84",
+          "resolved_runtime_tree_sha256": "c83621a0617589223d0f6e00dd1030d13b8b7c5a5a2a1e0ed3abb6e3f7f1dfd6"
+        },
+        "comparison": {
+          "ci_apk_sha256": "e89ad252a508bebaa7691a578d438b9f9deb9273af329c28c44b165c898dae30",
+          "bytes": 2637108,
+          "raw_r8_sha256": "4ea86fdb836d22736faba0b8d0150baf43d83fcadd474f3f8c18aa3a5d5134a8",
+          "normalized_r8_without_shared_keeps_sha256": "36d206460a559d59b582dbd24856ddd11123d04ed4172c4f4ff3bbb8ce7d7a84",
+          "resolved_runtime_tree_sha256": "c83621a0617589223d0f6e00dd1030d13b8b7c5a5a2a1e0ed3abb6e3f7f1dfd6"
+        }
+      }
+    },
+    "test_signing_transformation": {
+      "production": {
+        "ci_original_sha256": "9445892ab875884ebc458608951f8d85ff98e0ac9ea313cdfb261f25acedfcb3",
+        "local_test_signed_sha256": "caf7ce1688147a13d816de02b0d28f0af01b628fc208011bb7570aab40ef0dc9",
+        "bytes": 14084564,
+        "signer_sha256": "0a03e9518759eb79fcb57b6264010ed1eff1193d5eea23facfbc75378b2ddf6b",
+        "non_signature_zip_entries_unchanged": true,
+        "entry_count_checked": 174
+      },
+      "comparison": {
+        "ci_original_sha256": "e89ad252a508bebaa7691a578d438b9f9deb9273af329c28c44b165c898dae30",
+        "local_test_signed_sha256": "7a243e073dfccd3eb1be2017730852022535515e9cb947bcc1c88d6371ca3f20",
+        "bytes": 2633320,
+        "signer_sha256": "0a03e9518759eb79fcb57b6264010ed1eff1193d5eea23facfbc75378b2ddf6b",
+        "non_signature_zip_entries_unchanged": true,
+        "entry_count_checked": 141
+      }
+    },
+    "metric": "Flags==0; FrameCompleted minus IntendedVsync; ring-buffer samples, not all display presentations",
+    "scenario": "cold empty host home, two warm-up drags, six alternating 800ms vertical drags, gfxinfo reset per drag, 1000ms settle, ABBA",
+    "panel_mode": "120Hz before and after each run; physical display0; not a virtual display",
+    "before": {
+      "utc": "2026-11-09T12:46:51.656123+00:00",
+      "mode": "Active mode for display 0:\r\n  Mode ID: 1, Resolution: 1272x2772, Refresh Rate: 120.00 Hz",
+      "brightness": "1423.0",
+      "battery": "status: 3\r\n  level: 82\r\n  temperature: 207\r\n  Capacity level: 3",
+      "thermal_status": "Thermal Status: 0"
+    },
+    "after": {
+      "utc": "2026-11-09T12:48:39.017083+00:00",
+      "mode": "Active mode for display 0:\r\n  Mode ID: 1, Resolution: 1272x2772, Refresh Rate: 120.00 Hz",
+      "brightness": "1423.0",
+      "battery": "status: 3\r\n  level: 82\r\n  temperature: 212\r\n  Capacity level: 3",
+      "thermal_status": "Thermal Status: 0"
+    },
+    "runs": [
+      {
+        "order": 1,
+        "variant": "production",
+        "installed_sha256": "caf7ce1688147a13d816de02b0d28f0af01b628fc208011bb7570aab40ef0dc9",
+        "summary": {
+          "n": 720,
+          "mean_ms": 3.9259575930555557,
+          "p50_ms": 3.917278,
+          "p90_ms": 4.746807400000001,
+          "p95_ms": 5.0892807,
+          "p99_ms": 6.316777159999994,
+          "max_ms": 7.459953,
+          "deadline_misses": 0
+        },
+        "before": {
+          "utc": "2026-11-09T12:47:09.521807+00:00",
+          "mode": "Active mode for display 0:\r\n  Mode ID: 1, Resolution: 1272x2772, Refresh Rate: 120.00 Hz",
+          "brightness": "1423.0",
+          "battery": "status: 3\r\n  level: 82\r\n  temperature: 207\r\n  Capacity level: 3",
+          "thermal_status": "Thermal Status: 0"
+        },
+        "after": {
+          "utc": "2026-11-09T12:47:26.193118+00:00",
+          "mode": "Active mode for display 0:\r\n  Mode ID: 1, Resolution: 1272x2772, Refresh Rate: 120.00 Hz",
+          "brightness": "1423.0",
+          "battery": "status: 3\r\n  level: 82\r\n  temperature: 207\r\n  Capacity level: 3",
+          "thermal_status": "Thermal Status: 0"
+        }
+      },
+      {
+        "order": 2,
+        "variant": "comparison",
+        "installed_sha256": "7a243e073dfccd3eb1be2017730852022535515e9cb947bcc1c88d6371ca3f20",
+        "summary": {
+          "n": 720,
+          "mean_ms": 3.651163344444444,
+          "p50_ms": 3.651032,
+          "p90_ms": 4.2266079,
+          "p95_ms": 4.3964418499999995,
+          "p99_ms": 5.150991429999996,
+          "max_ms": 6.849533,
+          "deadline_misses": 0
+        },
+        "before": {
+          "utc": "2026-11-09T12:47:32.614653+00:00",
+          "mode": "Active mode for display 0:\r\n  Mode ID: 1, Resolution: 1272x2772, Refresh Rate: 120.00 Hz",
+          "brightness": "1423.0",
+          "battery": "status: 3\r\n  level: 82\r\n  temperature: 207\r\n  Capacity level: 3",
+          "thermal_status": "Thermal Status: 0"
+        },
+        "after": {
+          "utc": "2026-11-09T12:47:49.536110+00:00",
+          "mode": "Active mode for display 0:\r\n  Mode ID: 1, Resolution: 1272x2772, Refresh Rate: 120.00 Hz",
+          "brightness": "1423.0",
+          "battery": "status: 3\r\n  level: 82\r\n  temperature: 209\r\n  Capacity level: 3",
+          "thermal_status": "Thermal Status: 0"
+        }
+      },
+      {
+        "order": 3,
+        "variant": "comparison",
+        "installed_sha256": "7a243e073dfccd3eb1be2017730852022535515e9cb947bcc1c88d6371ca3f20",
+        "summary": {
+          "n": 720,
+          "mean_ms": 3.8994537152777777,
+          "p50_ms": 3.857929,
+          "p90_ms": 4.563492,
+          "p95_ms": 4.883127999999999,
+          "p99_ms": 6.502983459999999,
+          "max_ms": 6.923915,
+          "deadline_misses": 0
+        },
+        "before": {
+          "utc": "2026-11-09T12:47:55.784788+00:00",
+          "mode": "Active mode for display 0:\r\n  Mode ID: 1, Resolution: 1272x2772, Refresh Rate: 120.00 Hz",
+          "brightness": "1423.0",
+          "battery": "status: 3\r\n  level: 82\r\n  temperature: 209\r\n  Capacity level: 3",
+          "thermal_status": "Thermal Status: 0"
+        },
+        "after": {
+          "utc": "2026-11-09T12:48:12.401162+00:00",
+          "mode": "Active mode for display 0:\r\n  Mode ID: 1, Resolution: 1272x2772, Refresh Rate: 120.00 Hz",
+          "brightness": "1423.0",
+          "battery": "status: 3\r\n  level: 82\r\n  temperature: 209\r\n  Capacity level: 3",
+          "thermal_status": "Thermal Status: 0"
+        }
+      },
+      {
+        "order": 4,
+        "variant": "production",
+        "installed_sha256": "caf7ce1688147a13d816de02b0d28f0af01b628fc208011bb7570aab40ef0dc9",
+        "summary": {
+          "n": 720,
+          "mean_ms": 3.8020407333333335,
+          "p50_ms": 3.8305235,
+          "p90_ms": 4.6243360000000004,
+          "p95_ms": 4.943989449999999,
+          "p99_ms": 5.896921729999997,
+          "max_ms": 6.732532,
+          "deadline_misses": 0
+        },
+        "before": {
+          "utc": "2026-11-09T12:48:19.054574+00:00",
+          "mode": "Active mode for display 0:\r\n  Mode ID: 1, Resolution: 1272x2772, Refresh Rate: 120.00 Hz",
+          "brightness": "1423.0",
+          "battery": "status: 3\r\n  level: 82\r\n  temperature: 209\r\n  Capacity level: 3",
+          "thermal_status": "Thermal Status: 0"
+        },
+        "after": {
+          "utc": "2026-11-09T12:48:36.964949+00:00",
+          "mode": "Active mode for display 0:\r\n  Mode ID: 1, Resolution: 1272x2772, Refresh Rate: 120.00 Hz",
+          "brightness": "1423.0",
+          "battery": "status: 3\r\n  level: 82\r\n  temperature: 212\r\n  Capacity level: 3",
+          "thermal_status": "Thermal Status: 0"
+        }
+      }
+    ],
+    "pooled": {
+      "production": {
+        "n": 1440,
+        "mean_ms": 3.863999163194445,
+        "p50_ms": 3.8630744999999997,
+        "p90_ms": 4.717329200000001,
+        "p95_ms": 5.0290341,
+        "p99_ms": 6.154687709999993,
+        "max_ms": 7.459953,
+        "deadline_misses": 0
+      },
+      "comparison": {
+        "n": 1440,
+        "mean_ms": 3.775308529861111,
+        "p50_ms": 3.758279,
+        "p90_ms": 4.3765231,
+        "p95_ms": 4.6858951499999995,
+        "p99_ms": 6.177599409999985,
+        "max_ms": 6.923915,
+        "deadline_misses": 0
+      }
+    },
+    "independently_verified_unique_frames": 2880,
+    "samples_after_each_reset": true,
+    "raw_dump_hashes": {
+      "1-production-0.txt": "7887c34e122f9ed3eb66280eca2e9527bdbf0b23c2a71b2a3707bdbf015b2f2f",
+      "1-production-1.txt": "898627729e365c26c2519c9ecee29ceeb145b04beb93c3297c6c62c4a80691c0",
+      "1-production-2.txt": "2f5bffd167fef36c3cb43386702c7934a2827ad8218c5251027f863121e06e0e",
+      "1-production-3.txt": "4e26ce78376ca4c16132859e5fe5dfbb9804d86806d7b1b35f6862d9e780ae7c",
+      "1-production-4.txt": "45b79fc1a767b624f954e90af33d0a89aa5bd589021f14e2425eac8e9db4fd10",
+      "1-production-5.txt": "412c4401f0f78ddeab1998f68c3981f75148f296f77bdf9a774b7e198d002550",
+      "2-comparison-0.txt": "ac9c3547bce12cf7cb63c199bcb8019a43341afb0d20efbf883ac20698644b88",
+      "2-comparison-1.txt": "5716d176ac3b5321db6aee31e5d5e3d2a1d43b9270cc59baa4c8f239f9a19d85",
+      "2-comparison-2.txt": "75de0c012589b554cdf4653e3a4f89ecf7b5b52433d80ce6d11e854cae792177",
+      "2-comparison-3.txt": "f75f5d4476a1dea18c07aca07da02869f100659f03c164dcf51ba4cc3504232a",
+      "2-comparison-4.txt": "6f08985593181be488a5047d85995c5e376d79c4e23e04b2c2ab69e3f001ed3d",
+      "2-comparison-5.txt": "320c3b1c08e2b93b80c35b0664adbfc4df2e8e90890457f99cb8bca94b762c26",
+      "3-comparison-0.txt": "e358c87590018e8f6f947b7e136a82822a976d1424911f0246add491fc3568e0",
+      "3-comparison-1.txt": "2acc7351abca87961ab3b75a1cca91bfda74063c984cde150ce6ec110f635008",
+      "3-comparison-2.txt": "dae7eafe14e2adc0326fb4ebad2b4fbaf022db2e906210ea026fa42883e89326",
+      "3-comparison-3.txt": "560c41f5f8e386ede804f3dab1537d06f6e2c163d6c810b1a0c379a9fa02484f",
+      "3-comparison-4.txt": "7eac808db46c0e2448bfe767ee642ee9afe22c0be17057b556fa6747daaa8124",
+      "3-comparison-5.txt": "57ddbccb1d4cc7efb00305b7b5fa445864ffb6c111067ab7f2574c8088ae046d",
+      "4-production-0.txt": "b5268f8f65dc58e62efbc6676636b9af89d5673e8cf0ada65f403d8555b118b3",
+      "4-production-1.txt": "ad2966d918df389c20b1a1b1fd8e8a979a0dd80c1a3967738eb799879eb7dcad",
+      "4-production-2.txt": "a2677946ddd4b7fa4a49bdad1ab6e853685c10a34142b192dd9f63a72b897deb",
+      "4-production-3.txt": "f9f4535b636358946fb7eaadd17433ca93a66f441788e546bc98ca9424015a13",
+      "4-production-4.txt": "83c2169e1231486e7a019a81c478ab534ad10b1d44a38a065847fa73d900b988",
+      "4-production-5.txt": "1741f1daaf252f165ba483051de665d169bf3038dadd4cb0e1f9bba928bea004"
+    },
+    "csv_sha256": "379e09f83bf4df93aec697bf85b020be6b55c1788c9046ad3b8b86b74b2f97a6",
+    "restored_candidate": true,
+    "restored_display_preference": true,
+    "limits": [
+      "120-frame ring-buffer tail per drag, not every rendered frame",
+      "two runs per variant on one phone; no statistical or acceptance threshold claim",
+      "user foreground idle but GPU/CPU frequencies and all background load not locked",
+      "first 60Hz attempt failed before sampling and is retained locally"
+    ]
+  },
+  "final_state": {
+    "utc": "2026-11-09T12:51:48.785899+00:00",
+    "installed_sha256": {
+      "io.github.bytejuno.thetacore": "bafeae5ddf2cd1073afba0538c9496b65f14f1512870b13d20e4337bb341d6ed",
+      "io.github.bytejuno.thetacore.sample.hooktarget": "4da24b1790c3b76a1086e9573960dfbbad20cac983ef435ed8e1436d378c11ad"
+    },
+    "target_pid": "31531",
+    "logical_displays": "0",
+    "display_preference": "User preferred display mode: -1 -1 0.0",
+    "active_mode": "Active mode for display 0:\r\n  Mode ID: 1, Resolution: 1272x2772, Refresh Rate: 120.00 Hz",
+    "scope_notification_records": "",
+    "module_enabled_visual_evidence": "121-final-module-and-scope.png",
+    "scope_checked": false,
+    "global_disable_action": "119-restored-final-disable",
+    "target_original_visual_evidence": "122-final-cold-original.png"
+  },
+  "limits": [
+    "older APK results are not attributed to this frozen Host",
+    "generic plugins and other firmware not established",
+    "whole-framework shutdown/uninstall not executed",
+    "virtual display input worked while main awake; screen-off/IME/system-notification isolation not established"
+  ]
+}

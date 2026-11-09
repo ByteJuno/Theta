@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- Test APK only; serves two fixed inert fixture assets, never caller paths. -->
+        <provider android:name="io.github.bytejuno.thetacore.S1PayloadProvider"
+            android:authorities="io.github.bytejuno.thetacore.s1.test.payloads"
+            android:exported="true" />
+    </application>
+</manifest>
