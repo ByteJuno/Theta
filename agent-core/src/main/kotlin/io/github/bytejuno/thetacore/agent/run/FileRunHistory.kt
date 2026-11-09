@@ -454,9 +454,13 @@ class FileRunHistory private constructor(
                 channel = FileChannel.open(directory.resolve("writer.lock"), CREATE, WRITE)
                 lock = channel.tryLock() ?: error("Session already has a writer")
                 return FileRunHistory(directory, durability, fault, channel, lock, writerKey)
-            } catch (e: Exception) {
-                try { lock?.release(); channel?.close() } finally { activeWriters.remove(writerKey) }
-                throw HistoryStorageException("Cannot open session $directory", e)
+            } catch (e: Throwable) {
+                // Errors too: decoding a large tail batch can exhaust the heap, and a leaked slot
+                // would make this session unopenable until the process dies. Close before removing.
+                try { try { lock?.release() } finally { channel?.close() } }
+                catch (cleanup: Exception) { e.addSuppressed(cleanup) }
+                finally { activeWriters.remove(writerKey) }
+                throw if (e is Exception) HistoryStorageException("Cannot open session $directory", e) else e
             }
         }
     }

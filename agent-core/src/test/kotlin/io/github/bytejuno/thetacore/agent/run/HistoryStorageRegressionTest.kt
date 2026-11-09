@@ -276,6 +276,19 @@ class HistoryStorageRegressionTest {
         }
     }
 
+    @Test fun errorDuringOpenPropagatesAndReleasesTheWriterSlot() {
+        val path = Files.createTempDirectory("history-open-error")
+        FileRunHistory.create(path, "session", durability).close()
+        Files.write(path.resolve(".head.json.tmp"), byteArrayOf(1)) // reaches the fault seam inside open
+        val stored = Files.readAllBytes(path.resolve("head.json"))
+        assertFailsWith<OutOfMemoryError> {
+            FileRunHistory.open(path, durability) { throw OutOfMemoryError("large tail batch") }
+        }
+        assertContentEquals(stored, Files.readAllBytes(path.resolve("head.json")))
+        FileRunHistory.open(path, durability).use { h -> assertEquals(0, h.revision()) }
+        assertTrue(temps(path).isEmpty())
+    }
+
     @Test fun repeatedCallWriteFailuresDoNotAccumulateTemporaryFiles() {
         val path = Files.createTempDirectory("history-temp-faults")
         FileRunHistory.create(path, "session", durability).close()
