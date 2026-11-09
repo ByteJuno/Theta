@@ -4,6 +4,7 @@ import io.github.bytejuno.thetacore.agent.protocol.*
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeout
 import org.junit.Test
 import kotlin.test.*
 
@@ -248,5 +249,33 @@ class RunRecoveryTest {
         assertEquals(14000L, testScheduler.currentTime - start)
         assertEquals(8, p.requests.size)
         assertEquals(1, f.submitted.size)
+    }
+
+    @Test fun eachUnsupportedParameterIsRemovedOnceAndRepeatsStayBounded() = runTest {
+        val strategy = RecoveryStrategy { _, error, target, r -> RecoveryProposal(target, object : ChatRequest by r {
+            override val temperature = if (error!!.param == "temperature") null else r.temperature
+            override val topP = if (error!!.param == "top_p") null else r.topP
+        }) }
+        val f = RunFixture()
+        val base = f.request()
+        val request = object : ChatRequest by base { override val topP: Double? = 0.5 }
+        val p = ScriptProvider(listOf(failure(ModelErrorCode.UNSUPPORTED_PARAMETER, "temperature"),
+            failure(ModelErrorCode.UNSUPPORTED_PARAMETER, "top_p"), answer()))
+        assertEquals(RunState.COMPLETED, f.loop(p, strategy, request = request).run().state)
+        assertEquals(3, p.requests.size)
+        assertNull(p.requests[2].temperature); assertNull(p.requests[2].topP)
+
+        val repeated = ScriptProvider(listOf(failure(ModelErrorCode.UNSUPPORTED_PARAMETER, "temperature")))
+        assertEquals(RunState.FAILED, RunFixture().loop(repeated, strategy).run().state)
+        assertEquals(2, repeated.requests.size)
+    }
+
+    @Test fun recoveryStrategyLocalTimeoutFailsRunWithResult() = runTest {
+        val f = RunFixture()
+        val p = ScriptProvider(listOf(failure(ModelErrorCode.AUTH), answer()))
+        val strategy = RecoveryStrategy { _, _, _, _ -> withTimeout(10) { awaitCancellation() } }
+        assertEquals(RunState.FAILED, f.loop(p, strategy).run().state)
+        assertEquals(1, p.requests.size)
+        assertEquals(1, f.history.snapshot().messages.size)
     }
 }

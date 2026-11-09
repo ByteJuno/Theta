@@ -104,7 +104,9 @@ class AgentRunLoop(
                 val transient = terminal.error.code in setOf(ModelErrorCode.OVERLOADED, ModelErrorCode.SERVER,
                     ModelErrorCode.NETWORK, ModelErrorCode.TIMEOUT)
                 val endpoint = target.id to request.model
-                val key = terminal.error.code.name
+                // 2.8 removes "this parameter" once, so each rejected parameter has its own attempt.
+                val key = if (terminal.error.code == ModelErrorCode.UNSUPPORTED_PARAMETER)
+                    "${terminal.error.code}:${terminal.error.param}" else terminal.error.code.name
                 val n = if (transient) transientCauses.getOrDefault(endpoint, 0) else causes.getOrDefault(key, 0)
                 val decision = recoveryDecision(terminal.error, mode, n)
                 if (decision.serverUnknown) return result(RunState.PAUSED, "Server execution state unknown", true)
@@ -128,7 +130,7 @@ class AgentRunLoop(
                 return result(if (checkpointRequired) RunState.PAUSED else RunState.FAILED,
                     if (checkpointRequired) "Replay incompatible; checkpoint required" else "Model refused response")
             }
-            if (finish.reason in setOf(FinishReason.STOP, FinishReason.OTHER) && assistant.parts.isEmpty()) {
+            if (finish.reason in setOf(FinishReason.STOP, FinishReason.OTHER, FinishReason.TOOL_CALLS) && contentless(assistant)) {
                 if (mode != ModelExecutionMode.GENERATION_ONLY) return result(RunState.PAUSED, "Server execution state unknown", true)
                 val n = causes.getOrDefault("empty", 0)
                 if (n == 0 && recover(RecoveryDecision(RecoveryAction.RETRY), null, request)) {
@@ -183,7 +185,8 @@ class AgentRunLoop(
                 throw e
             }
             executionFailure?.let {
-                if (it is CancellationException) throw it
+                // A collaborator's own cancelled Deferred or withTimeout is not cancellation of this run.
+                if (it is CancellationException && !currentCoroutineContext().isActive) throw it
                 return result(RunState.PAUSED, "Tool step interrupted: ${it.message}")
             }
             if (calls.isNotEmpty() && tools.unresolved(calls)) return result(RunState.PAUSED, "Tool execution or effect unresolved")
@@ -195,12 +198,18 @@ class AgentRunLoop(
                     return result(RunState.PAUSED, "Missing server continuation history",
                         mode != ModelExecutionMode.GENERATION_ONLY)
                 if (++paused > limits.maxPaused) return result(RunState.PAUSED, "Server continuation limit")
-            } else if (calls.isEmpty()) return result(RunState.COMPLETED, finish.rawReason ?: finish.reason.name)
+            } else {
+                if (calls.isEmpty()) return result(RunState.COMPLETED, finish.rawReason ?: finish.reason.name)
+                paused = 0 // The server loop ended; maxPaused bounds one continuation chain, maxSteps the run.
+            }
             causes.clear()
             transientCauses.clear()
         }
         return result(RunState.PAUSED, "Step limit")
     }
+
+    /** Replay on an empty part is opaque adapter state, so only replay-free empty text is contentless. */
+    private fun contentless(message: Message) = message.parts.all { it is ContentPart.Text && it.text.isEmpty() && it.replay == null }
 
     private fun compatible(target: ModelTarget, request: ChatRequest): Boolean = request.messages.all { m ->
         m.parts.all { p -> p.replay?.let { target.provider.canReplay(it, request.model) } != false }
@@ -209,10 +218,16 @@ class AgentRunLoop(
     private suspend fun recover(decision: RecoveryDecision, error: ModelError?, request: ChatRequest): Boolean {
         val action = decision.action ?: return false
         if (retries >= limits.maxRetries || decision.delayMs > limits.maxRetryWaitMs) return false
-        val proposal = when (action) {
-            RecoveryAction.RETRY -> RecoveryProposal(target, request)
-            RecoveryAction.ROTATE_CREDENTIALS -> recovery.recover(action, error, target, request) ?: RecoveryProposal(target, request)
-            else -> recovery.recover(action, error, target, request) ?: return false
+        val proposal = try {
+            when (action) {
+                RecoveryAction.RETRY -> RecoveryProposal(target, request)
+                RecoveryAction.ROTATE_CREDENTIALS -> recovery.recover(action, error, target, request) ?: RecoveryProposal(target, request)
+                else -> recovery.recover(action, error, target, request) ?: return false
+            }
+        } catch (e: CancellationException) {
+            // A strategy's local timeout is a failed recovery; only real cancellation ends the run.
+            if (!currentCoroutineContext().isActive) throw e
+            return false
         }
         val next = copyRequest(proposal.request)
         // Recovery may change a credential/model/output limit or remove an optional parameter,

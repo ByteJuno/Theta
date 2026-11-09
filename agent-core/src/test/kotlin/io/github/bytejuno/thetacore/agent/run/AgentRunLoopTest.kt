@@ -307,4 +307,63 @@ class AgentRunLoopTest {
         assertEquals(3, f.history.snapshot().messages.size)
         assertEquals(1, p.requests.size)
     }
+
+    @Test fun contentlessToolCallsAndEmptyTextAreEmptyResponses() = runTest {
+        val empties = listOf(
+            listOf(Events.started("r", "m"), Events.finished(FinishReason.TOOL_CALLS)),
+            listOf(Events.started("r", "m"), Events.text(0, ""), Events.end(0), Events.finished(FinishReason.STOP)))
+        for (events in empties) {
+            val f = RunFixture()
+            val p = ScriptProvider(listOf(events, answer()))
+            assertEquals(RunState.COMPLETED, f.loop(p).run().state)
+            assertEquals(2, p.requests.size)
+            assertEquals(2, f.history.snapshot().messages.size)
+            assertEquals("done", (f.history.snapshot().messages.last().parts.single() as ContentPart.Text).text)
+
+            val g = RunFixture()
+            val q = ScriptProvider(listOf(events, answer()), ModelExecutionMode.MAY_EXECUTE_SERVER_TOOLS)
+            val unknown = g.loop(q).run()
+            assertEquals(RunState.PAUSED, unknown.state)
+            assertTrue(unknown.serverExecutionUnknown)
+            assertEquals(1, q.requests.size)
+            assertEquals(1, g.history.snapshot().messages.size)
+        }
+        // A signature on an empty text part is opaque replay data, not an empty response.
+        val signed = listOf(Events.started("r", "m"), Events.text(0, ""),
+            Events.end(0, replayData("p", "m", "signature")), Events.finished(FinishReason.STOP))
+        val f = RunFixture()
+        val p = ScriptProvider(listOf(signed, answer()))
+        assertEquals(RunState.COMPLETED, f.loop(p).run().state)
+        assertEquals(1, p.requests.size)
+        assertEquals("signature", f.history.snapshot().messages.last().parts.single().replay!!.payload)
+    }
+
+    @Test fun cancellationExceptionFromLiveCollaboratorsPausesInsteadOfEndingRun() = runTest {
+        val bridge = RunFixture(listOf(testDefinition("a", risk = Risk.WRITE)))
+        bridge.onSubmit = {}
+        bridge.onAwait = { throw CancellationException("tool deferred cancelled") }
+        val first = ScriptProvider(listOf(calls("a")))
+        val interrupted = bridge.loop(first).run()
+        assertEquals(RunState.PAUSED, interrupted.state)
+        assertEquals(Effect.UNKNOWN, bridge.store.records().single().result!!.effect)
+        assertEquals(3, bridge.history.snapshot().messages.size)
+        assertEquals(1, first.requests.size)
+
+        val approval = RunFixture(listOf(testDefinition("a", risk = Risk.WRITE)))
+        approval.approve = { withTimeout(10) { awaitCancellation() } }
+        val second = ScriptProvider(listOf(calls("a")))
+        assertEquals(RunState.PAUSED, approval.loop(second).run().state)
+        assertTrue(approval.submitted.isEmpty())
+        assertEquals(Effect.NONE, approval.store.records().single().result!!.effect)
+        assertEquals(3, approval.history.snapshot().messages.size)
+    }
+
+    @Test fun pausedBudgetAppliesPerServerLoopNotAcrossRun() = runTest {
+        val f = RunFixture(listOf(testDefinition()))
+        val pause = answer("pause", FinishReason.PAUSED)
+        fun call(n: Int) = calls("tool", args = "{\"n\":$n}")
+        val p = ScriptProvider(listOf(pause, call(1), pause, call(2), pause, call(3), pause, answer()))
+        assertEquals(RunState.COMPLETED, f.loop(p, limits = RunLimits(maxPaused = 1)).run().state)
+        assertEquals(8, p.requests.size)
+    }
 }
