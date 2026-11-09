@@ -1,6 +1,8 @@
 package io.github.bytejuno.thetacore.plugin
 
 import io.github.bytejuno.thetacore.agent.ledger.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.*
 
@@ -12,11 +14,12 @@ import kotlinx.serialization.json.*
  * Cold UNKNOWN decisions are the separate issue22 API; get exposes the retained barrier.
  */
 internal class HostToolRuntimeApi(private val service: HostToolExecutionService) {
-    suspend fun request(encoded: String): String {
+    /** Freeze/get take the definition gate, which is held across ledger fsyncs: never on the caller's thread. */
+    suspend fun request(encoded: String): String = withContext(Dispatchers.IO) {
         require(encoded.length <= 65_536) { "Host request too large" }
         val request = Json.parseToJsonElement(encoded).jsonObject
         fun field(name: String) = request.getValue(name).jsonPrimitive.content
-        return when (field("operation")) {
+        when (field("operation")) {
             "freeze" -> Json.encodeToString(service.catalog.freeze(field("runId")))
             "prepare" -> {
                 val run = field("runId")

@@ -2,13 +2,21 @@ package io.github.bytejuno.thetacore.plugin
 
 import io.github.bytejuno.thetacore.agent.ledger.*
 import io.github.bytejuno.thetacore.agent.protocol.callBinding
+import io.github.bytejuno.thetacore.plugin.tools.HostClockTool
+import io.github.bytejuno.thetacore.sdk.Tool
+import io.github.bytejuno.thetacore.sdk.ToolEnv
+import io.github.bytejuno.thetacore.sdk.ToolResult
+import io.github.bytejuno.thetacore.sdk.ToolSpec
 import kotlinx.coroutines.*
+import kotlinx.serialization.json.JsonObject
 import org.junit.Assert.*
 import org.junit.Test
 import java.io.File
 import java.io.IOException
 import java.nio.file.Files
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 class AndroidInvocationStoreTest {
     private fun input(service: HostToolExecutionService, args: String = "{}", run: String = UUID.randomUUID().toString()): InvocationInput {
@@ -141,6 +149,67 @@ class AndroidInvocationStoreTest {
                 assertEquals(1, attempts)
                 assertFalse(File(root, "${AndroidInvocationStore.DIRECTORY}/ledger.identity").exists())
             } finally { budget.close() }
+        } }
+    }
+
+    private class BlockedSpecTool(private val release: CountDownLatch) : Tool {
+        val entered = CountDownLatch(1)
+        private val delegate = HostClockTool()
+        override val id = "blocked"
+        override val spec: ToolSpec get() { entered.countDown(); release.await(); return delegate.spec }
+        override suspend fun call(args: JsonObject, env: ToolEnv): ToolResult = delegate.call(args, env)
+    }
+
+    @Test fun pluginLeasesCannotFailOneShotStartupButStillLimitExecution() = runBlocking {
+        temporary { root -> runBlocking {
+            val budget = PluginExecutionBudget(processSlots = 2, perPluginSlots = 2)
+            val plugins = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+            val hold = CompletableDeferred<Unit>()
+            try {
+                val leases = List(2) { checkNotNull(budget.submit("plugin", plugins, {}, {}) { hold.await() }) }
+                AndroidInvocationStore.open(root) {}.use { store ->
+                    val service = HostToolBridgeRoot(budget).initialize { store }
+                    val call = input(service)
+                    assertEquals(Status.READY, (service.prepare(call) as Mutation.Applied).record.state)
+                    assertEquals("Execution capacity unavailable", (service.dispatch(call.binding.callId) as Mutation.Blocked).reason)
+                    hold.complete(Unit)
+                    leases.forEach { it.actualExited.await() }
+                    assertTrue(service.dispatch(call.binding.callId) is Mutation.Applied)
+                    assertEquals(Status.SUCCEEDED, exited(service, call.binding.callId).state)
+                }
+            } finally { hold.complete(Unit); budget.close(); plugins.cancel() }
+        } }
+    }
+
+    @Test fun metadataTimeoutIsAStartupFailureNotCallerCancellation() = runBlocking {
+        temporary { root -> runBlocking {
+            val budget = PluginExecutionBudget()
+            val release = CountDownLatch(1)
+            try {
+                val failure = runCatching {
+                    HostToolBridgeRoot(budget, BlockedSpecTool(release)).initialize { AndroidInvocationStore.open(root) {} }
+                }.exceptionOrNull()
+                assertTrue("$failure", failure is IllegalStateException && failure !is CancellationException)
+                // Coroutine stack-trace recovery may wrap the rethrown exception in a copy.
+                assertTrue(generateSequence(failure) { it.cause }.any { it is TimeoutCancellationException })
+                AndroidInvocationStore.open(root) {}.close() // The failed startup released its writer.
+            } finally { release.countDown(); budget.close() }
+        } }
+    }
+
+    @Test fun cancellingTheInitializerStaysCancellation() = runBlocking {
+        temporary { root -> runBlocking {
+            val budget = PluginExecutionBudget()
+            val release = CountDownLatch(1)
+            val tool = BlockedSpecTool(release)
+            val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+            try {
+                val startup = scope.async { HostToolBridgeRoot(budget, tool).initialize { AndroidInvocationStore.open(root) {} } }
+                withContext(Dispatchers.IO) { assertTrue(tool.entered.await(5, TimeUnit.SECONDS)) }
+                startup.cancel()
+                withTimeout(3_000) { startup.join() }
+                assertTrue(startup.isCancelled)
+            } finally { release.countDown(); budget.close(); scope.cancel() }
         } }
     }
 

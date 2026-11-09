@@ -1,12 +1,19 @@
 package io.github.bytejuno.thetacore.plugin
 
 import io.github.bytejuno.thetacore.agent.ledger.*
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.*
 import org.junit.Assert.*
 import org.junit.Test
 import java.nio.file.Files
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import kotlin.concurrent.thread
 
 class HostToolRuntimeApiTest {
     private fun request(name: String, id: String = UUID.randomUUID().toString()) = buildJsonObject {
@@ -48,6 +55,31 @@ class HostToolRuntimeApiTest {
                 assertEquals(Status.SUCCEEDED, done.state)
                 assertEquals("alreadyApplied", call(api, input)["kind"]!!.jsonPrimitive.content)
                 assertEquals(done, service.ledger.get(id))
+            }
+        } finally { budget.close(); root.deleteRecursively() }
+    }
+
+    @Test fun heldDefinitionGateNeverBlocksTheSuspendingCallersThread() = runBlocking {
+        val root = Files.createTempDirectory("host-api-gate-").toFile()
+        val budget = PluginExecutionBudget()
+        try {
+            AndroidInvocationStore.open(root) {}.use { store ->
+                val service = HostToolBridgeRoot(budget).initialize { store }
+                val api = HostToolRuntimeApi(service)
+                Executors.newSingleThreadExecutor().asCoroutineDispatcher().use { caller ->
+                    val held = CountDownLatch(1)
+                    val release = CountDownLatch(1)
+                    val holder = thread { service.catalog.gate.withGate { held.countDown(); release.await() } }
+                    held.await()
+                    try {
+                        val freeze = async(caller) { api.request("""{"operation":"freeze","runId":"run"}""") }
+                        // A request blocking the single caller thread would leave this queued behind it.
+                        withTimeout(3_000) { withContext(caller) { } }
+                        assertFalse(freeze.isCompleted)
+                        release.countDown()
+                        assertTrue(freeze.await().contains("host/clock"))
+                    } finally { release.countDown(); holder.join() }
+                }
             }
         } finally { budget.close(); root.deleteRecursively() }
     }
