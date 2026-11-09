@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <!-- 插件不向系统注册权限，它们用的网络权限由宿主声明。 -->
     <uses-permission android:name="android.permission.INTERNET" />
@@ -21,6 +22,11 @@
         android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@style/Theme.ThetaCore">
+        <provider android:name="io.github.libxposed.service.XposedProvider" tools:node="remove" />
+        <provider
+            android:name=".hook.TrustedXposedProvider"
+            android:authorities="${applicationId}.XposedService"
+            android:exported="true" />
         <activity
             android:name=".MainActivity"
             android:exported="true">

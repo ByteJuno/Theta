@@ -46,6 +46,14 @@ jobs:
           --source "$GITHUB_WORKSPACE"
           --output "$RUNNER_TEMP/paired-keep-size"
           --context CI
+      - name: Record the paired runtime dependency resolutions
+        run: |
+          for variant in production comparison; do
+            (
+              cd "$RUNNER_TEMP/paired-keep-size/work/$variant"
+              ./gradlew --no-daemon --console=plain :app:dependencies --configuration releaseRuntimeClasspath > "$RUNNER_TEMP/paired-keep-size/evidence/$variant/runtime-dependencies.txt"
+            )
+          done
       - name: Preserve paired summaries, including failures
         # Explicit allowlist: never upload APKs, R8 outputs or raw build/signing logs.
         # Full failure evidence remains untouched in the runner's measurement directory.
@@ -58,5 +66,23 @@ jobs:
             ${{ runner.temp }}/paired-keep-size/evidence/source-hashes.json
             ${{ runner.temp }}/paired-keep-size/evidence/production/source-hashes.json
             ${{ runner.temp }}/paired-keep-size/evidence/comparison/source-hashes.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Preserve test-only inputs for opt-in physical measurements
+        if: success()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: paired-keep-physical-inputs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/paired-keep-size/evidence/result.json
+            ${{ runner.temp }}/paired-keep-size/evidence/source-hashes.json
+            ${{ runner.temp }}/paired-keep-size/evidence/production/source-hashes.json
+            ${{ runner.temp }}/paired-keep-size/evidence/comparison/source-hashes.json
+            ${{ runner.temp }}/paired-keep-size/evidence/production/app-release.apk
+            ${{ runner.temp }}/paired-keep-size/evidence/comparison/app-release.apk
+            ${{ runner.temp }}/paired-keep-size/evidence/production/r8/configuration.txt
+            ${{ runner.temp }}/paired-keep-size/evidence/comparison/r8/configuration.txt
+            ${{ runner.temp }}/paired-keep-size/evidence/production/runtime-dependencies.txt
+            ${{ runner.temp }}/paired-keep-size/evidence/comparison/runtime-dependencies.txt
           if-no-files-found: error
           retention-days: 7
