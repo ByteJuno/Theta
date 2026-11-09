@@ -1,7 +1,5 @@
 package io.github.bytejuno.thetacore.plugin
 
-import android.security.keystore.KeyGenParameterSpec
-import android.security.keystore.KeyProperties
 import io.github.bytejuno.thetacore.sdk.PluginClosedException
 import io.github.bytejuno.thetacore.sdk.PluginPrefs
 import io.github.bytejuno.thetacore.sdk.PluginSecrets
@@ -20,51 +18,20 @@ import java.nio.file.StandardCopyOption.REPLACE_EXISTING
 import java.nio.file.StandardOpenOption.CREATE_NEW
 import java.nio.file.StandardOpenOption.READ
 import java.nio.file.StandardOpenOption.WRITE
-import java.security.KeyStore
 import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
-import javax.crypto.Cipher
-import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
-import javax.crypto.spec.GCMParameterSpec
 
-/** Host-only injection seam, never implemented by or exposed to a plugin. */
-internal interface PluginSettingsCipher {
-    fun encrypt(plaintext: ByteArray): ByteArray
-    fun decrypt(ciphertext: ByteArray): ByteArray
-}
+internal typealias PluginSettingsCipher = io.github.bytejuno.thetacore.storage.SecretCipher
 
-/** Fresh provider-generated IV per write; the ID is authenticated as well as key-scoped. */
-internal class AesGcmPluginSettingsCipher(
+/** Keep the existing plugin envelope and authenticated namespace unchanged. */
+internal fun AesGcmPluginSettingsCipher(
     pluginId: String,
-    private val key: (create: Boolean) -> SecretKey,
-) : PluginSettingsCipher {
-    private val aad = "theta-plugin-secrets-v1:$pluginId".toByteArray(Charsets.UTF_8)
-
-    init { checkId(pluginId) }
-
-    override fun encrypt(plaintext: ByteArray): ByteArray {
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.ENCRYPT_MODE, key(true))
-        cipher.updateAAD(aad)
-        val iv = cipher.iv
-        if (iv.size != 12) throw IOException("Unexpected GCM IV size")
-        return ByteBuffer.allocate(4 + iv.size + plaintext.size + 16)
-            .putInt(SECRET_MAGIC).put(iv).put(cipher.doFinal(plaintext)).array()
-    }
-
-    override fun decrypt(ciphertext: ByteArray): ByteArray {
-        if (ciphertext.size < 4 + 12 + 16 || ByteBuffer.wrap(ciphertext).int != SECRET_MAGIC) {
-            throw IOException("Invalid encrypted settings envelope")
-        }
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.DECRYPT_MODE, key(false), GCMParameterSpec(128, ciphertext.copyOfRange(4, 16)))
-        cipher.updateAAD(aad)
-        return cipher.doFinal(ciphertext, 16, ciphertext.size - 16)
-    }
-
-    private companion object { const val SECRET_MAGIC = 0x54535331 }
+    key: (create: Boolean) -> SecretKey,
+): PluginSettingsCipher {
+    checkId(pluginId)
+    return io.github.bytejuno.thetacore.storage.AesGcmSecretCipher("theta-plugin-secrets-v1:" + pluginId, key)
 }
 
 /** Never delete/rotate this alias on update, rollback or ordinary clear-data. */
@@ -75,32 +42,11 @@ internal fun pluginSettingsKeyAlias(pluginId: String): String {
     return "theta.plugin.secrets.v1.$hash"
 }
 
-private val settingsKeyLock = Any()
-
-/** Key lookup is lazy: opening an owner or using prefs does not touch AndroidKeyStore. */
-internal fun androidPluginSettingsCipher(pluginId: String): PluginSettingsCipher {
-    val alias = pluginSettingsKeyAlias(pluginId)
-    return AesGcmPluginSettingsCipher(pluginId) { create ->
-        synchronized(settingsKeyLock) {
-            val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-            val existing = store.getKey(alias, null)
-            if (existing != null) {
-                existing as? SecretKey ?: throw IOException("Invalid settings key type")
-            } else {
-                // Reading old ciphertext must never silently create a replacement key.
-                if (!create || store.containsAlias(alias)) throw IOException("Settings key unavailable")
-                KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore").apply {
-                    init(KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
-                        .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                        .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                        .setKeySize(256)
-                        .setRandomizedEncryptionRequired(true)
-                        .build())
-                }.generateKey()
-            }
-        }
-    }
-}
+/** Key lookup remains lazy. */
+internal fun androidPluginSettingsCipher(pluginId: String): PluginSettingsCipher =
+    io.github.bytejuno.thetacore.storage.androidSecretCipher(
+        pluginSettingsKeyAlias(pluginId), "theta-plugin-secrets-v1:" + pluginId,
+    )
 
 /**
  * One host-owned lifecycle object per PluginContext. closeAdmission is memory-only and
