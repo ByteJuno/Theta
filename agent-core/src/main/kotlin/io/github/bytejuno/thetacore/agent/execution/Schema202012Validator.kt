@@ -35,8 +35,12 @@ class Schema202012Validator : ArgumentsValidator {
             "additionalProperties", "items", "contains", "not", "if", "then", "else", "unevaluatedProperties", "unevaluatedItems" -> checkSchema(value, depth + 1)
         }
     }
-    override fun valid(originalSchema: String, objectJson: String): Boolean = runCatching {
-        require(objectJson.length <= 65_536 && supported(originalSchema))
+    override fun valid(originalSchema: String, objectJson: String): Boolean =
+        objectJson.length <= 65_536 && validOutput(originalSchema, objectJson)
+
+    /** Output is already returned in memory; the argument admission cap must not reject a valid large result. */
+    fun validOutput(originalSchema: String, objectJson: String): Boolean = runCatching {
+        require(supported(originalSchema))
         factory.getSchema(originalSchema).validate(mapper.readTree(objectJson)).isEmpty()
     }.getOrDefault(false)
 }

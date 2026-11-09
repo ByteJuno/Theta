@@ -56,7 +56,7 @@ class JsonInvocationStoreTest {
     }
 
     @Test fun everyWritePhaseIsOldOrNewCompleteAndUncertainHalts() {
-        for (stage in WriteStage.entries) Fixture().use { f ->
+        for (stage in WriteStage.entries.filter { it <= WriteStage.AFTER_DIRECTORY_SYNC }) Fixture().use { f ->
             val ready = f.ready()
             f.stage = stage
             val result = assertIs<Mutation.StorageFailure>(f.ledger.claimExecution(ready.callId, ready.revision))

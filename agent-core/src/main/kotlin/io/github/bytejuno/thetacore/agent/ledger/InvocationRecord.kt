@@ -86,7 +86,8 @@ internal fun sha256(value: String) = MessageDigest.getInstance("SHA-256")
 )
 @Serializable data class ApprovalReceipt(val request: ApprovalRequest, val decision: Decision)
 @Serializable data class ExecutionInstance(val attemptId: String, val processEpoch: String, val state: InstanceState)
-@Serializable data class LogicalResult(val status: Status, val effect: Effect, val text: String, val inconsistentRead: Boolean)
+@Serializable data class LogicalResult(val status: Status, val effect: Effect, val text: String, val inconsistentRead: Boolean,
+    val output: StoredToolOutput? = null)
 @Serializable data class ExitEvidence(val attemptId: String, val text: String, val outcome: LogicalResult?)
 @Serializable data class Isolation(val reason: String, val resource: String?, val resolution: RecoveryResolution?)
 

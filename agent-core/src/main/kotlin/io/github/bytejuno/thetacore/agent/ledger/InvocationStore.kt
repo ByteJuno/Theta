@@ -10,6 +10,12 @@ interface InvocationStore : Closeable {
     fun bindCoordinator()
     fun records(): List<InvocationRecord>
     fun save(record: InvocationRecord, expectedRevision: Long?)
+    /** Publish bytes before the atomic record reference, under the same writer/GC ownership. */
+    fun saveWithBlobs(record: InvocationRecord, expectedRevision: Long?, blobs: List<BlobWrite>) {
+        check(blobs.isEmpty()) { "Store does not support blobs" }
+        save(record, expectedRevision)
+    }
+    fun readBlob(ref: BlobRef, offset: Long, limit: Int): ByteArray = error("Store does not support blobs")
 }
 class StoreException(message: String, val uncertain: Boolean = false, cause: Throwable? = null) :
     RuntimeException(message, cause)

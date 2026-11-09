@@ -10,7 +10,8 @@ import java.util.UUID
  * then under gate.withGate claim and submit the frozen ticket to PluginExecutionBudget/Invocation.
  * A submit failure is NOT proof of no execution: retain UNCONFIRMED unless the bridge has trusted
  * actual-exit evidence. Cancellation hooks must report terminal and actual exit separately.
- * UI, result/media normalization, history append transactions and Android durability are not here.
+ * UI, history append transactions and Android durability are not here. The host normalizes
+ * output before recordToolOutput; blob publication and durable references commit through the store.
  *
  * One coordinator per host, backed by one exclusive store writer. All state transitions share the
  * definition scheduling gate. No executors, network, UI, or automatic retries live in this core.
@@ -25,16 +26,22 @@ class InvocationLedger(
 ) {
     init { require(maxClaimsPerTaskChain > 0); store.bindCoordinator() }
     private val recordsById = store.records().associateByTo(linkedMapOf()) { it.callId }
+    private val blobRoots = BlobReferenceIndex(recordsById.values)
+    internal val blobRootVisits get() = blobRoots.rootVisits
+    internal val blobRecordVisits get() = blobRoots.recordVisits
     private var epoch: String? = null
     private var halted = false
     fun get(callId: String): InvocationRecord? = gate.withGate { recordsById[callId]?.detached() }
     private fun all() = recordsById.values.toList()
     private fun id() = UUID.randomUUID().toString()
-    private fun persist(previous: InvocationRecord?, next: InvocationRecord, ticket: ExecutionTicket? = null): Mutation {
+    private fun persist(previous: InvocationRecord?, next: InvocationRecord, ticket: ExecutionTicket? = null,
+        blobs: List<BlobWrite> = emptyList()): Mutation {
         if (halted) return Mutation.Blocked("Storage acknowledgement uncertain; reopen and cold-recover")
         return try {
             val snapshot = next.detached()
-            store.save(snapshot, previous?.revision)
+            if (blobs.isEmpty()) store.save(snapshot, previous?.revision)
+            else store.saveWithBlobs(snapshot, previous?.revision, blobs)
+            blobRoots.replace(previous, snapshot)
             recordsById[next.callId] = snapshot.detached()
             Mutation.Applied(next.detached(), ticket)
         } catch (e: StoreException) {
@@ -215,6 +222,34 @@ class InvocationLedger(
                 Isolation("Return evidence reports unknown effect", r.input.definition?.exclusiveResource, null) else next.isolation))
     }
 
+    /** Raw output remains durable even for late returns, without overriding logical terminal state. */
+    fun recordToolOutput(callId: String, attemptId: String, status: Status, output: NormalizedOutput,
+        effect: Effect?): Mutation = gate.withGate {
+        require(status == Status.SUCCEEDED || status == Status.FAILED)
+        val r = get(callId) ?: return@withGate Mutation.Conflict("Unknown call")
+        if (r.instance?.attemptId != attemptId) return@withGate Mutation.Conflict("Wrong attempt")
+        val ended = terminal(r, status, effect, output.text)
+        val outcome = ended.result!!.copy(output = output.stored)
+        val evidence = ExitEvidence(attemptId, output.text, outcome)
+        if (evidence in r.evidence) return@withGate Mutation.AlreadyApplied(r)
+        val next = if (r.state.terminal) r else ended.copy(result = outcome)
+        persist(r, next.copy(revision = r.revision + 1, evidence = r.evidence + evidence,
+            isolation = if (outcome.effect == Effect.UNKNOWN)
+                Isolation("Return evidence reports unknown effect", r.input.definition?.exclusiveResource, null) else next.isolation),
+            blobs = output.writes)
+    }
+
+    /** Retrieval is scoped to the frozen run's own results/evidence, never arbitrary store paths. */
+    fun readBlob(runId: String, id: String, offset: Long, limit: Int = 8192): Pair<BlobRef, ByteArray> = gate.withGate {
+        require(offset >= 0 && limit in 1..8192)
+        check(!halted) { "Reopen storage required" }
+        val matches = blobRoots.matches(runId, id)
+        require(matches.size <= 1) { "Ambiguous legacy blob identity; MIME-specific reference required" }
+        val ref = matches.singleOrNull() ?: error("Blob unavailable in this run")
+        require(offset <= ref.sizeBytes)
+        ref to store.readBlob(ref, offset, limit)
+    }
+
     /** Clear only this attempt's grace-expiry restriction; other attempts and restart causes remain. */
     private fun exited(r: InvocationRecord): InvocationRecord = r.copy(
         instance = requireNotNull(r.instance).copy(state = InstanceState.EXIT_CONFIRMED),
@@ -305,10 +340,7 @@ class InvocationLedger(
         if (records.isEmpty() || records.map { it.callId } != expectedCallIds || records.any { !it.state.terminal }) return@withGate null
         message(Role.TOOL, *records.map { r ->
             val result = r.result!!
-            val text = buildJsonObject {
-                put("status", result.status.name.lowercase()); put("effect", result.effect.name.lowercase())
-                put("message", result.text)
-            }.toString()
+            val text = ModelResultText.project(result)
             toolResultPart(r.callId, text, r.state != Status.SUCCEEDED)
         }.toTypedArray())
     }

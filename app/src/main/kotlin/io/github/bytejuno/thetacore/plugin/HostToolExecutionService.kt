@@ -110,25 +110,46 @@ internal class HostToolExecutionService(
         }
     }
 
-    private fun outcome(ticket: ExecutionTicket, value: PluginInvocationResult, entered: Boolean): Mutation {
+    internal var normalizationCount = 0L
+        private set
+    /** Monitor-local, released at actual exit; only the detached return's identity is reusable. */
+    private class ReturnNormalization {
+        var value: PluginInvocationResult? = null
+        var entered = false
+        var output: NormalizedOutput? = null
+    }
+    private fun outcome(ticket: ExecutionTicket, value: PluginInvocationResult, entered: Boolean,
+        cache: ReturnNormalization): Mutation {
         val result = value.result
-        val structured = result?.structured
-        val outputValid = structured == null || ticket.definition.outputSchema?.let { validator.valid(it, structured.toString()) } != false
-        val original = result?.text ?: value.message.orEmpty()
-        // PROTOCOL 3.8: valid JSON goes first under a label; invalid JSON is dropped and only an
-        // otherwise empty result becomes a model-visible error.
-        val text = when {
-            structured == null -> original
-            !outputValid -> original.ifEmpty { "Tool returned invalid structured output" }
-            original.isEmpty() -> "[structured JSON]\n$structured"
-            else -> "[structured JSON]\n$structured\n$original"
-        }
-        // Explicit SDK effect wins, including inconsistent READ/UNKNOWN. Absent effect is inferred
-        // by the ledger from effective risk, never silently forced to NONE after tool entry.
         val effect = if (!entered) Effect.NONE else result?.effect?.let { Effect.valueOf(it.name) }
-        val succeeded = value.status == PluginInvocationStatus.SUCCEEDED && (outputValid || original.isNotEmpty())
-        return observe(ledger.recordOutcome(ticket.callId, ticket.attemptId,
-            if (succeeded) Status.SUCCEEDED else Status.FAILED, text, effect))
+        val error = value.status != PluginInvocationStatus.SUCCEEDED || result?.isError == true
+        if (result?.structured == null && result?.content.isNullOrEmpty() &&
+            ModelResultText.fits(result?.text ?: value.message.orEmpty()))
+            return observe(ledger.recordOutcome(ticket.callId, ticket.attemptId,
+                if (error) Status.FAILED else Status.SUCCEEDED, result?.text ?: value.message.orEmpty(), effect))
+        val previous = cache.value
+        val reusable = previous != null && previous.result === result && previous.status == value.status &&
+            previous.message == value.message && cache.entered == entered
+        val normalized = if (reusable) checkNotNull(cache.output) else {
+        val parts = buildList {
+            val original = result?.text ?: value.message.orEmpty()
+            if (original.isNotEmpty()) add(OutputPart.Text(original))
+            result?.content?.forEach { part -> add(when (part) {
+                is ToolContent.Text -> OutputPart.Text(part.text)
+                is ToolContent.Media -> OutputPart.Media(MediaKind.valueOf(part.kind.name), part.mimeType, part.bytes)
+            }) }
+        }
+        val run = ledger.get(ticket.callId)!!.input.runId
+        val retrieval = catalog.frozen(run)?.values?.firstOrNull { it.toolKey == "host/blob_read" }?.modelName
+        check(retrieval != null) { "Blob retrieval capability was not frozen for this run" }
+        normalizationCount++
+        ToolOutputNormalizer.normalize(parts, result?.structured, error,
+            effect, ticket.definition.outputSchema, ArgumentsValidator(validator::validOutput), retrieval).also {
+            cache.value = value; cache.entered = entered; cache.output = it
+        }
+        }
+        val status = if (normalized.isError) Status.FAILED else Status.SUCCEEDED
+        return observe(ledger.recordToolOutput(ticket.callId, ticket.attemptId, status, normalized, effect))
     }
     /** Never acknowledge exit after an earlier outcome/evidence write was lost. Keeping the
      * durable instance UNCONFIRMED forces cold recovery to preserve the uncertainty. */
@@ -138,13 +159,14 @@ internal class HostToolExecutionService(
         else -> error("Invocation transition not acknowledged: $mutation")
     }
     private suspend fun monitor(ticket: ExecutionTicket, call: PluginInvocation) {
+        val normalization = ReturnNormalization()
         try {
             val logical = call.terminal.await()
             val durable = gate.withGate {
                 acknowledged(when (logical.status) {
                     PluginInvocationStatus.CANCELLED -> observe(ledger.cancel(ticket.callId))
                     PluginInvocationStatus.TIMED_OUT -> observe(ledger.timeout(ticket.callId))
-                    else -> outcome(ticket, logical, call.bodyEntered)
+                    else -> outcome(ticket, logical, call.bodyEntered, normalization)
                 })
             }
             gate.withGate { logicalResults[ticket.callId] }?.complete(Unit)
@@ -166,11 +188,11 @@ internal class HostToolExecutionService(
                     call.returnReported.onAwait { it }
                     call.actualExited.onAwait { call.returnEvidence }
                 }
-                if (returned != null) gate.withGate { acknowledged(outcome(ticket, returned, call.bodyEntered)) }
+                if (returned != null) gate.withGate { acknowledged(outcome(ticket, returned, call.bodyEntered, normalization)) }
                 call.actualExited.await()
                 restartWatch?.cancel()
                 gate.withGate {
-                    call.returnEvidence?.let { acknowledged(outcome(ticket, it, call.bodyEntered)) }
+                    call.returnEvidence?.let { acknowledged(outcome(ticket, it, call.bodyEntered, normalization)) }
                     acknowledged(observe(ledger.recordActualExit(ticket.callId, ticket.attemptId, "Shared execution budget confirmed worker and cancellation handlers exited")))
                     active.remove(ticket.callId)
                     // A failed monitor keeps its entries so waiters still see the failure.

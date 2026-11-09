@@ -33,6 +33,13 @@ class HostToolExecutionServiceTest {
             check(data[record.callId]?.revision == expectedRevision)
             data[record.callId] = record
         }
+        private val blobs = mutableMapOf<String, ByteArray>()
+        override fun saveWithBlobs(record: InvocationRecord, expectedRevision: Long?, blobs: List<BlobWrite>) {
+            blobs.forEach { this.blobs[it.ref.id] = it.bytes() }
+            save(record, expectedRevision)
+        }
+        override fun readBlob(ref: BlobRef, offset: Long, limit: Int): ByteArray =
+            blobs.getValue(ref.id).let { it.copyOfRange(offset.toInt(), minOf(it.size, offset.toInt() + limit)) }
         override fun close() {}
     }
     private class Fixture(policy: ApprovalPolicy = ApprovalPolicy(), maxClaims: Int = Int.MAX_VALUE,
@@ -48,6 +55,7 @@ class HostToolExecutionServiceTest {
         init { ledger.recoverColdStart(UUID.randomUUID().toString()) }
         suspend fun register(tool: Tool = HostClockTool { 42 }): FrozenDefinition {
             val d = catalog.registerHost("host/test", "1", tool)
+            catalog.registerHost("host/blob_read", "1", io.github.bytejuno.thetacore.plugin.tools.HostBlobReadTool(ledger))
             catalog.freeze("run")
             return d
         }
@@ -1443,7 +1451,7 @@ class HostToolExecutionServiceTest {
         try {
             store = JsonInvocationStore.create(dir, Durability.PROCESS_CRASH_ONLY)
             val service = HostToolBridgeRoot(budget).initialize { checkNotNull(store) }
-            val d = service.catalog.freeze("run").values.single()
+            val d = service.catalog.freeze("run").values.single { it.toolKey == "host/clock" }
             val reducer = ModelEventReducer("recorded", "disk")
             listOf(Events.started("response", "no-api"), Events.toolStart(0, "wire", d.modelName),
                 Events.toolDelta(0, "{}"), Events.end(0), Events.finished(FinishReason.STOP)).forEach(reducer::accept)

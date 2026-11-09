@@ -39,6 +39,7 @@ internal class HostToolBridgeRoot(
                 }
                 val catalog = FrozenToolCatalog(gate, metadataBudget, owner, validator)
                 catalog.registerHost("host/clock", "1", hostTool)
+                catalog.registerHost("host/blob_read", "1", io.github.bytejuno.thetacore.plugin.tools.HostBlobReadTool(ledger))
                 HostToolExecutionService(budget, owner, catalog, ledger, validator).also { service = it }
             } catch (error: Throwable) {
                 owner.cancel()
