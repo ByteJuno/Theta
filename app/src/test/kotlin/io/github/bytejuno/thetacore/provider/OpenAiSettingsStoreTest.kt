@@ -262,6 +262,20 @@ class OpenAiSettingsStoreTest {
         assertEquals("model1", admitted.request().model)
     }
 
+    @Test fun abandonedTempCiphertextIsRemovedByReplaceAndClear() {
+        val root = temp.newFolder()
+        val store = OpenAiSettingsStore(root, cipher())
+        store.replace(settings(), secret)
+        val directory = record(root).parentFile
+        fun abandon() = File(directory, "abandoned.tmp").also { it.writeBytes(record(root).readBytes()) }
+        abandon()
+        store.replace(settings(2), "new-key")
+        assertEquals(listOf("active.bin"), directory.list()!!.toList())
+        abandon()
+        store.clear()
+        assertEquals(0, directory.list()!!.size)
+    }
+
     @Test fun androidFactoryUsesOnlyNoBackupDirectoryWithoutEagerKeyLookup() {
         val root = temp.newFolder("android-no-backup")
         val context = object : ContextWrapper(null) {

@@ -79,8 +79,22 @@ class OpenAiSettingsStore internal constructor(noBackupDirectory: File, private 
         sanitize(ProviderSettingsException.Failure.WRITE_FAILED) {
             checkDirectories()
             Files.deleteIfExists(file)
+            removeAbandonedTemps()
         }
         Unit
+    }
+
+    /** A process death before the rename leaves a decryptable copy of an earlier key behind.
+     * Callers hold [lock], so no temp file of a live write in this process can be matched. */
+    private fun removeAbandonedTemps() {
+        if (Files.notExists(directory, NOFOLLOW_LINKS)) return
+        Files.newDirectoryStream(directory).use { entries ->
+            for (entry in entries) {
+                if (entry.fileName.toString().endsWith(".tmp") && Files.isRegularFile(entry, NOFOLLOW_LINKS)) {
+                    Files.deleteIfExists(entry)
+                }
+            }
+        }
     }
 
     private fun checkDirectories() {
@@ -96,6 +110,7 @@ class OpenAiSettingsStore internal constructor(noBackupDirectory: File, private 
         checkDirectories()
         Files.createDirectories(directory)
         check(Files.notExists(file, NOFOLLOW_LINKS) || Files.isRegularFile(file, NOFOLLOW_LINKS))
+        removeAbandonedTemps()
         val temp = directory.resolve("${UUID.randomUUID()}.tmp")
         try {
             FileChannel.open(temp, WRITE, CREATE_NEW, NOFOLLOW_LINKS).use { channel ->
