@@ -67,6 +67,7 @@ class ModelEventReducer(private val provider: String, private val requestId: Str
     private class Part(val kind: Kind, val binding: CallBinding? = null, val name: String = "") {
         val content = StringBuilder()
         var ended = false
+        var replay: ReplayData? = null
     }
     private val parts = linkedMapOf<Int, Part>()
     private var started = false
@@ -110,6 +111,7 @@ class ModelEventReducer(private val provider: String, private val requestId: Str
                 val part = parts[event.index]
                 protocol(part != null && !part.ended, "PartEnd without open part")
                 part!!.ended = true
+                part.replay = event.replay?.let { replayData(it.protocol, it.model, it.payload) }
             }
             is ModelEvent.Finished -> {
                 protocol(started && parts.values.all { it.ended }, "Finished with unclosed parts")
@@ -140,6 +142,14 @@ class ModelEventReducer(private val provider: String, private val requestId: Str
         return if (finish.reason in setOf(FinishReason.STOP, FinishReason.TOOL_CALLS, FinishReason.OTHER)) calls()
         else emptyList()
     }
+    /** Snapshot in part-index order, including opaque adapter replay on every part. */
+    fun assistantMessage(): Message = message(Role.ASSISTANT, *parts.values.map { part ->
+        when (part.kind) {
+            Kind.TEXT -> textPart(part.content.toString(), part.replay)
+            Kind.REASONING -> reasoningPart(part.content.toString(), part.replay)
+            Kind.TOOL -> toolCallPart(part.binding!!, part.name, part.content.toString(), part.replay)
+        }
+    }.toTypedArray())
     fun historyDisposition(): HistoryDisposition {
         val finish = terminal as? ModelEvent.Finished ?: return HistoryDisposition.DISCARD
         if (finish.reason in setOf(FinishReason.REFUSAL, FinishReason.CONTENT_FILTER) || parts.isEmpty())

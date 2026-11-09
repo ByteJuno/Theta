@@ -1,7 +1,5 @@
 package io.github.bytejuno.thetacore.agent.ledger
 
-import kotlinx.serialization.encodeToString
-import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
@@ -34,17 +32,20 @@ class JsonInvocationStore private constructor(
         check(!closed && !coordinatorBound) { "Store already has a coordinator" }
         coordinatorBound = true
     }
-    private val revisions = mutableMapOf<String, Long>()
-
-    init { records().forEach { revisions[it.callId] = it.revision } }
+    private val codec = InvocationRecordCodec(json)
+    private val recordsById = loadRecords().associateByTo(linkedMapOf()) { it.callId }
 
     @Synchronized override fun records(): List<InvocationRecord> {
         check(!closed)
+        return recordsById.values.map { it.detached() }
+    }
+
+    private fun loadRecords(): List<InvocationRecord> {
         try {
             val records = Files.newDirectoryStream(directory, "*.json").use { paths ->
                 paths.map { path ->
                     try {
-                        val record = json.decodeFromString<InvocationRecord>(readUtf8(path))
+                        val record = codec.decode(readUtf8(path))
                         record.validate()
                         require(path.fileName.toString() == "${record.callId}.json") { "Filename/binding mismatch" }
                         record
@@ -67,14 +68,15 @@ class JsonInvocationStore private constructor(
         check(!closed)
         if (poisoned) throw StoreException("Reopen and recover required", true)
         record.validate()
-        require(revisions[record.callId] == expectedRevision && record.revision == (expectedRevision ?: 0) + 1) { "Revision conflict" }
+        require(recordsById[record.callId]?.revision == expectedRevision && record.revision == (expectedRevision ?: 0) + 1) { "Revision conflict" }
+        val snapshot = record.detached()
         val temporary = directory.resolve(".${record.callId}-${UUID.randomUUID()}.tmp")
         val destination = directory.resolve("${record.callId}.json")
         var replacementAttempted = false
         try {
             fault(WriteStage.BEFORE_TEMP)
             FileChannel.open(temporary, CREATE_NEW, WRITE).use { channel ->
-                val buffer = ByteBuffer.wrap(json.encodeToString(record).toByteArray(Charsets.UTF_8))
+                val buffer = ByteBuffer.wrap(codec.encode(snapshot).toByteArray(Charsets.UTF_8))
                 while (buffer.hasRemaining()) channel.write(buffer)
                 fault(WriteStage.AFTER_WRITE)
                 channel.force(true)
@@ -86,7 +88,7 @@ class JsonInvocationStore private constructor(
             fault(WriteStage.AFTER_REPLACE)
             syncDirectory(directory, durability)
             fault(WriteStage.AFTER_DIRECTORY_SYNC)
-            revisions[record.callId] = record.revision
+            recordsById[record.callId] = snapshot
         } catch (e: Exception) {
             // Even move() throwing may leave outcome unknown on a remote/provider filesystem.
             poisoned = replacementAttempted
