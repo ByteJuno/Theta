@@ -1,4 +1,4 @@
-# Theta Core 插件 API
+# Theta 插件 API
 
 草案 v0.3，对应 API 等级 1，2026-11-06。S1 可行性验证通过之前，这里的接口都可能改。背景和取舍见 [DESIGN.md](DESIGN.md)，模型和工具调用的完整约定见 [PROTOCOL.md](PROTOCOL.md)。
 
