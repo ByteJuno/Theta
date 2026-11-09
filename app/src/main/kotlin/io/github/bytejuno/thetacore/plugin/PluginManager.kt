@@ -88,10 +88,9 @@ internal class PluginManager(context: Context) {
         val hostToolBridge = HostToolBridgeRoot(executionBudget)
     }
 
-    /** Internal opt-in only: no UI/model path is changed. The caller supplies a tested durability
-     * adapter; Android on-device persistence is not claimed by the JVM bridge. */
-    suspend fun initializeHostTools(store: io.github.bytejuno.thetacore.agent.ledger.InvocationStore): HostToolExecutionService =
-        hostToolBridge.initialize(store)
+    /** Application startup owns the store and the single recovery attempt, never an Activity. */
+    suspend fun initializeHostTools(): HostToolExecutionService =
+        hostToolBridge.initialize { AndroidInvocationStore.open(app.noBackupFilesDir) }
     private val stageCleanup = PluginStageCleanup()
     private val store = PluginStore(app.filesDir, app.cacheDir, PlatformPluginSignatureVerifier(app.packageManager), stageCleanup)
     private val states = PluginStateStore(app.filesDir)
