@@ -20,6 +20,9 @@ import java.time.format.DateTimeFormatter
 /** How long a server may keep the connection open once the response is complete. */
 private const val TERMINAL_GRACE_MS = 2_000L
 private class TerminalGraceExpired : Exception()
+// Do not retain arbitrary echoed strings or truncated credentials in error metadata.
+private val SAFE_ERROR_PARAMETERS = setOf("temperature", "top_p", "parallel_tool_calls", "response_format",
+    "stop", "reasoning_effort", "max_tokens", "max_completion_tokens", "stream_options")
 
 class OpenAiChatProvider(
     private val config: OpenAiChatConfig,
@@ -46,7 +49,15 @@ class OpenAiChatProvider(
             protocol(eventSizeBytes(event) <= 64 * 1024, "Event exceeds 64 KiB (replay requires external storage)")
             if (event is ModelEvent.Finished || event is ModelEvent.Failed) pendingTerminal = event else emit(event)
         }
-        val token = auth.accessToken()
+        val token = try { auth.accessToken() } catch (error: Exception) {
+            if (error is CancellationException) currentCoroutineContext().ensureActive()
+            emit(Events.failed(modelError(ModelErrorCode.AUTH, "Provider credentials unavailable; re-enter the API key")))
+            return@flow
+        }
+        if (!validApiKey(token)) {
+            emit(Events.failed(modelError(ModelErrorCode.AUTH, "Provider credentials invalid; re-enter the API key")))
+            return@flow
+        }
         var abandoned = false
         try { coroutineScope {
             var grace: Job? = null
@@ -84,7 +95,13 @@ class OpenAiChatProvider(
         } else if (!abandoned) {
             sse.endOfInput(); stream.endOfInput()
         }
-        emit(pendingTerminal ?: Events.failed(modelError(ModelErrorCode.PROTOCOL, "Missing terminal")))
+        val terminal = pendingTerminal ?: Events.failed(modelError(ModelErrorCode.PROTOCOL, "Missing terminal"))
+        // Servers may echo Authorization in error.param as well as message/body. Never journal it.
+        if (terminal is ModelEvent.Failed) {
+            val error = terminal.error
+            emit(Events.failed(modelError(error.code, "OpenAI Chat request failed", error.httpStatus,
+                error.retryAfterMs, error.param?.takeIf { it in SAFE_ERROR_PARAMETERS && !it.contains(token) })))
+        } else emit(terminal)
     }.catch { error ->
         // Only the collector's own cancellation stays silent; an adapter's internal one is a failure.
         if (error is CancellationException) currentCoroutineContext().ensureActive()
