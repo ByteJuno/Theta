@@ -45,7 +45,7 @@ data class HistoryRecovery(val recovered: Boolean, val requiresDecision: Boolean
 class FileRunHistory private constructor(
     private val directory: Path, private val durability: Durability,
     private val fault: (HistoryWritePoint) -> Unit,
-    private val lockChannel: FileChannel, private val lock: FileLock,
+    private val lockChannel: FileChannel, private val lock: FileLock, private val writerKey: Path,
 ) : RunHistory, AutoCloseable {
     private var closed = false
     private var poisoned = false
@@ -296,8 +296,11 @@ class FileRunHistory private constructor(
         val ids = calls.map { it.binding.callId }
         val results = requireNotNull(ledger.resultsForStep(sessionId, p.runId, p.stepId, ids)) { "Incomplete ledger step" }
         if (alreadyCommitted) {
-            val committed = batch(cursor()).second.map(HistoryCodec::encodeMessage)
-            require(committed == listOf(p.assistant, HistoryCodec.encodeMessage(results))) { "Ledger/history disagreement" }
+            // After a restart the ledger's text has been through UTF-8, but this batch kept the original.
+            val committed = batch(cursor()).second.map { HistoryCodec.atLedgerPrecision(HistoryCodec.encodeMessage(it)) }
+            require(committed == listOf(p.assistant, HistoryCodec.encodeMessage(results)).map(HistoryCodec::atLedgerPrecision)) {
+                "Ledger/history disagreement"
+            }
             clearPending()
         } else append(head.revision, listOf(assistant, results))
         val unresolved = ids.any { id ->
@@ -360,11 +363,20 @@ class FileRunHistory private constructor(
     private fun point(path: Path, stage: HistoryWriteStage) = fault(HistoryWritePoint(
         directory.relativize(path).toString().replace('\\', '/'), stage))
     @Synchronized override fun close() {
-        if (!closed) { closed = true; try { lock.release() } finally { lockChannel.close() } }
+        if (!closed) {
+            closed = true
+            try { lock.release() } finally {
+                // Only after the channel is closed: a later open must not overlap this descriptor.
+                try { lockChannel.close() } finally { activeWriters.remove(writerKey) }
+            }
+        }
     }
     companion object {
         private const val EMPTY_HASH = "ROOT"
         private const val MAX_FILE_BYTES = 64L * 1024 * 1024
+        /** POSIX drops a process's lock when ANY descriptor for that file closes. A same-process
+         * duplicate must therefore be rejected before it opens, and then closes, writer.lock. */
+        private val activeWriters = java.util.concurrent.ConcurrentHashMap.newKeySet<Path>()
         private fun digest(bytes: ByteArray) = MessageDigest.getInstance("SHA-256").digest(bytes)
             .joinToString("") { "%02x".format(it) }
         private fun hash(batch: HistoryBatch): String {
@@ -433,12 +445,19 @@ class FileRunHistory private constructor(
         fun open(directory: Path, durability: Durability, fault: (HistoryWritePoint) -> Unit = {}): FileRunHistory {
             require(Files.isDirectory(directory.resolve("batches")) && Files.isDirectory(directory.resolve("calls")))
             syncDirectory(directory, durability)
-            val channel = FileChannel.open(directory.resolve("writer.lock"), CREATE, WRITE)
+            val writerKey = directory.toRealPath()
+            if (!activeWriters.add(writerKey)) throw HistoryStorageException("Cannot open session $directory",
+                IllegalStateException("Session already has a writer in this process"))
+            var channel: FileChannel? = null
             var lock: FileLock? = null
             try {
+                channel = FileChannel.open(directory.resolve("writer.lock"), CREATE, WRITE)
                 lock = channel.tryLock() ?: error("Session already has a writer")
-                return FileRunHistory(directory, durability, fault, channel, lock)
-            } catch (e: Exception) { lock?.release(); channel.close(); throw HistoryStorageException("Cannot open session $directory", e) }
+                return FileRunHistory(directory, durability, fault, channel, lock, writerKey)
+            } catch (e: Exception) {
+                try { lock?.release(); channel?.close() } finally { activeWriters.remove(writerKey) }
+                throw HistoryStorageException("Cannot open session $directory", e)
+            }
         }
     }
 }

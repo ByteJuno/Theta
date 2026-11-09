@@ -187,6 +187,11 @@ internal object HistoryCodec {
             } else require(!Character.isLowSurrogate(c)) { "Unpaired surrogate in history input" }
         }
     }
+    /** InvocationRecordCodec stores text as UTF-8, turning a lone surrogate into '?' after a restart.
+     * History keeps the original, so comparing the two needs this same reduction on both sides. */
+    fun atLedgerPrecision(m: StoredMessage) = m.copy(parts = m.parts.map { p ->
+        p.copy(text = p.text?.let { String(it.toByteArray(Charsets.UTF_8), Charsets.UTF_8) })
+    })
     fun requireUtf8(m: StoredMessage) {
         for (p in m.parts) {
             listOfNotNull(p.text, p.name, p.args, p.callId).forEach(::requireUtf8)

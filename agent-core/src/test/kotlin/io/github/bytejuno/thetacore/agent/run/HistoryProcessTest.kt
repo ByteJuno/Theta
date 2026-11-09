@@ -58,18 +58,48 @@ object HistoryCrashChild {
     }
 }
 
+/** Reports whether a genuinely separate process can become a writer of the session. */
+object HistoryLockChild {
+    @JvmStatic fun main(args: Array<String>) {
+        val opened = runCatching { FileRunHistory.open(Paths.get(args[0]), Durability.PROCESS_CRASH_ONLY).close() }.isSuccess
+        println(if (opened) "OPENED" else "BLOCKED")
+    }
+}
+
 class HistoryProcessTest {
+    // Gradle 9 may use a non-URL application loader. Code sources work with both loaders.
+    private val classpath get() = (listOf(HistoryCrashChild::class.java, HistoryLockChild::class.java, FileRunHistory::class.java,
+        kotlin.Unit::class.java, kotlinx.serialization.json.Json::class.java,
+        kotlinx.serialization.SerializationException::class.java, kotlinx.coroutines.Job::class.java)
+        .map { File(it.protectionDomain.codeSource.location.toURI()).absolutePath } +
+        generateSequence(javaClass.classLoader) { it.parent }.filterIsInstance<URLClassLoader>()
+            .flatMap { it.urLs.asSequence() }.map { File(it.toURI()).absolutePath }.toList())
+        .distinct().joinToString(File.pathSeparator)
+    private val java get() = File(System.getProperty("java.home"), "bin/java" + if (System.getProperty("os.name").startsWith("Windows")) ".exe" else "")
+
+    private fun otherProcessCanOpen(path: java.nio.file.Path): Boolean {
+        val child = ProcessBuilder(java.absolutePath, "-cp", classpath, HistoryLockChild::class.java.name, path.toString())
+            .redirectErrorStream(true).start()
+        val output = child.inputStream.bufferedReader().readText().trim()
+        assertTrue(child.waitFor(30, TimeUnit.SECONDS))
+        assertTrue(output == "OPENED" || output == "BLOCKED", output)
+        return output == "OPENED"
+    }
+
+    @Test fun rejectedSameProcessOpenKeepsTheWriterLockForOtherProcesses() {
+        val path = Files.createTempDirectory("history-lock")
+        FileRunHistory.create(path, "session", Durability.PROCESS_CRASH_ONLY).use { h ->
+            assertFalse(otherProcessCanOpen(path))
+            assertFailsWith<HistoryStorageException> { FileRunHistory.open(path, Durability.PROCESS_CRASH_ONLY) }
+            assertFalse(otherProcessCanOpen(path), "a rejected duplicate must not release the OS lock")
+            assertEquals(0, h.revision())
+        }
+        assertTrue(otherProcessCanOpen(path))
+        FileRunHistory.open(path, Durability.PROCESS_CRASH_ONLY).close()
+    }
+
     @Test fun actualSubprocessKillAtEveryWriteStageRecoversCoherentHistoryAndLedger() {
-        // Gradle 9 may use a non-URL application loader. Code sources work with both loaders.
-        val classpath = (listOf(HistoryCrashChild::class.java, FileRunHistory::class.java,
-            kotlin.Unit::class.java, kotlinx.serialization.json.Json::class.java,
-            kotlinx.serialization.SerializationException::class.java, kotlinx.coroutines.Job::class.java)
-            .map { File(it.protectionDomain.codeSource.location.toURI()).absolutePath } +
-            generateSequence(javaClass.classLoader) { it.parent }.filterIsInstance<URLClassLoader>()
-                .flatMap { it.urLs.asSequence() }.map { File(it.toURI()).absolutePath }.toList())
-            .distinct().joinToString(File.pathSeparator)
         assertTrue(classpath.isNotBlank())
-        val java = File(System.getProperty("java.home"), "bin/java" + if (System.getProperty("os.name").startsWith("Windows")) ".exe" else "")
         var killed = 0
         for (file in listOf("pending.json", "batches/2.json", "calls/", "head.json")) {
             for (stage in HistoryWriteStage.entries) {

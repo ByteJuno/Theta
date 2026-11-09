@@ -163,6 +163,66 @@ class HistoryStorageRegressionTest {
         }
     }
 
+    @Test fun committedStepWithLoneSurrogateResultStillClearsPendingAfterLedgerReload() {
+        val path = Files.createTempDirectory("history-stale-surrogate")
+        val ledgerPath = Files.createTempDirectory("history-stale-surrogate-ledger")
+        val c = call()
+        val id = c.binding.callId
+        val a = assistant(c)
+        val text = "cut at a code unit \uD83D"
+        val d = testDefinition()
+        JsonInvocationStore.create(ledgerPath, durability).use { store ->
+            val gate = DefinitionGate().apply { install(d); freezeRun("run", listOf(d)) }
+            val l = InvocationLedger(store, gate, ArgumentsValidator { _, _ -> true })
+            l.recoverColdStart("before")
+            FileRunHistory.create(path, "session", durability).close()
+            FileRunHistory.open(path, durability) {
+                if (it.file == "head.json" && it.stage == HistoryWriteStage.AFTER_REPLACE) throw IOException("ack lost")
+            }.use { h ->
+                h.prepareStep(0, identity, "step", a)
+                l.recordInvocation(InvocationInput(BindingValue.copyOf(c.binding), "chain", "session", "run", "step",
+                    0, "{}", d, false, Risk.READ, false, "tool"))
+                l.validateAndPrepare(id)
+                val ticket = assertIs<Mutation.Applied>(l.claimExecution(id, l.get(id)!!.revision)).ticket!!
+                assertIs<Mutation.Applied>(l.complete(id, ticket.attemptId, Status.SUCCEEDED, text))
+                assertFailsWith<HistoryStorageException> { h.append(0, listOf(a, l.resultsForStep("session", "run", "step", listOf(id))!!)) }
+            }
+        }
+        JsonInvocationStore.open(ledgerPath, durability).use { store ->
+            val l = InvocationLedger(store, DefinitionGate(), ArgumentsValidator { _, _ -> true })
+            l.recoverColdStart("after")
+            FileRunHistory.open(path, durability).use { h ->
+                assertTrue(h.recoverPending(l).recovered)
+                assertFalse(Files.exists(path.resolve("pending.json")))
+                assertEquals(1, h.revision())
+                val result = h.snapshot().messages.last().parts.single() as ContentPart.ToolResult
+                assertEquals(text, Json.parseToJsonElement(result.text).jsonObject.getValue("message").jsonPrimitive.content)
+            }
+        }
+    }
+
+    @Test fun differentCommittedResultStillFailsClosedOnLedgerComparison() {
+        val path = Files.createTempDirectory("history-stale-mismatch")
+        val c = call()
+        val a = assistant(c)
+        val l = ledger()
+        FileRunHistory.create(path, "session", durability).close()
+        FileRunHistory.open(path, durability) {
+            if (it.file == "head.json" && it.stage == HistoryWriteStage.AFTER_REPLACE) throw IOException("ack lost")
+        }.use { h ->
+            h.prepareStep(0, identity, "step", a)
+            l.recordInvocation(InvocationInput(BindingValue.copyOf(c.binding), "chain", "session", "run", "step",
+                0, "{}", null, false, Risk.READ, true, "tool"))
+            assertFailsWith<HistoryStorageException> {
+                h.append(0, listOf(a, message(Role.TOOL, toolResultPart(c.binding.callId, "not what the ledger says"))))
+            }
+        }
+        FileRunHistory.open(path, durability).use { h ->
+            assertFails { h.recoverPending(l) }
+            assertTrue(Files.exists(path.resolve("pending.json")))
+        }
+    }
+
     @Test fun streamingEncodingMatchesLegacySerializerIncludingEveryEscape() {
         val chars = (0..255).map { it.toChar() }.joinToString("") + "原样😀"
         val a = assistant(call(args = chars), textPart(chars, replayData(chars, chars, chars)), reasoningPart(null, null))
