@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "preceding_commit": "7de23a2cb470f23ba7799b9e00662fba482c9abc",
+  "reason": "CI42637486329 found a script object captured by the padding task and missing generated-assets dependencies for Release lint",
+  "changes": "Typed GenerateS1PublicationPadding task plus AGP addGeneratedSourceDirectory; no runtime source or instrumented test changes",
+  "changed_source_sha256": {
+    "samples/fixtures/build.gradle.kts": "c4aa981a374abfcce2a4174c427d3fc3edd5ed8662f2d139352700b1a2dfaf1b",
+    "build-logic/src/main/kotlin/io/github/bytejuno/thetacore/gradle/GenerateS1PublicationPadding.kt": "6d520ab1f570cc6ed71c38c68636c30a59e61edd5df8915e4164e2298a3a9d7b"
+  },
+  "configuration_cache_store": {
+    "status": "PASS",
+    "log_sha256": "db643e83ccf1bb1cd656a19748e41a99c6e0f68ca88ff0494979038af91faf0f"
+  },
+  "configuration_cache_reuse": {
+    "status": "PASS",
+    "log_sha256": "32edc6d2096aac1c07022d181fb619f8572332ae2d3d252fa569aa2e93967eb6"
+  },
+  "apk_identity": {
+    "host": {
+      "built": "5a43e0ea5357db7a23186ce9b5ab368266d8cccff91a811a6758c3bbed786668",
+      "frozen": "5a43e0ea5357db7a23186ce9b5ab368266d8cccff91a811a6758c3bbed786668",
+      "identical": true
+    },
+    "test": {
+      "built": "8f1ddd6465ad6de9fb158903ccf649e8162d5f7688724db2964c603ea637b59c",
+      "frozen": "8f1ddd6465ad6de9fb158903ccf649e8162d5f7688724db2964c603ea637b59c",
+      "identical": true
+    },
+    "payload_v1": {
+      "built": "da929caa97ec18e00c634dbbce81b65a58ee1e6f1a6c781074d83c2f70e7b0de",
+      "frozen": "da929caa97ec18e00c634dbbce81b65a58ee1e6f1a6c781074d83c2f70e7b0de",
+      "identical": true
+    },
+    "payload_v2": {
+      "built": "520fe0d6560cee57b01cddab9252c0eed6cb51230124d1d6b9996e18a785d34c",
+      "frozen": "520fe0d6560cee57b01cddab9252c0eed6cb51230124d1d6b9996e18a785d34c",
+      "identical": true
+    }
+  },
+  "preceding_ci": {
+    "run": 42637486329,
+    "build": "FAILURE",
+    "paired-keep-size": "SUCCESS",
+    "runtime_dependencies_step": "SKIPPED",
+    "apk_r8_upload_step": "SKIPPED",
+    "failed_log_sha256": "3ed1dba94d58a1d001194ab039f5bbb99992e39bae840d81b7d24702d841e300"
+  },
+  "scope": "Byte-identical artifacts retain their original matrix-1 execution identity; no new device execution claimed"
+}

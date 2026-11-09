@@ -45,6 +45,8 @@ CODE 的 MOVED 已越过完整包原子发布点，不能套用 DATA 的“没�
 
 Debug Host/androidTest 构建通过；app JVM 412 项（411 通过、1 项既有 Windows 跳过），agent-core 168 项通过，SDK 任务无用例；lintDebug 零错误、15 警告。Release merged manifest 已确认不含测试 instrumentation/provider/authority。普通 PR CI 新增 androidTest 编译；设备矩阵是上述本地独立 AVD 执行，不能把 CI 编译视为再次设备通过。
 
+首次提交 `7de23a2` 的 CI42637486329 中 paired-keep-size 通过，build 因新增 padding 任务捕获 Gradle script、Release lint 对生成资产缺少依赖而失败。后续将生成逻辑移入类型化任务，并用 AGP `addGeneratedSourceDirectory` 接线；本地配置缓存保存/复用、Host/androidTest、normalV2 Release 与 Debug lint 均通过。四个重建 APK 的完整 SHA-256 与上述冻结实测包全部相同；不重命名原始设备结果、不宣称另一次设备执行。错误日志、修正源码哈希和逐包相同比较见 [构建修正索引](evidence/s1-code-publication-build-fix-20261109.json)。原始 123 文件清单保留其初次冻结身份，此修正索引单列后续构建接线变更。
+
 审核指出 PR Check 默认上传 APK/R8 配置与注释不一致。本次新增 `workflow_dispatch`，依赖记录及物理测量输入上传仅在手动触发时执行；普通 PR/main CI 继续测量、仅上传原摘要白名单。PR 仍待审，不合并、不启用 auto-merge。
 
 复现入口（脚本仅接受同名专属 AVD 和 marker，会清空该专属模拟器的 Host 数据）：
