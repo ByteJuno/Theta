@@ -18,7 +18,7 @@ class BridgeBoundaryTest {
             assertEquals(Status.TIMED_OUT, r.state)
             assertEquals(InstanceState.UNCONFIRMED, r.instance!!.state)
             assertNotNull(r.isolation)
-            val next = f.ready(f.input(input.definition, session = "other", chain = "other-chain"))
+            val next = f.ready(f.input(requireNotNull(input.definition), session = "other", chain = "other-chain"))
             assertIs<Mutation.Blocked>(f.ledger.claimExecution(next.callId, next.revision))
             f.reopen()
             val recovered = f.ledger.get(ready.callId)!!

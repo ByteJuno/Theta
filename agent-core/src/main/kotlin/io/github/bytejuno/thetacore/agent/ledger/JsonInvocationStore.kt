@@ -56,7 +56,7 @@ class JsonInvocationStore private constructor(
                 "Duplicate step order"
             }
             val activeResources = records.filter { it.instance?.state == InstanceState.UNCONFIRMED }
-                .mapNotNull { it.input.definition.exclusiveResource }
+                .mapNotNull { it.input.definition?.exclusiveResource }
             require(activeResources.distinct().size == activeResources.size) { "Contradictory active resource leases" }
             return records
         } catch (e: StoreException) { throw e }

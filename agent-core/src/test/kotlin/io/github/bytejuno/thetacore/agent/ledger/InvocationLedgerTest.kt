@@ -13,7 +13,7 @@ class InvocationLedgerTest {
         val first = f.record(a)
         assertIs<Mutation.AlreadyApplied>(f.ledger.recordInvocation(a))
         assertIs<Mutation.Conflict>(f.ledger.recordInvocation(a.copy(argsJson = "{}")))
-        assertIs<Mutation.Conflict>(f.ledger.recordInvocation(a.copy(definition = a.definition.copy(version = "2"))))
+        assertIs<Mutation.Conflict>(f.ledger.recordInvocation(a.copy(definition = requireNotNull(a.definition).copy(version = "2"))))
         val second = f.record(f.input(session = "other"))
         assertEquals(first.input.binding.wireId, second.input.binding.wireId)
         assertNotEquals(first.callId, second.callId)

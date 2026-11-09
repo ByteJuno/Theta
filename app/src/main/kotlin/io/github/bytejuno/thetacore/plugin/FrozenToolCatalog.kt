@@ -62,6 +62,8 @@ internal class FrozenToolCatalog(val gate: DefinitionGate, private val budget: P
         snapshot.mapValues { it.value.definition }
     }
     fun definition(runId: String, name: String): FrozenDefinition? = gate.withGate { runs[runId]?.get(name)?.definition }
+    /** Null means this run has no frozen catalog here, which says nothing about whether a name is unknown. */
+    fun frozen(runId: String): Map<String, FrozenDefinition>? = gate.withGate { runs[runId]?.mapValues { it.value.definition } }
     fun current(definition: FrozenDefinition): Entry? = gate.withGate {
         entries[definition.toolKey]?.takeIf { it.definition == definition }
     }

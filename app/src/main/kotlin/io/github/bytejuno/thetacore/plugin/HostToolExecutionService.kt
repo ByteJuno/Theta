@@ -64,7 +64,7 @@ internal class HostToolExecutionService(
                 else -> return@withGate checked
             }
             if (record.state != Status.READY) return@withGate checked
-            val entry = catalog.current(record.input.definition) ?: return@withGate Mutation.Blocked("Definition unavailable")
+            val entry = catalog.current(requireNotNull(record.input.definition)) ?: return@withGate Mutation.Blocked("Definition unavailable")
             var invocation: PluginInvocation? = null
             val reservation = budget.reserve(entry.definition.owner, owner,
                 onCancel = { invocation?.cancel() }, onExit = {})
@@ -181,8 +181,8 @@ internal class HostToolExecutionService(
     /** Receives the fully consumed protocol reducer, not an optimistic Finished event.
      * emptyArguments is eligibility, not approval: preserve raw arguments and let the ledger
      * normalize empty/null to {} only after frozen-schema validation; never gate on complete alone.
-     * Unknown names fail the WHOLE step before registration; unresolved rejection persistence is
-     * not implemented in this scoped slice (never invent a registered definition).
+     * Unknown names are registered as terminal rejections without a fabricated definition;
+     * they retain their original binding/order and do not prevent other calls from executing.
      */
     suspend fun executeStep(reducer: ModelEventReducer, taskChain: String, session: String, run: String,
         step: String, unattended: Boolean = false): Message? = withContext(Dispatchers.IO) {
@@ -191,11 +191,15 @@ internal class HostToolExecutionService(
         if (disposition == HistoryDisposition.DISCARD) return@withContext null
         val calls = if (disposition == HistoryDisposition.NEEDS_CANCELLED_NONE_RESULTS) reducer.calls() else reducer.toolCandidates()
         if (calls.isEmpty()) return@withContext null
-        val definitions = calls.map { catalog.definition(run, it.name) ?: error("Unresolved tool: ${it.name}; step not submitted") }
-        val inputs = calls.mapIndexed { index, call -> InvocationInput(
-            io.github.bytejuno.thetacore.agent.ledger.BindingValue.copyOf(call.binding), taskChain, session, run, step, index,
-            call.argsJson, definitions[index], unattended, definitions[index].declaredRisk,
-            disposition == HistoryDisposition.NEEDS_CANCELLED_NONE_RESULTS) }
+        // Unknown-tool rejections are permanent, so they need an actual catalog to be judged against.
+        val frozen = catalog.frozen(run) ?: error("Run catalog not frozen: $run; step not submitted")
+        val inputs = calls.mapIndexed { index, call ->
+            val definition = frozen[call.name]
+            InvocationInput(
+                io.github.bytejuno.thetacore.agent.ledger.BindingValue.copyOf(call.binding), taskChain, session, run, step, index,
+                call.argsJson, definition, unattended, definition?.declaredRisk ?: Risk.READ,
+                disposition == HistoryDisposition.NEEDS_CANCELLED_NONE_RESULTS, call.name)
+        }
         // Entire step is registered before any dispatch, so partial storage failure cannot execute it.
         val registered = gate.withGate {
             if (storageFailed) false else inputs.all {

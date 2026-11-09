@@ -23,7 +23,7 @@ class DefinitionGate {
         runs[runId] = frozen
     }
     internal fun check(input: InvocationInput): DefinitionState = withGate {
-        val d = input.definition
+        val d = input.definition ?: return@withGate DefinitionState.STALE
         when {
             runs[input.runId]?.get(d.modelName) != d -> DefinitionState.STALE
             d.toolKey in refreshing -> DefinitionState.REFRESH_PENDING
@@ -43,10 +43,11 @@ class ApprovalPolicy(
     internal fun isDenied(input: InvocationInput) = denied(input)
     internal fun evaluate(record: InvocationRecord, risk: Risk, unknown: List<String>, all: List<InvocationRecord>): Verdict {
         val i = record.input
+        val definition = i.definition ?: return Verdict.DENY
         if (denied(i)) return Verdict.DENY
         if (unknown.isNotEmpty()) return if (i.unattended) Verdict.DENY else Verdict.ASK
         val grant = all.any { other ->
-            other.input.definition.toolKey == i.definition.toolKey && other.definitionDigest == record.definitionDigest &&
+            other.input.definition?.toolKey == definition.toolKey && other.definitionDigest == record.definitionDigest &&
                 other.receipts.any { receipt ->
                     receipt.request.risk >= risk && receipt.request.unknownCalls.isEmpty() &&
                         (receipt.decision == Decision.ALLOW_ALWAYS ||
@@ -54,7 +55,7 @@ class ApprovalPolicy(
                 }
         }
         if (grant && permitsLongTerm(risk)) return Verdict.ALLOW
-        if (risk == Risk.READ && i.definition.source == Source.FIRST_PARTY) return Verdict.ALLOW
+        if (risk == Risk.READ && definition.source == Source.FIRST_PARTY) return Verdict.ALLOW
         return if (i.unattended) Verdict.DENY else Verdict.ASK
     }
 }
