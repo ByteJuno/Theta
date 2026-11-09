@@ -237,6 +237,39 @@ class HostToolExecutionServiceTest {
         }
     }
 
+    @Test fun cancellingCallQueuedForCapacityDoesNotStallLaterSiblings() = runBlocking {
+        Fixture(slots = 1).use { f ->
+            val entered = CountDownLatch(1); val release = CountDownLatch(1)
+            val queuedRuns = AtomicInteger(); val thirdRuns = AtomicInteger()
+            val slow = f.catalog.registerHost("host/slow", "1", tool(parallel = true, timeout = 10_000) {
+                entered.countDown(); release.await(); ToolResult("slow", effect = ToolEffect.NONE)
+            })
+            val queued = f.catalog.registerHost("host/queued", "1", tool(parallel = true) {
+                queuedRuns.incrementAndGet(); ToolResult("queued", effect = ToolEffect.NONE)
+            })
+            val third = f.catalog.registerHost("host/third", "1", tool(parallel = true) {
+                thirdRuns.incrementAndGet(); ToolResult("third", effect = ToolEffect.NONE)
+            })
+            f.catalog.freeze("run")
+            val reducer = completedCalls(listOf(slow.modelName, queued.modelName, third.modelName), "queued-cancel")
+            val ids = reducer.calls().map { it.binding.callId }
+            val step = async(Dispatchers.IO) { f.service.executeStep(reducer, "chain", "session", "run", "step") }
+            try {
+                assertTrue(entered.await(5, TimeUnit.SECONDS))
+                waitUntil { f.ledger.get(ids[1])?.state == Status.READY }
+                delay(200) // Let the step reach its capacity wait for the queued call.
+                assertTrue(f.service.cancel(ids[1]) is Mutation.Applied)
+                release.countDown()
+                val result = withTimeout(5_000) { step.await() }!!
+                assertEquals(ids, result.parts.map { (it as ContentPart.ToolResult).callId })
+                assertEquals(listOf(Status.SUCCEEDED, Status.CANCELLED, Status.SUCCEEDED), ids.map { f.ledger.get(it)!!.state })
+                assertEquals(Effect.NONE, f.ledger.get(ids[1])!!.result!!.effect)
+                assertEquals(0, queuedRuns.get())
+                assertEquals(1, thirdRuns.get())
+            } finally { release.countDown(); step.cancel() }
+        }
+    }
+
     @Test fun parallelSafeCallsSharingResourceStillSerializeWithinStep() = runBlocking {
         Fixture().use { f ->
             val entered = CountDownLatch(1); val release = CountDownLatch(1)

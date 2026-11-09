@@ -273,6 +273,8 @@ internal class HostToolExecutionService(
                     dispatched = dispatch(id)
                 }
                 if (dispatched is Mutation.Applied && dispatched.record.state.terminal) continue
+                // A call cancelled while queued for admission is finished; its siblings still run.
+                if (dispatched is Mutation.Conflict && ledger.get(id)?.state?.terminal == true) continue
                 if (dispatched !is Mutation.Applied || dispatched.ticket == null) return@withContext null
                 pending += id
                 if (!parallel && !drain()) return@withContext null
