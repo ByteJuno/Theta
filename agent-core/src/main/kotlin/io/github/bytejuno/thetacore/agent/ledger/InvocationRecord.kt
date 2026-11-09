@@ -38,6 +38,9 @@ import java.util.UUID
     val timeoutMillis: Long? = null,
 ) {
     init { require(toolKey.contains('/') && owner.isNotBlank() && version.isNotBlank() && generation >= 0) }
+    /** Aliases belong to a run, not the registration. All other fields must still match. */
+    fun sameRegistrationAs(other: FrozenDefinition): Boolean = copy(modelName = other.modelName) == other
+
     val digest: String get() = sha256("definition-v1:" + buildJsonObject {
         put("name", name); put("description", description)
         put("inputSchema", Json.parseToJsonElement(inputSchema)); put("risk", declaredRisk.name)

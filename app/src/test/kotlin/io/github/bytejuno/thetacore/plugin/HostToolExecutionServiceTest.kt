@@ -70,6 +70,110 @@ class HostToolExecutionServiceTest {
         assertTrue(f.service.decide(id, pending.id, Decision.ALLOW_ONCE) is Mutation.Applied)
     }
 
+    @Test fun collidingModelNamesDispatchToDistinctToolsInFrozenOrder() = runBlocking {
+        Fixture().use { f ->
+            val keys = listOf("host/a/b", "host/a_b", "host/" + "long.name".repeat(15))
+            keys.forEach { key ->
+                f.catalog.registerHost(key, "1", tool { ToolResult(text = key) })
+            }
+            val snapshot = f.catalog.freeze("run")
+            assertEquals(keys.size, snapshot.size)
+            assertEquals(snapshot.keys.sorted(), snapshot.keys.toList())
+            snapshot.forEach { (name, definition) ->
+                assertTrue(name.matches(Regex("[A-Za-z0-9_-]{1,64}")))
+                assertEquals(definition, f.catalog.definition("run", name))
+                assertNotNull(f.catalog.current(definition))
+            }
+            assertNull(f.catalog.definition("run", "host_a_b"))
+            val reducer = completedCalls(snapshot.keys.toList(), "aliases")
+            val result = f.service.executeStep(reducer, "chain", "session", "run", "step")!!
+            val parts = result.parts.map { it as ContentPart.ToolResult }
+            assertEquals(snapshot.values.map { it.toolKey }, parts.map { f.ledger.get(it.callId)!!.result!!.text })
+            parts.forEach { assertEquals(Status.SUCCEEDED, f.ledger.get(it.callId)!!.state) }
+        }
+    }
+
+    @Test fun catalogNamesAndOrderDoNotDependOnRegistrationOrder() = runBlocking {
+        val keys = listOf("host/z", "host/a/b", "host/a_b", "host/a_b_02c2b0e6aca1", "host/a.b",
+            "host/" + "x".repeat(90))
+        Fixture().use { first ->
+            Fixture().use { second ->
+                keys.forEach { first.catalog.registerHost(it, "1", HostClockTool()) }
+                keys.reversed().forEach { second.catalog.registerHost(it, "1", HostClockTool()) }
+                assertEquals(first.catalog.freeze("run").toList(), second.catalog.freeze("run").toList())
+            }
+        }
+    }
+
+    @Test fun literalHashAliasIsResolvedOnlyWithinItsFrozenRun() = runBlocking {
+        Fixture().use { f ->
+            val a = "host/a/b"
+            val b = "host/a_b"
+            val literal = "host/a_b_02c2b0e6aca1"
+            val literalRetry = "host/a_b_02c2b0e6aca1_1"
+            listOf(a, b).forEach { key ->
+                f.catalog.registerHost(key, "1", tool { ToolResult(text = key) })
+            }
+            val old = f.catalog.freeze("old")
+            listOf(literalRetry, literal).forEach { key ->
+                f.catalog.registerHost(key, "1", tool { ToolResult(text = key) })
+            }
+            val fresh = f.catalog.freeze("fresh")
+            val sharedName = "host_a_b_02c2b0e6aca1"
+            assertEquals(a, old.getValue(sharedName).toolKey)
+            assertEquals(literal, fresh.getValue(sharedName).toolKey)
+            assertEquals(a, fresh.getValue("${sharedName}_2").toolKey)
+            assertEquals(setOf(a, b, literal, literalRetry), fresh.values.map { it.toolKey }.toSet())
+            assertEquals(old, f.catalog.freeze("old"))
+            for ((run, snapshot) in listOf("old" to old, "fresh" to fresh)) {
+                snapshot.forEach { (name, definition) ->
+                    assertEquals(definition, f.catalog.definition(run, name))
+                }
+                val message = f.service.executeStep(completedCalls(snapshot.keys.toList(), "request-$run"),
+                    "chain", "session", run, "step")!!
+                val records = message.parts.map { f.ledger.get((it as ContentPart.ToolResult).callId)!! }
+                assertEquals(snapshot.values.map { it.toolKey }, records.map { it.result!!.text })
+                records.forEach { assertEquals(Status.SUCCEEDED, it.state) }
+            }
+            assertNull(f.catalog.definition("old", "${sharedName}_2"))
+        }
+    }
+
+    @Test fun oldRunAliasesSurviveNewCollisionsButRevokedAndReplacedToolsReject() = runBlocking {
+        Fixture().use { f ->
+            val a = "host/a/b"
+            val b = "host/a_b"
+            f.catalog.registerHost(a, "1", tool { ToolResult(text = "original-a") })
+            val old = f.catalog.freeze("old")
+            f.catalog.registerHost(b, "1", tool { ToolResult(text = "b") })
+            val newer = f.catalog.freeze("new")
+            assertEquals(old, f.catalog.freeze("old"))
+            assertEquals(old, f.catalog.frozen("old"))
+            assertEquals("host_a_b", old.keys.single())
+            assertFalse(newer.containsKey(old.keys.single()))
+            suspend fun execute(run: String, names: List<String>, request: String) =
+                f.service.executeStep(completedCalls(names, request), "chain", "session", run, request)!!
+                    .parts.map { it as ContentPart.ToolResult }
+            fun output(part: ContentPart.ToolResult) = f.ledger.get(part.callId)!!.result!!.text
+            assertEquals("original-a", output(execute("old", old.keys.toList(), "old-before").single()))
+            assertEquals(listOf("original-a", "b"), execute("new", newer.keys.toList(), "new-before").map(::output))
+            // Returned map containers cannot mutate the catalog's internal snapshot.
+            (old as MutableMap).clear()
+            assertEquals("host_a_b", f.catalog.freeze("old").keys.single())
+            f.catalog.revoke(b)
+            f.catalog.registerHost(a, "2", tool { ToolResult(text = "replacement-a") })
+            newer.values.forEach { assertNull(f.catalog.current(it)) }
+            assertEquals(newer, f.catalog.freeze("new"))
+            val rejected = execute("new", newer.keys.toList(), "new-after")
+            rejected.forEach { assertEquals(Status.REJECTED, f.ledger.get(it.callId)!!.state) }
+            val oldRejected = execute("old", listOf("host_a_b"), "old-after").single()
+            assertEquals(Status.REJECTED, f.ledger.get(oldRejected.callId)!!.state)
+            val latest = f.catalog.freeze("latest")
+            assertEquals("host_a_b", latest.keys.single())
+            assertEquals("replacement-a", output(execute("latest", latest.keys.toList(), "latest").single()))
+        }
+    }
+
     @Test fun recordedModelEventsInvokeRealClockAndProduceOneOrderedToolMessage() = runBlocking {
         Fixture().use { f ->
             val d = f.register()

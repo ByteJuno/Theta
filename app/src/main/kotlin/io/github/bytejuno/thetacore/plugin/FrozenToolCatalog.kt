@@ -1,5 +1,6 @@
 package io.github.bytejuno.thetacore.plugin
 
+import io.github.bytejuno.thetacore.agent.execution.ModelToolNames
 import io.github.bytejuno.thetacore.agent.execution.Schema202012Validator
 import io.github.bytejuno.thetacore.agent.ledger.*
 import io.github.bytejuno.thetacore.sdk.*
@@ -39,7 +40,8 @@ internal class FrozenToolCatalog(val gate: DefinitionGate, private val budget: P
         require(validator.supported(spec.inputSchema.toString())) { "Unsupported input schema" }
         require(spec.outputSchema == null || validator.supported(spec.outputSchema.toString())) { "Unsupported output schema" }
         require(spec.timeoutMs == null || spec.timeoutMs in 1L..600_000L)
-        val definition = FrozenDefinition(key, key.replace('/', '_'), spec.name, spec.description,
+        // This standalone alias is provisional; freeze assigns names against the whole directory.
+        val definition = FrozenDefinition(key, ModelToolNames.allocate(listOf(key)).getValue(key), spec.name, spec.description,
             spec.inputSchema.toString(), Risk.valueOf(spec.risk.name), Source.FIRST_PARTY, "host", version,
             generation, spec.parallelSafe, spec.exclusiveResource, spec.idempotent, spec.outputSchema?.toString(), spec.timeoutMs)
         return gate.withGate {
@@ -55,8 +57,12 @@ internal class FrozenToolCatalog(val gate: DefinitionGate, private val budget: P
         gate.uninstall(key)
     }
     fun freeze(runId: String): Map<String, FrozenDefinition> = gate.withGate {
-        val snapshot = entries.values.associateBy { it.definition.modelName }
-        check(runs[runId] == null || runs[runId] == snapshot) { "Run catalog is frozen" }
+        runs[runId]?.let { return@withGate it.mapValues { entry -> entry.value.definition } }
+        val names = ModelToolNames.allocate(entries.keys)
+        val snapshot = entries.values.map { entry ->
+            entry.copy(definition = entry.definition.copy(modelName = names.getValue(entry.definition.toolKey)))
+        }.sortedBy { it.definition.modelName }.associateBy { it.definition.modelName }
+        check(snapshot.size == entries.size) { "Model tool names must be unique" }
         gate.freezeRun(runId, snapshot.values.map { it.definition })
         runs[runId] = snapshot
         snapshot.mapValues { it.value.definition }
@@ -65,6 +71,6 @@ internal class FrozenToolCatalog(val gate: DefinitionGate, private val budget: P
     /** Null means this run has no frozen catalog here, which says nothing about whether a name is unknown. */
     fun frozen(runId: String): Map<String, FrozenDefinition>? = gate.withGate { runs[runId]?.mapValues { it.value.definition } }
     fun current(definition: FrozenDefinition): Entry? = gate.withGate {
-        entries[definition.toolKey]?.takeIf { it.definition == definition }
+        entries[definition.toolKey]?.takeIf { it.definition.sameRegistrationAs(definition) }
     }
 }
