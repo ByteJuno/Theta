@@ -215,6 +215,12 @@ class InvocationLedger(
                 Isolation("Return evidence reports unknown effect", r.input.definition?.exclusiveResource, null) else next.isolation))
     }
 
+    /** Clear only this attempt's grace-expiry restriction; other attempts and restart causes remain. */
+    private fun exited(r: InvocationRecord): InvocationRecord = r.copy(
+        instance = requireNotNull(r.instance).copy(state = InstanceState.EXIT_CONFIRMED),
+        restartRequired = r.restartRequired && !r.restartRequiredUntilExit,
+        restartRequiredUntilExit = false)
+
     /** Completion is also a trusted actual-exit callback, not merely a cancellation acknowledgement. */
     fun complete(callId: String, attemptId: String, status: Status, text: String, effect: Effect? = null): Mutation = gate.withGate {
         require(status == Status.SUCCEEDED || status == Status.FAILED)
@@ -224,10 +230,10 @@ class InvocationLedger(
         val evidence = ExitEvidence(attemptId, text, outcome)
         if (evidence in r.evidence) {
             return@withGate if (r.instance.state == InstanceState.EXIT_CONFIRMED) Mutation.AlreadyApplied(r)
-                else update(r, r.copy(instance = r.instance.copy(state = InstanceState.EXIT_CONFIRMED)))
+                else update(r, exited(r))
         }
         val next = if (r.state.terminal) r else terminal(r, status, effect, text)
-        update(r, next.copy(instance = r.instance.copy(state = InstanceState.EXIT_CONFIRMED),
+        update(r, exited(next).copy(
             // A clearance covers only evidence known at the time. New uncertainty invalidates it;
             // identical callback replays return above and do not undo a later clearance.
             isolation = if (outcome.effect == Effect.UNKNOWN)
@@ -239,13 +245,18 @@ class InvocationLedger(
         if (r.instance?.attemptId != attemptId) return@withGate Mutation.Conflict("Wrong attempt")
         val item = ExitEvidence(attemptId, evidence, null)
         if (item in r.evidence) return@withGate Mutation.AlreadyApplied(r)
-        update(r, r.copy(instance = r.instance.copy(state = InstanceState.EXIT_CONFIRMED), evidence = r.evidence + item))
+        update(r, exited(r).copy(evidence = r.evidence + item))
     }
-    fun markRestartRequired(callId: String, attemptId: String): Mutation = gate.withGate {
+    fun markRestartRequired(callId: String, attemptId: String, untilActualExit: Boolean = false): Mutation = gate.withGate {
         val r = get(callId) ?: return@withGate Mutation.Conflict("Unknown call")
         if (r.instance?.attemptId != attemptId || r.instance.state != InstanceState.UNCONFIRMED)
             return@withGate Mutation.Conflict("No unconfirmed instance")
-        if (r.restartRequired) Mutation.AlreadyApplied(r) else update(r, r.copy(restartRequired = true))
+        if (untilActualExit && r.state !in setOf(Status.CANCELLED, Status.TIMED_OUT))
+            return@withGate Mutation.Conflict("No cancelled or timed-out instance")
+        // A sticky cause wins regardless of arrival order; a later grace expiry cannot weaken it.
+        val releaseOnExit = untilActualExit && (!r.restartRequired || r.restartRequiredUntilExit)
+        if (r.restartRequired && r.restartRequiredUntilExit == releaseOnExit) Mutation.AlreadyApplied(r)
+        else update(r, r.copy(restartRequired = true, restartRequiredUntilExit = releaseOnExit))
     }
     fun resolveRecovery(callId: String, resolution: RecoveryResolution): Mutation = gate.withGate {
         val r = get(callId) ?: return@withGate Mutation.Conflict("Unknown call")
@@ -273,6 +284,7 @@ class InvocationLedger(
                 val unresolved = r.instance?.state == InstanceState.UNCONFIRMED
                 val needsDecision = r.state == Status.RUNNING || unresolved
                 next = next.copy(instance = r.instance?.copy(state = InstanceState.EXIT_CONFIRMED), restartRequired = false,
+                    restartRequiredUntilExit = false,
                     recoveryPending = r.recoveryPending || needsDecision,
                     isolation = if (needsDecision)
                         next.isolation ?: Isolation("Host loss requires recovery decision", r.input.definition?.exclusiveResource, null)
