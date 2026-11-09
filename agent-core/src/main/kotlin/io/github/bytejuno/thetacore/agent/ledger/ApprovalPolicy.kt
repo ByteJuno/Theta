@@ -27,7 +27,7 @@ class DefinitionGate {
         when {
             runs[input.runId]?.get(d.modelName) != d -> DefinitionState.STALE
             d.toolKey in refreshing -> DefinitionState.REFRESH_PENDING
-            definitions[d.toolKey] != d -> DefinitionState.STALE
+            definitions[d.toolKey]?.sameRegistrationAs(d) != true -> DefinitionState.STALE
             else -> DefinitionState.CURRENT
         }
     }
