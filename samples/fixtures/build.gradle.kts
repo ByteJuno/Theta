@@ -1,4 +1,5 @@
 import io.github.bytejuno.thetacore.gradle.GenerateThetaManifest
+import java.util.Random
 
 plugins {
     alias(libs.plugins.android.application)
@@ -7,6 +8,23 @@ plugins {
 }
 
 val s1BoundaryScenarios = listOf("s1RegisterDisable", "s1RegisterFail")
+// Inert bytes make a real partial CODE destination write observable on Android.
+// They belong only to the existing disposable normalV2 payload, never the host.
+val publicationPadding = layout.buildDirectory.dir("generated/publication-padding")
+val paddingFile = publicationPadding.get().file("s1-write-padding.bin").asFile
+val generatePublicationPadding = tasks.register("generatePublicationPadding") {
+    inputs.property("bytes", 8 * 1024 * 1024)
+    inputs.property("seed", 20261109L)
+    outputs.file(paddingFile)
+    doLast {
+        paddingFile.parentFile.mkdirs()
+        val random = Random(20261109L)
+        val buffer = ByteArray(8192)
+        paddingFile.outputStream().use { output ->
+            repeat(1024) { random.nextBytes(buffer); output.write(buffer) }
+        }
+    }
+}
 val s1BudgetScenarios = listOf("s1BudgetA", "s1BudgetB", "s1BudgetC", "s1BudgetD", "s1BudgetE")
 val s1Scenarios = listOf(
     "s1EntryReady", "s1EntryLate", "s1EntryNonCooperative", "s1EntryLongReady",
@@ -54,6 +72,7 @@ android {
         }
     }
     sourceSets {
+        named("normalV2") { assets.directories += publicationPadding.get().asFile.path }
         // AGP 9 built-in Kotlin ignores Kotlin directories registered on java.
         // Register on AndroidSourceSet.kotlin for every S1 flavor; leave r5 untouched.
         s1Scenarios.forEach { scenario ->
@@ -62,6 +81,7 @@ android {
             }
         }
     }
+    androidResources { noCompress += "bin" }
     buildTypes {
         release { signingConfig = signingConfigs.getByName("debug") }
     }
@@ -73,6 +93,9 @@ android {
         compose = true
         buildConfig = true
     }
+}
+tasks.configureEach {
+    if (name.startsWith("mergeNormalV2") && name.endsWith("Assets")) dependsOn(generatePublicationPadding)
 }
 
 theta {

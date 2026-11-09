@@ -19,6 +19,7 @@ android {
         targetSdk = libs.versions.android.targetSdk.get().toInt()
         versionCode = 1
         versionName = "0.1.0"
+        testInstrumentationRunner = "io.github.bytejuno.thetacore.S1PublicationInstrumentation"
     }
 
     signingConfigs {
@@ -50,6 +51,22 @@ android {
     buildFeatures {
         compose = true
     }
+}
+
+// Test APK only. Signed payloads exercise the actual host UI and platform verifier.
+val s1PublicationAssets = layout.buildDirectory.dir("generated/s1-publication-test-assets")
+val stageS1PublicationAssets = tasks.register<Copy>("stageS1PublicationTestAssets") {
+    dependsOn(":samples:fixtures:assembleNormalV1Debug", ":samples:fixtures:assembleNormalV2Debug")
+    into(s1PublicationAssets)
+    listOf("normalV1", "normalV2").forEachIndexed { index, flavor ->
+        from(project(":samples:fixtures").layout.buildDirectory.file("outputs/apk/$flavor/debug/fixtures-$flavor-debug.apk")) {
+            rename { "code-v${index + 1}.apk" }
+        }
+    }
+}
+android.sourceSets.named("androidTest") { assets.directories += s1PublicationAssets.get().asFile.path }
+tasks.configureEach {
+    if (name == "mergeDebugAndroidTestAssets") dependsOn(stageS1PublicationAssets)
 }
 
 // Compile the sample's actual platform-independent ZIP generator only into JVM tests.

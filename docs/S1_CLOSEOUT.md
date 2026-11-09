@@ -1,6 +1,6 @@
 # S1 closeout physical validation — 2026-11-09
 
-The listed bootstrap, Hook authorization, disable, target recovery and CI-pair frame checks have run on the identified PLK110. Historical emulator/runtime acceptance retains its original candidate identities. A new complete A–K matrix and release readiness are not asserted.
+The listed bootstrap, Hook authorization, disable, target recovery and CI-pair frame checks have run on the identified PLK110. Historical emulator/runtime acceptance retains its original candidate identities. The remaining CODE UI/publication tests were subsequently completed on a separately identified emulator Host in [S1_CODE_PUBLICATION.md](S1_CODE_PUBLICATION.md); cumulative feasibility closeout is recorded in [S1_ACCEPTANCE.md](S1_ACCEPTANCE.md). A new binary's complete A–K matrix and release readiness are not asserted.
 
 ## Frozen identities and evidence
 
