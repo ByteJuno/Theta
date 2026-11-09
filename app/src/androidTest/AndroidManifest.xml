@@ -1,6 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Keep the Gradle-selected runner first: AGP injects its name into the first instrumentation. -->
+    <instrumentation
+        android:name="io.github.bytejuno.thetacore.S1PublicationInstrumentation"
+        android:targetPackage="io.github.bytejuno.thetacore" />
     <instrumentation
         android:name="io.github.bytejuno.thetacore.provider.ProviderStorageInstrumentation"
         android:targetPackage="io.github.bytejuno.thetacore" />
+    <application>
+        <!-- Test APK only; serves two fixed inert fixture assets, never caller paths. -->
+        <provider android:name="io.github.bytejuno.thetacore.S1PayloadProvider"
+            android:authorities="io.github.bytejuno.thetacore.s1.test.payloads"
+            android:exported="true" />
+    </application>
 </manifest>

@@ -18,9 +18,32 @@ import io.github.bytejuno.thetacore.plugin.PluginProcessExit
 import io.github.bytejuno.thetacore.plugin.PluginRecoveryClock
 import io.github.bytejuno.thetacore.plugin.PluginRecoveryUncaughtHandler
 import java.io.File
+import android.util.Log
+import io.github.bytejuno.thetacore.plugin.HostToolExecutionService
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 
 class ThetaApplication : Application() {
     internal val plugins by lazy { PluginManager(this) }
+    private val hostToolsOwner = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private lateinit var hostToolsStartup: Deferred<HostToolExecutionService>
+
+    /** Consumers share startup and its failure; never substitute an in-memory ledger. */
+    internal suspend fun hostTools(): HostToolExecutionService = hostToolsStartup.await()
+
+    private val hostToolBoundary = io.github.bytejuno.thetacore.plugin.HostToolRequestBoundary { request ->
+        io.github.bytejuno.thetacore.plugin.HostToolRuntimeApi(hostTools()).request(request)
+    }
+
+    /** Suspending, trusted in-process contract, not IPC. No UI/model consumer exists yet. */
+    suspend fun hostToolRequest(request: String): String = hostToolBoundary.request(request)
+
+    /** Only Android's dedicated Instrumentation.onStart thread may block. Never coroutine pools. */
+    fun hostToolRequestForInstrumentation(request: String): String =
+        hostToolBoundary.requestForInstrumentation(request)
     internal lateinit var crashRecovery: PluginCrashRecovery
         private set
 
@@ -56,5 +79,18 @@ class ThetaApplication : Application() {
         })
         // One process-wide timer, not an Activity timer. Stable does not leave safe mode.
         Handler(Looper.getMainLooper()).postDelayed({ crashRecovery.markStableIfDue() }, PLUGIN_STABLE_WINDOW_MS)
+        // Process-owned and eager, but never perform ledger IO/schema initialization on Main.
+        // A failed Deferred stays failed for this process; there is no in-memory fallback.
+        hostToolsStartup = hostToolsOwner.async {
+            try {
+                plugins.initializeHostTools().also {
+                    Log.i("ThetaHostTools", "Host tools initialized")
+                }
+            }
+            catch (error: Exception) {
+                Log.e("ThetaHostTools", "Host tools unavailable; restart required", error)
+                throw error
+            }
+        }
     }
 }

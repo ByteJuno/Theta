@@ -1,4 +1,5 @@
 import io.github.bytejuno.thetacore.gradle.GenerateThetaManifest
+import io.github.bytejuno.thetacore.gradle.GenerateS1PublicationPadding
 
 plugins {
     alias(libs.plugins.android.application)
@@ -7,6 +8,13 @@ plugins {
 }
 
 val s1BoundaryScenarios = listOf("s1RegisterDisable", "s1RegisterFail")
+// Inert bytes make a real partial CODE destination write observable on Android.
+// They belong only to the existing disposable normalV2 payload, never the host.
+val generatePublicationPadding = tasks.register<GenerateS1PublicationPadding>("generatePublicationPadding") {
+    byteCount.set(8 * 1024 * 1024)
+    seed.set(20261109L)
+    outputDir.set(layout.buildDirectory.dir("generated/publication-padding"))
+}
 val s1BudgetScenarios = listOf("s1BudgetA", "s1BudgetB", "s1BudgetC", "s1BudgetD", "s1BudgetE")
 val s1Scenarios = listOf(
     "s1EntryReady", "s1EntryLate", "s1EntryNonCooperative", "s1EntryLongReady",
@@ -62,6 +70,7 @@ android {
             }
         }
     }
+    androidResources { noCompress += "bin" }
     buildTypes {
         release { signingConfig = signingConfigs.getByName("debug") }
     }
@@ -87,6 +96,9 @@ theta {
 // task inputs so r5 metadata, entry point and declared capabilities remain unchanged.
 androidComponents {
     onVariants { variant ->
+        if (variant.productFlavors.any { (_, flavor) -> flavor == "normalV2" }) {
+            variant.sources.assets?.addGeneratedSourceDirectory(generatePublicationPadding, GenerateS1PublicationPadding::outputDir)
+        }
         if (variant.productFlavors.any { (dimension, flavor) ->
                 dimension == "scenario" && flavor in s1Scenarios
             }) {
