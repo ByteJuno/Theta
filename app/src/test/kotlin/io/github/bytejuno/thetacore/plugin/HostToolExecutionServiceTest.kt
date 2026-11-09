@@ -143,6 +143,24 @@ class HostToolExecutionServiceTest {
         }
     }
 
+    @Test fun missingRunCatalogLeavesNoRejectionAndStepRunsOnceCatalogIsFrozen() = runBlocking {
+        Fixture().use { f ->
+            val executions = AtomicInteger()
+            val d = f.register(tool { executions.incrementAndGet(); ToolResult("known", effect = ToolEffect.NONE) })
+            val reducer = completedCalls(listOf(d.modelName, "missing"), "unfrozen")
+            assertThrows(IllegalStateException::class.java) {
+                runBlocking { f.service.executeStep(reducer, "chain", "session", "later", "step") }
+            }
+            assertTrue(f.store.records().isEmpty())
+            f.catalog.freeze("later")
+            val result = f.service.executeStep(reducer, "chain", "session", "later", "step")!!
+            assertEquals(2, result.parts.size)
+            assertEquals(1, executions.get())
+            assertEquals(listOf(Status.SUCCEEDED, Status.REJECTED),
+                reducer.calls().map { f.ledger.get(it.binding.callId)!!.state })
+        }
+    }
+
     @Test fun unknownRegistrationFailurePreventsEveryBodyInTheStep() = runBlocking {
         Fixture().use { f ->
             val d = f.register(tool { error("Partial step must not execute") })

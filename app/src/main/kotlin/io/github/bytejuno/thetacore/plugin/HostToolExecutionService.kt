@@ -191,8 +191,10 @@ internal class HostToolExecutionService(
         if (disposition == HistoryDisposition.DISCARD) return@withContext null
         val calls = if (disposition == HistoryDisposition.NEEDS_CANCELLED_NONE_RESULTS) reducer.calls() else reducer.toolCandidates()
         if (calls.isEmpty()) return@withContext null
+        // Unknown-tool rejections are permanent, so they need an actual catalog to be judged against.
+        val frozen = catalog.frozen(run) ?: error("Run catalog not frozen: $run; step not submitted")
         val inputs = calls.mapIndexed { index, call ->
-            val definition = catalog.definition(run, call.name)
+            val definition = frozen[call.name]
             InvocationInput(
                 io.github.bytejuno.thetacore.agent.ledger.BindingValue.copyOf(call.binding), taskChain, session, run, step, index,
                 call.argsJson, definition, unattended, definition?.declaredRisk ?: Risk.READ,
