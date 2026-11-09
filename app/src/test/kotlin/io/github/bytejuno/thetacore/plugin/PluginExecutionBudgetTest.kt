@@ -37,6 +37,29 @@ class PluginExecutionBudgetTest {
         } finally { release.countDown(); budget.close(); owner.coroutineContext[kotlinx.coroutines.Job]?.cancel() }
     }
 
+    @Test fun admittedHandoffSurvivesWorkerReturnWindowWithoutAnotherClaim() = runBlocking {
+        for (cancelPending in listOf(false, true)) {
+            val budget = PluginExecutionBudget(1, 1, 1)
+            val owner = CoroutineScope(SupervisorJob())
+            val second = java.util.concurrent.atomic.AtomicReference<PluginExecutionBudget.Lease?>()
+            val executions = AtomicInteger()
+            try {
+                // onExit runs before this saturated worker returns to its SynchronousQueue.
+                val first = budget.submit("a", owner, {}, {
+                    val next = budget.reserve("a", owner, {}, {})!!
+                    second.set(next)
+                    budget.commit(next) { executions.incrementAndGet() }
+                    if (cancelPending) { next.cancel(); budget.close() }
+                }) {}!!
+                withTimeout(3_000) { first.actualExited.await() }
+                val next = requireNotNull(second.get())
+                withTimeout(3_000) { next.actualExited.await() }
+                assertEquals(if (cancelPending) 0 else 1, executions.get())
+                assertEquals(0, budget.occupiedSlots())
+            } finally { budget.close(); owner.coroutineContext[kotlinx.coroutines.Job]?.cancel() }
+        }
+    }
+
     @OptIn(InternalCoroutinesApi::class)
     @Test fun saturatedCancellationRetainsRequestsAndSlotsUntilHandlerReturns() = runBlocking {
         val budget = PluginExecutionBudget(2, 1, 1)
