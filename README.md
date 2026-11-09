@@ -1,4 +1,4 @@
-# Theta Core
+# Theta
 
 一个“万物可插拔”的 Android AI 助手基座：内核只管 agent 循环和安全，其余功能都做成可以随时安装、卸载的插件。
 
@@ -9,7 +9,7 @@ An Android AI assistant base where almost everything is a plugin. The core only 
 
 ## 为什么要做
 
-Eta 社区有几十个 fork 在各自重复改同样的东西：模型提供商、厂商语音助手适配、通知、本地化。改任何功能都要 fork 再自己编译。Theta Core 想让这些改动变成可以分享的插件，不用再 fork。
+Eta 社区有几十个 fork 在各自重复改同样的东西：模型提供商、厂商语音助手适配、通知、本地化。改任何功能都要 fork 再自己编译。Theta 想让这些改动变成可以分享的插件，不用再 fork。
 
 ## 计划中的插件类型
 

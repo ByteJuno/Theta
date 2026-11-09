@@ -1,4 +1,4 @@
-# Theta Core 模型与工具调用协议
+# Theta 模型与工具调用协议
 
 草案 v0.2，对应 API 等级 1，2026-11-06。S1 通过之前，这里的接口都可能改。插件的基本结构见 [PLUGIN_API.md](PLUGIN_API.md)。
 
@@ -510,7 +510,7 @@ class ToolException(message: String, val effect: ToolEffect?) : Exception(messag
 
 目标版本是 2026-07-28，同时兼容 2025-11-25。内核把 MCP 工具包装成 `Tool`，走完全相同的校验、审批和账本。
 
-| MCP | Theta Core |
+| MCP | Theta |
 |---|---|
 | `server/discover` | 协商版本。旧服务器走 `initialize` 流程 |
 | `tools/list`、`nextCursor` | 翻到底，不设上限 |
