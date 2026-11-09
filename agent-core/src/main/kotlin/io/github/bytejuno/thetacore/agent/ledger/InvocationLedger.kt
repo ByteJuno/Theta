@@ -14,8 +14,9 @@ import java.util.UUID
  *
  * One coordinator per host, backed by one exclusive store writer. All state transitions share the
  * definition scheduling gate. No executors, network, UI, or automatic retries live in this core.
- * Startup scans records; bodies are read on demand rather than held permanently in memory.
- * This first implementation is O(history) per transition, intended for bounded local histories.
+ * Startup loads one snapshot; acknowledged writes update a callId index under the same gate.
+ * Policy/barrier checks scan in-memory history. Records (including terminal history) are retained
+ * indefinitely: grants, task-chain budgets and unknown-effect retry checks depend on them.
  */
 class InvocationLedger(
     private val store: InvocationStore, private val gate: DefinitionGate,
@@ -23,16 +24,19 @@ class InvocationLedger(
     private val maxClaimsPerTaskChain: Int = Int.MAX_VALUE,
 ) {
     init { require(maxClaimsPerTaskChain > 0); store.bindCoordinator() }
+    private val recordsById = store.records().associateByTo(linkedMapOf()) { it.callId }
     private var epoch: String? = null
     private var halted = false
-    fun get(callId: String): InvocationRecord? = gate.withGate { store.records().find { it.callId == callId } }
-    private fun all() = store.records()
+    fun get(callId: String): InvocationRecord? = gate.withGate { recordsById[callId]?.detached() }
+    private fun all() = recordsById.values.toList()
     private fun id() = UUID.randomUUID().toString()
     private fun persist(previous: InvocationRecord?, next: InvocationRecord, ticket: ExecutionTicket? = null): Mutation {
         if (halted) return Mutation.Blocked("Storage acknowledgement uncertain; reopen and cold-recover")
         return try {
-            store.save(next, previous?.revision)
-            Mutation.Applied(next, ticket)
+            val snapshot = next.detached()
+            store.save(snapshot, previous?.revision)
+            recordsById[next.callId] = snapshot.detached()
+            Mutation.Applied(next.detached(), ticket)
         } catch (e: StoreException) {
             if (e.uncertain) halted = true
             Mutation.StorageFailure(e.message ?: "storage failure", e.uncertain)
