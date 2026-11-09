@@ -132,15 +132,15 @@ internal class HostToolExecutionService(
     }
     /** Never acknowledge exit after an earlier outcome/evidence write was lost. Keeping the
      * durable instance UNCONFIRMED forces cold recovery to preserve the uncertainty. */
-    private fun acknowledged(mutation: Mutation) {
-        check(mutation is Mutation.Applied || mutation is Mutation.AlreadyApplied) {
-            "Invocation transition not acknowledged: $mutation"
-        }
+    private fun acknowledged(mutation: Mutation): InvocationRecord = when (mutation) {
+        is Mutation.Applied -> mutation.record
+        is Mutation.AlreadyApplied -> mutation.record
+        else -> error("Invocation transition not acknowledged: $mutation")
     }
     private suspend fun monitor(ticket: ExecutionTicket, call: PluginInvocation) {
         try {
             val logical = call.terminal.await()
-            gate.withGate {
+            val durable = gate.withGate {
                 acknowledged(when (logical.status) {
                     PluginInvocationStatus.CANCELLED -> observe(ledger.cancel(ticket.callId))
                     PluginInvocationStatus.TIMED_OUT -> observe(ledger.timeout(ticket.callId))
@@ -150,12 +150,16 @@ internal class HostToolExecutionService(
             gate.withGate { logicalResults[ticket.callId] }?.complete(Unit)
             coroutineScope {
                 // A cooperative worker needs a moment to unwind after cancellation; only an exit
-                // that stays unconfirmed past the grace period stops the owner until restart.
-                val restartWatch = if (logical.status in setOf(PluginInvocationStatus.CANCELLED, PluginInvocationStatus.TIMED_OUT)) launch {
+                // that stays unconfirmed past the grace period stops the owner. DESIGN 13.11 makes
+                // only a tool-call timeout release on actual exit; a cancelled call needs a restart.
+                // The ledger owns one restriction per attempt, not a blanket plugin reset.
+                // Cancellation may have won durably before this observer records SDK success.
+                val restartWatch = if (durable.state in setOf(Status.CANCELLED, Status.TIMED_OUT)) launch {
                     delay(exitGraceMillis)
                     gate.withGate {
                         if (!call.actualExited.isCompleted)
-                            acknowledged(observe(ledger.markRestartRequired(ticket.callId, ticket.attemptId)))
+                            acknowledged(observe(ledger.markRestartRequired(ticket.callId, ticket.attemptId,
+                                untilActualExit = durable.state == Status.TIMED_OUT)))
                     }
                 } else null
                 val returned = select<PluginInvocationResult?> {
