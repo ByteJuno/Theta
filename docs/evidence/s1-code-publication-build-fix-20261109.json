@@ -45,5 +45,83 @@
     "apk_r8_upload_step": "SKIPPED",
     "failed_log_sha256": "3ed1dba94d58a1d001194ab039f5bbb99992e39bae840d81b7d24702d841e300"
   },
-  "scope": "Byte-identical artifacts retain their original matrix-1 execution identity; no new device execution claimed"
+  "scope": "Byte-identical artifacts retain their original matrix-1 execution identity; no new device execution claimed",
+  "android_test_assets_followup": {
+    "preceding_commit": "863b62fc8cc09335be518d6cdec6307aa2ac6ed7",
+    "preceding_ci": 42639462940,
+    "preceding_ci_build": "FAILURE: missing androidTest asset lint dependencies",
+    "failed_log_sha256": "96ad856ebb7ce4bc890c808de9ba45f35407e1a7fdf01ade364709b2f823dce5",
+    "local_first_explicit_dependency_attempt": "FAILED: lint analysis also consumes generated assets; original log retained",
+    "local_first_attempt_log_sha256": "c26531cd1ebe60e119ec1dbcd6a18c2ec46dfc4a1af29f99008312960225359c",
+    "resolution": "Typed StageS1PublicationAssets registered through androidComponents deviceTest generated assets; no manually enumerated lint-task dependencies",
+    "full_ci_task_graph": "assembleDebug assembleRelease :app:assembleDebugAndroidTest lintDebug testDebugUnitTest :agent-core:test --configuration-cache --configuration-cache-problems=fail",
+    "configuration_cache_store": {
+      "status": "PASS",
+      "tasks": 3460,
+      "log_sha256": "6ddb43487f3a8ca464c82be1096889fd255fc63c4cde9c874af87e895a24f40d"
+    },
+    "configuration_cache_reuse": {
+      "status": "PASS",
+      "tasks": 3456,
+      "log_sha256": "652779fde1355991580da4ef814935d501808e7d0d02095ee70e78fa3aef8d2d"
+    },
+    "jvm": {
+      "app": {
+        "tests": 412,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 1
+      },
+      "agent-core": {
+        "tests": 168,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "sdk": {
+        "tests": 0,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "samples/blocked-provider": {
+        "tests": 20,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "samples/storage-fixture": {
+        "tests": 4,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    },
+    "apk_identity": {
+      "host": {
+        "built": "5a43e0ea5357db7a23186ce9b5ab368266d8cccff91a811a6758c3bbed786668",
+        "frozen": "5a43e0ea5357db7a23186ce9b5ab368266d8cccff91a811a6758c3bbed786668",
+        "identical": true
+      },
+      "test": {
+        "built": "8f1ddd6465ad6de9fb158903ccf649e8162d5f7688724db2964c603ea637b59c",
+        "frozen": "8f1ddd6465ad6de9fb158903ccf649e8162d5f7688724db2964c603ea637b59c",
+        "identical": true
+      },
+      "payload_v1": {
+        "built": "da929caa97ec18e00c634dbbce81b65a58ee1e6f1a6c781074d83c2f70e7b0de",
+        "frozen": "da929caa97ec18e00c634dbbce81b65a58ee1e6f1a6c781074d83c2f70e7b0de",
+        "identical": true
+      },
+      "payload_v2": {
+        "built": "520fe0d6560cee57b01cddab9252c0eed6cb51230124d1d6b9996e18a785d34c",
+        "frozen": "520fe0d6560cee57b01cddab9252c0eed6cb51230124d1d6b9996e18a785d34c",
+        "identical": true
+      }
+    },
+    "changed_source_sha256": {
+      "app/build.gradle.kts": "56f606f85c5bccf93254e76189ba2fe1cc78190c6d4b60e563e8c242e93f3321",
+      "build-logic/src/main/kotlin/io/github/bytejuno/thetacore/gradle/StageS1PublicationAssets.kt": "f79170c2c34ce98bdceb9837978788790436eeada04aa9ca5230026d164d2e41"
+    }
+  }
 }
