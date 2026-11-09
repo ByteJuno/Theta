@@ -18,6 +18,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -29,17 +31,20 @@ fun HookDiagnosticsPanel() {
     val status by HookHost.status.collectAsState()
     var reviewed by remember { mutableStateOf<HookImport?>(null) }
     var busy by remember { mutableStateOf(false) }
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+    val inspectSelection: (Uri?) -> Unit = { uri ->
         if (uri != null && !busy) {
             busy = true
             reviewed = null
             scope.launch {
                 try { reviewed = withContext(Dispatchers.IO) { HookHost.inspect(context, uri) } }
+                catch (error: kotlinx.coroutines.CancellationException) { throw error }
                 catch (error: Throwable) { HookHost.fail(error) }
                 finally { busy = false }
             }
         }
     }
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument(), inspectSelection)
+    val systemPicker = rememberLauncherForActivityResult(HookDocumentPicker(), inspectSelection)
     LaunchedEffect(Unit) {
         try { HookHost.connect() }
         catch (error: Throwable) { HookHost.fail(error) }
@@ -51,6 +56,10 @@ fun HookDiagnosticsPanel() {
         Button(enabled = !busy, onClick = { picker.launch(arrayOf("application/vnd.android.package-archive", "application/octet-stream")) }) {
             Text("Inspect signed Hook APK")
         }
+        Button(enabled = !busy, onClick = {
+            try { systemPicker.launch(arrayOf("application/vnd.android.package-archive", "application/octet-stream")) }
+            catch (error: Exception) { HookHost.fail(error) }
+        }) { Text("Use system document picker") }
         reviewed?.let { value ->
             Text("${value.descriptor.id} · ${value.descriptor.version}\nTarget: ${value.descriptor.target}\nVerified signer SHA-256: ${value.signers}")
             Text("Confirming requests framework scope and publishes this exact payload. First signer is pinned; a different signer is rejected.")
@@ -61,6 +70,7 @@ fun HookDiagnosticsPanel() {
                     try {
                         withContext(Dispatchers.IO) {
                             val grant = HookHost.requestScope(value.descriptor.target, action)
+                            currentCoroutineContext().ensureActive()
                             HookHost.publish(context, value, grant)
                         }
                     } catch (error: Throwable) { HookHost.fail(error) }

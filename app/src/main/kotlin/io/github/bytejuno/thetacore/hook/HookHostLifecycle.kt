@@ -1,6 +1,8 @@
 package io.github.bytejuno.thetacore.hook
 
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.locks.ReentrantLock
@@ -78,6 +80,26 @@ internal class HookHostOrder {
     fun published(ticket: Long) { applied = ticket }
     fun shouldDisable(ticket: Long): Boolean = ticket > applied
     fun disabled(ticket: Long) { applied = ticket }
+}
+
+/** Reuse only framework-reported scope; lookup/check failures are not approvals. */
+internal suspend fun ensureHookScope(
+    target: String,
+    readScope: () -> Collection<String>,
+    checkCurrent: () -> Unit,
+    request: suspend () -> Unit,
+) {
+    currentCoroutineContext().ensureActive()
+    checkCurrent()
+    val alreadyGranted = target in readScope()
+    currentCoroutineContext().ensureActive()
+    if (!alreadyGranted) request()
+    currentCoroutineContext().ensureActive()
+    checkCurrent()
+    val granted = target in readScope()
+    currentCoroutineContext().ensureActive()
+    check(granted) { "Target absent from granted scope" }
+    checkCurrent()
 }
 
 /** The official SDK has no scope-listener cancellation API and removes a listener only AFTER

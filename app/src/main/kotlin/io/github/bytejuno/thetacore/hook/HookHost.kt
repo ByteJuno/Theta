@@ -69,7 +69,7 @@ internal object HookHost {
     }
 
     fun inspect(context: Context, uri: Uri): HookImport {
-        val bytes = checkNotNull(context.contentResolver.openInputStream(uri)).use { it.bounded(HOOK_LIMIT) }
+        val bytes = readHookSource { context.contentResolver.openInputStream(uri) }
         val file = File.createTempFile("hook-review-", ".apk", context.cacheDir)
         try {
             file.writeBytes(bytes)
@@ -95,16 +95,19 @@ internal object HookHost {
         order.checkCurrent(action)
         require(target == HOOK_TARGET)
         val current = service ?: error("Framework unavailable")
-        val ticket = scopeBudget.reserve(target)
-        val outcome = ticket.outcome()
-        mutableStatus.value = "Scope requested; awaiting framework decision"
-        try {
-            current.requestScope(listOf(target), ScopeListener(ticket))
-            check(withTimeout(60_000) { outcome.await() }) { "Target scope not approved" }
+        ensureHookScope(target, readScope = { current.scope }, checkCurrent = {
             check(service === current) { "Framework connection changed" }
             order.checkCurrent(action)
-            return HookPublishGrant(current, action, target)
-        } finally { ticket.detach() }
+        }) {
+            val ticket = scopeBudget.reserve(target)
+            val outcome = ticket.outcome()
+            mutableStatus.value = "Scope requested; awaiting framework decision"
+            try {
+                current.requestScope(listOf(target), ScopeListener(ticket))
+                check(withTimeout(60_000) { outcome.await() }) { "Target scope not approved" }
+            } finally { ticket.detach() }
+        }
+        return HookPublishGrant(current, action, target)
     }
 
     /** Call off Main. Immutable remote file is committed before enabled selection.
