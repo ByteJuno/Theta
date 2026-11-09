@@ -11,7 +11,9 @@ internal class InvocationRecordCodec(private val json: Json) {
         val texts = linkedMapOf<String, Int>()
         val body = transform(json.encodeToJsonElement(record).jsonObject) { value ->
             val text = value.jsonPrimitive.also { require(it.isString) }.content
-            JsonPrimitive(texts.getOrPut(text) { texts.size })
+            // Intern what UTF-8 will store: unpaired surrogates become '?', so distinct in-memory
+            // strings can collapse and would otherwise fail the duplicate check on the next open.
+            JsonPrimitive(texts.getOrPut(String(text.toByteArray(Charsets.UTF_8), Charsets.UTF_8)) { texts.size })
         }
         return JsonObject(body + mapOf(
             "storageVersion" to JsonPrimitive(1),

@@ -71,6 +71,18 @@ class LedgerStorageIndexTest {
         assertEquals(listOf(text, "different late text"), late.evidence.map { it.text })
     }
 
+    @Test fun textsCollapsingInUtf8KeepLedgerOpenable(): Unit = Fixture().use { f ->
+        val claimed = f.claim(f.ready())
+        val callId = claimed.record.callId
+        val attempt = claimed.ticket!!.attemptId
+        assertIs<Mutation.Applied>(f.ledger.complete(callId, attempt, Status.SUCCEEDED, "cut\uD83D"))
+        assertIs<Mutation.Applied>(f.ledger.recordOutcome(callId, attempt, Status.SUCCEEDED, "cut\uD83E"))
+        f.reopen()
+        val reopened = f.ledger.get(callId)!!
+        assertEquals("cut?", reopened.result!!.text)
+        assertEquals(listOf("cut?", "cut?"), reopened.evidence.map { it.text })
+    }
+
     @Test fun legacyInlineFilesAreReadWithoutRewriteAndUpgradedOnNextSave() = Fixture().use { f ->
         val claimed = f.claim(f.ready())
         val r = assertIs<Mutation.Applied>(f.ledger.complete(claimed.record.callId, claimed.ticket!!.attemptId, Status.SUCCEEDED, "legacy result")).record
