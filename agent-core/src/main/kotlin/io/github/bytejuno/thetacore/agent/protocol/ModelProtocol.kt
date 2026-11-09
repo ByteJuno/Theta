@@ -76,7 +76,7 @@ sealed interface ContentPart {
 }
 fun textPart(text: String, replay: ReplayData? = null): ContentPart.Text = TextValue(text, replay)
 fun reasoningPart(summary: String?, replay: ReplayData?): ContentPart.Reasoning = ReasoningValue(summary, replay)
-fun toolCallPart(binding: CallBinding, name: String, argsJson: String): ContentPart.ToolCall = CallValue(binding, name, argsJson)
+fun toolCallPart(binding: CallBinding, name: String, argsJson: String, replay: ReplayData? = null): ContentPart.ToolCall = CallValue(binding, name, argsJson, replay)
 fun toolResultPart(callId: String, text: String, isError: Boolean = false): ContentPart.ToolResult = ResultValue(callId, text, isError)
 private data class TextValue(override val text: String, override val replay: ReplayData?) : ContentPart.Text
 private data class ReasoningValue(override val summary: String?, override val replay: ReplayData?) : ContentPart.Reasoning
