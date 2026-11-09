@@ -296,7 +296,21 @@ class InvocationLedgerTest {
         f.claim(next)
     }
 
-    @Test fun graceRestrictionOnlyAcceptsMatchingCancelledOrTimedOutAttempt(): Unit = Fixture().use { f ->
+    @Test fun cancelledCallCannotUseGraceReleaseAndStaysRestartRequiredAfterExit(): Unit = Fixture().use { f ->
+        val active = f.claim(f.ready())
+        val id = active.record.callId; val attempt = active.ticket!!.attemptId
+        f.ledger.cancel(id)
+        assertIs<Mutation.Conflict>(f.ledger.markRestartRequired(id, attempt, untilActualExit = true))
+        assertIs<Mutation.Applied>(f.ledger.markRestartRequired(id, attempt))
+        val exited = assertIs<Mutation.Applied>(f.ledger.recordActualExit(id, attempt, "stopped")).record
+        assertEquals(Status.CANCELLED, exited.state)
+        assertTrue(exited.restartRequired)
+        assertFalse(exited.restartRequiredUntilExit)
+        val next = f.ready()
+        assertEquals("Plugin restart required", assertIs<Mutation.Blocked>(f.ledger.claimExecution(next.callId, next.revision)).reason)
+    }
+
+    @Test fun graceRestrictionOnlyAcceptsMatchingTimedOutAttempt(): Unit = Fixture().use { f ->
         val active = f.claim(f.ready())
         val id = active.record.callId; val attempt = active.ticket!!.attemptId
         assertIs<Mutation.Conflict>(f.ledger.markRestartRequired(id, attempt, untilActualExit = true))

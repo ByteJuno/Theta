@@ -99,7 +99,7 @@ internal fun sha256(value: String) = MessageDigest.getInstance("SHA-256")
     val executionArgs: String?, val pending: ApprovalRequest?, val receipts: List<ApprovalReceipt>,
     val instance: ExecutionInstance?, val result: LogicalResult?, val evidence: List<ExitEvidence>,
     val isolation: Isolation?, val restartRequired: Boolean, val recoveryPending: Boolean,
-    /** Only a grace-expiry restriction is released by actual exit. Legacy/other causes stay sticky. */
+    /** Only a timed-out call's grace-expiry restriction is released by actual exit. Cancelled calls and legacy/other causes stay sticky. */
     val restartRequiredUntilExit: Boolean = false,
 ) {
     val callId: String get() = input.binding.callId
@@ -107,7 +107,7 @@ internal fun sha256(value: String) = MessageDigest.getInstance("SHA-256")
         require(formatVersion == 2 && revision > 0) { "Unsupported format or revision" }
         require(!recoveryPending || (state.terminal && instance?.state == InstanceState.EXIT_CONFIRMED && isolation != null))
         require(!restartRequiredUntilExit || (restartRequired && instance?.state == InstanceState.UNCONFIRMED &&
-            state in setOf(Status.CANCELLED, Status.TIMED_OUT)))
+            state == Status.TIMED_OUT))
         require(definitionDigest == input.definition?.digest && effectiveRisk >= input.initialRisk)
         if (input.definition == null) {
             require(state == if (input.cancelledBeforeExecution) Status.CANCELLED else Status.REJECTED)

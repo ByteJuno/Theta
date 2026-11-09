@@ -251,8 +251,8 @@ class InvocationLedger(
         val r = get(callId) ?: return@withGate Mutation.Conflict("Unknown call")
         if (r.instance?.attemptId != attemptId || r.instance.state != InstanceState.UNCONFIRMED)
             return@withGate Mutation.Conflict("No unconfirmed instance")
-        if (untilActualExit && r.state !in setOf(Status.CANCELLED, Status.TIMED_OUT))
-            return@withGate Mutation.Conflict("No cancelled or timed-out instance")
+        if (untilActualExit && r.state != Status.TIMED_OUT)
+            return@withGate Mutation.Conflict("No timed-out instance")
         // A sticky cause wins regardless of arrival order; a later grace expiry cannot weaken it.
         val releaseOnExit = untilActualExit && (!r.restartRequired || r.restartRequiredUntilExit)
         if (r.restartRequired && r.restartRequiredUntilExit == releaseOnExit) Mutation.AlreadyApplied(r)

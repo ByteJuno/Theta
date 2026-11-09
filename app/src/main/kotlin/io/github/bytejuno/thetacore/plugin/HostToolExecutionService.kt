@@ -144,14 +144,16 @@ internal class HostToolExecutionService(
             gate.withGate { logicalResults[ticket.callId] }?.complete(Unit)
             coroutineScope {
                 // A cooperative worker needs a moment to unwind after cancellation; only an exit
-                // that stays unconfirmed past the grace period stops the owner until actual exit.
+                // that stays unconfirmed past the grace period stops the owner. DESIGN 13.11 makes
+                // only a tool-call timeout release on actual exit; a cancelled call needs a restart.
                 // The ledger owns one restriction per attempt, not a blanket plugin reset.
                 // Cancellation may have won durably before this observer records SDK success.
                 val restartWatch = if (durable.state in setOf(Status.CANCELLED, Status.TIMED_OUT)) launch {
                     delay(exitGraceMillis)
                     gate.withGate {
                         if (!call.actualExited.isCompleted)
-                            acknowledged(observe(ledger.markRestartRequired(ticket.callId, ticket.attemptId, untilActualExit = true)))
+                            acknowledged(observe(ledger.markRestartRequired(ticket.callId, ticket.attemptId,
+                                untilActualExit = durable.state == Status.TIMED_OUT)))
                     }
                 } else null
                 val returned = select<PluginInvocationResult?> {

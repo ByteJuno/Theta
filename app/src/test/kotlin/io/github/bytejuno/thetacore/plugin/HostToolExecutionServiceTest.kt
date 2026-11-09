@@ -1123,7 +1123,7 @@ class HostToolExecutionServiceTest {
     }
 
     @OptIn(ExperimentalCoroutinesApi::class)
-    @Test fun durableCancellationBeforeObservedSdkSuccessBlocksOwnerUntilActualExit() = runBlocking {
+    @Test fun durableCancellationBeforeObservedSdkSuccessStaysRestartRequiredAfterActualExit() = runBlocking {
         for (effect in listOf(ToolEffect.NONE, ToolEffect.UNKNOWN)) Fixture(exitGraceMillis = 30).use { f ->
             val entered = CountDownLatch(1); val returnBody = CountDownLatch(1)
             val handler = CountDownLatch(1); val releaseHandler = CountDownLatch(1)
@@ -1154,8 +1154,9 @@ class HostToolExecutionServiceTest {
                     record
                 }
                 assertTrue(f.service.cancel(first.binding.callId) is Mutation.AlreadyApplied)
-                waitUntil { f.ledger.get(first.binding.callId)!!.restartRequiredUntilExit }
+                waitUntil { f.ledger.get(first.binding.callId)!!.restartRequired }
                 val blocked = f.ledger.get(first.binding.callId)!!
+                assertFalse(blocked.restartRequiredUntilExit)
                 assertEquals(cancelled.result, blocked.result)
                 assertEquals(Status.CANCELLED, blocked.state)
                 assertEquals(InstanceState.UNCONFIRMED, blocked.instance!!.state)
@@ -1172,24 +1173,23 @@ class HostToolExecutionServiceTest {
                 assertEquals(cancelled.result, exited.result)
                 assertEquals(ticket.attemptId, exited.instance!!.attemptId)
                 assertEquals(InstanceState.EXIT_CONFIRMED, exited.instance!!.state)
-                assertFalse(exited.restartRequired)
+                // DESIGN 13.11 releases only timeouts on actual exit; cancellation needs a restart.
+                assertTrue(exited.restartRequired)
                 assertFalse(exited.restartRequiredUntilExit)
                 assertTrue(exited.evidence.containsAll(blocked.evidence))
                 assertEquals(effect == ToolEffect.UNKNOWN, exited.isolation != null)
                 assertEquals(0, f.budget.occupiedSlots())
                 assertSame(original, f.catalog.current(d)!!.tool)
                 if (effect == ToolEffect.NONE) {
-                    assertNotNull((f.service.dispatch(next.binding.callId) as Mutation.Applied).ticket)
-                    withTimeout(5_000) { f.service.awaitObservedExit(next.binding.callId) }
-                    assertEquals(2, calls.get())
+                    assertEquals("Plugin restart required", (f.service.dispatch(next.binding.callId) as Mutation.Blocked).reason)
                 } else {
-                    // Clearing grace must not clear terminal UNKNOWN return evidence/isolation.
+                    // Terminal UNKNOWN return evidence still requires review before the restart gate.
                     assertEquals(Status.WAITING_APPROVAL,
                         (f.service.dispatch(next.binding.callId) as Mutation.Applied).record.state)
                     approve(f, next.binding.callId)
-                    assertEquals("Resource occupied or externally isolated",
-                        (f.service.dispatch(next.binding.callId) as Mutation.Blocked).reason)
+                    assertEquals("Plugin restart required", (f.service.dispatch(next.binding.callId) as Mutation.Blocked).reason)
                 }
+                assertEquals(1, calls.get())
             } finally { returnBody.countDown(); releaseHandler.countDown() }
         }
     }
@@ -1206,13 +1206,14 @@ class HostToolExecutionServiceTest {
                 assertTrue(entered.await(3, TimeUnit.SECONDS))
                 f.service.cancel(i.binding.callId)
                 assertTrue(cancelling.await(3, TimeUnit.SECONDS))
-                waitUntil { f.ledger.get(i.binding.callId)!!.restartRequiredUntilExit }
+                waitUntil { f.ledger.get(i.binding.callId)!!.restartRequired }
+                assertFalse(f.ledger.get(i.binding.callId)!!.restartRequiredUntilExit)
                 assertEquals(Status.CANCELLED, f.ledger.get(i.binding.callId)!!.state)
                 assertEquals(InstanceState.UNCONFIRMED, f.ledger.get(i.binding.callId)!!.instance!!.state)
                 assertEquals(1, f.budget.occupiedSlots())
                 release.countDown(); f.service.awaitObservedExit(i.binding.callId)
                 assertEquals(InstanceState.EXIT_CONFIRMED, f.ledger.get(i.binding.callId)!!.instance!!.state)
-                assertFalse(f.ledger.get(i.binding.callId)!!.restartRequired)
+                assertTrue(f.ledger.get(i.binding.callId)!!.restartRequired)
                 assertEquals(Status.CANCELLED, f.ledger.get(i.binding.callId)!!.state)
                 assertEquals(0, f.budget.occupiedSlots())
             } finally { release.countDown() }
