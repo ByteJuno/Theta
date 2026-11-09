@@ -400,7 +400,7 @@ S1 的补充断言（并入现有项目，不新增里程碑）：
 
 2026-11-06 确认：
 
-1. App 显示名：Theta（2026-11-09 确认）。仓库名 `theta-core` 和包名 `io.github.bytejuno.thetacore` 不变。
+1. App 显示名和 GitHub 仓库名：Theta（2026-11-09 确认）。包名 `io.github.bytejuno.thetacore` 不变。
 2. minSdk 33。
 3. 第一版不开放第三方 Hook 关键进程（第 9 节的列表）。
 4. S1 按第 11 节保留的 A–K 范围及补充断言验收，B/C 使用明确批准的替代断言；其余门槛不减免（E 的调整见第 7 条），全部适用项通过才进 S2。
