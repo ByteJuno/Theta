@@ -95,6 +95,125 @@ class HostToolExecutionServiceTest {
             Events.toolDelta(0, args), Events.end(0), Events.finished(reason)).forEach(reducer::accept)
     }
 
+    private fun completedCalls(names: List<String>, request: String, reason: FinishReason = FinishReason.STOP,
+        args: String = "{}") = ModelEventReducer("recorded", request).also { reducer ->
+        reducer.accept(Events.started("response-$request", "no-api"))
+        names.forEachIndexed { index, name ->
+            reducer.accept(Events.toolStart(index, "wire-$index", name))
+            reducer.accept(Events.toolDelta(index, args))
+            reducer.accept(Events.end(index))
+        }
+        reducer.accept(Events.finished(reason))
+    }
+
+    @Test fun mixedUnknownCallsKeepOrderUniqueResultsAndIdempotentStepReplay() = runBlocking {
+        Fixture().use { f ->
+            val executions = AtomicInteger()
+            val d = f.register(tool { executions.incrementAndGet(); ToolResult("known", effect = ToolEffect.NONE) })
+            val allIds = mutableSetOf<String>()
+            repeat(2) { turn ->
+                val reducer = completedCalls(listOf("missing", d.modelName, "missing", d.modelName), "mixed-$turn")
+                val result = f.service.executeStep(reducer, "chain", "session", "run", "step-$turn")!!
+                val ids = reducer.calls().map { it.binding.callId }
+                assertEquals(ids, result.parts.map { (it as ContentPart.ToolResult).callId })
+                assertEquals(4, ids.distinct().size)
+                assertTrue(ids.all { allIds.add(it) })
+                ids.forEachIndexed { index, id ->
+                    val record = f.ledger.get(id)!!
+                    assertEquals(index, record.input.callOrder)
+                    assertEquals(if (index % 2 == 0) Status.REJECTED else Status.SUCCEEDED, record.state)
+                    assertEquals(Effect.NONE, record.result!!.effect)
+                    assertEquals(index % 2 == 0, (result.parts[index] as ContentPart.ToolResult).isError)
+                    if (index % 2 == 0) {
+                        assertEquals("missing", record.input.modelName)
+                        assertNull(record.input.definition)
+                        assertNull(record.instance)
+                        assertTrue(f.service.dispatch(id) is Mutation.Conflict)
+                    }
+                }
+                val before = f.store.records()
+                val replay = f.service.executeStep(reducer, "chain", "session", "run", "step-$turn")!!
+                assertEquals(result.parts.map { (it as ContentPart.ToolResult).text },
+                    replay.parts.map { (it as ContentPart.ToolResult).text })
+                assertEquals(before, f.store.records())
+                assertEquals((turn + 1) * 2, executions.get())
+            }
+            assertEquals(8, f.store.records().size)
+            assertEquals(0, f.budget.occupiedSlots())
+        }
+    }
+
+    @Test fun unknownRegistrationFailurePreventsEveryBodyInTheStep() = runBlocking {
+        Fixture().use { f ->
+            val d = f.register(tool { error("Partial step must not execute") })
+            f.store.fail = { it.input.definition == null }
+            val reducer = completedCalls(listOf(d.modelName, "missing", d.modelName), "failed-write")
+            assertNull(f.service.executeStep(reducer, "chain", "session", "run", "step"))
+            assertEquals(Status.RECEIVED, f.store.records().single().state)
+            assertTrue(f.store.records().all { it.instance == null })
+            assertEquals(0, f.budget.occupiedSlots())
+            f.store.fail = { false }
+            assertNull(f.service.executeStep(reducer, "chain", "session", "run", "step"))
+        }
+    }
+
+    @Test fun unknownCallsRespectTruncatedAndDiscardedTurnDisposition() = runBlocking {
+        Fixture().use { f ->
+            val d = f.register(tool { error("Truncated turn must not execute") })
+            for ((index, reason) in listOf(FinishReason.LENGTH, FinishReason.CONTEXT_EXCEEDED).withIndex()) {
+                val reducer = completedCalls(listOf("missing", d.modelName), "truncated-$index", reason)
+                val result = f.service.executeStep(reducer, "chain", "session", "run", "step-$index")!!
+                assertEquals(2, result.parts.size)
+                reducer.calls().forEach { call ->
+                    val record = f.ledger.get(call.binding.callId)!!
+                    assertEquals(Status.CANCELLED, record.state)
+                    assertEquals(Effect.NONE, record.result!!.effect)
+                    assertNull(record.instance)
+                }
+                val discarded = completedCalls(listOf("missing"), "discarded-$index", reason, "{")
+                assertNull(f.service.executeStep(discarded, "chain", "session", "run", "discarded-$index"))
+            }
+            assertEquals(4, f.store.records().size)
+        }
+    }
+
+    @Test fun mixedUnknownStepReopensAndReplaysWithoutExecutingAgain() = runBlocking {
+        val dir = java.nio.file.Files.createTempDirectory("unknown-bridge-store")
+        val budget = PluginExecutionBudget()
+        val owner = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        var store: JsonInvocationStore? = null
+        try {
+            val gate = DefinitionGate()
+            val validator = Schema202012Validator()
+            val catalog = FrozenToolCatalog(gate, budget, owner, validator)
+            val executions = AtomicInteger()
+            val d = catalog.registerHost("host/test", "1", tool {
+                executions.incrementAndGet(); ToolResult("known", effect = ToolEffect.NONE)
+            })
+            catalog.freeze("run")
+            store = JsonInvocationStore.create(dir, Durability.PROCESS_CRASH_ONLY)
+            val ledger = InvocationLedger(store, gate, validator)
+            ledger.recoverColdStart("before-reopen")
+            val service = HostToolExecutionService(budget, owner, catalog, ledger, validator)
+            val reducer = completedCalls(listOf("missing", d.modelName, "missing"), "disk-mixed")
+            val result = service.executeStep(reducer, "chain", "session", "run", "step")!!
+            val before = store.records().sortedBy { it.input.callOrder }
+            store.close()
+            store = JsonInvocationStore.open(dir, Durability.PROCESS_CRASH_ONLY)
+            val recovered = InvocationLedger(store, gate, validator)
+            recovered.recoverColdStart("after-reopen")
+            val reopenedService = HostToolExecutionService(budget, owner, catalog, recovered, validator)
+            val replay = reopenedService.executeStep(reducer, "chain", "session", "run", "step")!!
+            assertEquals(before, store.records().sortedBy { it.input.callOrder })
+            assertEquals(result.parts.map { (it as ContentPart.ToolResult).text },
+                replay.parts.map { (it as ContentPart.ToolResult).text })
+            assertEquals(1, executions.get())
+            assertEquals(2, before.count { it.state == Status.REJECTED && it.instance == null && it.result!!.effect == Effect.NONE })
+        } finally {
+            store?.close(); budget.close(); owner.cancel(); dir.toFile().deleteRecursively()
+        }
+    }
+
     @Test fun emptyAndNullArgumentsUseFrozenSchemaWithoutLosingOriginalText() = runBlocking {
         for (required in listOf(false, true)) Fixture().use { f ->
             val calls = AtomicInteger()
@@ -268,7 +387,7 @@ class HostToolExecutionServiceTest {
         }
         Fixture().use { f ->
             val i = f.input(f.register(tool { error("revoked") })); f.service.prepare(i)
-            f.catalog.revoke(i.definition.toolKey)
+            f.catalog.revoke(requireNotNull(i.definition).toolKey)
             assertTrue(f.service.dispatch(i.binding.callId) is Mutation.Applied)
             assertEquals(Status.REJECTED, f.ledger.get(i.binding.callId)!!.state)
             assertNull(f.ledger.get(i.binding.callId)!!.instance)
@@ -407,7 +526,7 @@ class HostToolExecutionServiceTest {
                 f.service.prepare(i)
                 val start = CompletableDeferred<Unit>()
                 val dispatch = async(Dispatchers.Default) { start.await(); f.service.dispatch(i.binding.callId) }
-                val revoke = async(Dispatchers.Default) { start.await(); f.catalog.revoke(i.definition.toolKey) }
+                val revoke = async(Dispatchers.Default) { start.await(); f.catalog.revoke(requireNotNull(i.definition).toolKey) }
                 start.complete(Unit)
                 val result = dispatch.await(); revoke.await()
                 f.service.awaitObservedExit(i.binding.callId)

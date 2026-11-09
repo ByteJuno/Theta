@@ -57,15 +57,24 @@ internal fun sha256(value: String) = MessageDigest.getInstance("SHA-256")
 
 @Serializable data class InvocationInput(
     val binding: BindingValue, val taskChainId: String, val sessionId: String, val runId: String,
-    val stepId: String, val callOrder: Int, val argsJson: String, val definition: FrozenDefinition,
+    val stepId: String, val callOrder: Int, val argsJson: String, val definition: FrozenDefinition?,
     val unattended: Boolean, val initialRisk: Risk,
     /** Set from reducer disposition; never treat a complete truncated candidate as executable. */
     val cancelledBeforeExecution: Boolean = false,
+    /** Preserve unresolved names without fabricating a catalog definition. */
+    val modelName: String = definition?.modelName.orEmpty(),
 ) {
     init {
         require(listOf(taskChainId, sessionId, runId, stepId).all { it.isNotBlank() } && callOrder >= 0)
-        require(initialRisk >= definition.declaredRisk)
-        require(definition.source != Source.MCP || initialRisk >= Risk.WRITE)
+        if (definition != null) {
+            require(modelName == definition.modelName)
+            require(initialRisk >= definition.declaredRisk)
+            require(definition.source != Source.MCP || initialRisk >= Risk.WRITE)
+        } else {
+            require(modelName.isNotBlank())
+            // No executable risk metadata exists; READ is only a neutral storage value.
+            require(initialRisk == Risk.READ)
+        }
     }
 }
 @Serializable data class ApprovalRequest(
@@ -83,7 +92,7 @@ internal fun sha256(value: String) = MessageDigest.getInstance("SHA-256")
  * or deletion is automatic; the store identity marker versions the directory, not this schema. */
 @Serializable data class InvocationRecord(
     val formatVersion: Int, val revision: Long, val input: InvocationInput,
-    val definitionDigest: String, val state: Status, val effectiveRisk: Risk,
+    val definitionDigest: String?, val state: Status, val effectiveRisk: Risk,
     val executionArgs: String?, val pending: ApprovalRequest?, val receipts: List<ApprovalReceipt>,
     val instance: ExecutionInstance?, val result: LogicalResult?, val evidence: List<ExitEvidence>,
     val isolation: Isolation?, val restartRequired: Boolean, val recoveryPending: Boolean,
@@ -92,7 +101,13 @@ internal fun sha256(value: String) = MessageDigest.getInstance("SHA-256")
     fun validate() {
         require(formatVersion == 2 && revision > 0) { "Unsupported format or revision" }
         require(!recoveryPending || (state.terminal && instance?.state == InstanceState.EXIT_CONFIRMED && isolation != null))
-        require(definitionDigest == input.definition.digest && effectiveRisk >= input.initialRisk)
+        require(definitionDigest == input.definition?.digest && effectiveRisk >= input.initialRisk)
+        if (input.definition == null) {
+            require(state == if (input.cancelledBeforeExecution) Status.CANCELLED else Status.REJECTED)
+            require(effectiveRisk == Risk.READ && result?.effect == Effect.NONE)
+            require(executionArgs == null && pending == null && receipts.isEmpty() && instance == null)
+            require(evidence.isEmpty() && isolation == null && !restartRequired && !recoveryPending)
+        }
         require(state.terminal == (result != null) && (result == null || state == result.status))
         require(state != Status.RUNNING || instance != null)
         require(state != Status.READY || (executionArgs != null && instance == null && pending == null))
@@ -108,7 +123,7 @@ internal fun sha256(value: String) = MessageDigest.getInstance("SHA-256")
         require(pending == null || (pending.internal == (state == Status.RUNNING)))
         require(pending == null || receipts.none { it.request.id == pending.id })
         require(evidence.all { it.attemptId == instance?.attemptId })
-        require(isolation == null || isolation.resource == input.definition.exclusiveResource)
+        require(isolation == null || isolation.resource == input.definition?.exclusiveResource)
         require(state != Status.RECEIVED || (instance == null && pending == null))
         if (executionArgs != null) {
             require(Json.parseToJsonElement(executionArgs) is JsonObject)
@@ -118,7 +133,7 @@ internal fun sha256(value: String) = MessageDigest.getInstance("SHA-256")
         require(receipts.map { it.request.id }.distinct().size == receipts.size)
         for (request in receipts.map { it.request } + listOfNotNull(pending)) {
             require(request.callId == callId && request.digest == definitionDigest &&
-                request.version == input.definition.version && request.generation == input.definition.generation)
+                request.version == input.definition?.version && request.generation == input.definition.generation)
             require(UUID.fromString(request.id).toString() == request.id)
             require(request.unknownCalls == request.unknownCalls.distinct().sorted() && callId !in request.unknownCalls)
             require(request.risk >= input.initialRisk)

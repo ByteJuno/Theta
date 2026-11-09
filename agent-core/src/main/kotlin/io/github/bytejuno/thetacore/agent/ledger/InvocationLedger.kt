@@ -47,9 +47,15 @@ class InvocationLedger(
         val step = all().filter { sameStep(it.input, input) }
         if (input.callOrder != step.size)
             return@withGate Mutation.Conflict("Register calls in contiguous assistant order")
-        val record = InvocationRecord(2, 1, input, input.definition.digest, Status.RECEIVED, input.initialRisk,
+        val record = InvocationRecord(2, 1, input, input.definition?.digest, Status.RECEIVED, input.initialRisk,
             null, null, emptyList(), null, null, emptyList(), null, false, false)
-        persist(null, if (input.cancelledBeforeExecution) terminal(record, Status.CANCELLED, null, "Truncated model turn: not executed") else record)
+        // Unknown calls are terminal in their first durable write: they can never be claimed,
+        // including after a crash before the rest of the step was registered.
+        persist(null, when {
+            input.cancelledBeforeExecution -> terminal(record, Status.CANCELLED, null, "Truncated model turn: not executed")
+            input.definition == null -> terminal(record, Status.REJECTED, null, "Unknown tool: ${input.modelName}")
+            else -> record
+        })
     }
 
     private fun sameStep(a: InvocationInput, b: InvocationInput) =
@@ -66,11 +72,14 @@ class InvocationLedger(
     } catch (_: IllegalArgumentException) { null }
     private fun unknown(r: InvocationRecord): List<String> = all().filter {
         it.callId != r.callId && it.input.taskChainId == r.input.taskChainId &&
-            it.input.definition.toolKey == r.input.definition.toolKey &&
+            it.input.definition?.toolKey == r.input.definition?.toolKey &&
             (it.result?.effect == Effect.UNKNOWN || it.evidence.any { e -> e.outcome?.effect == Effect.UNKNOWN }) && argumentKey(it) == argumentKey(r)
     }.map { it.callId }.sorted()
-    private fun request(r: InvocationRecord, risk: Risk, internal: Boolean) = ApprovalRequest(id(), r.callId,
-        r.definitionDigest, r.input.definition.version, r.input.definition.generation, risk, unknown(r), internal)
+    private fun request(r: InvocationRecord, risk: Risk, internal: Boolean): ApprovalRequest {
+        val definition = requireNotNull(r.input.definition)
+        return ApprovalRequest(id(), r.callId, requireNotNull(r.definitionDigest),
+            definition.version, definition.generation, risk, unknown(r), internal)
+    }
 
     fun validateAndPrepare(callId: String): Mutation = gate.withGate {
         val r = get(callId) ?: return@withGate Mutation.Conflict("Unknown call")
@@ -82,7 +91,7 @@ class InvocationLedger(
         val parsed = try { if (r.input.argsJson.isEmpty()) JsonNull else Json.parseToJsonElement(r.input.argsJson) }
             catch (_: IllegalArgumentException) { return@withGate update(r, terminal(r, Status.REJECTED, null, "Invalid JSON")) }
         val args = if (parsed == JsonNull) "{}" else r.input.argsJson
-        if ((parsed != JsonNull && parsed !is JsonObject) || !validator.valid(r.input.definition.inputSchema, args))
+        if ((parsed != JsonNull && parsed !is JsonObject) || !validator.valid(requireNotNull(r.input.definition).inputSchema, args))
             return@withGate update(r, terminal(r, Status.REJECTED, null, "Invalid arguments"))
         val prepared = r.copy(executionArgs = args)
         when (policy.evaluate(prepared, prepared.effectiveRisk, unknown(prepared), all())) {
@@ -141,16 +150,16 @@ class InvocationLedger(
         val records = all()
         if (records.count { it.input.taskChainId == r.input.taskChainId && it.instance != null } >= maxClaimsPerTaskChain)
             return@withGate Mutation.Blocked("Task-chain claim budget exhausted")
-        val d = r.input.definition
-        if (records.any { it.restartRequired && it.input.definition.owner == d.owner })
+        val d = requireNotNull(r.input.definition)
+        if (records.any { it.restartRequired && it.input.definition?.owner == d.owner })
             return@withGate Mutation.Blocked("Plugin restart required")
         if (d.exclusiveResource != null && records.any {
-                it.input.definition.exclusiveResource == d.exclusiveResource &&
+                it.input.definition?.exclusiveResource == d.exclusiveResource &&
                     (it.instance?.state == InstanceState.UNCONFIRMED || it.isolation?.let { q -> q.resolution != RecoveryResolution.VERIFIED_CLEAR } == true)
             }) return@withGate Mutation.Blocked("Resource occupied or externally isolated")
         if (prior(r).any {
                 !it.state.terminal && it.instance == null ||
-                    ((!d.parallelSafe || !it.input.definition.parallelSafe) && it.instance?.state == InstanceState.UNCONFIRMED)
+                    ((!d.parallelSafe || it.input.definition?.parallelSafe != true) && it.instance?.state == InstanceState.UNCONFIRMED)
             }) return@withGate Mutation.Blocked("Step barrier awaits actual exit/submission")
         val instance = ExecutionInstance(id(), epoch!!, InstanceState.UNCONFIRMED)
         val ticket = ExecutionTicket(r.callId, instance.attemptId, instance.processEpoch, d, r.executionArgs!!)
@@ -180,7 +189,7 @@ class InvocationLedger(
             else if (status == Status.SUCCEEDED) Effect.APPLIED else Effect.UNKNOWN
         val result = LogicalResult(status, effect, text, r.effectiveRisk == Risk.READ && effect != Effect.NONE)
         return r.copy(state = status, pending = null, result = result,
-            isolation = if (effect == Effect.UNKNOWN) Isolation("Unknown external effect", r.input.definition.exclusiveResource, null) else r.isolation)
+            isolation = if (effect == Effect.UNKNOWN) Isolation("Unknown external effect", r.input.definition?.exclusiveResource, null) else r.isolation)
     }
     fun cancel(callId: String): Mutation = finishLocally(callId, Status.CANCELLED)
     fun timeout(callId: String): Mutation = finishLocally(callId, Status.TIMED_OUT)
@@ -199,7 +208,7 @@ class InvocationLedger(
         val next = if (r.state.terminal) r else terminal(r, status, effect, text)
         update(r, next.copy(evidence = r.evidence + evidence,
             isolation = if (outcome.effect == Effect.UNKNOWN)
-                Isolation("Return evidence reports unknown effect", r.input.definition.exclusiveResource, null) else next.isolation))
+                Isolation("Return evidence reports unknown effect", r.input.definition?.exclusiveResource, null) else next.isolation))
     }
 
     /** Completion is also a trusted actual-exit callback, not merely a cancellation acknowledgement. */
@@ -218,7 +227,7 @@ class InvocationLedger(
             // A clearance covers only evidence known at the time. New uncertainty invalidates it;
             // identical callback replays return above and do not undo a later clearance.
             isolation = if (outcome.effect == Effect.UNKNOWN)
-                Isolation("Late evidence reports unknown effect", r.input.definition.exclusiveResource, null) else next.isolation,
+                Isolation("Late evidence reports unknown effect", r.input.definition?.exclusiveResource, null) else next.isolation,
             evidence = r.evidence + evidence))
     }
     fun recordActualExit(callId: String, attemptId: String, evidence: String): Mutation = gate.withGate {
@@ -262,7 +271,7 @@ class InvocationLedger(
                 next = next.copy(instance = r.instance?.copy(state = InstanceState.EXIT_CONFIRMED), restartRequired = false,
                     recoveryPending = r.recoveryPending || needsDecision,
                     isolation = if (needsDecision)
-                        next.isolation ?: Isolation("Host loss requires recovery decision", r.input.definition.exclusiveResource, null)
+                        next.isolation ?: Isolation("Host loss requires recovery decision", r.input.definition?.exclusiveResource, null)
                     else next.isolation)
                 last = update(r, next)
                 if (last !is Mutation.Applied) return@withGate last
