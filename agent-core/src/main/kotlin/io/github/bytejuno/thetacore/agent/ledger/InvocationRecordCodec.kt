@@ -62,5 +62,8 @@ internal class InvocationRecordCodec(private val json: Json) {
 internal fun InvocationRecord.detached(): InvocationRecord = copy(
     pending = pending?.copy(unknownCalls = pending.unknownCalls.toList()),
     receipts = receipts.map { it.copy(request = it.request.copy(unknownCalls = it.request.unknownCalls.toList())) },
-    evidence = evidence.toList(),
+    result = result?.copy(output = result.output?.copy(media = result.output.media.toList())),
+    evidence = evidence.map { item -> item.copy(outcome = item.outcome?.let { outcome ->
+        outcome.copy(output = outcome.output?.copy(media = outcome.output.media.toList()))
+    }) },
 )

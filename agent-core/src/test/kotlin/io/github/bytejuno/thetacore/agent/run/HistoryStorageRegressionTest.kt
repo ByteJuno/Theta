@@ -92,21 +92,24 @@ class HistoryStorageRegressionTest {
     @Test fun escapingAmplifiedLedgerResultBeyond64MiBRecoversAfterFailedCommit() {
         val path = Files.createTempDirectory("history-large-result")
         val ledgerPath = Files.createTempDirectory("history-large-ledger")
-        val c = call()
-        val text = "\u0000".repeat(10 * 1024 * 1024) + "终点😀\\\"\n"
+        // PROTOCOL 3.8 caps each projected result at 32 KiB, so only a whole step can pass 64 MiB.
+        val calls = List(1800) { call(index = it, wire = "wire$it") }
+        val text = "\u0000".repeat(6000) + "终点😀\\\"\n"
         val d = testDefinition()
         JsonInvocationStore.create(ledgerPath, durability).use { store ->
             val gate = DefinitionGate().apply { install(d); freezeRun("run", listOf(d)) }
             val l = InvocationLedger(store, gate, ArgumentsValidator { _, _ -> true })
             l.recoverColdStart("before")
             FileRunHistory.create(path, "session", durability).use {
-                it.prepareStep(0, identity, "step", assistant(c))
+                it.prepareStep(0, identity, "step", assistant(*calls.toTypedArray()))
             }
-            l.recordInvocation(InvocationInput(BindingValue.copyOf(c.binding), "chain", "session", "run", "step",
-                0, "{}", d, false, Risk.READ, false, "tool"))
-            l.validateAndPrepare(c.binding.callId)
-            val ticket = assertIs<Mutation.Applied>(l.claimExecution(c.binding.callId, l.get(c.binding.callId)!!.revision)).ticket!!
-            assertIs<Mutation.Applied>(l.complete(c.binding.callId, ticket.attemptId, Status.SUCCEEDED, text))
+            calls.forEachIndexed { order, c ->
+                l.recordInvocation(InvocationInput(BindingValue.copyOf(c.binding), "chain", "session", "run", "step",
+                    order, "{}", d, false, Risk.READ, false, "tool"))
+                l.validateAndPrepare(c.binding.callId)
+                val ticket = assertIs<Mutation.Applied>(l.claimExecution(c.binding.callId, l.get(c.binding.callId)!!.revision)).ticket!!
+                assertIs<Mutation.Applied>(l.complete(c.binding.callId, ticket.attemptId, Status.SUCCEEDED, text))
+            }
         }
         JsonInvocationStore.open(ledgerPath, durability).use { store ->
             val l = InvocationLedger(store, DefinitionGate(), ArgumentsValidator { _, _ -> true })
@@ -127,11 +130,13 @@ class HistoryStorageRegressionTest {
             val page = h.recent(1)
             assertEquals(2, page.messages.size) // transport frames never split a transaction/page
             assertNull(page.older)
-            val result = page.messages.last().parts.single() as ContentPart.ToolResult
-            assertEquals(c.binding.callId, result.callId)
-            assertEquals(text, Json.parseToJsonElement(result.text).jsonObject.getValue("message").jsonPrimitive.content)
+            val results = page.messages.last().parts.map { it as ContentPart.ToolResult }
+            assertEquals(calls.map { it.binding.callId }, results.map { it.callId })
+            val expected = ModelResultText.project(LogicalResult(Status.SUCCEEDED, Effect.NONE, text, false))
+            assertTrue(expected.toByteArray(Charsets.UTF_8).size <= ModelResultText.LIMIT)
+            results.forEach { assertEquals(expected, it.text) }
         }
-        println("ISSUE19_LARGE_RESULT rawChars=${text.length}; batchBytes=${Files.size(path.resolve("batches/1.json"))}; ledger=$ledgerPath; history=$path")
+        println("ISSUE19_LARGE_RESULT calls=${calls.size}; rawChars=${text.length}; batchBytes=${Files.size(path.resolve("batches/1.json"))}; ledger=$ledgerPath; history=$path")
     }
 
     @Test fun legacyCheckedJsonBatchCanBeReadAndExtendedByFramedWrites() {

@@ -31,6 +31,12 @@ internal class AndroidInvocationStore private constructor(private val delegate: 
         try { delegate.save(record, expectedRevision) }
         catch (error: StoreException) { failed = true; throw error }
     }
+    @Synchronized override fun saveWithBlobs(record: InvocationRecord, expectedRevision: Long?, blobs: List<BlobWrite>) {
+        if (failed) throw StoreException("Android ledger storage failed; restart required", true)
+        try { delegate.saveWithBlobs(record, expectedRevision, blobs) }
+        catch (error: StoreException) { failed = true; throw error }
+    }
+    override fun readBlob(ref: BlobRef, offset: Long, limit: Int) = delegate.readBlob(ref, offset, limit)
     override fun close() = delegate.close()
 
     companion object {
@@ -75,7 +81,8 @@ internal class AndroidInvocationStore private constructor(private val delegate: 
                         syncDirectory(parent)
                         cutpoint(InitializationStage.AFTER_PARENT_SYNC)
                         val afterReplace: (WriteStage) -> Unit = { stage ->
-                            if (stage == WriteStage.AFTER_REPLACE) syncDirectory(directory)
+                            if (stage == WriteStage.AFTER_REPLACE || stage == WriteStage.AFTER_BLOB_DIRECTORY_SYNC)
+                                syncDirectory(directory)
                         }
                         opened = JsonInvocationStore.open(path, Durability.PROCESS_CRASH_ONLY, afterReplace)
                         syncDirectory(directory)
