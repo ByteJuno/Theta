@@ -5,6 +5,11 @@
     <uses-permission android:name="android.permission.INTERNET" />
 
     <queries>
+        <intent>
+            <action android:name="android.intent.action.OPEN_DOCUMENT" />
+            <category android:name="android.intent.category.OPENABLE" />
+            <data android:mimeType="*/*" />
+        </intent>
         <package android:name="io.github.bytejuno.thetacore.sample.hooktarget" />
         <intent><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.HOME" /></intent>
     </queries>
