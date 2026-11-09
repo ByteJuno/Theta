@@ -1,5 +1,7 @@
 # S1 插件加载原型验证
 
+2026-11-09 真机补证：bootstrap 身份校验候选 Host `bafeae5d…d6ed` 已独立完成普通 UID 拒绝/合法连接、系统 picker、真实 scope 回调、超时/迟到批准/拒绝/划走、同 PID 停用、scope 复用、请求取消、专用 Target 三次自然崩溃后的隔离、同签 v4 恢复，以及宿主不可用时的 manager scope 撤销救援。G 已用 CI run `42599041866` 的冻结配对 APK 完成主屏 A/B/B/A，共 2,880 个有效且不重复的帧样本；原候选及显示偏好均已恢复。逐项哈希、原始帧 CSV、失败尝试和限制见 [S1 closeout](S1_CLOSEOUT.md)。本补证不把旧 APK 或历史模拟器专项的通过转记为新二进制全矩阵通过；下文 2026-11-08 的延期状态为当时记录。
+
 当前是 S1 的增量原型，不是完整的插件管理器或可发布版本。**S1 尚未完成**。最新完整验证对应 `93142b3`（PR #7 运行时增量及审查修复，含此前 PR #6 数据 ZIP 与 `c06c789` 受管 scope 故障隔离），结果见 S1_ACCEPTANCE.md；下文的历史通过记录只覆盖当时的代码；后续已接受的本地/JVM/模拟器专项、已执行的 Actions 体积对比及延期真机门槛分层列于本页，不用历史缺口否定后续限定通过。
 
 2026-11-07 数据 ZIP revision-5 的本机增量验证见 [独立记录](DATA_ZIP_ACCEPTANCE.md)。该记录补充当前实现与局部通过范围，不覆盖下文全部 S1 门槛。
@@ -14,7 +16,7 @@
 
 - **已接受的限定范围**：本地构建/JVM/静态检查、按 candidate7/candidate9 分别绑定的模拟器专项、LOCAL_ONLY 成对体积实验，以及独立 DATA production-store fixture 的 Android expectedSHA staging 拒绝和 10 次进程死亡恢复。已完成专项不再标作待执行，但不宣称全部 S1 通过，也不把历史 FAILED 或候选身份改写。
 - **Actions 已执行**：PR #7 的 PR Check run 42458056673（`93142b3`）中 paired-keep-size 实际运行并通过（`MEASURED_CI`）：production 13,937,590 bytes、去共享库 keep 的对照 2,473,682 bytes，差 11,463,908 bytes。本地成对构建与 candidate9/storage20 的历史设备证据仍各自独立，不互相追认。
-- **原有真机门槛继续延期**：G 固定真机帧耗时，J 真实框架远程文件加载/生效及 requestScope，K 目标崩溃循环跳过、全局开关传播、目标重启和框架外救援。宿主恢复、模拟器和 JVM helper 不替代这些门槛。
+- **2026-11-08 原有真机门槛及后续补证**：当时 G 固定真机帧耗时、J 真实框架远程加载/requestScope、K 崩溃循环/开关传播/目标重启/框架外救援均延期；2026-11-09 的专用样例真机结果已补入 [独立 closeout 记录](S1_CLOSEOUT.md)。其中框架外救援实际执行的是 manager 仅撤销专用 Target scope，整框架停用/卸载未执行；G 是 CI 冻结对照的主屏样本量化，未设置开销可接受阈值。历史候选和新候选证据仍各自绑定。
 - **具体证据缺口保留在对应层**：storage20 没有独立导出的底层持久化文件/目录快照，未覆盖 candidate9 主界面的 expectedSHA/publication 切点、Android CODE 发布中断或物理断电。旧专项的 listener host actualExited、私有 tombstone/回滚状态及精确 idle 续期等未观测项仍按下表披露；这些限制不撤销已接受结果，也不扩展成任意包、完整故障矩阵或全量历史重跑的新门槛。
 
 S1_ACCEPTANCE.md 中保留历史实现期缺口；当前进展以本页和 runtime increment 的逐候选证据为准，不修改 DESIGN.md §11 的范围、批准后的 B/C 口径或 S2 归属。
