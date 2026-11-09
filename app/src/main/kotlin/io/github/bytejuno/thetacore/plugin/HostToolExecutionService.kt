@@ -27,8 +27,13 @@ internal class HostToolExecutionService(
     private val observations = mutableMapOf<String, Deferred<Unit>>()
     private val logicalResults = mutableMapOf<String, CompletableDeferred<Unit>>()
     @Volatile private var storageFailed = false
+    private val storageFailure = CompletableDeferred<Unit>()
+    private fun closeSubmissions() {
+        storageFailed = true
+        storageFailure.complete(Unit)
+    }
     private fun observe(mutation: Mutation): Mutation {
-        if (mutation is Mutation.StorageFailure) storageFailed = true
+        if (mutation is Mutation.StorageFailure) closeSubmissions()
         return mutation
     }
 
@@ -70,7 +75,7 @@ internal class HostToolExecutionService(
                 onCancel = { invocation?.cancel() }, onExit = {})
                 ?: return@withGate Mutation.Blocked("Execution capacity unavailable")
             val claimed = try { observe(ledger.claimExecution(callId, record.revision)) }
-                catch (error: Throwable) { reservation.abandon(); storageFailed = true; throw error }
+                catch (error: Throwable) { reservation.abandon(); closeSubmissions(); throw error }
             val ticket = (claimed as? Mutation.Applied)?.ticket
             if (ticket == null) { reservation.abandon(); return@withGate claimed }
             invocation = PluginInvocation(budget, entry.definition.owner, owner, entry.tool,
@@ -164,7 +169,7 @@ internal class HostToolExecutionService(
                 }
             }
         } catch (error: Throwable) {
-            storageFailed = true
+            closeSubmissions()
             gate.withGate { logicalResults[ticket.callId] }?.completeExceptionally(error)
             throw error
         }
@@ -208,21 +213,81 @@ internal class HostToolExecutionService(
             }
         }
         if (!registered) return@withContext null
+        val pending = mutableListOf<String>()
+        suspend fun awaitHealthy(completion: Deferred<Unit>?): Boolean {
+            if (storageFailed) return false
+            if (completion == null) return true
+            return select {
+                storageFailure.onAwait { false }
+                completion.onAwait { !storageFailed }
+            }
+        }
+        suspend fun observePending(id: String): Boolean {
+            if (!awaitHealthy(gate.withGate { logicalResults[id] })) return false
+            // Logical timeout/cancellation is not actual exit. Never wait indefinitely for it;
+            // subsequent claims still enforce leases, isolation and actual-exit barriers.
+            return ledger.get(id)?.state !in setOf(Status.SUCCEEDED, Status.FAILED) ||
+                awaitHealthy(gate.withGate { observations[id] })
+        }
+        suspend fun drain(): Boolean {
+            for (id in pending) if (!observePending(id)) return false
+            pending.clear()
+            return !storageFailed
+        }
+        suspend fun awaitAdmissionProgress(blocked: Mutation.Blocked, input: InvocationInput): Boolean {
+            // Only current-batch leases can be relieved here. Permanent guards (claim budget,
+            // restart, stale definition, recovery) must pause without waiting on unrelated work.
+            val candidates = when (blocked.reason) {
+                "Execution capacity unavailable" -> pending.toList()
+                "Resource occupied or externally isolated" -> pending.filter {
+                    ledger.get(it)?.input?.definition?.exclusiveResource == input.definition?.exclusiveResource
+                }
+                "Step barrier awaits actual exit/submission" -> pending.toList()
+                else -> emptyList()
+            }
+            if (candidates.isEmpty()) return false
+            return coroutineScope {
+                val waits = candidates.associateWith { id -> async { observePending(id) } }
+                try {
+                    val completed = select<Pair<String, Boolean>> {
+                        waits.forEach { (id, wait) -> wait.onAwait { id to it } }
+                    }
+                    pending.remove(completed.first)
+                    completed.second && !storageFailed
+                } finally { waits.values.forEach { it.cancel() } }
+            }
+        }
         for (input in inputs) {
             val id = input.binding.callId
+            // Validation and approval remain ordered; only submitted tool bodies overlap.
             val prepared = gate.withGate { observe(ledger.validateAndPrepare(id)) }
             val record = when (prepared) { is Mutation.Applied -> prepared.record; is Mutation.AlreadyApplied -> prepared.record; else -> return@withContext null }
             if (record.state == Status.READY) {
-                val dispatched = dispatch(id)
+                val parallel = input.definition?.parallelSafe == true
+                if (!parallel && !drain()) return@withContext null
+                var dispatched = dispatch(id)
+                // Retry admission, never execution, after a relevant current-batch lease
+                // progresses. A free slot need not wait for unrelated slower siblings.
+                while (dispatched is Mutation.Blocked && pending.isNotEmpty()) {
+                    if (!awaitAdmissionProgress(dispatched, input)) return@withContext null
+                    dispatched = dispatch(id)
+                }
                 if (dispatched is Mutation.Applied && dispatched.record.state.terminal) continue
+                // A call cancelled while queued for admission is finished; its siblings still run.
+                if (dispatched is Mutation.Conflict && ledger.get(id)?.state?.terminal == true) continue
                 if (dispatched !is Mutation.Applied || dispatched.ticket == null) return@withContext null
-                gate.withGate { logicalResults[id] }?.await()
-                if (storageFailed) return@withContext null
-                // Never wait indefinitely for a timed-out non-cooperative body just to return
-                // its logical result. Subsequent claims still enforce the actual-exit barrier.
-                if (ledger.get(id)?.state in setOf(Status.SUCCEEDED, Status.FAILED)) awaitObservedExit(id)
+                pending += id
+                if (!parallel && !drain()) return@withContext null
+            } else if (record.state == Status.RUNNING ||
+                (record.state in setOf(Status.SUCCEEDED, Status.FAILED) &&
+                    record.instance?.state == InstanceState.UNCONFIRMED)) {
+                // A resumed step observes its existing claim, including a normal result whose
+                // completion handlers have not exited yet; it never submits the claim twice.
+                pending += id
+                if (input.definition?.parallelSafe != true && !drain()) return@withContext null
             } else if (!record.state.terminal) return@withContext null
         }
+        if (!drain()) return@withContext null
         ledger.resultsForStep(session, run, step, inputs.map { it.binding.callId })
     }
 }

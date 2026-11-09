@@ -35,13 +35,14 @@ class HostToolExecutionServiceTest {
         }
         override fun close() {}
     }
-    private class Fixture(policy: ApprovalPolicy = ApprovalPolicy()) : AutoCloseable {
-        val budget = PluginExecutionBudget(2, 2)
+    private class Fixture(policy: ApprovalPolicy = ApprovalPolicy(), maxClaims: Int = Int.MAX_VALUE,
+        slots: Int = 2) : AutoCloseable {
+        val budget = PluginExecutionBudget(slots, slots)
         val owner = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val store = MemoryStore()
         val gate = DefinitionGate()
         val validator = Schema202012Validator()
-        val ledger = InvocationLedger(store, gate, validator, policy)
+        val ledger = InvocationLedger(store, gate, validator, policy, maxClaims)
         val catalog = FrozenToolCatalog(gate, budget, owner, validator)
         val service = HostToolExecutionService(budget, owner, catalog, ledger, validator)
         init { ledger.recoverColdStart(UUID.randomUUID().toString()) }
@@ -57,10 +58,10 @@ class HostToolExecutionServiceTest {
     }
     private val emptySchema = Json.parseToJsonElement("""{"type":"object","additionalProperties":false}""").jsonObject
     private fun tool(risk: ToolRisk = ToolRisk.READ, timeout: Long = 2_000, resource: String? = null,
-        body: suspend (ToolEnv) -> ToolResult) = object : Tool {
+        parallel: Boolean = false, body: suspend (ToolEnv) -> ToolResult) = object : Tool {
         override val id = "controlled"
         override val spec = ToolSpec("controlled", "actual SDK tool", emptySchema, risk = risk,
-            timeoutMs = timeout, exclusiveResource = resource)
+            timeoutMs = timeout, exclusiveResource = resource, parallelSafe = parallel)
         override suspend fun call(args: JsonObject, env: ToolEnv) = body(env)
     }
     private suspend fun waitUntil(check: () -> Boolean) = withTimeout(5_000) { while (!check()) delay(5) }
@@ -104,6 +105,375 @@ class HostToolExecutionServiceTest {
             reducer.accept(Events.end(index))
         }
         reducer.accept(Events.finished(reason))
+    }
+
+    @Test fun parallelBatchOverlapsAndKeepsCallOrderAfterReverseCompletionAndFailure() = runBlocking {
+        Fixture().use { f ->
+            val bothEntered = CountDownLatch(2)
+            val releaseFirst = CountDownLatch(1)
+            val releaseSecond = CountDownLatch(1)
+            val executions = AtomicInteger()
+            val first = f.catalog.registerHost("host/first", "1", tool(parallel = true, timeout = 10_000) {
+                executions.incrementAndGet(); bothEntered.countDown(); releaseFirst.await()
+                ToolResult("first result", effect = ToolEffect.NONE)
+            })
+            val second = f.catalog.registerHost("host/second", "1", tool(parallel = true, timeout = 10_000) {
+                executions.incrementAndGet(); bothEntered.countDown(); releaseSecond.await()
+                error("second failed")
+            })
+            f.catalog.freeze("run")
+            val reducer = completedCalls(listOf(first.modelName, second.modelName), "parallel")
+            val ids = reducer.calls().map { it.binding.callId }
+            val step = async(Dispatchers.IO) { f.service.executeStep(reducer, "chain", "session", "run", "step") }
+            try {
+                assertTrue("Both bodies must enter before either is released", bothEntered.await(5, TimeUnit.SECONDS))
+                assertEquals(2, f.budget.occupiedSlots())
+                releaseSecond.countDown(); withTimeout(5_000) { f.service.awaitObservedExit(ids[1]) }
+                assertEquals(Status.FAILED, f.ledger.get(ids[1])!!.state)
+                assertEquals(Status.RUNNING, f.ledger.get(ids[0])!!.state)
+                assertFalse(step.isCompleted)
+                releaseFirst.countDown()
+                val result = withTimeout(5_000) { step.await() }!!
+                assertEquals(ids, result.parts.map { (it as ContentPart.ToolResult).callId })
+                assertTrue((result.parts[0] as ContentPart.ToolResult).text.contains("first result"))
+                assertFalse((result.parts[0] as ContentPart.ToolResult).isError)
+                assertTrue((result.parts[1] as ContentPart.ToolResult).isError)
+                assertNotNull(f.service.executeStep(reducer, "chain", "session", "run", "step"))
+                assertEquals(2, executions.get())
+                assertEquals(0, f.budget.occupiedSlots())
+            } finally { releaseFirst.countDown(); releaseSecond.countDown(); step.cancel() }
+        }
+    }
+
+    @Test fun serialBarrierWaitsForParallelBatchAndBlocksFollowingBatch() = runBlocking {
+        Fixture(slots = 3).use { f ->
+            val bothEntered = CountDownLatch(2)
+            val releaseBefore = CountDownLatch(1)
+            val serialEntered = CountDownLatch(1)
+            val releaseSerial = CountDownLatch(1)
+            val afterEntered = CountDownLatch(2)
+            val releaseAfter = CountDownLatch(1)
+            val before = f.catalog.registerHost("host/before", "1", tool(parallel = true, timeout = 10_000) {
+                bothEntered.countDown(); releaseBefore.await()
+                ToolResult("before", effect = ToolEffect.NONE)
+            })
+            lateinit var ids: List<String>
+            val serial = f.catalog.registerHost("host/serial", "1", tool(timeout = 10_000) {
+                assertTrue(ids.take(2).all { f.ledger.get(it)!!.instance!!.state == InstanceState.EXIT_CONFIRMED })
+                serialEntered.countDown(); releaseSerial.await(); ToolResult("serial", effect = ToolEffect.NONE)
+            })
+            val after = f.catalog.registerHost("host/after", "1", tool(parallel = true, timeout = 10_000) {
+                assertEquals(InstanceState.EXIT_CONFIRMED, f.ledger.get(ids[2])!!.instance!!.state)
+                afterEntered.countDown(); releaseAfter.await(); ToolResult("after", effect = ToolEffect.NONE)
+            })
+            f.catalog.freeze("run")
+            val reducer = completedCalls(listOf(before.modelName, before.modelName, serial.modelName,
+                after.modelName, after.modelName), "barriers")
+            ids = reducer.calls().map { it.binding.callId }
+            val step = async(Dispatchers.IO) { f.service.executeStep(reducer, "chain", "session", "run", "step") }
+            try {
+                assertTrue(bothEntered.await(5, TimeUnit.SECONDS))
+                assertTrue(ids.take(2).all { f.ledger.get(it)!!.state == Status.RUNNING })
+                assertTrue(ids.take(2).all { f.ledger.get(it)!!.instance!!.state == InstanceState.UNCONFIRMED })
+                assertNull(f.ledger.get(ids[2])!!.instance)
+                releaseBefore.countDown()
+                assertTrue(serialEntered.await(5, TimeUnit.SECONDS))
+                assertTrue(ids.drop(3).all { f.ledger.get(it)!!.instance == null })
+                releaseSerial.countDown()
+                assertTrue(afterEntered.await(5, TimeUnit.SECONDS))
+                releaseAfter.countDown()
+                val result = withTimeout(5_000) { step.await() }!!
+                assertEquals(ids, result.parts.map { (it as ContentPart.ToolResult).callId })
+                assertTrue(ids.all { f.ledger.get(it)!!.state == Status.SUCCEEDED })
+            } finally { releaseBefore.countDown(); releaseSerial.countDown(); releaseAfter.countDown(); step.cancel() }
+        }
+    }
+
+    @Test fun parallelBatchLargerThanBudgetDrainsWithoutDroppingCalls() = runBlocking {
+        Fixture().use { f ->
+            val entered = CountDownLatch(2); val release = CountDownLatch(1)
+            val calls = AtomicInteger()
+            val d = f.register(tool(parallel = true, timeout = 10_000) {
+                val n = calls.incrementAndGet()
+                if (n <= 2) { entered.countDown(); release.await() }
+                ToolResult("result-$n", effect = ToolEffect.NONE)
+            })
+            val reducer = completedCalls(List(5) { d.modelName }, "capacity")
+            val step = async(Dispatchers.IO) { f.service.executeStep(reducer, "chain", "session", "run", "step") }
+            try {
+                assertTrue(entered.await(5, TimeUnit.SECONDS))
+                assertEquals(2, f.budget.occupiedSlots())
+                assertNull(f.ledger.get(reducer.calls()[2].binding.callId)!!.instance)
+                release.countDown()
+                assertEquals(5, withTimeout(5_000) { step.await() }!!.parts.size)
+                assertEquals(5, calls.get())
+                assertEquals(0, f.budget.occupiedSlots())
+            } finally { release.countDown(); step.cancel() }
+        }
+    }
+
+    @Test fun capacityBackpressureUsesFreedSlotBeforeSlowSiblingExits() = runBlocking {
+        Fixture().use { f ->
+            val entered = CountDownLatch(2); val release = CountDownLatch(1)
+            val thirdEntered = CountDownLatch(1)
+            val slow = f.catalog.registerHost("host/slow", "1", tool(parallel = true, timeout = 10_000) {
+                entered.countDown(); release.await(); ToolResult("slow", effect = ToolEffect.NONE)
+            })
+            val fast = f.catalog.registerHost("host/fast", "1", tool(parallel = true) {
+                entered.countDown(); entered.await(); ToolResult("fast", effect = ToolEffect.NONE)
+            })
+            val third = f.catalog.registerHost("host/third", "1", tool(parallel = true) {
+                thirdEntered.countDown(); ToolResult("third", effect = ToolEffect.NONE)
+            })
+            f.catalog.freeze("run")
+            val reducer = completedCalls(listOf(slow.modelName, fast.modelName, third.modelName), "free-slot")
+            val step = async(Dispatchers.IO) { f.service.executeStep(reducer, "chain", "session", "run", "step") }
+            try {
+                assertTrue(thirdEntered.await(5, TimeUnit.SECONDS))
+                assertEquals(Status.RUNNING, f.ledger.get(reducer.calls()[0].binding.callId)!!.state)
+                release.countDown()
+                assertEquals(3, withTimeout(5_000) { step.await() }!!.parts.size)
+            } finally { release.countDown(); step.cancel() }
+        }
+    }
+
+    @Test fun cancellingCallQueuedForCapacityDoesNotStallLaterSiblings() = runBlocking {
+        Fixture(slots = 1).use { f ->
+            val entered = CountDownLatch(1); val release = CountDownLatch(1)
+            val queuedRuns = AtomicInteger(); val thirdRuns = AtomicInteger()
+            val slow = f.catalog.registerHost("host/slow", "1", tool(parallel = true, timeout = 10_000) {
+                entered.countDown(); release.await(); ToolResult("slow", effect = ToolEffect.NONE)
+            })
+            val queued = f.catalog.registerHost("host/queued", "1", tool(parallel = true) {
+                queuedRuns.incrementAndGet(); ToolResult("queued", effect = ToolEffect.NONE)
+            })
+            val third = f.catalog.registerHost("host/third", "1", tool(parallel = true) {
+                thirdRuns.incrementAndGet(); ToolResult("third", effect = ToolEffect.NONE)
+            })
+            f.catalog.freeze("run")
+            val reducer = completedCalls(listOf(slow.modelName, queued.modelName, third.modelName), "queued-cancel")
+            val ids = reducer.calls().map { it.binding.callId }
+            val step = async(Dispatchers.IO) { f.service.executeStep(reducer, "chain", "session", "run", "step") }
+            try {
+                assertTrue(entered.await(5, TimeUnit.SECONDS))
+                waitUntil { f.ledger.get(ids[1])?.state == Status.READY }
+                delay(200) // Let the step reach its capacity wait for the queued call.
+                assertTrue(f.service.cancel(ids[1]) is Mutation.Applied)
+                release.countDown()
+                val result = withTimeout(5_000) { step.await() }!!
+                assertEquals(ids, result.parts.map { (it as ContentPart.ToolResult).callId })
+                assertEquals(listOf(Status.SUCCEEDED, Status.CANCELLED, Status.SUCCEEDED), ids.map { f.ledger.get(it)!!.state })
+                assertEquals(Effect.NONE, f.ledger.get(ids[1])!!.result!!.effect)
+                assertEquals(0, queuedRuns.get())
+                assertEquals(1, thirdRuns.get())
+            } finally { release.countDown(); step.cancel() }
+        }
+    }
+
+    @Test fun parallelSafeCallsSharingResourceStillSerializeWithinStep() = runBlocking {
+        Fixture().use { f ->
+            val entered = CountDownLatch(1); val release = CountDownLatch(1)
+            val calls = AtomicInteger()
+            lateinit var firstId: String
+            val d = f.register(tool(resource = "shared", parallel = true, timeout = 10_000) {
+                if (calls.incrementAndGet() == 1) { entered.countDown(); release.await() }
+                else assertEquals(InstanceState.EXIT_CONFIRMED, f.ledger.get(firstId)!!.instance!!.state)
+                ToolResult("ok", effect = ToolEffect.NONE)
+            })
+            val reducer = completedCalls(List(2) { d.modelName }, "resource")
+            firstId = reducer.calls()[0].binding.callId
+            val step = async(Dispatchers.IO) { f.service.executeStep(reducer, "chain", "session", "run", "step") }
+            try {
+                assertTrue(entered.await(5, TimeUnit.SECONDS))
+                assertNull(f.ledger.get(reducer.calls()[1].binding.callId)!!.instance)
+                release.countDown()
+                val results = withTimeout(5_000) { step.await() }!!.parts
+                assertEquals(2, results.size)
+                assertTrue(results.all { !(it as ContentPart.ToolResult).isError })
+                assertEquals(2, calls.get())
+            } finally { release.countDown(); step.cancel() }
+        }
+    }
+
+    @Test fun parallelTimeoutOrCancellationDoesNotReleaseSerialBarrier() = runBlocking {
+        for (cancel in listOf(false, true)) Fixture(slots = 3).use { f ->
+            val entered = CountDownLatch(2); val release = CountDownLatch(1)
+            val parallel = f.catalog.registerHost("host/parallel", "1",
+                tool(parallel = true, timeout = if (cancel) 10_000 else 300) {
+                    entered.countDown(); release.await(); ToolResult("late", effect = ToolEffect.NONE)
+                })
+            val serialCalls = AtomicInteger()
+            val serial = f.catalog.registerHost("host/serial", "1", tool {
+                serialCalls.incrementAndGet(); ToolResult("serial", effect = ToolEffect.NONE)
+            })
+            f.catalog.freeze("run")
+            val reducer = completedCalls(listOf(parallel.modelName, parallel.modelName, serial.modelName), "terminal-$cancel")
+            val ids = reducer.calls().map { it.binding.callId }
+            val step = async(Dispatchers.IO) { f.service.executeStep(reducer, "chain", "session", "run", "step") }
+            try {
+                assertTrue(entered.await(5, TimeUnit.SECONDS))
+                if (cancel) ids.take(2).forEach { f.service.cancel(it) }
+                assertNull(withTimeout(5_000) { step.await() })
+                assertEquals(0, serialCalls.get())
+                assertEquals(2, f.budget.occupiedSlots())
+                ids.take(2).forEach {
+                    assertEquals(if (cancel) Status.CANCELLED else Status.TIMED_OUT, f.ledger.get(it)!!.state)
+                    assertEquals(InstanceState.UNCONFIRMED, f.ledger.get(it)!!.instance!!.state)
+                }
+                assertNull(f.ledger.get(ids[2])!!.instance)
+                release.countDown()
+                ids.take(2).forEach { withTimeout(5_000) { f.service.awaitObservedExit(it) } }
+                // Late completion cannot replace either logical result or cause a second claim.
+                val result = f.service.executeStep(reducer, "chain", "session", "run", "step")!!
+                assertEquals(ids, result.parts.map { (it as ContentPart.ToolResult).callId })
+                assertEquals(1, serialCalls.get())
+                ids.take(2).forEach {
+                    assertEquals(if (cancel) Status.CANCELLED else Status.TIMED_OUT, f.ledger.get(it)!!.state)
+                }
+            } finally { release.countDown(); step.cancel() }
+        }
+    }
+
+    @Test fun parallelApprovalsStayOrderedAndDeniedCallDoesNotBlockApprovedSibling() = runBlocking {
+        Fixture().use { f ->
+            val calls = AtomicInteger()
+            val d = f.register(tool(ToolRisk.WRITE, parallel = true) {
+                calls.incrementAndGet(); ToolResult("approved", effect = ToolEffect.NONE)
+            })
+            val reducer = completedCalls(List(3) { d.modelName }, "approval-order")
+            val ids = reducer.calls().map { it.binding.callId }
+            assertNull(f.service.executeStep(reducer, "chain", "session", "run", "step"))
+            assertEquals(Status.WAITING_APPROVAL, f.ledger.get(ids[0])!!.state)
+            assertEquals(Status.RECEIVED, f.ledger.get(ids[1])!!.state)
+            assertEquals(0, calls.get())
+            val request = f.ledger.get(ids[0])!!.pending!!
+            f.service.decide(ids[0], request.id, Decision.DENY)
+            assertNull(f.service.executeStep(reducer, "chain", "session", "run", "step"))
+            assertEquals(Status.WAITING_APPROVAL, f.ledger.get(ids[1])!!.state)
+            assertEquals(Status.RECEIVED, f.ledger.get(ids[2])!!.state)
+            val next = f.ledger.get(ids[1])!!.pending!!
+            f.service.decide(ids[1], next.id, Decision.ALLOW_SESSION)
+            val result = withTimeout(5_000) { f.service.executeStep(reducer, "chain", "session", "run", "step") }!!
+            assertEquals(ids, result.parts.map { (it as ContentPart.ToolResult).callId })
+            assertEquals(listOf(Status.REJECTED, Status.SUCCEEDED, Status.SUCCEEDED), ids.map { f.ledger.get(it)!!.state })
+            assertEquals(2, calls.get())
+        }
+    }
+
+    @Test fun resumingApprovalObservesRunningSiblingWithoutDuplicateClaim() = runBlocking {
+        Fixture().use { f ->
+            val readEntered = CountDownLatch(1); val writeEntered = CountDownLatch(1)
+            val release = CountDownLatch(1); val calls = AtomicInteger()
+            val read = f.catalog.registerHost("host/read", "1", tool(parallel = true, timeout = 10_000) {
+                calls.incrementAndGet(); readEntered.countDown(); release.await()
+                ToolResult("read", effect = ToolEffect.NONE)
+            })
+            val write = f.catalog.registerHost("host/write", "1", tool(ToolRisk.WRITE, parallel = true, timeout = 10_000) {
+                calls.incrementAndGet(); writeEntered.countDown(); release.await()
+                ToolResult("write", effect = ToolEffect.NONE)
+            })
+            f.catalog.freeze("run")
+            val reducer = completedCalls(listOf(read.modelName, write.modelName), "resume")
+            val ids = reducer.calls().map { it.binding.callId }
+            try {
+                assertNull(f.service.executeStep(reducer, "chain", "session", "run", "step"))
+                assertTrue(readEntered.await(5, TimeUnit.SECONDS))
+                val attempt = f.ledger.get(ids[0])!!.instance!!.attemptId
+                assertEquals(Status.WAITING_APPROVAL, f.ledger.get(ids[1])!!.state)
+                assertEquals(1L, writeEntered.count)
+                approve(f, ids[1])
+                val resumed = async(Dispatchers.IO) { f.service.executeStep(reducer, "chain", "session", "run", "step") }
+                try {
+                    assertTrue(writeEntered.await(5, TimeUnit.SECONDS))
+                    assertEquals(2, f.budget.occupiedSlots())
+                    assertEquals(attempt, f.ledger.get(ids[0])!!.instance!!.attemptId)
+                    release.countDown()
+                    assertEquals(ids, withTimeout(5_000) { resumed.await() }!!.parts.map { (it as ContentPart.ToolResult).callId })
+                    assertEquals(2, calls.get())
+                } finally { release.countDown(); resumed.cancel() }
+            } finally { release.countDown() }
+        }
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test fun approvalResumeWaitsForNormalResultCompletionHandlerBeforeSerialClaim() = runBlocking {
+        Fixture().use { f ->
+            val handler = CountDownLatch(1); val release = CountDownLatch(1)
+            val read = f.catalog.registerHost("host/read", "1", tool(parallel = true, timeout = 10_000) {
+                currentCoroutineContext()[Job]!!.parent!!.invokeOnCompletion { handler.countDown(); release.await() }
+                ToolResult("read", effect = ToolEffect.NONE)
+            })
+            val writes = AtomicInteger()
+            val write = f.catalog.registerHost("host/write", "1", tool(ToolRisk.WRITE) {
+                writes.incrementAndGet(); ToolResult("write", effect = ToolEffect.NONE)
+            })
+            f.catalog.freeze("run")
+            val reducer = completedCalls(listOf(read.modelName, write.modelName), "normal-resume")
+            val ids = reducer.calls().map { it.binding.callId }
+            try {
+                assertNull(f.service.executeStep(reducer, "chain", "session", "run", "step"))
+                assertTrue(handler.await(5, TimeUnit.SECONDS))
+                waitUntil { f.ledger.get(ids[0])!!.state == Status.SUCCEEDED }
+                val attempt = f.ledger.get(ids[0])!!.instance!!.attemptId
+                assertEquals(InstanceState.UNCONFIRMED, f.ledger.get(ids[0])!!.instance!!.state)
+                approve(f, ids[1])
+                val resumed = async(Dispatchers.IO) { f.service.executeStep(reducer, "chain", "session", "run", "step") }
+                try {
+                    delay(100)
+                    assertFalse("Resume must observe the live completion handler", resumed.isCompleted)
+                    assertEquals(0, writes.get())
+                    release.countDown()
+                    val result = withTimeout(5_000) { resumed.await() }!!
+                    assertEquals(ids, result.parts.map { (it as ContentPart.ToolResult).callId })
+                    assertEquals(attempt, f.ledger.get(ids[0])!!.instance!!.attemptId)
+                    assertEquals(1, writes.get())
+                } finally { release.countDown(); resumed.cancel() }
+            } finally { release.countDown() }
+        }
+    }
+
+    @Test fun siblingStorageFailureInterruptsWaitingForSlowFirstCall() = runBlocking {
+        Fixture().use { f ->
+            val entered = CountDownLatch(1); val release = CountDownLatch(1)
+            val slow = f.catalog.registerHost("host/slow", "1", tool(parallel = true, timeout = 10_000) {
+                entered.countDown(); release.await(); ToolResult("slow", effect = ToolEffect.NONE)
+            })
+            val fast = f.catalog.registerHost("host/fast", "1", tool(parallel = true) {
+                ToolResult("fast", effect = ToolEffect.NONE)
+            })
+            f.catalog.freeze("run")
+            val reducer = completedCalls(listOf(slow.modelName, fast.modelName), "storage-failure")
+            val ids = reducer.calls().map { it.binding.callId }
+            f.store.fail = { it.callId == ids[1] && it.state == Status.SUCCEEDED }
+            val step = async(Dispatchers.IO) { f.service.executeStep(reducer, "chain", "session", "run", "step") }
+            try {
+                assertTrue(entered.await(5, TimeUnit.SECONDS))
+                assertNull(withTimeout(2_000) { step.await() })
+                assertEquals(Status.RUNNING, f.ledger.get(ids[0])!!.state)
+                assertEquals(InstanceState.UNCONFIRMED, f.ledger.get(ids[1])!!.instance!!.state)
+            } finally { release.countDown(); step.cancel() }
+        }
+    }
+
+    @Test fun parallelBatchCannotExceedDurableClaimBudget() = runBlocking {
+        Fixture(maxClaims = 1).use { f ->
+            val calls = AtomicInteger(); val entered = CountDownLatch(1); val release = CountDownLatch(1)
+            val d = f.register(tool(parallel = true, timeout = 10_000) {
+                calls.incrementAndGet(); entered.countDown(); release.await()
+                ToolResult("ok", effect = ToolEffect.NONE)
+            })
+            val reducer = completedCalls(List(2) { d.modelName }, "claim-budget")
+            try {
+                // Exhaustion is permanent: return without waiting for the running sibling.
+                assertNull(withTimeout(2_000) { f.service.executeStep(reducer, "chain", "session", "run", "step") })
+                assertTrue(entered.await(5, TimeUnit.SECONDS))
+                assertEquals(1, calls.get())
+                assertNull(f.ledger.get(reducer.calls()[1].binding.callId)!!.instance)
+                release.countDown()
+                withTimeout(5_000) { f.service.awaitObservedExit(reducer.calls()[0].binding.callId) }
+                assertEquals(0, f.budget.occupiedSlots())
+            } finally { release.countDown() }
+        }
     }
 
     @Test fun mixedUnknownCallsKeepOrderUniqueResultsAndIdempotentStepReplay() = runBlocking {

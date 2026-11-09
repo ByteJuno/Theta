@@ -45,9 +45,8 @@ internal class PluginExecutionBudget(
     }
     private val active = mutableSetOf<Lease>()
     private var closed = false
-    // Event-driven: a cancellation request or a finished delivery dispatches pending requests.
-    // Only a rejected dispatch (both threads busy or still unwinding) arms one short retry,
-    // so an idle process never polls.
+    // Event-driven: only a rejected handoff (threads still busy/unwinding) arms a retry.
+    // Pending handoffs retain their reserved slots; this is not an admission queue.
     private var retryArmed = false
 
     internal inner class Lease(
@@ -59,6 +58,7 @@ internal class PluginExecutionBudget(
     ) {
         val actualExited = CompletableDeferred<Unit>()
         internal var submitted = false
+        internal var pendingAction: (suspend CoroutineScope.() -> Unit)? = null
         internal var executionExited = false
         /** Release a reservation that never entered the executor. */
         fun abandon() = synchronized(lock) {
@@ -123,31 +123,45 @@ internal class PluginExecutionBudget(
             return false
         }
         lease.submitted = true
-        try {
-            workers.execute {
-                try {
-                    runBlocking(lease.execution) {
-                        if (synchronized(lock) { !lease.cancelRequested }) action()
-                    }
-                } catch (_: Throwable) {
-                    // Actions own sanitized logical outcomes; cancellation can escape runBlocking.
-                } finally {
-                    // Completion handlers are plugin code too; keep them on this worker.
-                    val completeNormally = synchronized(lock) { !lease.cancelRequested }
-                    if (completeNormally) try { lease.execution.complete() } catch (_: Throwable) { }
-                    synchronized(lock) {
-                        lease.executionExited = true
-                        releaseIfFinished(lease)
+        lease.pendingAction = action
+        pumpExecution()
+        true
+    }
+
+    private fun pumpExecution(): Unit = synchronized(lock) {
+        active.toList().forEach { lease ->
+            val action = lease.pendingAction ?: return@forEach
+            if (closed || lease.cancelRequested) {
+                lease.pendingAction = null
+                lease.executionExited = true
+                releaseIfFinished(lease)
+                return@forEach
+            }
+            try {
+                workers.execute {
+                    try {
+                        runBlocking(lease.execution) {
+                            if (synchronized(lock) { !lease.cancelRequested }) action()
+                        }
+                    } catch (_: Throwable) {
+                        // Actions own sanitized logical outcomes; cancellation can escape runBlocking.
+                    } finally {
+                        // Completion handlers are plugin code too; keep them on this worker.
+                        val completeNormally = synchronized(lock) { !lease.cancelRequested }
+                        if (completeNormally) try { lease.execution.complete() } catch (_: Throwable) { }
+                        synchronized(lock) {
+                            lease.executionExited = true
+                            releaseIfFinished(lease)
+                        }
                     }
                 }
+                lease.pendingAction = null
+            } catch (_: RejectedExecutionException) {
+                // A released worker may not have returned to SynchronousQueue yet. Keep this
+                // admitted action and its durable claim; retry only the unsubmitted handoff.
+                armRetry()
             }
-        } catch (_: RejectedExecutionException) {
-            // SynchronousQueue can reject briefly while a previously released worker unwinds.
-            lease.executionExited = true
-            releaseIfFinished(lease)
-            return false
         }
-        true
     }
 
     /** Timers run host-only transitions on an independent thread, never plugin callbacks. */
@@ -186,6 +200,7 @@ internal class PluginExecutionBudget(
         try {
             clock.schedule(Runnable {
                 synchronized(lock) { retryArmed = false }
+                pumpExecution()
                 pumpCancellation()
             }, 5, TimeUnit.MILLISECONDS)
             retryArmed = true
@@ -211,6 +226,7 @@ internal class PluginExecutionBudget(
         if (closed) return
         closed = true
         active.toList().forEach { it.cancel() }
+        pumpExecution()
         workers.shutdown() // Never shutdownNow: interruption is not proof of actual exit.
         finishShutdownIfEmpty()
     }
