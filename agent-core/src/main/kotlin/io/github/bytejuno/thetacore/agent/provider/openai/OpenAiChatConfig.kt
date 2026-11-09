@@ -15,7 +15,10 @@ class OpenAiChatConfig(
     val endpoint: HttpUrl
     init {
         require(providerId.isNotBlank())
-        val base = baseUrl.toHttpUrl()
+        // URL parser exceptions may embed userinfo/query credentials: never preserve their cause.
+        val base = try { baseUrl.toHttpUrl() } catch (_: IllegalArgumentException) {
+            throw IllegalArgumentException("Invalid provider URL")
+        }
         require(base.username.isEmpty() && base.password.isEmpty() && base.query == null && base.fragment == null)
         endpoint = base.newBuilder().apply {
             if (base.encodedPath.endsWith('/')) removePathSegment(base.pathSize - 1)
