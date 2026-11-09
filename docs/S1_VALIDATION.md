@@ -1,6 +1,10 @@
 # S1 插件加载原型验证
 
-当前是 S1 的增量原型，不是完整的插件管理器或可发布版本。**S1 尚未完成**。最新完整验证对应 `93142b3`（PR #7 运行时增量及审查修复，含此前 PR #6 数据 ZIP 与 `c06c789` 受管 scope 故障隔离），结果见 S1_ACCEPTANCE.md；下文的历史通过记录只覆盖当时的代码；后续已接受的本地/JVM/模拟器专项、已执行的 Actions 体积对比及延期真机门槛分层列于本页，不用历史缺口否定后续限定通过。
+2026-11-09 最终补证：真实 Host UI CODE 摘要拒绝、目的文件部分写入、五个发布切点 × enabled/disabled 及正控共 16 场景全部通过；48 份原始文件归档已从进程外重新核对。新 Host `5a43e0ea…6668` 仅承担本轮模拟器专项，不承接旧 APK 的物理通过。结合下列已接受的运行时/DATA 和物理 G/J/K，现行 S1 可行性门槛已补齐；阶段收尾及逐候选边界见 [S1 验收台账](S1_ACCEPTANCE.md) 和 [CODE 发布补证](S1_CODE_PUBLICATION.md)。不是新二进制全历史矩阵或产品发版声明。
+
+2026-11-09 真机补证：bootstrap 身份校验候选 Host `bafeae5d…d6ed` 已独立完成普通 UID 拒绝/合法连接、系统 picker、真实 scope 回调、超时/迟到批准/拒绝/划走、同 PID 停用、scope 复用、请求取消、专用 Target 三次自然崩溃后的隔离、同签 v4 恢复，以及宿主不可用时的 manager scope 撤销救援。G 已用 CI run `42599041866` 的冻结配对 APK 完成主屏 A/B/B/A，共 2,880 个有效且不重复的帧样本；原候选及显示偏好均已恢复。逐项哈希、原始帧 CSV、失败尝试和限制见 [S1 closeout](S1_CLOSEOUT.md)。本补证不把旧 APK 或历史模拟器专项的通过转记为新二进制全矩阵通过；下文 2026-11-08 的延期状态为当时记录。
+
+当前仍是插件管理增量原型，不是可发布版本。最近一次历史完整矩阵对应 `93142b3`（PR #7 运行时增量及审查修复，含此前 PR #6 数据 ZIP 与 `c06c789` 受管 scope 故障隔离），结果见 S1_ACCEPTANCE.md；下文历史通过记录只覆盖当时的代码。后续专项按各自 APK/运行独立接受，不把补证改写为同一个新 APK 全矩阵。
 
 2026-11-07 数据 ZIP revision-5 的本机增量验证见 [独立记录](DATA_ZIP_ACCEPTANCE.md)。该记录补充当前实现与局部通过范围，不覆盖下文全部 S1 门槛。
 
@@ -8,16 +12,16 @@
 
 2026-11-08 PR #6 合并前的审查修复与完整回归对应 `0f5a779`：GPU 服务器 KVM 模拟器上 JVM 177 项、冒烟、生命周期 17/17（含新增 data-zip）、签名 7/7 全部通过，见 S1_ACCEPTANCE.md。
 
-后续入口/工具、设置、自动恢复、回滚选项及 Modern Hook 接入的实现与逐候选证据见 [S1 runtime increment](S1_RUNTIME_INCREMENT.md)。Hook 修复后的第九轮冻结构建共 320 项 JVM 测试（319 通过、1 项既有 Windows 跳过），Debug/R8 Release、lint 和 Hook 样例构建通过；后续 provider/parser 增量为宿主 322 通过、1 跳过，provider 8 项通过。candidate9 的 HTTPS、阻塞来源、长期监听、组合崩溃恢复、登记关闭竞争和执行容量已有专项设备证据；不把这些局部结果外推为最终完整矩阵。J/K 源码已独立审查并修复，真实框架运行、开关传播及目标进程救援仍未验收。
+后续入口/工具、设置、自动恢复、回滚选项及 Modern Hook 接入的实现与逐候选证据见 [S1 runtime increment](S1_RUNTIME_INCREMENT.md)。Hook 修复后的第九轮冻结构建共 320 项 JVM 测试（319 通过、1 项既有 Windows 跳过），Debug/R8 Release、lint 和 Hook 样例构建通过；后续 provider/parser 增量为宿主 322 通过、1 跳过，provider 8 项通过。candidate9 的 HTTPS、阻塞来源、长期监听、组合崩溃恢复、登记关闭竞争和执行容量已有专项设备证据；不把这些局部结果外推为最终完整矩阵。当时 J/K 仅完成源码审查；真实框架、开关和救援已在 2026-11-09 的冻结物理候选补齐，见本页顶部。
 
-## 当前收口状态（2026-11-08）
+## 当前收口状态（2026-11-09，保留 11-08 的证据归属）
 
-- **已接受的限定范围**：本地构建/JVM/静态检查、按 candidate7/candidate9 分别绑定的模拟器专项、LOCAL_ONLY 成对体积实验，以及独立 DATA production-store fixture 的 Android expectedSHA staging 拒绝和 10 次进程死亡恢复。已完成专项不再标作待执行，但不宣称全部 S1 通过，也不把历史 FAILED 或候选身份改写。
+- **已接受的限定范围**：本地构建/JVM/静态检查、按 candidate7/candidate9 分别绑定的模拟器专项、LOCAL_ONLY 成对体积实验，以及独立 DATA production-store fixture 的 Android expectedSHA staging 拒绝和 10 次进程死亡恢复。后续物理 G/J/K 与 CODE UI 专项分别补齐其余现行门槛，不改写历史 FAILED 或候选身份。
 - **Actions 已执行**：PR #7 的 PR Check run 42458056673（`93142b3`）中 paired-keep-size 实际运行并通过（`MEASURED_CI`）：production 13,937,590 bytes、去共享库 keep 的对照 2,473,682 bytes，差 11,463,908 bytes。本地成对构建与 candidate9/storage20 的历史设备证据仍各自独立，不互相追认。
-- **原有真机门槛继续延期**：G 固定真机帧耗时，J 真实框架远程文件加载/生效及 requestScope，K 目标崩溃循环跳过、全局开关传播、目标重启和框架外救援。宿主恢复、模拟器和 JVM helper 不替代这些门槛。
-- **具体证据缺口保留在对应层**：storage20 没有独立导出的底层持久化文件/目录快照，未覆盖 candidate9 主界面的 expectedSHA/publication 切点、Android CODE 发布中断或物理断电。旧专项的 listener host actualExited、私有 tombstone/回滚状态及精确 idle 续期等未观测项仍按下表披露；这些限制不撤销已接受结果，也不扩展成任意包、完整故障矩阵或全量历史重跑的新门槛。
+- **2026-11-08 原有真机门槛及后续补证**：当时 G 固定真机帧耗时、J 真实框架远程加载/requestScope、K 崩溃循环/开关传播/目标重启/框架外救援均延期；2026-11-09 的专用样例真机结果已补入 [独立 closeout 记录](S1_CLOSEOUT.md)。其中框架外救援实际执行的是 manager 仅撤销专用 Target scope，整框架停用/卸载未执行；G 是 CI 冻结对照的主屏样本量化，未设置开销可接受阈值。历史候选和新候选证据仍各自绑定。
+- **层次边界分别保留**：storage20 仍只证明独立 DATA API expectedSHA/进程死亡恢复。本轮新 Host 的实际 UI 摘要拒绝、CODE 发布中断及独立文件归档见 [CODE 补证](S1_CODE_PUBLICATION.md)，不转记为 candidate9 执行；Host 没有可信索引 expectedSHA 输入路由。物理断电未测试，生产发布协议声明的是进程死亡恢复。旧专项的 listener host actualExited、私有 tombstone/回滚状态及精确 idle 续期等未观测项仍按下表披露；这些限制不撤销已接受结果，也不扩展成任意包、完整故障矩阵或全量历史重跑的新门槛。
 
-S1_ACCEPTANCE.md 中保留历史实现期缺口；当前进展以本页和 runtime increment 的逐候选证据为准，不修改 DESIGN.md §11 的范围、批准后的 B/C 口径或 S2 归属。
+S1_ACCEPTANCE.md 已补入现行阶段收尾，同时保留各历史章节；范围仍为 DESIGN.md §11、批准后的 B/C 口径及 S2 归属。
 
 ### 独立 DATA Android 存储专项已限定接受
 
@@ -104,30 +108,30 @@ DESIGN.md 第 11 节保留 A–K 原始验收表和全部补充断言。旧 B �
 
 现行 B/C 检查持久化意愿、登记撤销、作用域取消、有界等待、重启前不二次实例化、新路径暂存更新和冷启动激活、卸载 tombstone 与明确的数据选择。GC 仅供诊断，不是验收门槛。F 的快照/回滚要求仍保留，并遵守冷启动恢复和同进程不二次实例化；其余验收项没有因生命周期决策而删减，也未新增里程碑或 API。
 
-## 现行 S1 逐项证据与限定缺口
+## 现行 S1 逐项证据与限定边界
 
 下表区分历史局部证据与尚缺内容，不把局部通过、要求变更或仅有实现等同于整项完成。历史完整矩阵见 S1_ACCEPTANCE.md；当前增量及精确运行标识见 [S1_RUNTIME_INCREMENT.md](S1_RUNTIME_INCREMENT.md)。candidate7、candidate9 与历史提交的证据分别保留，不相互追认。
 
-| 原验收项 | 保留的门槛与证据缺口 |
+| 原验收项 | 已接受证据与保留边界 |
 |---|---|
 | A/H | candidate9 配合诊断 Probe 已记录实际 HTTPS 请求/最终 URL、204、TLSv1.3，以及其后 18/18 UI 结果，前后宿主 hash 一致；该调用链已验证，不代表所有平台类和插件 API 的完整兼容性。历史 R8/Compose 与共享库预检记录保留，`0 missing` 仍仅为预检。 |
 | B/C（修订后） | candidate9 最小矩阵已独立核实 V1→V2 冷切换：同 PID 更新后仍运行 V1，明确冷启动后运行 V2，计数保持 3；加载后卸载公开 pending、冷启动卡片/页面消失、保留数据重装仍为 3。计数证据为 XML 0107，0108 仅列表顶屏。candidate9 已补验普通 fixture 明确勾选删除数据，删除前计数5、冷启动重装后为0；不外推为整机或所有secrets擦除。历史 `c06c789` 记录独立保留；私有 tombstone 文件及设备写入/删除中断未直接观察。不再要求 GC/热卸载通过。 |
-| B/I | candidate9 的 V1/V2 apksigner 完整指纹与三次导入 UI 一致；截断 APK、畸形 ZIP 均明确拒绝，各自冷启动后完整列表无新激活。另已复核可读ZIP容器/各entry CRC正常但签名失败的APK拒绝，以及可读data ZIP内单entry CRC错误的拒绝；冷启完整列表无新激活。prefix-provider已验证返回部分数据后EIO、冷启无激活及合法正控恢复，但不是宿主目的文件fsync或publication中断证明。独立storage-fixture已通过4项JVM测试，且 Android expectedSHA staging 拒绝与五切点×enabled/disabled的10次进程死亡恢复已限定接受（storage20索引及上文专项）；它是独立 DATA production-store 集成，不是 candidate9 主界面/CODE/物理断电验证，持久化状态为源码核对的跨进程fixture断言而非独立底层文件快照。`0f5a779` 的 data-zip 设备用例另验证拒绝代码载荷、摘要确认、更新、启停与卸载归属；历史 `c06c789` 签名矩阵及 revision-5 数据 ZIP/双向类型归属记录独立保留，不将本轮同signer结果称为签名轮换验收。 |
+| B/I | candidate9 的 V1/V2 apksigner 完整指纹与三次导入 UI 一致；截断 APK、畸形 ZIP 均明确拒绝，各自冷启动后完整列表无新激活。另已复核可读ZIP容器/各entry CRC正常但签名失败的APK拒绝，以及可读data ZIP内单entry CRC错误的拒绝；冷启完整列表无新激活。prefix-provider已验证返回部分数据后EIO、冷启无激活及合法正控恢复，但不是宿主目的文件fsync或publication中断证明。独立storage-fixture已通过4项JVM测试，且 Android expectedSHA staging 拒绝与五切点×enabled/disabled的10次进程死亡恢复已限定接受（storage20索引及上文专项）；它是独立 DATA production-store 集成，不是 candidate9 主界面/CODE/物理断电验证，持久化状态为源码核对的跨进程fixture断言而非独立底层文件快照。另有 2026-11-09 新 Host 的实际 UI 摘要篡改拒绝、五切点/部分目的写入 × enabled/disabled 和正控共 16 场景、48 份独立文件归档，见 CODE 补证；不将新 Host 结果倒记为 candidate9。`0f5a779` 的 data-zip 设备用例另验证拒绝代码载荷、摘要确认、更新、启停与卸载归属；历史 `c06c789` 签名矩阵及 revision-5 数据 ZIP/双向类型归属记录独立保留，不将本轮同signer结果称为签名轮换验收。 |
 | B/D | candidate9 的 RegisterDisable/ RegisterFail 专项已验证有界竞争中的逐 identity 结果、已接纳 cleanup 各执行一次及关闭后拒绝。RegisterFail 新 focused run 补齐完整 owner 区段两次无残留页面采样；旧屏外快照仍不算通过。没有声称覆盖所有内部锁交错或 GC。 |
 | D | candidate9 已验证真实 Compose 正文崩溃、旧 PID 消失、新进程隔离、明确启用后只读恢复非 seed prefs/secrets。candidate9 新补受管scope运行期、首启故障：宿主同PID响应、完整owner区段撤页，冷启动保持禁用；首启冷态具体为 Previous initialization interrupted; disabled。升级首启scope故障冷回滚V1/0已复核。candidate7工具专项独立保留；candidate9已补initThrow/initBlock故障撤页与冷态禁用，以及22.621秒内三个FAILED/actualExited调用、随后第四次准入隔离。进度1–5→SUCCEEDED/actualExited及同call取消→CANCELLED/actualExited已复核；约5秒进度测试不证明空闲超时续期。手动恢复入口不等于自动崩溃循环验收。 |
 | D/E | candidate7 有 READY、超时及迟到 ready 不复活专项。candidate9 同实例监听在事件间静默超过 60 秒、ready 后超过 600 秒仍收到事件；停用后 unregister/finally 及外部广播负控已验证。监听页面隐藏后 host STOPPED/actualExited 未观察，不据此推断执行槽释放。 |
 | E | candidate9 已验证每插件 2 槽、全进程 8 槽饱和拒绝及单槽实际释放后复用；另有同一 callId 的 TIMED_OUT 保持、actualExited false→true 直接 UI 配对。独立导入配额也已复核：两次部分读取在UI取消后仍阻塞，第三次busy拒绝且捕获区间无新增来源打开；provider Reset/EIO/FD_RELEASE后，同一观测PID成功接纳完整导入，续跑读取既有marker并正常卸载。后续单次成功仅证明至少恢复一个可用槽，不声称精确释放时刻或两个槽全部恢复；原标题字符匹配失败仍保留FAILED。没有覆盖混合 entry/tool 或多个 manager 的设备组合，不把这些披露自动扩成新门槛。历史非协作初始化/清理证据保留。screen 资源租约、跨会话调用和外部未知状态账本仍属 S2（DESIGN.md 第 13 节第 7 条）。 |
 | F | 快照/恢复与 code-only 选项已有实现；candidate7 已验证 prefs/secrets 默认取消、快照手动回滚、首次启动失败回滚和明确 code-only 保留当前值。历史 `c06c789` 卡死/中断恢复记录独立保留。candidate9 已独立复核手动冷回滚（V2计数5→V1快照旧值4）、首启失败后冷恢复V1/4，以及首次成功运行后观察期起点跨页面重开和冷启不变。损坏数值99没有独立实测，仅有fixture的 data:damaged 标记；预激活 not-started 提示未暴露。两轮FAILED及跨轮记录间隙保留，无公共update token，不能声称连续监控。candidate9 已补首启阻塞后冷回滚V1/4，以及初始化中force-stop后的冷回滚V1/4；后者不是磁盘断电。24小时精确边界、过期动作拒绝及已接受回滚过期后继续恢复已在最新生产helper JVM测试通过，不声称真实等待24小时的设备验收。已激活包下次启动前损坏走拒绝包路径，不自动回滚。 |
-| G | 最新隔离干净成对构建及证据复核已完成：production 13,921,206 bytes，comparison 2,473,682 bytes，差11,447,524 bytes；冻结输入和归一化merged R8配置仅差精确七条keep。对照不是兼容生产替代方案。实验production与candidate9非相同二进制，单方法无用Unit spill差异有静态等价分析，设备结果不转移。Actions 实测（run 42458056673，`93142b3`）：production 13,937,590 bytes、对照 2,473,682 bytes，差 11,463,908 bytes；真机帧测量仍缺，按原G门槛延期。 |
-| J | 真机 Hook 远程文件加载并生效、`requestScope` 作用域申请仍未验证。 |
-| K | 真机目标 App 崩溃循环跳过、远程偏好全局开关传播、目标进程重启及框架外救援仍未验证；Theta 手动恢复入口不替代 Hook 救援链路。 |
+| G | 最新隔离干净成对构建及证据复核已完成：production 13,921,206 bytes，comparison 2,473,682 bytes，差11,447,524 bytes；冻结输入和归一化merged R8配置仅差精确七条keep。对照不是兼容生产替代方案。实验production与candidate9非相同二进制，单方法无用Unit spill差异有静态等价分析，设备结果不转移。Actions 实测（run 42458056673，`93142b3`）：production 13,937,590 bytes、对照 2,473,682 bytes，差 11,463,908 bytes；后续物理 CI42599041866 冻结配对在 PLK110 完成 2,880 个唯一有效帧；production/comparison 均值 3.864/3.775ms、P95 5.029/4.686ms，CI 原包差 11,447,528 bytes，见 S1_CLOSEOUT.md。不同配对身份分别保留。 |
+| J | 冻结物理 Host `bafeae5d…d6ed` 已完成远程文件加载/生效、真实 scope Allow/Reject/划走/超时/迟到批准、scope 复用及请求取消；见 S1_CLOSEOUT.md。不外推任意 Target/固件。 |
+| K | 同一冻结物理候选已完成三次自然崩溃后隔离、同签 v4 恢复、同 PID 关闭后显式读取 ORIGINAL、冷 Target ORIGINAL，以及 Host 不可用时 manager 仅撤销专用 scope 的外部救援。整框架停用/卸载替代路径未执行；见 S1_CLOSEOUT.md。 |
 
 ## 其他原型限制与非承诺
 
 - 复杂依赖管理原本不在第一版范围，不是本轮新增 S1 门槛。热卸载和强制 GC 已由批准决策排除，不再作为“以后必须补齐”的承诺。
 - 非协作代码的真正终止，以及任意后台线程崩溃的可靠归因不保证；宿主受管协程与 Compose 冷启动恢复门槛仍保留。
 - 等待已被手动撤销但仍在运行的 cleanup；当前仅保证同一登记不重复调用。
-- 损坏包会报告并跳过，不会自动修复；初始化失败后不在同进程尝试旧版本。`c06c789` 的更新首启失败冷启动回滚已有上文设备证据，完整验收仍未完成。
+- 损坏包会报告并跳过，不会自动修复；初始化失败后不在同进程尝试旧版本。`c06c789` 的更新首启失败冷启动回滚已有上文设备证据，现行阶段收尾及各候选边界见本页顶部和 S1_ACCEPTANCE.md。
 - 受管 scope 分开首启仲裁与 UI 发布：onEnable 返回后先在短内存锁内仲裁；此前的子任务故障不写更新成功标记，保留首启回滚语义。仲裁成功后的故障按运行期故障禁用，不自动回滚数据；持久化失败时没有任何成功记录落盘，并发故障仍按首启处理；只有 updates.started 和 initializing=false 均落盘且第二次故障检查通过，才发布 active/Running。IO 期间不持 boundary 锁。取消不计故障，重复或关闭后故障不重新清理。
 - 故障诊断只取异常类名，不调用插件可覆盖的 toString/message/cause/stackTrace；宿主自己的 `PluginPackageException` 是 final 且对插件不可见，保留原文，否则超时、签名和 API 级别等失败原因会只剩类名。持久化在诊断之前，关闭在 finally 中。回滚恢复保留 RECOVERED 回执，先恢复启用意愿再确认删除回执；状态写失败留待冷启动重试，不再次搬移数据。成功删除或已验证安装才解除 recoveryBlocked，进程 attempted 门控不变。已接受回滚不再读取可选 UI 资格，直接 deferred/禁用入口/关闭。
 - 受管 scope 的单元测试覆盖：共享 production scheduler 的真实 mutex 竞争与 worker 故障观察、首启仲裁/持久化/发布次序与并发故障、恶意 Throwable 诊断与一次清理、恢复回执切点/状态写失败/普通回滚、删除后同进程重装、回滚接受后刷新故障隔离。它们是 production helper/存储级单测，不是完整 PluginManager、Android Main/Compose 页面或设备端集成；设备场景已在 `c06c789` 全量回归通过，真实磁盘断电仍未验证。没有引入旧 snapshot-foundation。这些测试不覆盖 Compose、任意线程、JNI 崩溃或独立有界执行资源。

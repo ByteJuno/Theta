@@ -18,9 +18,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 internal data class HookImport(val bytes: ByteArray, val descriptor: HookDescriptor, val signers: String)
 internal data class HookPublishGrant(val service: XposedService, val action: Long, val target: String)
 
-/** Official bootstrap is used unchanged. Delivery identity is not authenticated here:
- * integration verification is outstanding. This is not a custom target -> host IPC endpoint.
- */
+/** The official bootstrap delegate is reached through the platform-UID-gated provider. */
 internal object HookHost {
     private val mutableStatus = MutableStateFlow("Framework unavailable; open LSPosed and enable the module")
     val status = mutableStatus.asStateFlow()
@@ -51,7 +49,7 @@ internal object HookHost {
                         } else if (service !== value) {
                             service = value
                             order.next()
-                            mutableStatus.value = "Framework connected (bootstrap identity unverified); no Hook published"
+                            mutableStatus.value = "Framework connected; no Hook published"
                         }
                     }
                 } catch (error: Throwable) { fail(error) }

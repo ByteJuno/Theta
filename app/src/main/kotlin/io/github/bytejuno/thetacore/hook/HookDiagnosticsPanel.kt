@@ -52,7 +52,7 @@ fun HookDiagnosticsPanel() {
     Column {
         Text("S1 Modern Hook — dedicated ordinary target only")
         Text(status)
-        Text("Bootstrap sender authentication and live switch propagation are not yet verified. Full-trust code runs inside the target. No custom target-to-Theta callback endpoint.")
+        Text("Full-trust code runs inside the target. Live disable depends on framework preference delivery; restart the target to exit Hook code. No custom target-to-Theta callback endpoint.")
         Button(enabled = !busy, onClick = { picker.launch(arrayOf("application/vnd.android.package-archive", "application/octet-stream")) }) {
             Text("Inspect signed Hook APK")
         }

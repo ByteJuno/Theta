@@ -1,6 +1,9 @@
+import io.github.bytejuno.thetacore.gradle.StageS1PublicationAssets
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
+    id("io.github.bytejuno.theta-plugin") apply false
 }
 
 // 只有发版工作流会传这四个变量。签名材料不进仓库，CI 用的那份放在 GitHub 的 release environment 里。
@@ -19,6 +22,7 @@ android {
         targetSdk = libs.versions.android.targetSdk.get().toInt()
         versionCode = 1
         versionName = "0.1.0"
+        testInstrumentationRunner = "io.github.bytejuno.thetacore.S1PublicationInstrumentation"
     }
 
     signingConfigs {
@@ -49,6 +53,22 @@ android {
 
     buildFeatures {
         compose = true
+    }
+}
+
+// Test APK only. Signed payloads exercise the actual host UI and platform verifier.
+val s1PublicationAssets = layout.buildDirectory.dir("generated/s1-publication-test-assets")
+val stageS1PublicationAssets = tasks.register<StageS1PublicationAssets>("stageS1PublicationTestAssets") {
+    dependsOn(":samples:fixtures:assembleNormalV1Debug", ":samples:fixtures:assembleNormalV2Debug")
+    outputDir.set(s1PublicationAssets)
+    versionOne.set(project(":samples:fixtures").layout.buildDirectory.file("outputs/apk/normalV1/debug/fixtures-normalV1-debug.apk"))
+    versionTwo.set(project(":samples:fixtures").layout.buildDirectory.file("outputs/apk/normalV2/debug/fixtures-normalV2-debug.apk"))
+}
+androidComponents {
+    onVariants(selector().withBuildType("debug")) { variant ->
+        variant.deviceTests.values.forEach { test ->
+            test.sources.assets?.addGeneratedSourceDirectory(stageS1PublicationAssets, StageS1PublicationAssets::outputDir)
+        }
     }
 }
 

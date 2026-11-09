@@ -1,6 +1,22 @@
 # S1 验收台账
 
-S1 尚未完成。此台账区分现有证据、待实现能力与需真机的项目；不以单次脚本退出 0 代替整个阶段验收。
+S1 可行性验证的现行门槛已于 2026-11-09 补齐，按候选/场景累计收尾。依据为下列已接受的独立记录，不以单次脚本退出 0 代替整个阶段验收；这不表示一个新 APK 重跑了所有历史矩阵，也不是产品发版。
+
+## 2026-11-09 现行 S1 收尾
+
+| 适用门槛 | 证据归属 |
+|---|---|
+| A/H：R8、Compose、独立插件及 HTTPS/平台类 | 下文 `93142b3` 完整构建/链接/Probe，及 [runtime increment](S1_RUNTIME_INCREMENT.md) 中 candidate9 的实际 HTTPS 204/TLS 和 18/18 UI 专项 |
+| B/C：批准后的冷切换、撤销、卸载及数据选择 | `93142b3` 生命周期、candidate9 冷切换/进程门控/保留数据/明确删除专项；不再要求热卸载或 GC |
+| B/I：代码签名、无签名 DATA、异常包、摘要及写入中断 | 历史签名矩阵、DATA ZIP/accepted storage20，以及新 [CODE Host UI / 16 场景](S1_CODE_PUBLICATION.md)；各自精确 APK 身份独立 |
+| B/D、D/E：登记关闭竞争、启用/受管协程/工具/Compose 故障、监听释放、超时和实际退出 | runtime increment 的 candidate7/candidate9、RegisterFail focused、长期监听、执行容量及配对 actualExited 专项；本轮 579 项 JVM 通过、1 项既有条件跳过 |
+| F：快照、失败/阻塞后冷回滚及 code-only 策略 | candidate7/candidate9 data/prefs/secrets 默认取消、快照、失败/阻塞冷回滚、明确 code-only；精确 24 小时规则为生产 helper JVM 证据 |
+| G：CI 体积与真机帧耗时量化 | [物理收尾](S1_CLOSEOUT.md) 中 CI42599041866 冻结配对、PLK110 主屏 ABBA / 2,880 帧 |
+| J/K：真实 Hook、scope、同 PID 开关、崩溃隔离及外部救援 | 同一物理收尾中冻结 Host `bafeae5d…d6ed` / Target `4da24b17…11ad`；真实通知回调、三次自然崩溃、同签 v4 恢复、Host 不可用时 manager 撤销 scope |
+
+完整 CODE 发布前中断均未激活 v2；MOVED 后完整签名包按生产冷恢复安全激活，与 DATA selection commit 的语义分别记录。真实断电不在本次进程死亡证明内；Host 不存在可信索引 expectedSHA 的产品输入路由，DATA API expectedSHA 与 Host UI 审核后摘要拒绝分别验证。已披露的单设备、具体 ABI、内部状态采样及未覆盖组合保留，不新增全历史矩阵重跑条件。范围仍为 DESIGN §11、批准后的 B/C 与 S2 排除项；资源租约、跨会话隔离账本及 agent 能力仍在 S2。
+
+以下各日期章节保留当时的结果及未完成状态；现行逐项边界见 [S1_VALIDATION.md](S1_VALIDATION.md)。PR #43 仍 OPEN 待审，不合并。
 
 ## 2026-11-08 PR #7 审查修复与完整回归（`93142b3`）
 
