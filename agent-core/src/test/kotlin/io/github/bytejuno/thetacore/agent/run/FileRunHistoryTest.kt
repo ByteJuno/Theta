@@ -147,7 +147,7 @@ class FileRunHistoryTest {
             toolCallPart(callBinding("p", "request", "response", 0, "w", first), "tool", "{}"),
             toolCallPart(callBinding("p", "request", "response", 1, "w2", second), "tool", "{}"))
         val definition = testDefinition(risk = Risk.WRITE)
-        JsonInvocationStore.create(ledgerPath, durability).use { store ->
+        TestInvocationStore.create(ledgerPath).use { store ->
             val gate = DefinitionGate().apply { install(definition); freezeRun("run", listOf(definition)) }
             val ledger = InvocationLedger(store, gate, ArgumentsValidator { _, _ -> true })
             ledger.recoverColdStart("old-process")
@@ -162,7 +162,7 @@ class FileRunHistoryTest {
                 assertFails { h.snapshot() }
             }
         }
-        JsonInvocationStore.open(ledgerPath, durability).use { store ->
+        TestInvocationStore.open(ledgerPath).use { store ->
             val ledger = InvocationLedger(store, DefinitionGate(), ArgumentsValidator { _, _ -> true })
             FileRunHistory.open(path, durability).use { h ->
                 assertFails { h.recoverPending(ledger) } // never guess a RUNNING result

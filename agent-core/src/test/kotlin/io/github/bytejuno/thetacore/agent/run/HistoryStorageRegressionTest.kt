@@ -96,7 +96,7 @@ class HistoryStorageRegressionTest {
         val calls = List(1800) { call(index = it, wire = "wire$it") }
         val text = "\u0000".repeat(6000) + "终点😀\\\"\n"
         val d = testDefinition()
-        JsonInvocationStore.create(ledgerPath, durability).use { store ->
+        TestInvocationStore.create(ledgerPath).use { store ->
             val gate = DefinitionGate().apply { install(d); freezeRun("run", listOf(d)) }
             val l = InvocationLedger(store, gate, ArgumentsValidator { _, _ -> true })
             l.recoverColdStart("before")
@@ -111,7 +111,7 @@ class HistoryStorageRegressionTest {
                 assertIs<Mutation.Applied>(l.complete(c.binding.callId, ticket.attemptId, Status.SUCCEEDED, text))
             }
         }
-        JsonInvocationStore.open(ledgerPath, durability).use { store ->
+        TestInvocationStore.open(ledgerPath).use { store ->
             val l = InvocationLedger(store, DefinitionGate(), ArgumentsValidator { _, _ -> true })
             l.recoverColdStart("after")
             FileRunHistory.open(path, durability) {
@@ -176,7 +176,7 @@ class HistoryStorageRegressionTest {
         val a = assistant(c)
         val text = "cut at a code unit \uD83D"
         val d = testDefinition()
-        JsonInvocationStore.create(ledgerPath, durability).use { store ->
+        TestInvocationStore.create(ledgerPath).use { store ->
             val gate = DefinitionGate().apply { install(d); freezeRun("run", listOf(d)) }
             val l = InvocationLedger(store, gate, ArgumentsValidator { _, _ -> true })
             l.recoverColdStart("before")
@@ -193,7 +193,7 @@ class HistoryStorageRegressionTest {
                 assertFailsWith<HistoryStorageException> { h.append(0, listOf(a, l.resultsForStep("session", "run", "step", listOf(id))!!)) }
             }
         }
-        JsonInvocationStore.open(ledgerPath, durability).use { store ->
+        TestInvocationStore.open(ledgerPath).use { store ->
             val l = InvocationLedger(store, DefinitionGate(), ArgumentsValidator { _, _ -> true })
             l.recoverColdStart("after")
             FileRunHistory.open(path, durability).use { h ->

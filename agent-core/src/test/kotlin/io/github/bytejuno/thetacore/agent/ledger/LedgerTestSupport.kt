@@ -16,8 +16,8 @@ internal class Fixture(
     val maxClaims: Int = Int.MAX_VALUE,
 ) : AutoCloseable {
     val directory = Files.createTempDirectory("theta-ledger-test-")
-    var stage: WriteStage? = null
-    var store = JsonInvocationStore.create(directory, Durability.PROCESS_CRASH_ONLY) { if (it == stage) error("injected $it") }
+    var stage: SqliteWriteStage? = null
+    var store = TestInvocationStore.create(directory) { if (it == stage) error("injected $it") }
     val gate = DefinitionGate()
     var ledger = InvocationLedger(store, gate, validator, policy, maxClaims)
     init { ledger.recoverColdStart("epoch-1") }
@@ -42,7 +42,7 @@ internal class Fixture(
     fun claim(r: InvocationRecord): Mutation.Applied = assertIs<Mutation.Applied>(ledger.claimExecution(r.callId, r.revision))
     fun reopen(epoch: String = "epoch-2") {
         store.close()
-        store = JsonInvocationStore.open(directory, Durability.PROCESS_CRASH_ONLY)
+        store = TestInvocationStore.open(directory)
         ledger = InvocationLedger(store, gate, ArgumentsValidator { _, _ -> true }, policy, maxClaims)
         ledger.recoverColdStart(epoch)
     }

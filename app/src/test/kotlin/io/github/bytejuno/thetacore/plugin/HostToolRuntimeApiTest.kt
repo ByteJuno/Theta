@@ -29,7 +29,7 @@ class HostToolRuntimeApiTest {
         val root = Files.createTempDirectory("host-api-").toFile()
         val budget = PluginExecutionBudget()
         try {
-            AndroidInvocationStore.open(root) {}.use { store ->
+            openTestStore(root).use { store ->
                 val service = HostToolBridgeRoot(budget).initialize { store }
                 val api = HostToolRuntimeApi(service)
                 val input = request(service.catalog.freeze("run").values.single { it.toolKey == "host/clock" }.modelName)
@@ -63,7 +63,7 @@ class HostToolRuntimeApiTest {
         val root = Files.createTempDirectory("host-api-gate-").toFile()
         val budget = PluginExecutionBudget()
         try {
-            AndroidInvocationStore.open(root) {}.use { store ->
+            openTestStore(root).use { store ->
                 val service = HostToolBridgeRoot(budget).initialize { store }
                 val api = HostToolRuntimeApi(service)
                 Executors.newSingleThreadExecutor().asCoroutineDispatcher().use { caller ->
@@ -90,15 +90,15 @@ class HostToolRuntimeApiTest {
         try {
             lateinit var input: JsonObject
             lateinit var ready: InvocationRecord
-            AndroidInvocationStore.open(root) {}.use { store ->
+            openTestStore(root).use { store ->
                 val service = HostToolBridgeRoot(budget).initialize { store }
                 input = request(service.catalog.freeze("run").values.single { it.toolKey == "host/clock" }.modelName)
                 call(HostToolRuntimeApi(service), input)
                 ready = service.ledger.get(input["callId"]!!.jsonPrimitive.content)!!
                 assertEquals(Status.READY, ready.state)
             }
-            val disk = root.resolve("${AndroidInvocationStore.DIRECTORY}/${ready.callId}.json").readText()
-            AndroidInvocationStore.open(root) {}.use { store ->
+            val disk = String(appPayload(root, ready.callId), Charsets.UTF_8)
+            openTestStore(root).use { store ->
                 val service = HostToolBridgeRoot(budget).initialize { store }
                 val api = HostToolRuntimeApi(service)
                 val dispatch = buildJsonObject { put("operation", "dispatch"); put("callId", ready.callId) }
@@ -106,7 +106,7 @@ class HostToolRuntimeApiTest {
                     assertEquals("blocked", call(api, dispatch)["kind"]!!.jsonPrimitive.content)
                     assertTrue(service.prepare(ready.input) is Mutation.Blocked)
                     assertEquals(ready, service.ledger.get(ready.callId))
-                    assertEquals(disk, root.resolve("${AndroidInvocationStore.DIRECTORY}/${ready.callId}.json").readText())
+                    assertEquals(disk, String(appPayload(root, ready.callId), Charsets.UTF_8))
                     assertNull(service.catalog.frozen("run"))
                 }
                 call(api, buildJsonObject { put("operation", "freeze"); put("runId", "run") })
@@ -124,7 +124,7 @@ class HostToolRuntimeApiTest {
         try {
             lateinit var input: JsonObject
             lateinit var id: String
-            AndroidInvocationStore.open(root) {}.use { store ->
+            openTestStore(root).use { store ->
                 val service = HostToolBridgeRoot(budget).initialize { store }
                 input = request(service.catalog.freeze("run").values.single { it.toolKey == "host/clock" }.modelName)
                 id = input["callId"]!!.jsonPrimitive.content
@@ -136,7 +136,7 @@ class HostToolRuntimeApiTest {
                 assertTrue(service.ledger.recordOutcome(id, claimed.ticket!!.attemptId,
                     Status.FAILED, "effect unknown before exit", Effect.UNKNOWN) is Mutation.Applied)
             }
-            AndroidInvocationStore.open(root) {}.use { store ->
+            openTestStore(root).use { store ->
                 val service = HostToolBridgeRoot(budget).initialize { store }
                 val api = HostToolRuntimeApi(service)
                 service.catalog.freeze("run")

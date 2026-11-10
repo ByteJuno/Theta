@@ -13,7 +13,12 @@ internal class HostBlobReadTool(private val ledger: InvocationLedger) : Tool {
         risk = ToolRisk.READ, idempotent = true, parallelSafe = true)
     override suspend fun call(args: JsonObject, env: ToolEnv): ToolResult {
         val offset = args.getValue("offset").jsonPrimitive.long
-        val (ref, bytes) = ledger.readBlob(env.runId, args.getValue("id").jsonPrimitive.content, offset)
+        val (ref, bytes) = try {
+            ledger.readBlob(env.runId, args.getValue("id").jsonPrimitive.content, offset)
+        } catch (_: io.github.bytejuno.thetacore.agent.ledger.StoreException) {
+            return ToolResult(text = "Result content is unavailable: missing or corrupt.",
+                isError = true, effect = ToolEffect.NONE)
+        }
         // Plain text avoids recursively archiving the retrieval response as another raw envelope.
         return ToolResult(text = buildJsonObject {
             put("id", ref.id); put("mimeType", ref.mimeType); put("sizeBytes", ref.sizeBytes)

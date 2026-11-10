@@ -87,6 +87,9 @@ tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach 
 dependencies {
     implementation(project(":sdk"))
     implementation(project(":agent-core"))
+    implementation(libs.androidx.sqlite.framework)
+    // Local JVM tests need the desktop JNI loader, not the Android AAR selected by AGP.
+    testImplementation(libs.androidx.sqlite.bundled.jvm)
     compileOnly("io.github.libxposed:api:102.0.0")
     implementation("io.github.libxposed:service:102.0.0")
     implementation(platform(libs.androidx.compose.bom))
