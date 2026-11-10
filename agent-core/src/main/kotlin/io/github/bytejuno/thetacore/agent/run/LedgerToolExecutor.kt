@@ -58,8 +58,21 @@ class LedgerToolExecutor(
 
     internal fun currentCheckpointRecords(saved: List<InvocationRecord>): List<InvocationRecord> = saved.map { old ->
         val current = ledger.get(old.callId) ?: throw ToolStepBlocked("Checkpoint missing ledger record")
-        require(current.atLedgerPrecision().input == old.atLedgerPrecision().input) { "Checkpoint invocation changed" }
+        val durable = current.atLedgerPrecision()
+        val savedRecord = old.atLedgerPrecision()
+        require(durable.input == savedRecord.input) { "Checkpoint invocation changed" }
+        // Receipts are immutable evidence, unlike live exit/recovery state. Older lossy history
+        // writers omitted approval summaries; never silently acknowledge fabricated empty text.
+        require(savedRecord.receipts.all { it in durable.receipts } &&
+            (savedRecord.pending == null || savedRecord.pending == durable.pending ||
+                durable.receipts.any { it.request == savedRecord.pending })) { "Checkpoint approval evidence changed or incomplete" }
         current
+    }
+
+    /** Ordinary runs may inspect unresolved effects after actual exit. Resource isolation and
+     * same-chain UNKNOWN write approvals remain enforced by the ledger on every tool submission. */
+    internal fun localExecutionBlocked(records: List<InvocationRecord>): Boolean = records.any {
+        !it.state.terminal || it.instance?.state == InstanceState.UNCONFIRMED || it.recoveryPending || it.restartRequired
     }
 
     // UNKNOWN remains forensic truth after resolution. Only a real exited instance with current

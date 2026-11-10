@@ -69,7 +69,7 @@ class FileRunHistory private constructor(
      * temp is expected after death and is never committed evidence. Unknown names and every final
      * file, including corrupt finals, are retained. This runs only while holding writer.lock. */
     private fun discardTemporaryFiles() {
-        val patterns = listOf(directory to Regex("\\.(head|pending|context|view|execution|accounting)\\.json\\.tmp"),
+        val patterns = listOf(directory to Regex("\\.(head|pending|context|view|execution|accounting|reconciliations)\\.json\\.tmp"),
             directory.resolve("batches") to Regex("\\.[1-9][0-9]*\\.json\\.tmp"),
             directory.resolve("calls") to Regex("\\.[0-9a-f]{64}\\.json\\.tmp"),
             directory.resolve("accounting") to Regex("\\.[0-9a-f]{64}\\.json\\.tmp"))
@@ -155,6 +155,62 @@ class FileRunHistory private constructor(
         catch (e: Exception) { poisoned = true; throw HistoryStorageException("Accounting migration uncertain", e) }
     }
 
+    private var runActive = false
+    @Synchronized internal fun beginRun() {
+        ready(); check(!runActive) { "Session already has an active run" }; runActive = true
+    }
+    @Synchronized internal fun endRun() { runActive = false }
+
+    private fun retryReceipts(): List<RetryReceipt> {
+        val path = directory.resolve("reconciliations.json")
+        return if (Files.exists(path)) read<List<RetryReceipt>>(path).also { receipts ->
+            require(receipts.all { it.sessionId == sessionId })
+        } else emptyList()
+    }
+    private fun rawBarrier(): ExecutionBarrier? {
+        val path = directory.resolve("execution.json")
+        return if (Files.exists(path)) read<ExecutionBarrier>(path).also { require(it.sessionId == sessionId) } else null
+    }
+    @Synchronized internal fun checkpointReconciled(value: ContextCheckpoint): Boolean {
+        ready(); return retryReceipts().any { it.checkpoint == value }
+    }
+    private fun retryEvidence(): Pair<ExecutionBarrier?, ContextCheckpoint?> {
+        val barrier = loadBarrier()
+        val checkpoint = loadCheckpoint()?.takeIf {
+            !checkpointReconciled(it) && (it.serverUnresolved ||
+                it.kind == "PAUSED" && it.pauseClass in setOf("ADMITTED", "SUMMARY_RESERVED", "REVIEW"))
+        }
+        return barrier to checkpoint
+    }
+    private fun retryIdentifier(barrier: ExecutionBarrier?, checkpoint: ContextCheckpoint?): String =
+        digest(HistoryCodec.json.encodeToString(RetryReceipt("", sessionId, "", "", barrier, checkpoint))
+            .toByteArray(Charsets.UTF_8))
+
+    /** Inspect after the run stops. The identifier binds the current durable session evidence,
+     * independently of appended user messages or changed model configuration. */
+    @Synchronized fun retryReconciliation(): RetryReconciliation? {
+        ready()
+        val (barrier, checkpoint) = retryEvidence()
+        if (barrier == null && checkpoint == null) return null
+        return RetryReconciliation(retryIdentifier(barrier, checkpoint), sessionId,
+            barrier?.reason ?: requireNotNull(checkpoint).reason)
+    }
+
+    /** Trusted host call only, after user/host reconciliation. No caller-supplied evidence is
+     * authoritative. Rejected/stale/duplicate/unattended decisions make no writes. A single atomic
+     * receipt acknowledges both reservations without deleting their forensic records or views.
+     * Local execution leases and ledger isolation are deliberately NOT changed by this API. */
+    @Synchronized fun confirmRetryAfterReconciliation(id: String, caller: RunIdentity, note: String): Boolean {
+        ready()
+        if (runActive || caller.unattended || caller.sessionId != sessionId || note.isBlank() ||
+            Files.exists(pendingPath())) return false
+        val (barrier, checkpoint) = retryEvidence()
+        if (barrier == null && checkpoint == null || id != retryIdentifier(barrier, checkpoint)) return false
+        val receipt = RetryReceipt(id, sessionId, caller.runId, note, barrier, checkpoint)
+        write(directory.resolve("reconciliations.json"), retryReceipts() + receipt)
+        return true
+    }
+
     @Synchronized internal fun saveBarrier(value: ExecutionBarrier) {
         ready(); require(value.sessionId == sessionId)
         val previous = loadBarrier()
@@ -163,8 +219,8 @@ class FileRunHistory private constructor(
     }
     @Synchronized internal fun loadBarrier(): ExecutionBarrier? {
         ready()
-        val path = directory.resolve("execution.json")
-        return if (Files.exists(path)) read<ExecutionBarrier>(path).also { require(it.sessionId == sessionId) } else null
+        val value = rawBarrier() ?: return null
+        return value.takeUnless { barrier -> retryReceipts().any { it.barrier == barrier } }
     }
     @Synchronized internal fun completeServerExecution(identity: RunIdentity) {
         ready()

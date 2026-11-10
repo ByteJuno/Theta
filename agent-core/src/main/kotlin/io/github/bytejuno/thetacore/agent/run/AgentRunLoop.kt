@@ -65,6 +65,7 @@ class AgentRunLoop(
     private var activeInputCount = 0
     private var admissionPending = false
     private var accountingActive = false
+    private var confirmedGenerationResponse = false
 
     private fun persistAccounting() {
         if (accountingActive) (history as? FileRunHistory)?.saveAccounting(
@@ -104,7 +105,8 @@ class AgentRunLoop(
         }
         // Safety is session durable, not a derived context view. Even disabling context policy
         // or changing provider cannot admit a request over unresolved remote execution.
-        if (barrier != null || saved?.serverUnresolved == true) {
+        val reconciled = saved?.let { disk.checkpointReconciled(it) } == true
+        if (barrier != null || saved?.serverUnresolved == true && !reconciled) {
             serverUnknown = true
             if (barrier?.taskChainId == identity.taskChainId) {
                 steps = maxOf(steps, barrier.steps); retries = maxOf(retries, barrier.retries)
@@ -114,8 +116,8 @@ class AgentRunLoop(
         }
         // A paired history is not proof of actual worker exit. Check live ledger truth even
         // without context policy/checkpoint, and before consuming any explicit admission token.
-        val localBlocked = tools.checkpointBlocked(tools.checkpointRecords(source.messages)) ||
-            saved?.let { tools.checkpointBlocked(tools.currentCheckpointRecords(it.ledger)) } == true
+        val localBlocked = tools.localExecutionBlocked(tools.checkpointRecords(source.messages)) ||
+            saved?.let { tools.localExecutionBlocked(tools.currentCheckpointRecords(it.ledger)) } == true
         if (localBlocked) {
             persistedPause = "Local tool execution or effect requires reconciliation"
             return
@@ -125,11 +127,12 @@ class AgentRunLoop(
             // A local wait is re-evaluated from live ledger truth. It is not a remote barrier or
             // a consumed model admission; actual exit may resolve it without a new override API.
             val localWaitResolved = saved.pauseClass == "LOCAL_WAIT"
-            if (!selected && !localWaitResolved) {
+            if (!selected && !localWaitResolved && !reconciled) {
                 persistedPause = "Persisted checkpoint requires explicit continuation or user review: ${saved.id}"
                 return
             }
         }
+        if (reconciled && saved?.pauseClass in setOf("ADMITTED", "SUMMARY_RESERVED", "REVIEW")) admissionPending = true
         val policy = contextPolicy ?: return
         require(policy.priorMessageCount <= source.messages.size)
         validateHistory(source.messages.take(policy.priorMessageCount))
@@ -169,7 +172,9 @@ class AgentRunLoop(
                 view.catalog == tools.definitions.sortedBy { it.modelName } &&
                 view.matches(source, settingsKey(target.id, config, target.provider.contextConfigurationKey()))) {
                 val records = tools.checkpointRecords(source.messages)
-                require(!tools.checkpointBlocked(records)) { "Checkpoint ledger requires review" }
+                // Ordinary runs can fall back to full history after accepted uncertainty;
+                // do not turn stricter automatic-summary eligibility into a session lock.
+                if (tools.checkpointBlocked(records)) return
                 val durableRecords = records.map { it.atLedgerPrecision() }.associateBy { it.callId }
                 require(view.ledger.all { old -> durableRecords[old.callId] == old.atLedgerPrecision() }) { "Checkpoint ledger changed" }
                 contextView = view
@@ -260,8 +265,18 @@ class AgentRunLoop(
         val disk = history as? FileRunHistory ?: return
         val prior = disk.loadBarrier()
         disk.saveBarrier(prior?.copy(steps = maxOf(prior.steps, steps), retries = maxOf(prior.retries, retries))
-            ?: ExecutionBarrier(identity.sessionId, identity.taskChainId, identity.runId, reason, steps, retries))
+            ?: ExecutionBarrier(identity.sessionId, identity.taskChainId, identity.runId, reason, steps, retries,
+                UUID.randomUUID().toString()))
     }
+
+    private fun refreshCheckpoint(saved: ContextCheckpoint, source: HistorySnapshot) = saved.copy(
+        id = UUID.randomUUID().toString(), sessionId = identity.sessionId, taskChainId = identity.taskChainId,
+        runId = identity.runId, unattended = identity.unattended, nextRunId = null,
+        sourceRevision = source.revision, sourceCount = source.messages.size,
+        sourceDigest = sourceDigest(source.messages), steps = steps, retries = retries,
+        settingsKey = settingsKey(target.id, config, target.provider.contextConfigurationKey()),
+        ledger = tools.checkpointRecords(source.messages), catalog = tools.definitions.sortedBy { it.modelName },
+        kind = "PAUSED", summary = null, serverUnresolved = false)
 
     private fun result(state: RunState, reason: String, unknown: Boolean = false): RunResult {
         val unresolved = unknown || serverUnknown || serverLoopOpen
@@ -269,23 +284,32 @@ class AgentRunLoop(
         // Admission state is not accounting. Retire only a resolved admission/local wait;
         // summary reservations, budget pauses and continuations must survive every exit.
         val disk = history as? FileRunHistory
-        if (!unresolved && persistedPause == null && contextPolicy != null && disk != null) {
+        if (!unresolved && persistedPause == null && disk != null) {
             val saved = disk.loadCheckpoint()
             val source = history.snapshot()
-            val localBlocked = tools.checkpointBlocked(tools.checkpointRecords(source.messages))
-            val settled = saved == null || saved.kind in setOf("VIEW", "COMPLETE") ||
-                saved.pauseClass == "ADMITTED" && !admissionPending || saved.pauseClass == "LOCAL_WAIT" && !localBlocked
-            if (settled && !localBlocked) disk.saveCheckpoint(checkpoint(source,
-                source.messages.size, null, "COMPLETE", reason, false))
+            val localBlocked = tools.localExecutionBlocked(tools.checkpointRecords(source.messages))
+            val settled = saved == null || saved.kind in setOf("VIEW", "COMPLETE") || disk.checkpointReconciled(saved) ||
+                saved.pauseClass == "ADMITTED" && (!admissionPending || confirmedGenerationResponse) ||
+                saved.pauseClass == "LOCAL_WAIT" && !localBlocked
+            if (settled && !localBlocked) {
+                val completed = if (contextPolicy != null) checkpoint(source,
+                    source.messages.size, null, "COMPLETE", reason, false)
+                else saved?.let { refreshCheckpoint(it, source).copy(kind = "COMPLETE", pauseClass = "REVIEW", reason = reason) }
+                if (completed != null) disk.saveCheckpoint(completed)
+            }
         }
         return RunResult(state, reason, steps, retries, unresolved)
     }
 
     suspend fun run(): RunResult {
         check(started.compareAndSet(false, true)) { "Run is one-shot; do not replay a partially executed step" }
+        val disk = history as? FileRunHistory
+        disk?.beginRun()
         var failure: Throwable? = null
         try {
             return runStarted()
+        } catch (e: UncertainSummaryResponse) {
+            return result(RunState.PAUSED, "Summary response uncertain; host reconciliation required")
         } catch (e: Throwable) {
             failure = e
             throw e
@@ -294,7 +318,7 @@ class AgentRunLoop(
             // same accounting rule. Never mask primary failure if the history writer is poisoned.
             try { persistAccounting() } catch (e: Throwable) {
                 if (failure == null) throw e else failure.addSuppressed(e)
-            }
+            } finally { disk?.endRun() }
         }
     }
 
@@ -326,14 +350,21 @@ class AgentRunLoop(
             if (!compatible(target, request)) return pauseContext(view, "Replay incompatible; checkpoint required")
             val mode = target.provider.executionMode(request) // freeze BEFORE submission, including extraBody
             val reducer = ModelEventReducer(target.id, request.requestId)
-            if (admissionPending) (history as? FileRunHistory)?.saveCheckpoint(checkpoint(view, view.messages.size,
-                null, "PAUSED", "Admitted request awaiting durable response", false).copy(pauseClass = "ADMITTED"))
+            if (admissionPending) (history as? FileRunHistory)?.let { disk ->
+                val reserved = if (contextPolicy != null) checkpoint(view, view.messages.size,
+                    null, "PAUSED", "Admitted request awaiting durable response", false)
+                else refreshCheckpoint(requireNotNull(disk.loadCheckpoint()), view)
+                disk.saveCheckpoint(reserved.copy(pauseClass = "ADMITTED",
+                    reason = "Admitted request awaiting durable response"))
+            }
             if (mode != ModelExecutionMode.GENERATION_ONLY) persistServerBarrier("Server request submitted; result not yet durable")
             journal.submitted(request.requestId, target.id, mode)
             var cancelled = false
+            confirmedGenerationResponse = false
+            val evidence = ResponseEvidence()
             try {
                 // Wrap creation as well as collection: synchronous chat() failures obey 2.8 too.
-                flow { emitAll(target.provider.chat(request, target.credentials)) }
+                evidence.observe(flow { emitAll(target.provider.chat(request, target.credentials)) })
                     .validated(target.id, request.requestId, timeouts).collect { reducer.accept(it) }
             } catch (e: CancellationException) {
                 cancelled = true
@@ -343,6 +374,10 @@ class AgentRunLoop(
                     reducer.terminal, reducer.usage, cancelled))
             }
             val terminal = reducer.terminal!!
+            confirmedGenerationResponse = mode == ModelExecutionMode.GENERATION_ONLY && evidence.confirms(terminal)
+            if (admissionPending && !confirmedGenerationResponse && terminal is ModelEvent.Failed &&
+                mode == ModelExecutionMode.GENERATION_ONLY)
+                return result(RunState.PAUSED, "Admitted response uncertain; host reconciliation required")
             if (terminal is ModelEvent.Failed) {
                 val transient = terminal.error.code in setOf(ModelErrorCode.OVERLOADED, ModelErrorCode.SERVER,
                     ModelErrorCode.NETWORK, ModelErrorCode.TIMEOUT)
@@ -464,7 +499,7 @@ class AgentRunLoop(
             if (serverLoopOpen) persistServerBarrier("Server loop paused; continuation incomplete")
             else if (!truncated && disposition != HistoryDisposition.DISCARD)
                 (history as? FileRunHistory)?.completeServerExecution(identity)
-            val localBlocked = calls.isNotEmpty() && tools.checkpointBlocked(tools.checkpointRecords(view.messages))
+            val localBlocked = calls.isNotEmpty() && tools.localExecutionBlocked(tools.checkpointRecords(view.messages))
             if (localBlocked && !serverUnknown && !serverLoopOpen && contextPolicy != null) {
                 (history as? FileRunHistory)?.saveCheckpoint(checkpoint(view, view.messages.size,
                     null, "PAUSED", "Tool execution or effect unresolved", false).copy(pauseClass = "LOCAL_WAIT"))

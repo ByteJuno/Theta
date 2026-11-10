@@ -180,7 +180,9 @@ internal object HistoryCodec {
             is RunAccounting -> fields("sessionId" to v.sessionId, "taskChainId" to v.taskChainId,
                 "runId" to v.runId, "steps" to v.steps, "retries" to v.retries)
             is ExecutionBarrier -> fields("sessionId" to v.sessionId, "taskChainId" to v.taskChainId,
-                "runId" to v.runId, "reason" to v.reason, "steps" to v.steps, "retries" to v.retries)
+                "runId" to v.runId, "reason" to v.reason, "steps" to v.steps, "retries" to v.retries, "id" to v.id)
+            is RetryReceipt -> fields("id" to v.id, "sessionId" to v.sessionId, "callerRunId" to v.callerRunId,
+                "note" to v.note, "barrier" to v.barrier, "checkpoint" to v.checkpoint)
             is ContextCheckpoint -> fields("version" to v.version, "id" to v.id, "sessionId" to v.sessionId,
                 "taskChainId" to v.taskChainId, "runId" to v.runId, "nextRunId" to v.nextRunId,
                 "unattended" to v.unattended, "sourceRevision" to v.sourceRevision, "sourceCount" to v.sourceCount,
@@ -207,7 +209,7 @@ internal object HistoryCodec {
                 "outputSchema" to v.outputSchema, "timeoutMillis" to v.timeoutMillis)
             is ApprovalRequest -> fields("id" to v.id, "callId" to v.callId, "digest" to v.digest,
                 "version" to v.version, "generation" to v.generation, "risk" to v.risk,
-                "unknownCalls" to v.unknownCalls, "internal" to v.internal)
+                "unknownCalls" to v.unknownCalls, "internal" to v.internal, "summary" to v.summary)
             is ApprovalReceipt -> fields("request" to v.request, "decision" to v.decision)
             is ExecutionInstance -> fields("attemptId" to v.attemptId, "processEpoch" to v.processEpoch, "state" to v.state)
             is LogicalResult -> fields("status" to v.status, "effect" to v.effect, "text" to v.text,

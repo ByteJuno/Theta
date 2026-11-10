@@ -41,6 +41,386 @@ class ContextPolicyTest {
         LedgerToolExecutor(f.ledger, f.gate, f.definitions, f.bridge, RunApprovals { Decision.ALLOW_ONCE }),
         f.journal, budget = b, limits = limits, timeouts = EventTimeouts(100, 100), contextPolicy = policy)
 
+    private fun retryId(h: FileRunHistory) = assertNotNull(h.retryReconciliation()).id
+    private fun confirmRetry(h: FileRunHistory, id: String, caller: RunIdentity = identity) =
+        h.confirmRetryAfterReconciliation(id, caller, "Host inspected request journal and reconciled external results")
+
+    @Test fun `definite generation failure releases continuation admission without losing view or counters`() = runTest {
+        for (code in listOf(ModelErrorCode.INVALID_REQUEST, ModelErrorCode.AUTH, ModelErrorCode.MODEL_NOT_FOUND)) {
+            val f = RunFixture()
+            FileRunHistory.create(root.resolve("definite-$code"), "session", durability).use { h ->
+                h.append(0, listOf(user("old")))
+                val saved = checkpoint(h, "CONTINUATION"); h.saveCheckpoint(saved)
+                assertEquals(RunState.FAILED, loop(f, ScriptProvider(listOf(failure(code))), h,
+                    ContextPolicy("goal", resumeCheckpointId = saved.id), saved.identity()).run().state)
+                val p = ScriptProvider(listOf(answer()))
+                val result = loop(f, p, h, ContextPolicy("goal", 1), identity.copy(runId = "retry")).run()
+                assertEquals(RunState.COMPLETED, result.state)
+                assertEquals(1, p.requests.size); assertTrue(result.steps > saved.steps)
+                assertNotNull(h.loadView())
+                assertFailsWith<IllegalArgumentException> {
+                    loop(f, p, h, ContextPolicy("goal", resumeCheckpointId = saved.id), saved.identity()).run()
+                }
+            }
+        }
+    }
+
+    // Exercise the real adapter: it converts pre-terminal transport failures into a normally
+    // closed Failed flow. Counting exchanges detects both same-run retries and cold readmission.
+    private class FaultTransport(private val fault: String) : ModelTransport {
+        var requests = 0
+        override fun exchange(url: String, body: String, token: String) = flow<TransportEvent> {
+            requests++
+            emit(TransportEvent.Headers(200, "text/event-stream", null))
+            if (requests == 1) when (fault) {
+                "network" -> throw java.io.IOException("reset before terminal")
+                "protocol" -> { emit(TransportEvent.Bytes("data: not-json\n\n".toByteArray())); return@flow }
+                "unknown" -> error("transport internal failure")
+            }
+            emit(TransportEvent.Bytes(("data: {\"id\":\"response\",\"model\":\"m\",\"choices\":[{\"index\":0," +
+                "\"delta\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n").toByteArray()))
+            if (fault == "terminal-reset") throw java.io.IOException("reset after terminal")
+        }
+    }
+    private fun realProvider(transport: ModelTransport) =
+        OpenAiChatProvider(OpenAiChatConfig("provider", "https://example.invalid/v1"), transport)
+
+    private suspend fun admittedTransportFailure(fault: String, automatic: Boolean) {
+        val f = RunFixture(); val transport = FaultTransport(fault); val p = realProvider(transport)
+        FileRunHistory.create(root.resolve("admitted-$fault-$automatic"), "session", durability).use { h ->
+            h.append(0, listOf(user("goal")))
+            val saved = checkpoint(h, "CONTINUATION").copy(
+                settingsKey = settingsKey("provider", f.request(), p.contextConfigurationKey()))
+            h.saveCheckpoint(saved)
+            val limits = RunLimits(maxRetries = if (automatic) 12 else saved.retries)
+            val result = loop(f, p, h, ContextPolicy("goal", resumeCheckpointId = saved.id),
+                saved.identity(), limits = limits).run()
+            assertEquals(1, transport.requests, "uncertainty must not enter automatic recovery")
+            assertEquals(RunState.PAUSED, result.state)
+            assertEquals("ADMITTED", h.loadCheckpoint()!!.pauseClass)
+            assertEquals(RunState.PAUSED, loop(f, p, h, ContextPolicy("goal"), b = budget(10_000)).run().state)
+            assertEquals(1, transport.requests)
+            val stale = retryId(h)
+            h.saveCheckpoint(h.loadCheckpoint()!!.copy(id = "new-evidence"))
+            assertFalse(confirmRetry(h, stale))
+            val current = retryId(h)
+            assertFalse(confirmRetry(h, current, identity.copy(unattended = true)))
+            assertTrue(confirmRetry(h, current)); assertFalse(confirmRetry(h, current))
+            assertEquals(RunState.COMPLETED, loop(f, p, h, ContextPolicy("goal")).run().state)
+            assertEquals(2, transport.requests)
+        }
+    }
+    @Test fun `real transport network cannot automatically resubmit admitted continuation`() = runTest {
+        admittedTransportFailure("network", true)
+    }
+    @Test fun `real transport network cannot retire admitted continuation when retries exhausted`() = runTest {
+        admittedTransportFailure("network", false)
+    }
+    @Test fun `real transport protocol cannot automatically resubmit admitted continuation`() = runTest {
+        admittedTransportFailure("protocol", true)
+    }
+    @Test fun `real transport unknown cannot automatically resubmit admitted continuation`() = runTest {
+        admittedTransportFailure("unknown", true)
+    }
+
+    private suspend fun reservedTransportFailure(fault: String) {
+        val f = RunFixture(); val transport = FaultTransport(fault)
+        val mainTransport = FaultTransport("success"); val p = realProvider(mainTransport)
+        FileRunHistory.create(root.resolve("reserved-$fault"), "session", durability).use { h ->
+            h.append(0, listOf(user("old".repeat(1000)), user("goal")))
+            assertEquals(RunState.PAUSED, loop(f, p, h,
+                ContextPolicy("goal", 1, summary(realProvider(transport)))).run().state)
+            assertEquals(1, transport.requests); assertEquals(0, mainTransport.requests)
+            val saved = h.loadCheckpoint()!!
+            assertEquals("SUMMARY_RESERVED", saved.pauseClass)
+            assertFailsWith<IllegalArgumentException> {
+                loop(f, p, h, ContextPolicy("goal", 1, readmitBudgetCheckpointId = saved.id),
+                    b = budget(10_000)).run()
+            }
+            assertEquals(RunState.PAUSED, loop(f, p, h, ContextPolicy("goal"), b = budget(10_000)).run().state)
+            assertEquals(0, mainTransport.requests); assertEquals(1, transport.requests)
+            val stale = retryId(h)
+            h.saveCheckpoint(saved.copy(id = "new-summary-evidence"))
+            assertFalse(confirmRetry(h, stale))
+            val current = retryId(h)
+            assertFalse(confirmRetry(h, current, identity.copy(unattended = true)))
+            assertTrue(confirmRetry(h, current))
+            assertEquals(RunState.COMPLETED, loop(f, p, h, ContextPolicy("goal"), b = budget(10_000)).run().state)
+            assertEquals(1, mainTransport.requests); assertEquals(1, transport.requests)
+        }
+    }
+    @Test fun `real transport network retains summary reservation across window change`() = runTest {
+        reservedTransportFailure("network")
+    }
+    @Test fun `real transport protocol retains summary reservation across window change`() = runTest {
+        reservedTransportFailure("protocol")
+    }
+    @Test fun `real transport unknown retains summary reservation across window change`() = runTest {
+        reservedTransportFailure("unknown")
+    }
+    @Test fun `real transport terminal then reset completes admitted generation`() = runTest {
+        val f = RunFixture(); val transport = FaultTransport("terminal-reset"); val p = realProvider(transport)
+        FileRunHistory.create(root.resolve("terminal-reset"), "session", durability).use { h ->
+            h.append(0, listOf(user("goal")))
+            val saved = checkpoint(h, "CONTINUATION").copy(
+                settingsKey = settingsKey("provider", f.request(), p.contextConfigurationKey()))
+            h.saveCheckpoint(saved)
+            assertEquals(RunState.COMPLETED, loop(f, p, h,
+                ContextPolicy("goal", resumeCheckpointId = saved.id), saved.identity()).run().state)
+            assertEquals(1, transport.requests); assertNull(h.retryReconciliation())
+        }
+    }
+
+    @Test fun `closed failure evidence only accepts definite request rejections`() = runTest {
+        val definite = setOf(ModelErrorCode.AUTH, ModelErrorCode.INVALID_REQUEST, ModelErrorCode.MODEL_NOT_FOUND,
+            ModelErrorCode.CONTEXT_TOO_LONG, ModelErrorCode.UNSUPPORTED_PARAMETER, ModelErrorCode.RATE_LIMIT,
+            ModelErrorCode.QUOTA, ModelErrorCode.CONTENT_BLOCKED)
+        for (code in ModelErrorCode.entries) {
+            val event = Events.failed(modelError(code, "failure"))
+            val evidence = ResponseEvidence()
+            evidence.observe(flow { emit(event) }).toList()
+            assertEquals(code in definite, evidence.confirms(event), code.name)
+            assertFalse(evidence.confirms(Events.failed(modelError(code, "different event"))))
+        }
+    }
+
+    @Test fun `real HTTP request rejections release admitted generation`() = runTest {
+        for (status in listOf(400, 401, 404)) {
+            val f = RunFixture()
+            val transport = object : ModelTransport {
+                var requests = 0
+                override fun exchange(url: String, body: String, token: String) = flow<TransportEvent> {
+                    requests++
+                    emit(TransportEvent.Headers(status, "application/json", null))
+                    if (status == 404) emit(TransportEvent.Bytes(
+                        "{\"error\":{\"code\":\"model_not_found\"}}".toByteArray()))
+                }
+            }
+            val p = realProvider(transport)
+            FileRunHistory.create(root.resolve("http-rejection-$status"), "session", durability).use { h ->
+                h.append(0, listOf(user("goal")))
+                val saved = checkpoint(h, "CONTINUATION").copy(
+                    settingsKey = settingsKey("provider", f.request(), p.contextConfigurationKey()))
+                h.saveCheckpoint(saved)
+                assertEquals(RunState.FAILED, loop(f, p, h,
+                    ContextPolicy("goal", resumeCheckpointId = saved.id), saved.identity(),
+                    limits = RunLimits(maxRetries = saved.retries)).run().state)
+                assertEquals(1, transport.requests); assertNull(h.retryReconciliation())
+                val next = FaultTransport("success")
+                assertEquals(RunState.COMPLETED, loop(f, realProvider(next), h, ContextPolicy("goal")).run().state)
+                assertEquals(1, next.requests)
+            }
+        }
+    }
+
+    @Test fun `accepted unknown write allows ordinary question but next write still requires unknown approval`() = runTest {
+        val definition = testDefinition(risk = Risk.WRITE).copy(exclusiveResource = "external-file")
+        val f = RunFixture(listOf(definition, testDefinition("read")))
+        f.onSubmit = { f.ledger.recordOutcome(it.callId, it.attemptId, Status.FAILED, "write uncertain", Effect.UNKNOWN) }
+        FileRunHistory.create(root.resolve("accepted-write"), "session", durability).use { h ->
+            h.append(0, listOf(user("write")))
+            assertEquals(RunState.PAUSED, loop(f, ScriptProvider(listOf(calls("tool"))), h, ContextPolicy("goal")).run().state)
+            val ticket = f.submitted.single()
+            assertIs<Mutation.Blocked>(f.ledger.resolveRecovery(ticket.callId, RecoveryResolution.ACCEPTED_UNCERTAINTY))
+            f.ledger.recordActualExit(ticket.callId, ticket.attemptId, "worker exited")
+            assertIs<Mutation.Applied>(f.ledger.resolveRecovery(ticket.callId, RecoveryResolution.ACCEPTED_UNCERTAINTY))
+            h.append(h.revision(), listOf(user("what happened?")))
+            f.onSubmit = { f.ledger.complete(it.callId, it.attemptId, Status.SUCCEEDED, "read complete") }
+            val p = ScriptProvider(listOf(calls("read"), answer("final answer")))
+            assertEquals(RunState.COMPLETED, f.loop(p, history = h).run().state)
+            assertEquals(2, p.requests.size)
+            assertEquals(InstanceState.EXIT_CONFIRMED, f.ledger.get(f.submitted.last().callId)!!.instance!!.state)
+            var approval: ApprovalRequest? = null
+            f.approve = { approval = it; Decision.DENY }
+            val next = ScriptProvider(listOf(calls("tool", args = "{\"next\":true}"), answer()))
+            f.loop(next, history = h).run()
+            assertTrue(ticket.callId in assertNotNull(approval).unknownCalls)
+            assertEquals(2, f.submitted.size)
+            assertEquals(Effect.UNKNOWN, f.ledger.get(ticket.callId)!!.result!!.effect)
+            assertEquals(RecoveryResolution.ACCEPTED_UNCERTAINTY, f.ledger.get(ticket.callId)!!.isolation!!.resolution)
+        }
+    }
+
+    @Test fun `retry acknowledgement is atomic durable and bound to latest evidence`() = runTest {
+        for (stage in HistoryWriteStage.entries) {
+            val dir = root.resolve("confirm-$stage")
+            lateinit var token: String
+            FileRunHistory.create(dir, "session", durability).use { h ->
+                h.append(0, listOf(user("goal")))
+                h.saveBarrier(ExecutionBarrier("session", "chain", "run", "uncertain", 4, 2, "barrier-1"))
+                h.saveCheckpoint(checkpoint(h).copy(serverUnresolved = true, pauseClass = "ADMITTED"))
+                val stale = retryId(h)
+                h.saveBarrier(h.loadBarrier()!!.copy(id = "barrier-2"))
+                assertFalse(confirmRetry(h, stale))
+                token = retryId(h)
+            }
+            FileRunHistory.open(dir, durability) { point ->
+                if (point.file == "reconciliations.json" && point.stage == stage) error("injected")
+            }.use { h ->
+                assertFailsWith<HistoryStorageException> { confirmRetry(h, token) }
+                assertFailsWith<IllegalStateException> { h.retryReconciliation() }
+            }
+            FileRunHistory.open(dir, durability).use { h ->
+                val committed = stage in setOf(HistoryWriteStage.AFTER_REPLACE, HistoryWriteStage.AFTER_DIRECTORY_SYNC)
+                assertEquals(committed, h.retryReconciliation() == null)
+                val f = RunFixture(); val p = ScriptProvider(listOf(answer()))
+                assertEquals(if (committed) RunState.COMPLETED else RunState.PAUSED,
+                    loop(f, p, h, ContextPolicy("goal")).run().state)
+                assertEquals(if (committed) 1 else 0, p.requests.size)
+                assertTrue(Files.exists(dir.resolve("execution.json"))) // receipt, not deletion
+                if (!committed) assertTrue(confirmRetry(h, retryId(h)))
+                assertFalse(confirmRetry(h, token))
+                assertTrue(Files.size(dir.resolve("reconciliations.json")) > 0)
+            }
+        }
+    }
+
+    @Test fun `unclosed admitted failures and transport exceptions require reconciliation not automatic retry`() = runTest {
+        for (end in listOf("throw", "unclosed", "missing-terminal")) {
+            val f = RunFixture()
+            FileRunHistory.create(root.resolve("uncertain-$end"), "session", durability).use { h ->
+                h.append(0, listOf(user("goal")))
+                val saved = checkpoint(h, "CONTINUATION"); h.saveCheckpoint(saved)
+                val p = object : ModelProvider by ScriptProvider(emptyList()) {
+                    override fun chat(request: ChatRequest, auth: Credentials) = flow<ModelEvent> {
+                        if (end == "throw") error("transport disappeared")
+                        if (end == "unclosed") {
+                            emit(Events.failed(modelError(ModelErrorCode.INVALID_REQUEST, "not closed")))
+                            kotlinx.coroutines.awaitCancellation()
+                        }
+                    }
+                }
+                assertEquals(RunState.PAUSED, loop(f, p, h,
+                    ContextPolicy("goal", resumeCheckpointId = saved.id), saved.identity()).run().state)
+                assertEquals("ADMITTED", h.loadCheckpoint()!!.pauseClass)
+                val next = ScriptProvider(listOf(answer()))
+                assertEquals(RunState.PAUSED, loop(f, next, h, ContextPolicy("goal")).run().state)
+                assertTrue(next.requests.isEmpty())
+                assertTrue(confirmRetry(h, retryId(h)))
+                assertEquals(RunState.COMPLETED, loop(f, next, h, ContextPolicy("goal")).run().state)
+            }
+        }
+    }
+
+    @Test fun `summary definite failure supports changed window while interrupted summary needs confirmation`() = runTest {
+        for (end in listOf("failed", "cancel", "unclosed")) {
+            val f = RunFixture()
+            FileRunHistory.create(root.resolve("summary-$end"), "session", durability).use { h ->
+                h.append(0, listOf(user("old".repeat(1000)), user("goal")))
+                val p = ScriptProvider(listOf(answer()))
+                val s = if (end == "failed") ScriptProvider(listOf(failure(ModelErrorCode.INVALID_REQUEST)))
+                    else object : ModelProvider by ScriptProvider(emptyList()) {
+                        override fun chat(request: ChatRequest, auth: Credentials) = flow<ModelEvent> {
+                            assertFalse(confirmRetry(h, retryId(h))) // no confirmation while run is active
+                            if (end == "unclosed") emit(Events.failed(modelError(ModelErrorCode.INVALID_REQUEST, "not EOF")))
+                            kotlinx.coroutines.awaitCancellation()
+                        }
+                    }
+                val run = loop(f, p, h, ContextPolicy("goal", 1, summary(s)))
+                if (end == "cancel") assertFailsWith<kotlinx.coroutines.CancellationException> {
+                    kotlinx.coroutines.withTimeout(10) { run.run() }
+                } else assertEquals(RunState.PAUSED, run.run().state)
+                assertTrue(p.requests.isEmpty())
+                val saved = h.loadCheckpoint()!!
+                if (end == "failed") {
+                    assertEquals("BUDGET", saved.pauseClass)
+                    assertEquals(RunState.COMPLETED, loop(f, p, h,
+                        ContextPolicy("goal", 1, readmitBudgetCheckpointId = saved.id), b = budget(10_000)).run().state)
+                } else {
+                    assertEquals("SUMMARY_RESERVED", saved.pauseClass)
+                    assertEquals(RunState.PAUSED, loop(f, p, h, ContextPolicy("goal"), b = budget(10_000)).run().state)
+                    assertFalse(confirmRetry(h, retryId(h), identity.copy(unattended = true)))
+                    assertTrue(confirmRetry(h, retryId(h)))
+                    assertEquals(RunState.COMPLETED, loop(f, p, h, ContextPolicy("goal"), b = budget(10_000)).run().state)
+                }
+                assertEquals(1, p.requests.size)
+                assertTrue(h.loadAccounting("chain")!!.retries >= 1)
+            }
+        }
+    }
+
+    @Test fun `replay incompatible failed summary has attended current evidence retry path`() = runTest {
+        for (end in listOf("failed", "cancel", "unclosed")) {
+            val f = RunFixture()
+            FileRunHistory.create(root.resolve("review-$end"), "session", durability).use { h ->
+                h.append(0, listOf(user("goal"), message(Role.ASSISTANT,
+                    textPart("old", replayData("opaque", "m", "retain me")))))
+                val p = ScriptProvider(listOf(answer()), replay = false)
+                val s = if (end == "failed") ScriptProvider(listOf(failure(ModelErrorCode.INVALID_REQUEST)))
+                    else object : ModelProvider by ScriptProvider(emptyList()) {
+                        override fun chat(request: ChatRequest, auth: Credentials) = flow<ModelEvent> {
+                            if (end == "unclosed") emit(Events.failed(modelError(ModelErrorCode.INVALID_REQUEST, "unclosed")))
+                            kotlinx.coroutines.awaitCancellation()
+                        }
+                    }
+                val run = loop(f, p, h, ContextPolicy("goal", summaryModel = summary(s)))
+                if (end == "cancel") assertFailsWith<kotlinx.coroutines.CancellationException> {
+                    kotlinx.coroutines.withTimeout(10) { run.run() }
+                } else assertEquals(RunState.PAUSED, run.run().state)
+                assertTrue(p.requests.isEmpty())
+                assertEquals(if (end == "failed") "REVIEW" else "SUMMARY_RESERVED", h.loadCheckpoint()!!.pauseClass)
+                p.replay = true // host fixes adapter, but configuration alone is not confirmation
+                assertEquals(RunState.PAUSED, loop(f, p, h, ContextPolicy("goal")).run().state)
+                assertTrue(p.requests.isEmpty())
+                val stale = retryId(h)
+                h.saveCheckpoint(h.loadCheckpoint()!!.copy(id = "new-review"))
+                assertFalse(confirmRetry(h, stale))
+                val current = retryId(h)
+                assertFalse(confirmRetry(h, current, identity.copy(unattended = true)))
+                assertTrue(confirmRetry(h, current)); assertFalse(confirmRetry(h, current))
+                val result = loop(f, p, h, ContextPolicy("goal")).run()
+                assertEquals(RunState.COMPLETED, result.state); assertEquals(1, p.requests.size)
+                assertTrue(result.retries >= 1)
+            }
+        }
+    }
+
+    @Test fun `reconciliation does not release live local execution or external isolation`() = runTest {
+        val f = RunFixture(listOf(testDefinition(risk = Risk.WRITE)))
+        f.onSubmit = { f.ledger.recordOutcome(it.callId, it.attemptId, Status.FAILED, "uncertain", Effect.UNKNOWN) }
+        FileRunHistory.create(root.resolve("live-confirm"), "session", durability).use { h ->
+            h.append(0, listOf(user("goal")))
+            loop(f, ScriptProvider(listOf(calls("tool"))), h, ContextPolicy("goal")).run()
+            h.saveBarrier(ExecutionBarrier("session", "chain", "run", "remote uncertain", 1, 0, "barrier"))
+            assertTrue(confirmRetry(h, retryId(h)))
+            val p = ScriptProvider(listOf(answer()))
+            assertEquals(RunState.PAUSED, loop(f, p, h, ContextPolicy("goal")).run().state)
+            assertTrue(p.requests.isEmpty())
+            val record = f.ledger.get(f.submitted.single().callId)!!
+            assertEquals(InstanceState.UNCONFIRMED, record.instance!!.state)
+            assertNull(record.isolation!!.resolution)
+        }
+    }
+
+    @Test fun `confirmed retry reserves fresh identity even with context policy disabled`() = runTest {
+        for (pauseClass in listOf("ADMITTED", "REVIEW")) {
+        val f = RunFixture()
+        FileRunHistory.create(root.resolve("retry-again-$pauseClass"), "session", durability).use { h ->
+            h.append(0, listOf(user("goal")))
+            h.saveCheckpoint(checkpoint(h).copy(pauseClass = pauseClass))
+            val first = retryId(h)
+            assertTrue(confirmRetry(h, first))
+            val cancelled = object : ModelProvider by ScriptProvider(emptyList()) {
+                override fun chat(request: ChatRequest, auth: Credentials) = flow<ModelEvent> {
+                    assertNotEquals(first, retryId(h))
+                    assertFalse(confirmRetry(h, retryId(h)))
+                    kotlinx.coroutines.awaitCancellation()
+                }
+            }
+            assertFailsWith<kotlinx.coroutines.CancellationException> {
+                kotlinx.coroutines.withTimeout(10) { f.loop(cancelled, history = h).run() }
+            }
+            val second = retryId(h)
+            assertNotEquals(first, second); assertFalse(confirmRetry(h, first))
+            val p = ScriptProvider(listOf(answer()))
+            assertEquals(RunState.PAUSED, f.loop(p, history = h).run().state)
+            assertTrue(p.requests.isEmpty()); assertTrue(confirmRetry(h, second))
+            assertEquals(RunState.COMPLETED, f.loop(p, history = h).run().state)
+            assertNull(h.retryReconciliation()); assertEquals("COMPLETE", h.loadCheckpoint()!!.kind)
+        }
+        }
+    }
+
     @Test fun `budget includes all input and output reservation and unknown is not zero`() {
         val r = chatRequest("m") { system = "system"; messages = listOf(user("history"), user("new"))
             tools = listOf(modelTool("t", "description", buildJsonObject { put("type", "object") }))
@@ -280,17 +660,17 @@ class ContextPolicyTest {
             h.append(0, listOf(user("goal"))); saved = checkpoint(h, "CONTINUATION"); h.saveCheckpoint(saved)
             val p = ScriptProvider(listOf(failure(ModelErrorCode.INVALID_REQUEST)))
             loop(f, p, h, ContextPolicy("goal", resumeCheckpointId = saved.id), saved.identity()).run()
-            assertEquals(1, p.requests.size); assertEquals("PAUSED", h.loadCheckpoint()!!.kind)
+            assertEquals(1, p.requests.size); assertEquals("COMPLETE", h.loadCheckpoint()!!.kind)
         }
         FileRunHistory.open(dir, durability).use { h ->
             h.append(h.revision(), listOf(user("new input is not admission acknowledgement")))
             val p = ScriptProvider(listOf(answer()))
             assertNotNull(h.loadView())
-            assertEquals(RunState.PAUSED, loop(f, p, h, ContextPolicy("goal")).run().state)
+            assertEquals(RunState.COMPLETED, loop(f, p, h, ContextPolicy("goal")).run().state)
             assertFailsWith<IllegalArgumentException> {
                 loop(f, p, h, ContextPolicy("goal", resumeCheckpointId = saved.id), saved.identity()).run()
             }
-            assertTrue(p.requests.isEmpty())
+            assertEquals(1, p.requests.size)
         }
     }
 
@@ -472,6 +852,17 @@ class ContextPolicyTest {
                     request = copyRequest(f.request(), model = "changed"), b = budget(10)).run()
                 assertEquals(RunState.PAUSED, result.state); assertTrue(result.serverExecutionUnknown)
                 assertTrue(p.requests.isEmpty()); assertTrue(s.requests.isEmpty())
+                val token = retryId(h)
+                assertFalse(confirmRetry(h, token, identity.copy(unattended = true)))
+                assertFalse(confirmRetry(h, token, identity.copy(sessionId = "wrong")))
+                assertFalse(confirmRetry(h, "stale"))
+                assertTrue(confirmRetry(h, token))
+                assertFalse(confirmRetry(h, token))
+            }
+            FileRunHistory.open(dir, durability).use { h ->
+                val p = ScriptProvider(listOf(answer()))
+                assertEquals(RunState.COMPLETED, loop(f, p, h, ContextPolicy("goal"), b = budget(100_000)).run().state)
+                assertEquals(1, p.requests.size)
             }
         }
     }
@@ -541,12 +932,12 @@ class ContextPolicyTest {
         }
     }
 
-    @Test fun `failed summary reservations retain counters through explicit budget readmission`() = runTest {
+    @Test fun `definitely rejected summary reservations retain counters through explicit budget readmission`() = runTest {
         val f = RunFixture(); val dir = root.resolve("failed-summary")
         FileRunHistory.create(dir, "session", durability).use { h ->
             h.append(0, listOf(user("old".repeat(1000)), user("goal")))
             repeat(3) { n ->
-                val s = ScriptProvider(listOf(failure(ModelErrorCode.SERVER))); val p = ScriptProvider(listOf(answer()))
+                val s = ScriptProvider(listOf(failure(ModelErrorCode.INVALID_REQUEST))); val p = ScriptProvider(listOf(answer()))
                 val saved = h.loadCheckpoint()
                 val result = loop(f, p, h, ContextPolicy("goal", 1, summary(s, 1800L + n),
                     readmitBudgetCheckpointId = saved?.id), limits = RunLimits(maxRetries = 2)).run()
@@ -625,6 +1016,11 @@ class ContextPolicyTest {
             val p = ScriptProvider(listOf(answer())); val s = ScriptProvider(listOf(answer()))
             assertEquals(RunState.PAUSED, loop(f, p, h, ContextPolicy("goal", 1, summary(s))).run().state)
             assertTrue(p.requests.isEmpty()); assertTrue(s.requests.isEmpty()); assertNotNull(h.loadView())
+            val token = retryId(h)
+            assertFalse(confirmRetry(h, token, identity.copy(unattended = true)))
+            assertTrue(confirmRetry(h, token)); assertFalse(confirmRetry(h, token))
+            assertEquals(RunState.COMPLETED, loop(f, p, h, ContextPolicy("goal", 1)).run().state)
+            assertEquals(1, p.requests.size)
         }
     }
 
@@ -658,6 +1054,10 @@ class ContextPolicyTest {
                 assertEquals(0, result.steps); assertEquals(0, result.retries)
                 assertEquals(reservation, h.loadCheckpoint()!!.pauseClass)
                 assertTrue(p.requests.isEmpty()); assertTrue(s.requests.isEmpty()); assertNull(h.loadBarrier())
+                val token = retryId(h)
+                assertTrue(confirmRetry(h, token)); assertFalse(confirmRetry(h, token))
+                assertEquals(RunState.COMPLETED, loop(f, p, h, ContextPolicy("goal"), b = budget(10_000)).run().state)
+                assertEquals(1, p.requests.size)
             }
         }
     }
@@ -767,8 +1167,8 @@ class ContextPolicyTest {
                     }
                     val result = AgentRunLoop(identity.copy(runId = "reopened"), ModelTarget("provider", p, Credentials { "fake" }), request, h,
                         executor, budget = budget(), contextPolicy = ContextPolicy("goal")).run()
-                    assertEquals(if (scenario in setOf("exit", "clear", "sticky")) RunState.COMPLETED else RunState.PAUSED, result.state)
-                    assertEquals(if (scenario in setOf("exit", "clear", "sticky")) 1 else 0, p.requests.size)
+                    assertEquals(if (scenario in setOf("exit", "unknown", "clear", "accept", "late", "sticky")) RunState.COMPLETED else RunState.PAUSED, result.state)
+                    assertEquals(if (scenario in setOf("exit", "unknown", "clear", "accept", "late", "sticky")) 1 else 0, p.requests.size)
                     assertEquals(scenario == "remote", result.serverExecutionUnknown)
                     assertEquals(scenario == "remote", h.loadBarrier() != null)
                 }
@@ -777,7 +1177,8 @@ class ContextPolicyTest {
     }
 
     @Test fun `disk ledger precision preserves raw and late evidence for continuation readmission and view`() = runTest {
-        for (kind in listOf("CONTINUATION", "PAUSED", "VIEW")) for (changed in listOf("none", "evidence", "result")) {
+        for (kind in listOf("CONTINUATION", "PAUSED", "VIEW", "ADMITTED")) for (changed in listOf("none", "evidence", "result", "legacy-summary")) {
+            if (kind == "ADMITTED" && changed in listOf("evidence", "result")) continue
             val dir = root.resolve("precision-$kind-$changed"); val ledgerDir = root.resolve("precision-ledger-$kind-$changed")
             val definition = testDefinition(); val request = RunFixture(listOf(definition)).request()
             lateinit var saved: ContextCheckpoint
@@ -787,7 +1188,10 @@ class ContextPolicyTest {
                 ledger.recoverColdStart("first")
                 val bridge = object : ToolExecutionBridge {
                     override fun submit(ticket: ExecutionTicket) {
-                        ledger.complete(ticket.callId, ticket.attemptId, Status.SUCCEEDED, "raw\uD800 original")
+                        val pending = assertIs<Mutation.Applied>(ledger.requestRiskUpgrade(ticket.callId,
+                            ticket.attemptId, Risk.WRITE, "Persist this runtime approval summary")).record.pending!!
+                        assertIs<Mutation.Applied>(ledger.resolveApproval(ticket.callId, pending, Decision.ALLOW_ONCE))
+                        ledger.complete(ticket.callId, ticket.attemptId, Status.SUCCEEDED, "raw\uD800 original", Effect.NONE)
                         ledger.recordOutcome(ticket.callId, ticket.attemptId, Status.SUCCEEDED, "late\uDC00 evidence", Effect.NONE)
                     }
                     override suspend fun awaitTerminal(callId: String) = Unit
@@ -799,13 +1203,39 @@ class ContextPolicyTest {
                     AgentRunLoop(identity, ModelTarget("provider", ScriptProvider(listOf(calls("tool"), answer())), Credentials { "fake" }),
                         request, h, executor, budget = budget(), contextPolicy = ContextPolicy("goal")).run()
                     val records = executor.checkpointRecords(h.snapshot().messages)
-                    saved = checkpoint(h, kind).copy(catalog = listOf(definition), ledger = records,
+                    saved = checkpoint(h, if (kind == "ADMITTED") "CONTINUATION" else kind).copy(catalog = listOf(definition), ledger = records,
                         settingsKey = settingsKey("provider", request), pauseClass = "BUDGET", budgetKey = "1500|null")
                     h.saveCheckpoint(saved)
+                    if (kind == "ADMITTED") {
+                        var submitted = false
+                        val interrupted = object : ModelProvider by ScriptProvider(emptyList()) {
+                            override fun chat(request: ChatRequest, auth: Credentials) = flow<ModelEvent> {
+                                submitted = true
+                                kotlinx.coroutines.awaitCancellation()
+                            }
+                        }
+                        assertFailsWith<kotlinx.coroutines.CancellationException> {
+                            kotlinx.coroutines.withTimeout(10) {
+                                AgentRunLoop(saved.identity(), ModelTarget("provider", interrupted, Credentials { "fake" }),
+                                    request, h, executor, budget = budget(),
+                                    contextPolicy = ContextPolicy("goal", resumeCheckpointId = saved.id)).run()
+                            }
+                        }
+                        assertTrue(submitted)
+                        saved = h.loadCheckpoint()!!
+                        assertEquals("ADMITTED", saved.pauseClass)
+                        assertNotNull(h.loadView())
+                    }
                     assertTrue(saved.ledger.single().result!!.text.contains('\uD800'))
                     assertTrue(saved.ledger.single().evidence.last().text.contains('\uDC00'))
                     val record = records.single()
                     if (changed == "evidence") ledger.recordOutcome(record.callId, record.instance!!.attemptId, Status.SUCCEEDED, "genuinely changed evidence", Effect.NONE)
+                    if (changed == "legacy-summary") {
+                        saved = saved.copy(ledger = records.map { r -> r.copy(receipts = r.receipts.map {
+                            it.copy(request = it.request.copy(summary = ""))
+                        }) })
+                        h.saveCheckpoint(saved)
+                    }
                     if (changed == "result") {
                         // A durable snapshot with actually different logical output is not a UTF-8 equivalence.
                         saved = saved.copy(ledger = listOf(record.copy(result = record.result!!.copy(text = "changed result"))))
@@ -824,7 +1254,9 @@ class ContextPolicyTest {
                 }
                 FileRunHistory.open(dir, durability).use { h ->
                     val p = ScriptProvider(listOf(answer()))
+                    if (kind == "ADMITTED") assertTrue(confirmRetry(h, retryId(h)))
                     val policy = when (kind) {
+                        "ADMITTED" -> ContextPolicy("goal")
                         "CONTINUATION" -> ContextPolicy("goal", resumeCheckpointId = saved.id)
                         "PAUSED" -> ContextPolicy("goal", readmitBudgetCheckpointId = saved.id)
                         else -> ContextPolicy("goal", h.snapshot().messages.size)

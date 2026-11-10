@@ -98,7 +98,8 @@ internal data class ContextCheckpoint(
  * Written before server submission, cleared only after a confirmed complete durable response. */
 @Serializable
 internal data class ExecutionBarrier(val sessionId: String, val taskChainId: String,
-    val runId: String, val reason: String, val steps: Int, val retries: Int)
+    val runId: String, val reason: String, val steps: Int, val retries: Int,
+    val id: String = "legacy")
 
 /** Public, non-secret inspection surface for a host's continuation UI. */
 data class CheckpointInfo(val id: String, val previousRunId: String, val nextIdentity: RunIdentity?,
@@ -178,12 +179,14 @@ internal class ContextSummarizer(
         val reducer = ModelEventReducer(model.target.id, req.requestId)
         journal.submitted(req.requestId, model.target.id, mode)
         var cancelled = false
+        val evidence = ResponseEvidence()
         try {
-            flow { emitAll(model.target.provider.chat(req, model.target.credentials)) }
+            evidence.observe(flow { emitAll(model.target.provider.chat(req, model.target.credentials)) })
                 .validated(model.target.id, req.requestId, timeouts).collect { reducer.accept(it) }
         } catch (e: CancellationException) { cancelled = true; throw e }
         finally { journal.finished(ModelAttempt(req.requestId, model.target.id, mode, reducer.assistantMessage(),
             reducer.terminal, reducer.usage, cancelled)) }
+        if (!evidence.confirms(reducer.terminal)) throw UncertainSummaryResponse()
         val terminal = reducer.terminal as? ModelEvent.Finished ?: return null
         if (terminal.reason != FinishReason.STOP || reducer.calls().isNotEmpty()) return null
         val parts = reducer.assistantMessage().parts
