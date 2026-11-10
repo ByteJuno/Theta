@@ -195,7 +195,8 @@ internal object HistoryCodec {
                 "effectiveRisk" to v.effectiveRisk, "executionArgs" to v.executionArgs, "pending" to v.pending,
                 "receipts" to v.receipts, "instance" to v.instance, "result" to v.result, "evidence" to v.evidence,
                 "isolation" to v.isolation, "restartRequired" to v.restartRequired,
-                "recoveryPending" to v.recoveryPending, "restartRequiredUntilExit" to v.restartRequiredUntilExit)
+                "recoveryPending" to v.recoveryPending, "restartRequiredUntilExit" to v.restartRequiredUntilExit,
+                "acknowledgedUnknownDenial" to v.acknowledgedUnknownDenial)
             is InvocationInput -> fields("binding" to v.binding, "taskChainId" to v.taskChainId,
                 "sessionId" to v.sessionId, "runId" to v.runId, "stepId" to v.stepId, "callOrder" to v.callOrder,
                 "argsJson" to v.argsJson, "definition" to v.definition, "unattended" to v.unattended,
@@ -210,7 +211,7 @@ internal object HistoryCodec {
             is ApprovalRequest -> fields("id" to v.id, "callId" to v.callId, "digest" to v.digest,
                 "version" to v.version, "generation" to v.generation, "risk" to v.risk,
                 "unknownCalls" to v.unknownCalls, "internal" to v.internal, "summary" to v.summary)
-            is ApprovalReceipt -> fields("request" to v.request, "decision" to v.decision)
+            is ApprovalReceipt -> fields("request" to v.request, "decision" to v.decision, "reason" to v.reason)
             is ExecutionInstance -> fields("attemptId" to v.attemptId, "processEpoch" to v.processEpoch, "state" to v.state)
             is LogicalResult -> fields("status" to v.status, "effect" to v.effect, "text" to v.text,
                 "inconsistentRead" to v.inconsistentRead, "output" to v.output)

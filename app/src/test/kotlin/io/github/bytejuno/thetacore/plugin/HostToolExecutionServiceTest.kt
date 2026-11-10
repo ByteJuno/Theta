@@ -3,6 +3,7 @@ package io.github.bytejuno.thetacore.plugin
 import io.github.bytejuno.thetacore.agent.execution.Schema202012Validator
 import io.github.bytejuno.thetacore.agent.ledger.*
 import io.github.bytejuno.thetacore.agent.protocol.*
+import io.github.bytejuno.thetacore.agent.run.*
 import io.github.bytejuno.thetacore.agent.provider.openai.OpenAiChatCodec
 import io.github.bytejuno.thetacore.agent.provider.openai.OpenAiChatConfig
 import io.github.bytejuno.thetacore.agent.provider.openai.OpenAiChatProvider
@@ -1498,6 +1499,73 @@ class HostToolExecutionServiceTest {
         }
     }
 
+    @Test fun unattendedInternalUnknownDenialSurvivesActualReadExitAndPausesLoop() = runBlocking {
+        for (failed in listOf(false, true)) Fixture().use { f ->
+            val writes = AtomicInteger()
+            val read = f.catalog.registerHost("host/read", "1", tool { env ->
+                val allowed = env.requestApproval("internal write", ToolRisk.WRITE)
+                if (allowed) writes.incrementAndGet()
+                assertFalse(allowed)
+                ToolResult("read actually ran", isError = failed, effect = ToolEffect.NONE)
+            })
+            val uncertain = f.catalog.registerHost("host/uncertain", "1", tool(risk = ToolRisk.WRITE) {
+                ToolResult("uncertain", isError = true, effect = ToolEffect.UNKNOWN)
+            })
+            val definitions = f.catalog.freeze("run").values.toList()
+            val old = f.input(uncertain, step = "old")
+            f.service.prepare(old); approve(f, old.binding.callId)
+            f.service.dispatch(old.binding.callId)
+            f.service.awaitObservedExit(old.binding.callId)
+            val requests = AtomicInteger()
+            val provider = object : ModelProvider {
+                override fun chat(request: ChatRequest, auth: Credentials) = flow {
+                    val n = requests.incrementAndGet()
+                    emit(Events.started("response", "no-api"))
+                    if (n == 1) {
+                        emit(Events.toolStart(0, "wire", read.modelName))
+                        emit(Events.toolDelta(0, "{}")); emit(Events.end(0))
+                    } else { emit(Events.text(0, "done")); emit(Events.end(0)) }
+                    emit(Events.finished(FinishReason.STOP))
+                }
+            }
+            val memory = MemoryRunHistory()
+            // Adapt the exact loop-owned binding to the production bridge before reconciliation.
+            // HostToolExecutionService currently owns claim+dispatch rather than accepting tickets.
+            val history = object : RunHistory by memory {
+                override fun prepareStep(expectedRevision: Long, identity: RunIdentity, stepId: String, assistant: Message) {
+                    val call = assistant.parts.single() as ContentPart.ToolCall
+                    runBlocking {
+                        val input = InvocationInput(io.github.bytejuno.thetacore.agent.ledger.BindingValue.copyOf(call.binding),
+                            "chain", "session", "run", stepId, 0, call.argsJson, read, true, Risk.READ)
+                        assertTrue(f.service.prepare(input) is Mutation.Applied)
+                        assertTrue(f.service.dispatch(call.binding.callId) is Mutation.Applied)
+                        f.service.awaitObservedExit(call.binding.callId)
+                        val actual = f.ledger.get(call.binding.callId)!!
+                        assertEquals(if (failed) Status.FAILED else Status.SUCCEEDED, actual.state)
+                        assertEquals(Effect.NONE, actual.result!!.effect)
+                        assertEquals(InstanceState.EXIT_CONFIRMED, actual.instance!!.state)
+                    }
+                }
+            }
+            val executor = io.github.bytejuno.thetacore.agent.run.LedgerToolExecutor(f.ledger, f.gate, definitions,
+                object : io.github.bytejuno.thetacore.agent.run.ToolExecutionBridge {
+                    override fun submit(ticket: ExecutionTicket) = error("Already executed by production service")
+                    override suspend fun awaitTerminal(callId: String) = f.service.awaitObservedExit(callId)
+                    override fun requestCancel(callId: String) = error("Already exited")
+                }, io.github.bytejuno.thetacore.agent.run.RunApprovals { error("Unattended callback") })
+            val loop = io.github.bytejuno.thetacore.agent.run.AgentRunLoop(
+                io.github.bytejuno.thetacore.agent.run.RunIdentity("chain", "session", "run", true),
+                io.github.bytejuno.thetacore.agent.run.ModelTarget("recorded", provider, Credentials { "fake" }),
+                chatRequest("no-api") { tools = definitions.map { modelTool(it.modelName, it.description, Json.parseToJsonElement(it.inputSchema).jsonObject) } },
+                history, executor)
+            assertEquals(io.github.bytejuno.thetacore.agent.run.RunState.PAUSED, loop.run().state)
+            assertEquals(1, requests.get())
+            assertEquals(0, writes.get())
+            assertTrue(f.ledger.pendingApprovals().isEmpty())
+            validateHistory(history.snapshot().messages)
+        }
+    }
+
     @Test fun runtimeAskSuspendsAndHostApiCommitsRiskBeforeReturningTrue() = runBlocking {
         Fixture().use { f ->
             val returned = CompletableDeferred<Boolean>()
@@ -1946,7 +2014,10 @@ class HostToolExecutionServiceTest {
             val result = f.ledger.get(i.binding.callId)!!.result!!
             if (text.isEmpty()) {
                 assertEquals(Status.FAILED, result.status)
-                assertEquals("Tool returned invalid structured output", result.text)
+                assertEquals("Side effects are unknown. The operation may have taken effect; verify the outcome before retrying.\n" +
+                    "Tool returned invalid structured output", result.text)
+                assertEquals("Tool returned invalid structured output", f.ledger.get(i.binding.callId)!!.evidence
+                    .first { it.outcome != null }.outcome!!.text)
                 assertEquals(Effect.UNKNOWN, result.effect)
             } else {
                 assertEquals(Status.SUCCEEDED, result.status)

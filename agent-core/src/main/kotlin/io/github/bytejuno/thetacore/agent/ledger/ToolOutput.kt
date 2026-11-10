@@ -58,7 +58,7 @@ sealed interface OutputPart {
     fun references(): List<BlobRef> = listOf(raw) + media
 }
 data class NormalizedOutput(val text: String, val isError: Boolean, val stored: StoredToolOutput,
-    val writes: List<BlobWrite>)
+    val writes: List<BlobWrite>, val truncationNotice: String)
 
 object ToolOutputNormalizer {
     const val TEXT_LIMIT = 32 * 1024
@@ -93,7 +93,7 @@ object ToolOutputNormalizer {
             "Data is base64-encoded bytes. Truncated JSON above is text, not a complete structured value.]"
         val bounded = ModelResultText.bound(text, notice)
         return NormalizedOutput(bounded, isError || (!valid && empty),
-            StoredToolOutput(raw.ref, parts.mapNotNull { it.blob }, warning), writes)
+            StoredToolOutput(raw.ref, parts.mapNotNull { it.blob }, warning), writes, notice)
     }
 }
 

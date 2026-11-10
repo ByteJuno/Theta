@@ -36,10 +36,10 @@ class HistorySchemaTest {
             InvocationInput(BindingValue("provider", "request", "response", 3, "wire", id),
                 "chain", "session", "run", "step", 4, "{}", definition, true, Risk.WRITE, true, "tool"),
             definition.digest, Status.TIMED_OUT, Risk.ROOT, "{}", approval,
-            listOf(ApprovalReceipt(approval, Decision.ALLOW_ALWAYS)),
+            listOf(ApprovalReceipt(approval, Decision.DENY, ApprovalDenialReason.UNATTENDED_UNKNOWN)),
             ExecutionInstance(UUID.randomUUID().toString(), "epoch", InstanceState.UNCONFIRMED), result,
             listOf(ExitEvidence("attempt", "late", result)), Isolation("unknown", "resource", RecoveryResolution.ACCEPTED_UNCERTAINTY),
-            true, true, true)
+            true, true, true, approval.id)
         // Wire-shape fixtures intentionally exercise optional fields together; transition validity
         // is tested separately against the real ledger, not relaxed by this serializer test.
         val checkpoint = ContextCheckpoint(1, "checkpoint", "session", "chain", "run", "next", true,

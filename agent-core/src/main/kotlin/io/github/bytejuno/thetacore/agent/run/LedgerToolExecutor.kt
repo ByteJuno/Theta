@@ -72,7 +72,10 @@ class LedgerToolExecutor(
     /** Ordinary runs may inspect unresolved effects after actual exit. Resource isolation and
      * same-chain UNKNOWN write approvals remain enforced by the ledger on every tool submission. */
     internal fun localExecutionBlocked(records: List<InvocationRecord>): Boolean = records.any {
-        !it.state.terminal || it.instance?.state == InstanceState.UNCONFIRMED || it.recoveryPending || it.restartRequired
+        !it.state.terminal || it.instance?.state == InstanceState.UNCONFIRMED || it.recoveryPending || it.restartRequired ||
+            it.isolation?.let { isolation -> isolation.resource != null && isolation.resolution != RecoveryResolution.VERIFIED_CLEAR } == true ||
+            it.receipts.lastOrNull { receipt -> receipt.reason == ApprovalDenialReason.UNATTENDED_UNKNOWN }
+                ?.request?.id?.let { denial -> denial != it.acknowledgedUnknownDenial } == true
     }
 
     /** Ordinary prior-history compaction needs actual exit and a recorded host/user decision for
@@ -83,7 +86,7 @@ class LedgerToolExecutor(
     // UNKNOWN remains forensic truth after resolution. Only a real exited instance with current
     // VERIFIED_CLEAR may pass: resolveRecovery is a no-op without isolation, and new UNKNOWN
     // outcome evidence replaces isolation with an unresolved value in the ledger.
-    internal fun checkpointBlocked(records: List<InvocationRecord>): Boolean = records.any { r ->
+    internal fun checkpointBlocked(records: List<InvocationRecord>): Boolean = localExecutionBlocked(records) || records.any { r ->
         !r.state.terminal || (r.result?.effect == Effect.UNKNOWN &&
             (r.instance?.state != InstanceState.EXIT_CONFIRMED || r.isolation?.resolution != RecoveryResolution.VERIFIED_CLEAR)) ||
             r.instance?.state == InstanceState.UNCONFIRMED ||
@@ -112,9 +115,20 @@ class LedgerToolExecutor(
         for (call in calls) {
             currentCoroutineContext().ensureActive()
             var r = record(ledger.validateAndPrepare(call.binding.callId))
-            if (r.state == Status.WAITING_APPROVAL) {
-                r = record(ledger.resolveApproval(r.callId, r.pending!!, approvals.decide(r.pending!!)))
+            var prompts = 0
+            suspend fun resolveCurrent() {
+                while (r.state == Status.WAITING_APPROVAL) {
+                    currentCoroutineContext().ensureActive()
+                    // Evidence may change while a human decides. Re-ask the renewed request,
+                    // never consume a stale receipt, and stop if the boundary keeps moving.
+                    if (++prompts > 8) throw ToolStepBlocked("Approval evidence kept changing")
+                    val pending = requireNotNull(r.pending)
+                    val decision = approvals.decide(pending)
+                    currentCoroutineContext().ensureActive()
+                    r = record(ledger.resolveApproval(r.callId, pending, decision))
+                }
             }
+            resolveCurrent()
             if (r.state.terminal) continue
             if (r.state != Status.READY) throw ToolStepBlocked("Approval not resolved")
             val resource = r.input.definition?.exclusiveResource
@@ -130,14 +144,22 @@ class LedgerToolExecutor(
             // A serial invocation is awaited immediately. The ledger still enforces actual-exit
             // barriers, shared resources, definition versions, unknown effects and cold recovery.
             val context = currentCoroutineContext()
-            val claimed = gate.withGate {
-                // Approval/barrier callbacks may cancel and still return normally. Check inside
-                // the scheduling gate, before a durable claim can make this an executed call.
-                context.ensureActive()
-                val mutation = ledger.claimExecution(r.callId, r.revision)
-                val next = record(mutation)
-                (mutation as? Mutation.Applied)?.ticket?.let { bridge.submit(it) }
-                next
+            var claimed: InvocationRecord
+            while (true) {
+                claimed = gate.withGate {
+                    // Approval/barrier callbacks may cancel and still return normally. Check inside
+                    // the scheduling gate, before a durable claim can make this an executed call.
+                    context.ensureActive()
+                    val mutation = ledger.claimExecution(r.callId, r.revision)
+                    val next = record(mutation)
+                    (mutation as? Mutation.Applied)?.ticket?.let { bridge.submit(it) }
+                    next
+                }
+                if (claimed.state != Status.WAITING_APPROVAL) break
+                r = claimed
+                resolveCurrent()
+                if (r.state.terminal) { claimed = r; break }
+                if (r.state != Status.READY) throw ToolStepBlocked("Approval not resolved")
             }
             if (claimed.state == Status.RUNNING) {
                 if (claimed.input.definition?.parallelSafe == true) active += claimed.callId
@@ -166,10 +188,11 @@ class LedgerToolExecutor(
         ledger.resultsForStep(identity.sessionId, identity.runId, step, calls.map { it.binding.callId })
             ?: throw ToolStepBlocked("Incomplete ledger step; history must remain uncommitted")
 
+    fun continuationBlocked(identity: RunIdentity): Boolean = ledger.continuationBlocked(identity.taskChainId)
+
     fun unresolved(calls: List<CollectedCall>): Boolean = calls.any {
         val r = ledger.get(it.binding.callId) ?: return@any true
-        r.instance?.state == InstanceState.UNCONFIRMED || r.recoveryPending || r.restartRequired ||
-            r.isolation?.let { isolation -> isolation.resolution != RecoveryResolution.VERIFIED_CLEAR } == true
+        ledger.continuationBlocked(r.input.taskChainId)
     }
 
     private fun record(mutation: Mutation): InvocationRecord = when (mutation) {

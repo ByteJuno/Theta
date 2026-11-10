@@ -193,13 +193,16 @@ internal class HostToolExecutionService(
         val result = value.result
         val effect = if (!entered) Effect.NONE else result?.effect?.let { Effect.valueOf(it.name) }
         val error = value.status != PluginInvocationStatus.SUCCEEDED || result?.isError == true
-        if (result?.structured == null && result?.content.isNullOrEmpty() &&
-            ModelResultText.fits(result?.text ?: value.message.orEmpty()))
-            return observe(ledger.recordOutcome(ticket.callId, ticket.attemptId,
-                if (error) Status.FAILED else Status.SUCCEEDED, result?.text ?: value.message.orEmpty(), effect))
         val previous = cache.value
         val reusable = previous != null && previous.result === result && previous.status == value.status &&
             previous.message == value.message && cache.entered == entered
+        // Repeated observations must reuse an already normalized return: after the first
+        // terminal write the preview no longer adds a warning, but its blob route is fixed.
+        if (!reusable && result?.structured == null && result?.content.isNullOrEmpty() &&
+            ledger.outcomeFitsInline(ticket.callId, ticket.attemptId,
+                if (error) Status.FAILED else Status.SUCCEEDED, result?.text ?: value.message.orEmpty(), effect))
+            return observe(ledger.recordOutcome(ticket.callId, ticket.attemptId,
+                if (error) Status.FAILED else Status.SUCCEEDED, result?.text ?: value.message.orEmpty(), effect))
         val normalized = if (reusable) checkNotNull(cache.output) else {
         val parts = buildList {
             val original = result?.text ?: value.message.orEmpty()

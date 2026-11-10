@@ -214,7 +214,8 @@ class ContextPolicyTest {
     }
 
     @Test fun `accepted unknown write allows ordinary question but next write still requires unknown approval`() = runTest {
-        val definition = testDefinition(risk = Risk.WRITE).copy(exclusiveResource = "external-file")
+        // Accepted effect uncertainty permits inspection only without unresolved resource isolation.
+        val definition = testDefinition(risk = Risk.WRITE)
         val f = RunFixture(listOf(definition, testDefinition("read")))
         f.onSubmit = { f.ledger.recordOutcome(it.callId, it.attemptId, Status.FAILED, "write uncertain", Effect.UNKNOWN) }
         FileRunHistory.create(root.resolve("accepted-write"), "session", durability).use { h ->

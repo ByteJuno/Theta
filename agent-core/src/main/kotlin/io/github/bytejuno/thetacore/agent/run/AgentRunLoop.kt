@@ -345,6 +345,8 @@ class AgentRunLoop(
         val transientCauses = mutableMapOf<Pair<String, String>, Int>()
         while (steps < limits.maxSteps) {
             currentCoroutineContext().ensureActive()
+            if (tools.continuationBlocked(identity))
+                return result(RunState.PAUSED, "Tool execution or resource recovery unresolved")
             check(history.revision() == view.revision) { "History changed during active run" }
             val messages = requestMessages(view).map { m ->
                 if (cacheDisabled) message(m.role, *m.parts.toTypedArray()) else m
