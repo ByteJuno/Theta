@@ -84,12 +84,17 @@ class InvocationLedger(
     private fun hasUnknown(r: InvocationRecord) = r.result?.effect == Effect.UNKNOWN ||
         r.evidence.any { it.outcome?.effect == Effect.UNKNOWN }
     /** Chain-local pause, independent of step, owner, parallelSafe and resource declarations. */
-    private fun chainBarrier(r: InvocationRecord): Mutation.Blocked? {
+    private fun chainBarrier(r: InvocationRecord, internal: Boolean = false): Mutation.Blocked? {
         val others = all().filter { it.callId != r.callId && it.input.taskChainId == r.input.taskChainId }
         return when {
             others.any { it.recoveryPending } -> Mutation.Blocked("Task chain awaits explicit cold-recovery decision")
             others.any { it.instance?.state == InstanceState.UNCONFIRMED && hasUnknown(it) } ->
                 Mutation.Blocked("Task chain awaits unknown instance actual exit")
+            // Claim retains its original approval/owner-restart ordering below. Running siblings
+            // have no claim boundary left, so enforce external isolation at each internal step.
+            internal && others.any { it.isolation?.let { q ->
+                q.resource != null && q.resolution != RecoveryResolution.VERIFIED_CLEAR } == true } ->
+                Mutation.Blocked("Resource occupied or externally isolated")
             else -> null
         }
     }
@@ -100,6 +105,46 @@ class InvocationLedger(
             ((it.input.definition?.toolKey == r.input.definition?.toolKey && argumentKey(it) == argumentKey(r)) ||
                 (risk > Risk.READ && it.isolation?.resolution != RecoveryResolution.VERIFIED_CLEAR))
     }.map { it.callId }.sorted()
+    private fun unknownDenial(r: InvocationRecord) = r.receipts.lastOrNull {
+        it.reason == ApprovalDenialReason.UNATTENDED_UNKNOWN
+    }?.request?.id
+    private fun denialPending(r: InvocationRecord) = unknownDenial(r)?.let { it != r.acknowledgedUnknownDenial } == true
+
+    /** Effect uncertainty alone permits continuation, but actual execution, cold recovery and
+     * external resource isolation do not. Consult the entire chain, including checkpoint ancestors. */
+    fun continuationBlocked(taskChainId: String): Boolean = gate.withGate {
+        halted || epoch == null || all().any { r ->
+            r.input.taskChainId == taskChainId &&
+                (r.instance?.state == InstanceState.UNCONFIRMED || r.recoveryPending || r.restartRequired || denialPending(r) ||
+                    r.isolation?.let { it.resource != null && it.resolution != RecoveryResolution.VERIFIED_CLEAR } == true)
+        }
+    }
+
+    /** Denial-time evidence, never recomputed from later siblings. An internal denial does not
+     * undo the enclosing READ's execution or replace its eventual terminal result. */
+    fun rejectedUnknownUnattended(callId: String): Boolean = gate.withGate {
+        val r = get(callId) ?: return@withGate false
+        r.input.unattended && r.receipts.any {
+            it.decision == Decision.DENY && it.reason == ApprovalDenialReason.UNATTENDED_UNKNOWN
+        }
+    }
+
+    private fun denied(r: InvocationRecord, risk: Risk, internal: Boolean, summary: String = ""): InvocationRecord {
+        val request = request(r, risk, internal, summary)
+        val reason = if (policy.isDenied(r.input)) ApprovalDenialReason.POLICY
+            else if (r.input.unattended && request.unknownCalls.isNotEmpty()) ApprovalDenialReason.UNATTENDED_UNKNOWN
+            else ApprovalDenialReason.UNATTENDED_APPROVAL
+        return r.copy(receipts = r.receipts + ApprovalReceipt(request, Decision.DENY, reason))
+    }
+
+    /** Persist refusal before returning false through the bridge. Applied/no-pending means ALLOW
+     * to that bridge, so a successful refusal write must still return Blocked. */
+    private fun denyInternal(r: InvocationRecord, risk: Risk, summary: String, reason: String): Mutation =
+        when (val saved = update(r, denied(r, risk, true, summary))) {
+            is Mutation.Applied -> Mutation.Blocked(reason)
+            else -> saved
+        }
+
     private fun request(r: InvocationRecord, risk: Risk, internal: Boolean, summary: String = ""): ApprovalRequest {
         val definition = requireNotNull(r.input.definition)
         return ApprovalRequest(id(), r.callId, requireNotNull(r.definitionDigest),
@@ -120,7 +165,7 @@ class InvocationLedger(
             return@withGate update(r, terminal(r, Status.REJECTED, null, "Invalid arguments"))
         val prepared = r.copy(executionArgs = args)
         when (policy.evaluate(prepared, prepared.effectiveRisk, unknown(prepared), all())) {
-            ApprovalPolicy.Verdict.DENY -> update(r, terminal(prepared, Status.REJECTED, null, "Policy denied"))
+            ApprovalPolicy.Verdict.DENY -> update(r, terminal(denied(prepared, prepared.effectiveRisk, false), Status.REJECTED, null, "Policy denied"))
             ApprovalPolicy.Verdict.ALLOW -> update(r, prepared.copy(state = Status.READY))
             ApprovalPolicy.Verdict.ASK -> update(r, prepared.copy(state = Status.WAITING_APPROVAL,
                 pending = request(prepared, prepared.effectiveRisk, false)))
@@ -179,7 +224,7 @@ class InvocationLedger(
             (it.decision == Decision.ALLOW_ONCE || policy.permitsLongTerm(r.effectiveRisk)) &&
             it.request.risk >= r.effectiveRisk && it.request.unknownCalls == unknown }
         if (!accepted && policy.evaluate(r, r.effectiveRisk, unknown, all()) != ApprovalPolicy.Verdict.ALLOW) {
-            if (r.input.unattended) return@withGate update(r, terminal(r, Status.REJECTED, null, "Unattended approval unavailable"))
+            if (r.input.unattended) return@withGate update(r, terminal(denied(r, r.effectiveRisk, false), Status.REJECTED, null, "Unattended approval unavailable"))
             return@withGate update(r, r.copy(state = Status.WAITING_APPROVAL, pending = request(r, r.effectiveRisk, false)))
         }
         val records = all()
@@ -188,6 +233,11 @@ class InvocationLedger(
         val d = requireNotNull(r.input.definition)
         if (records.any { it.restartRequired && it.input.definition?.owner == d.owner })
             return@withGate Mutation.Blocked("Plugin restart required")
+        // Chain isolation also stops unrelated resources. Keep approval refresh and owner-restart
+        // ordering intact; this check is still under the scheduling gate, before any claim/ticket.
+        if (records.any { it.callId != r.callId && it.input.taskChainId == r.input.taskChainId &&
+                it.isolation?.let { q -> q.resource != null && q.resolution != RecoveryResolution.VERIFIED_CLEAR } == true
+            }) return@withGate Mutation.Blocked("Resource occupied or externally isolated")
         if (d.exclusiveResource != null && records.any {
                 it.input.definition?.exclusiveResource == d.exclusiveResource &&
                     (it.instance?.state == InstanceState.UNCONFIRMED || it.isolation?.let { q -> q.resolution != RecoveryResolution.VERIFIED_CLEAR } == true)
@@ -211,10 +261,10 @@ class InvocationLedger(
             return@withGate Mutation.Conflict("Instance not running")
         if (r.pending != null) return@withGate Mutation.Blocked("Approval already pending")
         definitionCheck(r)?.let { return@withGate it }
-        chainBarrier(r)?.let { return@withGate it }
+        chainBarrier(r, internal = true)?.let { return@withGate it }
         val requestedRisk = maxOf(r.effectiveRisk, risk)
         when (policy.evaluate(r, requestedRisk, unknown(r, requestedRisk), all())) {
-            ApprovalPolicy.Verdict.DENY -> Mutation.Blocked("Internal upgrade denied")
+            ApprovalPolicy.Verdict.DENY -> denyInternal(r, requestedRisk, summary, "Internal upgrade denied")
             ApprovalPolicy.Verdict.ALLOW -> update(r, r.copy(effectiveRisk = maxOf(r.effectiveRisk, requestedRisk)))
             ApprovalPolicy.Verdict.ASK -> update(r, r.copy(pending = request(r, requestedRisk, true, summary)))
         }
@@ -231,12 +281,12 @@ class InvocationLedger(
             ?: return@withGate Mutation.Conflict("No decision for this runtime request")
         if (receipt.decision == Decision.DENY) return@withGate Mutation.Blocked("Internal step denied")
         definitionCheck(r)?.let { return@withGate it }
-        chainBarrier(r)?.let { return@withGate it }
+        chainBarrier(r, internal = true)?.let { return@withGate it }
         if (policy.isDenied(r.input)) return@withGate Mutation.Blocked("Deny rule takes priority")
         if (receipt.decision != Decision.ALLOW_ONCE && !policy.permitsLongTerm(receipt.request.risk))
             return@withGate Mutation.Blocked("ROOT long-term grants disabled")
         if (unknown(r, receipt.request.risk) != receipt.request.unknownCalls) {
-            if (r.input.unattended) return@withGate Mutation.Blocked("Unattended approval unavailable")
+            if (r.input.unattended) return@withGate denyInternal(r, receipt.request.risk, receipt.request.summary, "Unattended approval unavailable")
             return@withGate update(r, r.copy(pending = request(r, receipt.request.risk, true, receipt.request.summary)))
         }
         Mutation.AlreadyApplied(r)
@@ -355,8 +405,9 @@ class InvocationLedger(
     fun pendingApprovals(): List<ApprovalRequest> = gate.withGate { all().mapNotNull { it.detached().pending } }
 
     private fun recoveryRequest(r: InvocationRecord): RecoveryRequest? {
-        if (!r.state.terminal || r.instance?.state != InstanceState.EXIT_CONFIRMED || r.isolation == null ||
-            (!r.recoveryPending && r.isolation.resolution == RecoveryResolution.VERIFIED_CLEAR)) return null
+        if (!r.state.terminal || r.instance?.state == InstanceState.UNCONFIRMED) return null
+        if (!denialPending(r) && (r.instance?.state != InstanceState.EXIT_CONFIRMED || r.isolation == null ||
+            (!r.recoveryPending && r.isolation.resolution == RecoveryResolution.VERIFIED_CLEAR))) return null
         return RecoveryRequest("recovery:${r.callId}:${r.revision}", r.callId, r.revision)
     }
     fun pendingRecoveries(): List<RecoveryRequest> = gate.withGate { all().mapNotNull(::recoveryRequest) }
@@ -366,7 +417,7 @@ class InvocationLedger(
     fun decideRecovery(callId: String, requestId: String, resolution: RecoveryResolution): Mutation = gate.withGate {
         val r = get(callId) ?: return@withGate Mutation.Conflict("Unknown call")
         if (recoveryRequest(r)?.id != requestId) return@withGate Mutation.Conflict("Recovery decision is not current")
-        if (!r.recoveryPending && r.isolation?.resolution == resolution)
+        if (!denialPending(r) && !r.recoveryPending && r.isolation?.resolution == resolution)
             return@withGate Mutation.Conflict("Recovery decision already recorded")
         resolveRecovery(callId, resolution)
     }
@@ -374,9 +425,11 @@ class InvocationLedger(
     fun resolveRecovery(callId: String, resolution: RecoveryResolution): Mutation = gate.withGate {
         val r = get(callId) ?: return@withGate Mutation.Conflict("Unknown call")
         if (r.instance?.state == InstanceState.UNCONFIRMED) return@withGate Mutation.Blocked("Actual exit still unconfirmed")
-        val isolation = r.isolation ?: return@withGate Mutation.AlreadyApplied(r)
-        if (isolation.resolution == resolution && !r.recoveryPending) Mutation.AlreadyApplied(r)
-        else update(r, r.copy(isolation = isolation.copy(resolution = resolution), recoveryPending = false))
+        val isolation = r.isolation
+        if (!denialPending(r) && (isolation == null || isolation.resolution == resolution) && !r.recoveryPending)
+            Mutation.AlreadyApplied(r)
+        else update(r, r.copy(isolation = isolation?.copy(resolution = resolution), recoveryPending = false,
+            acknowledgedUnknownDenial = unknownDenial(r)))
     }
 
     /** Call only on a genuine new host process. Epoch must never be reused. All admission is closed
@@ -408,6 +461,21 @@ class InvocationLedger(
         }
         epoch = newProcessEpoch
         last ?: Mutation.Blocked("Recovery complete; no records changed")
+    }
+
+    /** Append-only supplementary evidence, separate from the immutable canonical tool result.
+     * The caller persists each returned message before provider submission. Stable text deduplicates
+     * across reopen without changing old paired results (including stale-pending reconciliation). */
+    fun uncertaintyNotices(taskChainId: String, history: List<Message>): List<Message> = gate.withGate {
+        val existing = history.flatMap { it.parts }.filterIsInstance<ContentPart.Text>().map { it.text }.toSet()
+        all().filter { it.input.taskChainId == taskChainId && it.state.terminal &&
+            (it.result?.effect == Effect.UNKNOWN || it.evidence.any { e -> e.outcome?.effect == Effect.UNKNOWN })
+        }.map { r ->
+            val source = if (r.result!!.effect == Effect.UNKNOWN) "canonical result" else "supplementary return evidence"
+            "Tool invocation ${r.callId}: $source reports UNKNOWN. " +
+                "Side effects are unknown. The operation may have taken effect; verify the outcome before retrying. " +
+                "The canonical ${r.state.name} / ${r.result!!.effect.name} result is unchanged."
+        }.filterNot { it in existing }.map { message(Role.USER, textPart(it)) }
     }
 
     /** Pure projection, not an append operation. Caller must freeze/register the entire step first.

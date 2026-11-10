@@ -87,7 +87,10 @@ internal fun sha256(value: String) = MessageDigest.getInstance("SHA-256")
 )
 /** Revision-bound identifier: survives reopen, but any new evidence invalidates the decision. */
 @Serializable data class RecoveryRequest(val id: String, val callId: String, val revision: Long)
-@Serializable data class ApprovalReceipt(val request: ApprovalRequest, val decision: Decision)
+/** Null on legacy receipts and explicit user decisions; never infer a reason during decode. */
+@Serializable enum class ApprovalDenialReason { POLICY, UNATTENDED_UNKNOWN, UNATTENDED_APPROVAL }
+@Serializable data class ApprovalReceipt(val request: ApprovalRequest, val decision: Decision,
+    val reason: ApprovalDenialReason? = null)
 @Serializable data class ExecutionInstance(val attemptId: String, val processEpoch: String, val state: InstanceState)
 @Serializable data class LogicalResult(val status: Status, val effect: Effect, val text: String, val inconsistentRead: Boolean,
     val output: StoredToolOutput? = null)
@@ -105,6 +108,8 @@ internal fun sha256(value: String) = MessageDigest.getInstance("SHA-256")
     val isolation: Isolation?, val restartRequired: Boolean, val recoveryPending: Boolean,
     /** Only a timed-out call's grace-expiry restriction is released by actual exit. Cancelled calls and legacy/other causes stay sticky. */
     val restartRequiredUntilExit: Boolean = false,
+    /** Explicit recovery acknowledgement; denial receipts themselves remain immutable evidence. */
+    val acknowledgedUnknownDenial: String? = null,
 ) {
     val callId: String get() = input.binding.callId
     fun validate() {
@@ -142,6 +147,14 @@ internal fun sha256(value: String) = MessageDigest.getInstance("SHA-256")
             require(executionArgs == if (original == JsonNull) "{}" else input.argsJson) { "Frozen arguments differ from original" }
         }
         require(receipts.map { it.request.id }.distinct().size == receipts.size)
+        require(receipts.all { it.reason == null || it.decision == Decision.DENY })
+        require(receipts.filter { it.reason == ApprovalDenialReason.UNATTENDED_UNKNOWN }.all {
+            input.unattended && it.request.unknownCalls.isNotEmpty()
+        })
+        require(receipts.none { it.reason == ApprovalDenialReason.UNATTENDED_APPROVAL } || input.unattended)
+        require(acknowledgedUnknownDenial == null || receipts.any {
+            it.request.id == acknowledgedUnknownDenial && it.reason == ApprovalDenialReason.UNATTENDED_UNKNOWN
+        })
         for (request in receipts.map { it.request } + listOfNotNull(pending)) {
             require(request.callId == callId && request.digest == definitionDigest &&
                 request.version == input.definition?.version && request.generation == input.definition.generation)

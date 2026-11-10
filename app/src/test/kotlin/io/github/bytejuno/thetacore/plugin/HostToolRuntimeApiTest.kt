@@ -154,7 +154,22 @@ class HostToolRuntimeApiTest {
                 val view = call(api, buildJsonObject { put("operation", "get"); put("callId", id) })
                 assertTrue(view["recoveryPending"]!!.jsonPrimitive.boolean)
                 assertEquals(recovered, service.ledger.get(id))
-                val pending = Json.parseToJsonElement(api.request("""{"operation":"pendingRecoveries"}""")).jsonArray.single().jsonObject
+                val recoveries = Json.parseToJsonElement(api.request("""{"operation":"pendingRecoveries"}""")).jsonArray.map { it.jsonObject }
+                // The unattended same-argument retry now carries its own durable pause. It must
+                // be recoverable through the existing ID-only API, independently of the old effect.
+                val nextId = next["callId"]!!.jsonPrimitive.content
+                assertEquals(setOf(id, nextId), recoveries.map { it["callId"]!!.jsonPrimitive.content }.toSet())
+                val denied = service.ledger.get(nextId)!!
+                val denialRecovery = recoveries.single { it["callId"]!!.jsonPrimitive.content == nextId }
+                assertEquals("applied", call(api, buildJsonObject {
+                    put("operation", "decideRecovery"); put("callId", nextId)
+                    put("recoveryId", denialRecovery["id"]!!); put("resolution", "ACCEPTED_UNCERTAINTY")
+                })["kind"]!!.jsonPrimitive.content)
+                assertEquals(denied.receipts, service.ledger.get(nextId)!!.receipts)
+                assertNull(service.ledger.get(nextId)!!.instance)
+                assertEquals(recovered, service.ledger.get(id))
+                assertTrue(service.ledger.continuationBlocked("chain"))
+                val pending = recoveries.single { it["callId"]!!.jsonPrimitive.content == id }
                 val decision = buildJsonObject {
                     put("operation", "decideRecovery"); put("callId", id)
                     put("recoveryId", pending["id"]!!); put("resolution", "VERIFIED_CLEAR")

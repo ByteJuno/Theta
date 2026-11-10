@@ -77,7 +77,14 @@ class AgentRunLoop(
         val transientCauses = mutableMapOf<Pair<String, String>, Int>()
         while (steps < limits.maxSteps) {
             currentCoroutineContext().ensureActive()
+            if (tools.continuationBlocked(identity))
+                return result(RunState.PAUSED, "Tool execution or resource recovery unresolved")
             check(history.revision() == view.revision) { "History changed during active run" }
+            val notices = tools.uncertaintyNotices(identity, view.messages)
+            if (notices.isNotEmpty()) {
+                history.append(view.revision, notices)
+                view = HistorySnapshot(history.revision(), freezeMessages(view.messages + notices))
+            }
             val request = copyRequest(config, view.messages, requestId = UUID.randomUUID().toString())
             val estimate = budget.tokens(request)
             val capacity = budget.limit(request.model)
