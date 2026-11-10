@@ -1264,7 +1264,13 @@ class ContextPolicyTest {
                     val run = AgentRunLoop(if (kind == "CONTINUATION") saved.identity() else identity.copy(runId = "restart"),
                         ModelTarget("provider", p, Credentials { "fake" }), request, h,
                         LedgerToolExecutor(ledger, gate, listOf(definition), bridge), budget = budget(10_000), contextPolicy = policy)
-                    if (changed != "none") { assertFailsWith<IllegalArgumentException> { run.run() }; assertTrue(p.requests.isEmpty()) }
+                    if (kind == "VIEW" && changed in setOf("evidence", "result")) {
+                        // A stale derived view is dropped, never a session lock: raw history is sent.
+                        assertEquals(RunState.COMPLETED, run.run().state); assertEquals(1, p.requests.size)
+                        assertTrue(p.requests.single().messages.flatMap { it.parts }.filterIsInstance<ContentPart.Text>()
+                            .none { it.text.startsWith("Summary continuation") })
+                    }
+                    else if (changed != "none") { assertFailsWith<IllegalArgumentException> { run.run() }; assertTrue(p.requests.isEmpty()) }
                     else {
                         assertEquals(saved.ledger.map { it.atLedgerPrecision() }, store.records())
                         assertEquals(RunState.COMPLETED, run.run().state); assertEquals(1, p.requests.size)
@@ -1495,5 +1501,77 @@ class ContextPolicyTest {
         }
         Files.write(dir.resolve("batches/1.json"), byteArrayOf(1, 2, 3))
         FileRunHistory.open(dir, durability).use { h -> assertFailsWith<HistoryStorageException> { h.checkpointInfo() } }
+    }
+
+    @Test fun `budget pause or summary offer superseded by new input does not lock session`() = runTest {
+        for (offer in listOf(true, false)) {
+            val f = RunFixture(if (offer) listOf(testDefinition()) else emptyList())
+            f.onSubmit = { f.ledger.complete(it.callId, it.attemptId, Status.SUCCEEDED, "x".repeat(5000)) }
+            FileRunHistory.create(root.resolve("superseded-$offer"), "session", durability).use { h ->
+                if (offer) {
+                    h.append(0, listOf(user("goal")))
+                    loop(f, ScriptProvider(listOf(calls("tool"))), h, ContextPolicy("goal", summaryModel = summary()),
+                        limits = RunLimits(maxRetries = 50)).run()
+                    assertEquals("CONTINUATION", h.loadCheckpoint()!!.kind)
+                } else {
+                    h.append(0, listOf(user("old".repeat(800)), message(Role.ASSISTANT, textPart("past")), user("goal")))
+                    loop(f, ScriptProvider(listOf(answer())), h, ContextPolicy("goal", 2)).run()
+                    assertEquals("BUDGET", h.loadCheckpoint()!!.pauseClass); assertEquals("PAUSED", h.loadCheckpoint()!!.kind)
+                }
+                val saved = h.loadCheckpoint()!!
+                val idle = ScriptProvider(listOf(answer()))
+                // Without new input the record still requires explicit selection or readmission.
+                assertEquals(RunState.PAUSED, loop(f, idle, h, ContextPolicy("goal", h.snapshot().messages.size),
+                    identity.copy(runId = "idle"), b = budget(10_000)).run().state)
+                assertTrue(idle.requests.isEmpty())
+                h.append(h.revision(), listOf(user("new short question")))
+                assertNull(h.retryReconciliation()); assertNull(h.checkpointInfo())
+                val p = ScriptProvider(listOf(answer()))
+                val result = loop(f, p, h, ContextPolicy("goal", h.snapshot().messages.size - 1),
+                    identity.copy(runId = "next"), b = budget(if (offer) 1500 else 10_000)).run()
+                assertEquals(RunState.COMPLETED, result.state); assertEquals(1, p.requests.size)
+                assertTrue(result.steps >= saved.steps)
+                if (offer) assertTrue(p.requests.single().messages.flatMap { it.parts }.filterIsInstance<ContentPart.Text>()
+                    .any { it.text.startsWith("Summary continuation") })
+                assertFailsWith<IllegalArgumentException> {
+                    loop(f, p, h, ContextPolicy("goal", resumeCheckpointId = saved.id), identity.copy(runId = "stale")).run()
+                }
+            }
+        }
+        FileRunHistory.create(root.resolve("superseded-review"), "session", durability).use { h ->
+            h.append(0, listOf(user("goal"))); h.saveCheckpoint(checkpoint(h))
+            h.append(h.revision(), listOf(user("new input is not review acknowledgement")))
+            val p = ScriptProvider(listOf(answer()))
+            assertEquals(RunState.PAUSED, loop(RunFixture(), p, h, ContextPolicy("goal", 1), b = budget(10_000)).run().state)
+            assertTrue(p.requests.isEmpty())
+        }
+    }
+
+    @Test fun `late benign ledger evidence drops stale view instead of locking session`() = runTest {
+        val f = RunFixture(listOf(testDefinition()))
+        FileRunHistory.create(root.resolve("late-view"), "session", durability).use { h ->
+            h.append(0, listOf(user("x".repeat(1400))))
+            assertEquals(RunState.COMPLETED, loop(f, ScriptProvider(listOf(calls("tool"), answer())), h,
+                ContextPolicy("goal"), b = budget(100_000)).run().state)
+            h.append(h.revision(), listOf(user("q2")))
+            val s = ScriptProvider(listOf(answer("short summary")))
+            assertEquals(RunState.COMPLETED, loop(f, ScriptProvider(listOf(answer("a2"))), h,
+                ContextPolicy("goal", h.snapshot().messages.size - 1, summary(s)), identity.copy(runId = "r2"),
+                limits = RunLimits(maxRetries = 50)).run().state)
+            val stale = assertNotNull(h.loadView())
+            val ticket = f.submitted.single()
+            assertIs<Mutation.Applied>(f.ledger.recordActualExit(ticket.callId, ticket.attemptId, "supervisor reaped process"))
+            repeat(2) { n ->
+                h.append(h.revision(), listOf(user("q3-$n")))
+                val p = ScriptProvider(listOf(answer("a3")))
+                assertEquals(RunState.COMPLETED, loop(f, p, h, ContextPolicy("goal", h.snapshot().messages.size - 1, summary(s)),
+                    identity.copy(runId = "r3-$n"), limits = RunLimits(maxRetries = 50)).run().state)
+                assertEquals(1, p.requests.size)
+            }
+            val fresh = assertNotNull(h.loadView())
+            assertNotEquals(stale.id, fresh.id)
+            assertEquals(f.ledger.get(ticket.callId)!!.atLedgerPrecision(), fresh.ledger.single().atLedgerPrecision())
+            assertTrue(f.submitted.size == 1)
+        }
     }
 }

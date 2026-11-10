@@ -127,7 +127,12 @@ class AgentRunLoop(
             // A local wait is re-evaluated from live ledger truth. It is not a remote barrier or
             // a consumed model admission; actual exit may resolve it without a new override API.
             val localWaitResolved = saved.pauseClass == "LOCAL_WAIT"
-            if (!selected && !localWaitResolved && !reconciled) {
+            // A definite budget pause or an unselected summary offer records no uncertain work.
+            // Once newer input makes it unselectable (no readmission/continuation can match),
+            // it must not lock the session; the ordinary run rechecks budget and compatibility.
+            val superseded = !saved.serverUnresolved && saved.sourceRevision < source.revision &&
+                (saved.kind == "CONTINUATION" || saved.kind == "PAUSED" && saved.pauseClass == "BUDGET")
+            if (!selected && !localWaitResolved && !reconciled && !superseded) {
                 persistedPause = "Persisted checkpoint requires explicit continuation or user review: ${saved.id}"
                 return
             }
@@ -176,7 +181,9 @@ class AgentRunLoop(
                 // do not turn stricter automatic-summary eligibility into a session lock.
                 if (tools.checkpointBlocked(records)) return
                 val durableRecords = records.map { it.atLedgerPrecision() }.associateBy { it.callId }
-                require(view.ledger.all { old -> durableRecords[old.callId] == old.atLedgerPrecision() }) { "Checkpoint ledger changed" }
+                // A derived view whose ledger snapshot no longer matches (e.g. late exit evidence)
+                // is stale, not a session lock: fall back to raw history, which may re-compact.
+                if (view.ledger.any { old -> durableRecords[old.callId] != old.atLedgerPrecision() }) return
                 contextView = view
             }
         }
