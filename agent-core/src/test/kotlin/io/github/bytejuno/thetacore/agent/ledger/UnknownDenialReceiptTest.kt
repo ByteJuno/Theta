@@ -40,7 +40,7 @@ class UnknownDenialReceiptTest {
     @Test fun refusalWriteFailureCannotMasqueradeAsApproval() = Fixture().use { f ->
         unknown(f)
         val claim = f.claim(f.ready(f.input(definition().copy(toolKey = "reader/tool"), unattended = true)))
-        f.stage = WriteStage.BEFORE_TEMP
+        f.stage = SqliteWriteStage.AFTER_BEGIN
         assertIs<Mutation.StorageFailure>(f.ledger.requestRiskUpgrade(claim.record.callId, claim.ticket!!.attemptId, Risk.WRITE))
         assertEquals(claim.record, f.ledger.get(claim.record.callId))
     }

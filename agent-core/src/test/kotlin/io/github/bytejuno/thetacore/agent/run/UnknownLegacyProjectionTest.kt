@@ -22,6 +22,12 @@ class UnknownLegacyProjectionTest {
             val claim = f.claim(f.ready(input))
             val id = claim.record.callId
             f.ledger.complete(id, claim.ticket!!.attemptId, Status.FAILED, raw)
+            // Seed an actual pre-warning persisted result, not a newly created terminal.
+            val ended = f.ledger.get(id)!!
+            val legacyRecord = ended.copy(revision = ended.revision + 1,
+                result = ended.result!!.copy(text = raw))
+            f.store.save(legacyRecord, ended.revision)
+            f.reopen("legacy-seeded")
             val canonical = f.ledger.get(id)!!.result!!
             assertEquals(Effect.UNKNOWN, canonical.effect)
             val legacy = LegacyModelResultTextFixture.project(canonical)
@@ -72,7 +78,7 @@ class UnknownLegacyProjectionTest {
                     assertEquals(RunState.COMPLETED, loop(f, h, p).run().state)
                     assertRequest(p.requests.single(), id, legacy, pair)
                 }
-                // The warning itself is durable and is not duplicated on another process/loop reopen.
+                // Another process/loop reopen neither upgrades the legacy result nor injects messages.
                 f.reopen("epoch-3")
                 FileRunHistory.open(path, Durability.PROCESS_CRASH_ONLY).use { h ->
                     val p = ScriptProvider(listOf(answer()))
@@ -91,13 +97,11 @@ class UnknownLegacyProjectionTest {
         assertEquals(id, result.callId)
         assertEquals(legacy, result.text)
         assertTrue(result.isError)
-        val warning = "Tool invocation $id: canonical result reports UNKNOWN. " +
-            "Side effects are unknown. The operation may have taken effect; verify the outcome before retrying. " +
-            "The canonical FAILED / UNKNOWN result is unchanged."
-        val notices = request.messages.flatMap { it.parts }.filterIsInstance<ContentPart.Text>()
-            .filter { it.text.contains("Side effects are unknown") }
-        assertEquals(listOf(warning), notices.map { it.text })
-        assertTrue(notices.single().text.toByteArray(Charsets.UTF_8).size <= 32 * 1024)
+        assertFalse(result.text.contains("Side effects are unknown"), "Legacy results are not upgraded on projection")
+        assertEquals(listOf(Role.ASSISTANT, Role.TOOL), request.messages.take(2).map { it.role })
+        assertTrue(request.messages.drop(2).all { it.role == Role.ASSISTANT })
+        assertTrue(request.messages.flatMap { it.parts }.filterIsInstance<ContentPart.Text>()
+            .none { it.text.contains("Side effects are unknown") })
         validateHistory(request.messages)
     }
 

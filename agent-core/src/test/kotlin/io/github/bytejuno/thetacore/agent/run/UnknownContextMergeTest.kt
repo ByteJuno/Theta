@@ -45,7 +45,7 @@ class UnknownContextMergeTest {
         id, ModelTarget("provider", p, Credentials { "test" }), request(d), h,
         LedgerToolExecutor(f.ledger, f.gate, listOf(d), bridge), contextPolicy = policy).run()
 
-    @Test fun `compacted unknown notice stays visible append only and deduplicated after disk reopen`() = runTest {
+    @Test fun `compacted unknown preserves ledger equality without injecting messages after disk reopen`() = runTest {
         Fixture().use { f ->
             val d = definition(Risk.WRITE)
             val input = f.input(d)
@@ -57,7 +57,9 @@ class UnknownContextMergeTest {
             lateinit var saved: ContextCheckpoint
             FileRunHistory.create(path, "session", durability).use { h ->
                 append(h, f, input)
-                h.append(h.revision(), f.ledger.uncertaintyNotices("chain", h.snapshot().messages))
+                val result = h.snapshot().messages.last().parts.single() as ContentPart.ToolResult
+                assertTrue(result.text.contains("Side effects are unknown"))
+                assertEquals(ModelResultText.project(f.ledger.get(claim.record.callId)!!.result!!), result.text)
                 original = h.snapshot().messages.map(HistoryCodec::encodeMessage)
                 saved = checkpoint(h, f, d, "VIEW")
                 h.saveCheckpoint(saved)
@@ -70,14 +72,19 @@ class UnknownContextMergeTest {
                         ContextPolicy("goal", saved.sourceCount), identity.copy(runId = "run-$n")).state)
                     val sent = p.requests.single().messages
                     assertTrue((sent.first().parts.single() as ContentPart.Text).text.startsWith("Summary continuation"))
-                    assertEquals(1, sent.flatMap { it.parts }.filterIsInstance<ContentPart.Text>()
+                    assertEquals(listOf(Role.USER) + List(n) { Role.ASSISTANT }, sent.map { it.role })
+                    assertEquals(0, sent.flatMap { it.parts }.filterIsInstance<ContentPart.Text>()
                         .count { it.text.contains("Side effects are unknown") })
+                    assertEquals(saved.ledger.single().atLedgerPrecision(),
+                        f.ledger.get(claim.record.callId)!!.atLedgerPrecision())
                     assertTrue(sent.flatMap { it.parts }.none { it is ContentPart.ToolCall || it is ContentPart.ToolResult })
                     assertEquals(original, h.snapshot().messages.take(original.size).map(HistoryCodec::encodeMessage))
                     assertEquals(saved, h.loadView())
                     assertTrue(saved.matches(h.snapshot(), saved.settingsKey))
-                    assertEquals(2, h.snapshot().messages.flatMap { it.parts }.filterIsInstance<ContentPart.Text>()
-                        .count { it.text.contains("Side effects are unknown") }, "one historical notice and one visible suffix")
+                    assertEquals(0, h.snapshot().messages.flatMap { it.parts }.filterIsInstance<ContentPart.Text>()
+                        .count { it.text.contains("Side effects are unknown") })
+                    val stored = h.snapshot().messages.flatMap { it.parts }.filterIsInstance<ContentPart.ToolResult>().single()
+                    assertEquals(ModelResultText.project(f.ledger.get(stored.callId)!!.result!!), stored.text)
                 }
             }
         }

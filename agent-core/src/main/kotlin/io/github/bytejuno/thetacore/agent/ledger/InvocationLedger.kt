@@ -307,7 +307,13 @@ class InvocationLedger(
         val effect = if (r.instance == null || status == Status.REJECTED) Effect.NONE
             else explicit ?: if (r.effectiveRisk == Risk.READ) Effect.NONE
             else if (status == Status.SUCCEEDED) Effect.APPLIED else Effect.UNKNOWN
-        val result = LogicalResult(status, effect, text, r.effectiveRisk == Risk.READ && effect != Effect.NONE)
+        // Only new logical terminals receive this warning. Projection/reopen never rewrites
+        // persisted results, and late returns remain reconciliation evidence, not messages.
+        // Prefix it so the legacy encoder's bounded projection cannot truncate the warning.
+        val message = if (effect == Effect.UNKNOWN && !r.state.terminal)
+            "Side effects are unknown. The operation may have taken effect; verify the outcome before retrying.\n$text"
+        else text
+        val result = LogicalResult(status, effect, message, r.effectiveRisk == Risk.READ && effect != Effect.NONE)
         return r.copy(state = status, pending = null, result = result,
             isolation = if (effect == Effect.UNKNOWN) Isolation("Unknown external effect", r.input.definition?.exclusiveResource, null) else r.isolation)
     }
@@ -317,12 +323,23 @@ class InvocationLedger(
         val r = get(callId) ?: return@withGate Mutation.Conflict("Unknown call")
         if (r.state.terminal) Mutation.AlreadyApplied(r) else update(r, terminal(r, status, null, status.name))
     }
+    /** Host routing preview under the same definition gate as recording. Reuse terminal's
+     * effect/warning semantics without changing history or adding a warning to raw evidence.
+     * Bound the raw check first so a huge return is not copied merely to decide its route. */
+    fun outcomeFitsInline(callId: String, attemptId: String, status: Status, text: String,
+        effect: Effect? = null): Boolean = gate.withGate {
+        require(status == Status.SUCCEEDED || status == Status.FAILED)
+        val r = requireNotNull(get(callId))
+        require(r.instance?.attemptId == attemptId)
+        ModelResultText.fits(text) && ModelResultText.fits(terminal(r, status, effect, text).result!!.text)
+    }
+
     /** Return evidence is NOT actual exit: children and cancellation handlers may still run. */
     fun recordOutcome(callId: String, attemptId: String, status: Status, text: String, effect: Effect? = null): Mutation = gate.withGate {
         require(status == Status.SUCCEEDED || status == Status.FAILED)
         val r = get(callId) ?: return@withGate Mutation.Conflict("Unknown call")
         if (r.instance?.attemptId != attemptId) return@withGate Mutation.Conflict("Wrong attempt")
-        val outcome = terminal(r, status, effect, text).result!!
+        val outcome = terminal(r, status, effect, text).result!!.copy(text = text)
         val evidence = ExitEvidence(attemptId, text, outcome)
         if (evidence in r.evidence) return@withGate Mutation.AlreadyApplied(r)
         val next = if (r.state.terminal) r else terminal(r, status, effect, text)
@@ -338,8 +355,11 @@ class InvocationLedger(
         val r = get(callId) ?: return@withGate Mutation.Conflict("Unknown call")
         if (r.instance?.attemptId != attemptId) return@withGate Mutation.Conflict("Wrong attempt")
         val ended = terminal(r, status, effect, output.text)
-        val outcome = ended.result!!.copy(output = output.stored)
-        val evidence = ExitEvidence(attemptId, output.text, outcome)
+        // The normalized text already fits before the terminal warning is added. If it
+        // no longer fits, keep both the warning prefix and the original retrieval suffix.
+        val outcome = ended.result!!.let { result -> result.copy(output = output.stored,
+            text = ModelResultText.bound(result.text, output.truncationNotice, status, result.effect)) }
+        val evidence = ExitEvidence(attemptId, output.text, outcome.copy(text = output.text))
         if (evidence in r.evidence) return@withGate Mutation.AlreadyApplied(r)
         val next = if (r.state.terminal) r else ended.copy(result = outcome)
         persist(r, next.copy(revision = r.revision + 1, evidence = r.evidence + evidence,
@@ -370,7 +390,7 @@ class InvocationLedger(
         require(status == Status.SUCCEEDED || status == Status.FAILED)
         val r = get(callId) ?: return@withGate Mutation.Conflict("Unknown call")
         if (r.instance?.attemptId != attemptId) return@withGate Mutation.Conflict("Wrong attempt")
-        val outcome = terminal(r, status, effect, text).result!!
+        val outcome = terminal(r, status, effect, text).result!!.copy(text = text)
         val evidence = ExitEvidence(attemptId, text, outcome)
         if (evidence in r.evidence) {
             return@withGate if (r.instance.state == InstanceState.EXIT_CONFIRMED) Mutation.AlreadyApplied(r)
@@ -461,21 +481,6 @@ class InvocationLedger(
         }
         epoch = newProcessEpoch
         last ?: Mutation.Blocked("Recovery complete; no records changed")
-    }
-
-    /** Append-only supplementary evidence, separate from the immutable canonical tool result.
-     * The caller persists each returned message before provider submission. Stable text deduplicates
-     * across reopen without changing old paired results (including stale-pending reconciliation). */
-    fun uncertaintyNotices(taskChainId: String, history: List<Message>): List<Message> = gate.withGate {
-        val existing = history.flatMap { it.parts }.filterIsInstance<ContentPart.Text>().map { it.text }.toSet()
-        all().filter { it.input.taskChainId == taskChainId && it.state.terminal &&
-            (it.result?.effect == Effect.UNKNOWN || it.evidence.any { e -> e.outcome?.effect == Effect.UNKNOWN })
-        }.map { r ->
-            val source = if (r.result!!.effect == Effect.UNKNOWN) "canonical result" else "supplementary return evidence"
-            "Tool invocation ${r.callId}: $source reports UNKNOWN. " +
-                "Side effects are unknown. The operation may have taken effect; verify the outcome before retrying. " +
-                "The canonical ${r.state.name} / ${r.result!!.effect.name} result is unchanged."
-        }.filterNot { it in existing }.map { message(Role.USER, textPart(it)) }
     }
 
     /** Pure projection, not an append operation. Caller must freeze/register the entire step first.

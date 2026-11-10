@@ -136,18 +136,23 @@ class UnknownBoundaryTest {
         }
     }
 
-    private fun assertSupplement(request: ChatRequest, id: String) {
+    private fun assertReconciliationOnly(request: ChatRequest, id: String) {
         val result = request.messages.flatMap { it.parts }.filterIsInstance<ContentPart.ToolResult>().single { it.callId == id }
         assertTrue(result.text.contains("\"status\":\"timed_out\""))
         assertTrue(result.text.contains("\"effect\":\"none\""))
         val notices = request.messages.flatMap { it.parts }.filterIsInstance<ContentPart.Text>()
             .filter { it.text.contains(id) && it.text.contains("Side effects are unknown") }
-        assertEquals(1, notices.size, "Late UNKNOWN must reach the actual provider as supplementary evidence")
-        assertTrue(notices.single().text.toByteArray().size <= ModelResultText.LIMIT)
+        assertTrue(notices.isEmpty(), "Late evidence is reconciliation only, not another message channel")
+        assertFalse(result.text.contains("Side effects are unknown"))
+        assertFalse(request.messages.zipWithNext().any { (a, b) -> a.role == Role.TOOL && b.role == Role.USER })
+        val roles = request.messages.map { it.role }
+        val start = if (roles.first() == Role.USER) 1 else 0
+        assertEquals(listOf(Role.ASSISTANT, Role.TOOL), roles.drop(start).take(2))
+        assertTrue(roles.drop(start + 2).all { it == Role.ASSISTANT })
         validateHistory(request.messages)
     }
 
-    @Test fun lateReadUnknownReachesActualNextModelRequest() = runTest {
+    @Test fun lateReadUnknownRemainsEvidenceOnlyInActualNextModelRequest() = runTest {
         val f = RunFixture(listOf(testDefinition("read")))
         f.onSubmit = { t ->
             f.ledger.timeout(t.callId)
@@ -155,8 +160,47 @@ class UnknownBoundaryTest {
         }
         val p = ScriptProvider(listOf(calls("read"), answer()))
         assertEquals(RunState.COMPLETED, f.loop(p).run().state)
-        assertSupplement(p.requests[1], f.submitted.single().callId)
+        assertReconciliationOnly(p.requests[1], f.submitted.single().callId)
         assertEquals(Effect.NONE, f.ledger.get(f.submitted.single().callId)!!.result!!.effect)
+    }
+
+    @Test fun lateUnknownAfterProviderReceivedResultAddsNoMessageAndStillRequiresWriteApproval() = runTest {
+        val f = RunFixture(listOf(testDefinition("read"), testDefinition("write", risk = Risk.WRITE)))
+        val asked = mutableListOf<ApprovalRequest>()
+        f.approve = { asked += it; Decision.ALLOW_ONCE }
+        f.onSubmit = { t ->
+            if (t.definition.name == "read") {
+                f.ledger.timeout(t.callId)
+                f.ledger.recordActualExit(t.callId, t.attemptId, "exit")
+            } else f.ledger.complete(t.callId, t.attemptId, Status.SUCCEEDED, "written")
+        }
+        val script = ScriptProvider(listOf(calls("read"), calls("write"), answer()))
+        val provider = object : ModelProvider by script {
+            override fun chat(request: ChatRequest, auth: Credentials): kotlinx.coroutines.flow.Flow<ModelEvent> {
+                val response = script.chat(request, auth)
+                if (script.requests.size == 2) {
+                    val before = f.history.snapshot()
+                    val t = f.submitted.single()
+                    val result = f.ledger.get(t.callId)!!.result
+                    f.ledger.complete(t.callId, t.attemptId, Status.FAILED, "late unknown", Effect.UNKNOWN)
+                    assertEquals(before, f.history.snapshot())
+                    assertEquals(result, f.ledger.get(t.callId)!!.result)
+                }
+                return response
+            }
+        }
+        assertEquals(RunState.COMPLETED, f.loop(provider).run().state)
+        val id = f.submitted.first().callId
+        assertReconciliationOnly(script.requests[1], id)
+        assertEquals(listOf(Role.USER, Role.ASSISTANT, Role.TOOL, Role.ASSISTANT, Role.TOOL),
+            script.requests[2].messages.map { it.role })
+        assertEquals(listOf(id), asked.single().unknownCalls)
+        val results = script.requests[2].messages.flatMap { it.parts }.filterIsInstance<ContentPart.ToolResult>()
+        assertEquals(1, results.count { it.callId == id })
+        assertEquals(ModelResultText.project(f.ledger.get(id)!!.result!!), results.first().text)
+        assertTrue(results.first().text.contains("\"effect\":\"none\""))
+        assertTrue(script.requests[2].messages.flatMap { it.parts }.filterIsInstance<ContentPart.Text>()
+            .none { it.text.contains("Side effects are unknown") })
     }
 
     @Test fun lateEvidenceAfterCommittedPairAndStalePendingReopensWithoutMismatch() = runTest {
@@ -181,13 +225,13 @@ class UnknownBoundaryTest {
                 assertEquals(1, h.revision())
                 val p = ScriptProvider(listOf(answer()))
                 assertEquals(RunState.COMPLETED, emptyLoop(f, h, p).run().state)
-                assertSupplement(p.requests.single(), a.record.callId)
+                assertReconciliationOnly(p.requests.single(), a.record.callId)
                 assertEquals(canonical, f.ledger.get(a.record.callId)!!.result)
             }
             FileRunHistory.open(path, Durability.PROCESS_CRASH_ONLY).use { h ->
                 val p = ScriptProvider(listOf(answer()))
                 assertEquals(RunState.COMPLETED, emptyLoop(f, h, p).run().state)
-                assertSupplement(p.requests.single(), a.record.callId)
+                assertReconciliationOnly(p.requests.single(), a.record.callId)
             }
             path.toFile().deleteRecursively()
         }

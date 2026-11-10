@@ -72,13 +72,14 @@ class UnknownContinuationTest {
         assertEquals(1, approvals.size)
         val result = p.requests[1].messages.flatMap { it.parts }.filterIsInstance<ContentPart.ToolResult>().single()
         assertTrue(result.text.contains("\"effect\":\"unknown\""))
-        val notices = p.requests[1].messages.flatMap { it.parts }.filterIsInstance<ContentPart.Text>()
-            .filter { it.text.contains("Side effects are unknown") }
-        assertEquals(1, notices.size)
-        assertTrue(notices.single().text.contains(result.callId))
-        assertTrue(notices.single().text.contains("canonical result reports UNKNOWN"))
-        assertEquals(1, p.requests[2].messages.flatMap { it.parts }.filterIsInstance<ContentPart.Text>()
-            .count { it.text == notices.single().text })
+        assertTrue(result.text.contains("Side effects are unknown"))
+        assertTrue(result.text.contains("verify the outcome before retrying"))
+        assertEquals(listOf(Role.USER, Role.ASSISTANT, Role.TOOL), p.requests[1].messages.map { it.role })
+        assertEquals(listOf(Role.USER, Role.ASSISTANT, Role.TOOL, Role.ASSISTANT, Role.TOOL),
+            p.requests[2].messages.map { it.role })
+        assertEquals(result.text, p.requests[2].messages.flatMap { it.parts }
+            .filterIsInstance<ContentPart.ToolResult>().first().text)
+        assertEquals(1, f.ledger.get(result.callId)!!.result!!.text.split("Side effects are unknown").size - 1)
         assertTrue(result.isError)
         assertNull(f.ledger.get(f.submitted.first().callId)!!.isolation!!.resolution)
         validateHistory(f.history.snapshot().messages)

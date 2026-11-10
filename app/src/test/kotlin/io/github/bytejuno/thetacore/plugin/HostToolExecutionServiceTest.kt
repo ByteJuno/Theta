@@ -2014,7 +2014,10 @@ class HostToolExecutionServiceTest {
             val result = f.ledger.get(i.binding.callId)!!.result!!
             if (text.isEmpty()) {
                 assertEquals(Status.FAILED, result.status)
-                assertEquals("Tool returned invalid structured output", result.text)
+                assertEquals("Side effects are unknown. The operation may have taken effect; verify the outcome before retrying.\n" +
+                    "Tool returned invalid structured output", result.text)
+                assertEquals("Tool returned invalid structured output", f.ledger.get(i.binding.callId)!!.evidence
+                    .first { it.outcome != null }.outcome!!.text)
                 assertEquals(Effect.UNKNOWN, result.effect)
             } else {
                 assertEquals(Status.SUCCEEDED, result.status)

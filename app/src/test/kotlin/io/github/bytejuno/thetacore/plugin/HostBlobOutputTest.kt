@@ -283,6 +283,111 @@ class HostBlobOutputTest {
         }
     }
 
+    private val unknownWarning = "Side effects are unknown. The operation may have taken effect; verify the outcome before retrying."
+
+    private suspend fun checkPlainFailedWrite(text: String, expectBlob: Boolean, effect: ToolEffect? = null) {
+        val root = Files.createTempDirectory("host-unknown-budget").toFile()
+        val budget = PluginExecutionBudget()
+        val tool = object : Tool {
+            override val id = "failed-write"
+            override val spec = ToolSpec(id, id, JsonObject(emptyMap()), risk = ToolRisk.WRITE)
+            override suspend fun call(args: JsonObject, env: ToolEnv) = ToolResult(text, isError = true, effect = effect)
+        }
+        try {
+            lateinit var saved: InvocationRecord
+            openTestStore(root).use { store ->
+                val service = HostToolBridgeRoot(budget, tool).initialize { store }
+                val frozen = service.catalog.freeze("run")
+                val source = frozen.values.single { it.toolKey == "host/clock" }
+                val reader = frozen.values.single { it.toolKey == "host/blob_read" }
+                val input = InvocationInput(BindingValue.copyOf(callBinding("test", "failed-write", null, 0, "wire")),
+                    "chain", "session", "run", "step", 0, "{}", source, false, Risk.WRITE)
+                val id = input.binding.callId
+                service.prepare(input)
+                val pending = service.ledger.get(id)!!.pending!!
+                assertTrue(service.decide(id, pending.id, Decision.ALLOW_ONCE) is Mutation.Applied)
+                service.dispatch(id)
+                withTimeout(15000) { service.awaitObservedExit(id) }
+                saved = service.ledger.get(id)!!
+                val result = saved.result!!
+                assertEquals(Status.FAILED, result.status)
+                assertEquals(if (effect == ToolEffect.NONE) Effect.NONE else Effect.UNKNOWN, result.effect)
+                assertEquals(InstanceState.EXIT_CONFIRMED, saved.instance!!.state)
+                assertEquals(listOf(ApprovalReceipt(pending, Decision.ALLOW_ONCE)), saved.receipts)
+                assertEquals("Blob routing must include the new terminal warning", expectBlob, result.output != null)
+                assertEquals(if (expectBlob) 1L else 0L, service.normalizationCount)
+                // The monitor observes the same returned object more than once. It must not
+                // switch back to inline after the warning has become a persisted terminal.
+                assertEquals(1, saved.evidence.count { it.outcome != null })
+                assertFalse(saved.evidence.single { it.outcome != null }.outcome!!.text.contains(unknownWarning))
+                val projected = service.ledger.resultsForStep("session", "run", "step", listOf(id))!!
+                val part = projected.parts.single() as ContentPart.ToolResult
+                assertTrue(part.isError)
+                assertTrue(part.text.toByteArray(Charsets.UTF_8).size <= ModelResultText.LIMIT)
+                assertEquals(ModelResultText.encode(result.status, result.effect, result.text), part.text)
+                assertEquals(if (effect == ToolEffect.NONE) 0 else 1, result.text.split(unknownWarning).size - 1)
+                assertFalse(part.text.contains("Truncated ledger message"))
+                if (expectBlob) {
+                    val ref = result.output!!.raw
+                    assertTrue(part.text.contains(ref.id))
+                    assertTrue(part.text.contains("Retrieve with ${reader.modelName}"))
+                    val bytes = java.io.ByteArrayOutputStream()
+                    var offset = 0L
+                    var index = 0
+                    do {
+                        val args = buildJsonObject { put("id", ref.id); put("offset", offset) }.toString()
+                        val reply = service.executeStep(calls(reader.modelName, args, "unknown-chunk-$index"),
+                            "chain", "session", "run", "unknown-chunk-${index++}")!!
+                        val chunkPart = reply.parts.single() as ContentPart.ToolResult
+                        assertFalse(chunkPart.isError)
+                        val message = Json.parseToJsonElement(chunkPart.text).jsonObject.getValue("message").jsonPrimitive.content
+                        val chunk = Json.parseToJsonElement(message).jsonObject
+                        bytes.write(Base64.getDecoder().decode(chunk.getValue("data").jsonPrimitive.content))
+                        offset = chunk["nextOffset"]?.jsonPrimitive?.longOrNull ?: -1
+                    } while (offset >= 0)
+                    assertEquals(ref.sizeBytes, bytes.size().toLong())
+                    val raw = Json.decodeFromString(RawToolOutput.serializer(), bytes.toString("UTF-8"))
+                    assertEquals(text, raw.content.single().text)
+                    assertTrue(raw.isError)
+                    assertNull(raw.structured)
+                    assertNull(raw.effect)
+                    assertEquals(1L, service.normalizationCount)
+                } else assertEquals(if (effect == ToolEffect.NONE) text else "$unknownWarning\n$text", result.text)
+                assertEquals(saved, service.ledger.get(id))
+            }
+            openTestStore(root).use { store -> assertEquals(saved, store.records().single { it.callId == saved.callId }) }
+        } finally { budget.close(); root.deleteRecursively() }
+    }
+
+    @Test fun newUnknownPlain32700ReturnKeepsCompleteRawViaHostBlobRead() = runBlocking {
+        val text = "x".repeat(32700)
+        assertTrue(ModelResultText.fits(text))
+        assertFalse(ModelResultText.fits("$unknownWarning\n$text"))
+        checkPlainFailedWrite(text, expectBlob = true)
+    }
+
+    @Test fun newUnknownPlainRoutingIncludesWarningAtEscapedEnvelopeBoundary() = runBlocking {
+        // Use the encoder, not raw string length, to exercise exact conservative boundaries.
+        for (unit in listOf("x", "\"", "\\", "\n", "\u0000", "中文😀")) {
+            val room = ModelResultText.LIMIT - ModelResultText.encode(Status.TIMED_OUT, Effect.UNKNOWN, "$unknownWarning\n")
+                .toByteArray(Charsets.UTF_8).size
+            val cost = ModelResultText.encode(Status.TIMED_OUT, Effect.UNKNOWN, unit).toByteArray(Charsets.UTF_8).size -
+                ModelResultText.encode(Status.TIMED_OUT, Effect.UNKNOWN, "").toByteArray(Charsets.UTF_8).size
+            val at = unit.repeat(room / cost) + "x".repeat(room % cost)
+            assertEquals(ModelResultText.LIMIT,
+                ModelResultText.encode(Status.TIMED_OUT, Effect.UNKNOWN, "$unknownWarning\n$at").toByteArray(Charsets.UTF_8).size)
+            checkPlainFailedWrite(at, expectBlob = false)
+            // Four bytes over the conservative limit also exceed the shorter FAILED envelope.
+            val over = at + "xxxx"
+            assertTrue(ModelResultText.fits(over))
+            checkPlainFailedWrite(over, expectBlob = true)
+        }
+    }
+
+    @Test fun explicitNonePlain32700ReturnDoesNotReserveUnknownWarning() = runBlocking {
+        checkPlainFailedWrite("x".repeat(32700), expectBlob = false, effect = ToolEffect.NONE)
+    }
+
     @Test fun productionBridgePublishesRawMediaAndFrozenRetrievalReadsStableChunks() = runBlocking {
         val root = Files.createTempDirectory("host-blob-output").toFile()
         val budget = PluginExecutionBudget()

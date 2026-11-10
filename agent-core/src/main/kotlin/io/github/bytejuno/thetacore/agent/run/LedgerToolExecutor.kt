@@ -190,9 +190,6 @@ class LedgerToolExecutor(
 
     fun continuationBlocked(identity: RunIdentity): Boolean = ledger.continuationBlocked(identity.taskChainId)
 
-    fun uncertaintyNotices(identity: RunIdentity, history: List<Message>): List<Message> =
-        ledger.uncertaintyNotices(identity.taskChainId, history)
-
     fun unresolved(calls: List<CollectedCall>): Boolean = calls.any {
         val r = ledger.get(it.binding.callId) ?: return@any true
         ledger.continuationBlocked(r.input.taskChainId)

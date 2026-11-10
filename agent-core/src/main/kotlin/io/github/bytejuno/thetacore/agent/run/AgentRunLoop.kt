@@ -348,14 +348,6 @@ class AgentRunLoop(
             if (tools.continuationBlocked(identity))
                 return result(RunState.PAUSED, "Tool execution or resource recovery unresolved")
             check(history.revision() == view.revision) { "History changed during active run" }
-            // Deduplicate against the effective view, not hidden compacted history. A summary
-            // must not hide UNKNOWN evidence. Append outside its bound prefix, preserving both
-            // the immutable source digest and canonical call/result pairs across reopen.
-            val notices = tools.uncertaintyNotices(identity, requestMessages(view))
-            if (notices.isNotEmpty()) {
-                history.append(view.revision, notices)
-                view = HistorySnapshot(history.revision(), freezeMessages(view.messages + notices))
-            }
             val messages = requestMessages(view).map { m ->
                 if (cacheDisabled) message(m.role, *m.parts.toTypedArray()) else m
             }
