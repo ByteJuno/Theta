@@ -81,15 +81,29 @@ class InvocationLedger(
     private fun argumentKey(r: InvocationRecord): String? = try {
         canonical(Json.parseToJsonElement(r.executionArgs ?: r.input.argsJson))
     } catch (_: IllegalArgumentException) { null }
-    private fun unknown(r: InvocationRecord): List<String> = all().filter {
+    private fun hasUnknown(r: InvocationRecord) = r.result?.effect == Effect.UNKNOWN ||
+        r.evidence.any { it.outcome?.effect == Effect.UNKNOWN }
+    /** Chain-local pause, independent of step, owner, parallelSafe and resource declarations. */
+    private fun chainBarrier(r: InvocationRecord): Mutation.Blocked? {
+        val others = all().filter { it.callId != r.callId && it.input.taskChainId == r.input.taskChainId }
+        return when {
+            others.any { it.recoveryPending } -> Mutation.Blocked("Task chain awaits explicit cold-recovery decision")
+            others.any { it.instance?.state == InstanceState.UNCONFIRMED && hasUnknown(it) } ->
+                Mutation.Blocked("Task chain awaits unknown instance actual exit")
+            else -> null
+        }
+    }
+    private fun unknown(r: InvocationRecord, risk: Risk = r.effectiveRisk): List<String> = all().filter {
         it.callId != r.callId && it.input.taskChainId == r.input.taskChainId &&
-            it.input.definition?.toolKey == r.input.definition?.toolKey &&
-            (it.result?.effect == Effect.UNKNOWN || it.evidence.any { e -> e.outcome?.effect == Effect.UNKNOWN }) && argumentKey(it) == argumentKey(r)
+            (it.result?.effect == Effect.UNKNOWN || it.evidence.any { e -> e.outcome?.effect == Effect.UNKNOWN }) &&
+            // Same-argument retries always ask (3.6). Until verified, every write asks (3.8).
+            ((it.input.definition?.toolKey == r.input.definition?.toolKey && argumentKey(it) == argumentKey(r)) ||
+                (risk > Risk.READ && it.isolation?.resolution != RecoveryResolution.VERIFIED_CLEAR))
     }.map { it.callId }.sorted()
-    private fun request(r: InvocationRecord, risk: Risk, internal: Boolean): ApprovalRequest {
+    private fun request(r: InvocationRecord, risk: Risk, internal: Boolean, summary: String = ""): ApprovalRequest {
         val definition = requireNotNull(r.input.definition)
         return ApprovalRequest(id(), r.callId, requireNotNull(r.definitionDigest),
-            definition.version, definition.generation, risk, unknown(r), internal)
+            definition.version, definition.generation, risk, unknown(r, risk), internal, summary.take(4096))
     }
 
     fun validateAndPrepare(callId: String): Mutation = gate.withGate {
@@ -113,6 +127,15 @@ class InvocationLedger(
         }
     }
 
+    /** Host decisions supply identifiers, never caller-owned risk/digest/unknown evidence. */
+    fun decideApproval(callId: String, requestId: String, decision: Decision): Mutation = gate.withGate {
+        val r = get(callId) ?: return@withGate Mutation.Conflict("Unknown call")
+        val pending = r.pending
+        if (pending == null || pending.id != requestId) return@withGate Mutation.Conflict("Approval is not current")
+        if (r.input.unattended) return@withGate Mutation.Blocked("Unattended approval unavailable")
+        resolveApproval(callId, pending, decision)
+    }
+
     /** The entire stored request must match; a UI-supplied digest/version is not trusted. */
     fun resolveApproval(callId: String, approval: ApprovalRequest, decision: Decision): Mutation = gate.withGate {
         val r = get(callId) ?: return@withGate Mutation.Conflict("Unknown call")
@@ -126,17 +149,19 @@ class InvocationLedger(
             return@withGate Mutation.Conflict("Internal approval instance already exited")
         if (!approval.internal && prior(r).any { it.state == Status.RECEIVED || it.state == Status.WAITING_APPROVAL })
             return@withGate Mutation.Blocked("Earlier call approval pending")
+        if (decision == Decision.DENY) {
+            // Current-request denial grants nothing and must remain possible during refresh or
+            // changed policy/evidence. Internal denial leaves the already-running invocation real.
+            val denied = r.copy(pending = null, receipts = r.receipts + ApprovalReceipt(approval, decision))
+            return@withGate update(r, if (approval.internal) denied else terminal(denied, Status.REJECTED, null, "Approval denied"))
+        }
         definitionCheck(r)?.let { return@withGate it }
-        if (decision != Decision.DENY && policy.isDenied(r.input)) return@withGate Mutation.Blocked("Deny rule takes priority")
+        if (policy.isDenied(r.input)) return@withGate Mutation.Blocked("Deny rule takes priority")
         if (decision in setOf(Decision.ALLOW_SESSION, Decision.ALLOW_ALWAYS) && !policy.permitsLongTerm(approval.risk))
             return@withGate Mutation.Blocked("ROOT long-term grants disabled")
-        if (decision != Decision.DENY && unknown(r) != approval.unknownCalls)
-            return@withGate update(r, r.copy(pending = request(r, approval.risk, approval.internal)))
+        if (unknown(r, approval.risk) != approval.unknownCalls)
+            return@withGate update(r, r.copy(pending = request(r, approval.risk, approval.internal, approval.summary)))
         val next = r.copy(pending = null, receipts = r.receipts + ApprovalReceipt(approval, decision))
-        if (decision == Decision.DENY) {
-            // Internal denial denies only the proposed step; the already-running invocation remains real.
-            return@withGate update(r, if (approval.internal) next else terminal(next, Status.REJECTED, null, "Approval denied"))
-        }
         update(r, next.copy(state = if (approval.internal) Status.RUNNING else Status.READY,
             effectiveRisk = maxOf(r.effectiveRisk, approval.risk)))
     }
@@ -146,8 +171,7 @@ class InvocationLedger(
         val r = get(callId) ?: return@withGate Mutation.Conflict("Unknown call")
         if (r.revision != expectedRevision || r.state != Status.READY || r.instance != null)
             return@withGate Mutation.Conflict("Not a current READY revision")
-        if (all().any { it.input.taskChainId == r.input.taskChainId && it.recoveryPending })
-            return@withGate Mutation.Blocked("Task chain awaits explicit cold-recovery decision")
+        chainBarrier(r)?.let { return@withGate it }
         definitionCheck(r)?.let { return@withGate it }
         if (policy.isDenied(r.input)) return@withGate update(r, terminal(r, Status.REJECTED, null, "Policy denied before claim"))
         val unknown = unknown(r)
@@ -177,20 +201,55 @@ class InvocationLedger(
         update(r, r.copy(state = Status.RUNNING, instance = instance), ticket)
     }
 
-    /** Applied with effectiveRisk >= requestedRisk means the bridge may return true. A pending request
-     * or any other response does NOT authorize the internal step. */
-    fun requestRiskUpgrade(callId: String, attemptId: String, risk: Risk): Mutation = gate.withGate {
+    /** Every call is a new authorization, even below the historical risk watermark. Applied with
+     * no pending request is the immediate ALLOW outcome, after current checks and durable risk
+     * acknowledgement. ASK is identified by its pending ID; resolve it from that ID's receipt,
+     * never from effectiveRisk. ALLOW_ONCE on an earlier internal step cannot authorize this one. */
+    fun requestRiskUpgrade(callId: String, attemptId: String, risk: Risk, summary: String = ""): Mutation = gate.withGate {
         val r = get(callId) ?: return@withGate Mutation.Conflict("Unknown call")
         if (r.state != Status.RUNNING || r.instance?.attemptId != attemptId || r.instance.state != InstanceState.UNCONFIRMED)
             return@withGate Mutation.Conflict("Instance not running")
-        if (risk <= r.effectiveRisk) return@withGate Mutation.AlreadyApplied(r)
         if (r.pending != null) return@withGate Mutation.Blocked("Approval already pending")
         definitionCheck(r)?.let { return@withGate it }
-        when (policy.evaluate(r, risk, unknown(r), all())) {
+        chainBarrier(r)?.let { return@withGate it }
+        val requestedRisk = maxOf(r.effectiveRisk, risk)
+        when (policy.evaluate(r, requestedRisk, unknown(r, requestedRisk), all())) {
             ApprovalPolicy.Verdict.DENY -> Mutation.Blocked("Internal upgrade denied")
-            ApprovalPolicy.Verdict.ALLOW -> update(r, r.copy(effectiveRisk = risk))
-            ApprovalPolicy.Verdict.ASK -> update(r, r.copy(pending = request(r, risk, true)))
+            ApprovalPolicy.Verdict.ALLOW -> update(r, r.copy(effectiveRisk = maxOf(r.effectiveRisk, requestedRisk)))
+            ApprovalPolicy.Verdict.ASK -> update(r, r.copy(pending = request(r, requestedRisk, true, summary)))
         }
+    }
+
+    /** Recheck the specific durable decision at the bridge's consumption boundary. A new UNKNOWN
+     * set re-arms only this request, while denial, stale definitions and live occupancy fail closed. */
+    fun checkRiskApproval(callId: String, attemptId: String, requestId: String): Mutation = gate.withGate {
+        val r = get(callId) ?: return@withGate Mutation.Conflict("Unknown call")
+        if (r.state != Status.RUNNING || r.instance?.attemptId != attemptId || r.instance.state != InstanceState.UNCONFIRMED)
+            return@withGate Mutation.Conflict("Instance not running")
+        if (r.pending != null) return@withGate Mutation.Conflict("Approval still pending")
+        val receipt = r.receipts.singleOrNull { it.request.id == requestId && it.request.internal }
+            ?: return@withGate Mutation.Conflict("No decision for this runtime request")
+        if (receipt.decision == Decision.DENY) return@withGate Mutation.Blocked("Internal step denied")
+        definitionCheck(r)?.let { return@withGate it }
+        chainBarrier(r)?.let { return@withGate it }
+        if (policy.isDenied(r.input)) return@withGate Mutation.Blocked("Deny rule takes priority")
+        if (receipt.decision != Decision.ALLOW_ONCE && !policy.permitsLongTerm(receipt.request.risk))
+            return@withGate Mutation.Blocked("ROOT long-term grants disabled")
+        if (unknown(r, receipt.request.risk) != receipt.request.unknownCalls) {
+            if (r.input.unattended) return@withGate Mutation.Blocked("Unattended approval unavailable")
+            return@withGate update(r, r.copy(pending = request(r, receipt.request.risk, true, receipt.request.summary)))
+        }
+        Mutation.AlreadyApplied(r)
+    }
+
+    /** A cancelled SDK waiter no longer owns a proposed step. Withdrawal needs no live definition
+     * or permission: it can only deny that attempt's current pending upgrade. */
+    fun withdrawRiskUpgrade(callId: String, attemptId: String, requestId: String): Mutation = gate.withGate {
+        val r = get(callId) ?: return@withGate Mutation.Conflict("Unknown call")
+        val pending = r.pending
+        if (r.state != Status.RUNNING || r.instance?.attemptId != attemptId ||
+            pending?.id != requestId || !pending.internal) return@withGate Mutation.Conflict("Upgrade is not current")
+        update(r, r.copy(pending = null, receipts = r.receipts + ApprovalReceipt(pending, Decision.DENY)))
     }
 
     private fun terminal(r: InvocationRecord, status: Status, explicit: Effect?, text: String): InvocationRecord {
@@ -293,6 +352,25 @@ class InvocationLedger(
         if (r.restartRequired && r.restartRequiredUntilExit == releaseOnExit) Mutation.AlreadyApplied(r)
         else update(r, r.copy(restartRequired = true, restartRequiredUntilExit = releaseOnExit))
     }
+    fun pendingApprovals(): List<ApprovalRequest> = gate.withGate { all().mapNotNull { it.detached().pending } }
+
+    private fun recoveryRequest(r: InvocationRecord): RecoveryRequest? {
+        if (!r.state.terminal || r.instance?.state != InstanceState.EXIT_CONFIRMED || r.isolation == null ||
+            (!r.recoveryPending && r.isolation.resolution == RecoveryResolution.VERIFIED_CLEAR)) return null
+        return RecoveryRequest("recovery:${r.callId}:${r.revision}", r.callId, r.revision)
+    }
+    fun pendingRecoveries(): List<RecoveryRequest> = gate.withGate { all().mapNotNull(::recoveryRequest) }
+
+    /** CAS against the CURRENT durable evidence, not a caller-supplied record. Reopening does not
+     * renew IDs; late evidence does. A decision acknowledges uncertainty, never rewrites effects. */
+    fun decideRecovery(callId: String, requestId: String, resolution: RecoveryResolution): Mutation = gate.withGate {
+        val r = get(callId) ?: return@withGate Mutation.Conflict("Unknown call")
+        if (recoveryRequest(r)?.id != requestId) return@withGate Mutation.Conflict("Recovery decision is not current")
+        if (!r.recoveryPending && r.isolation?.resolution == resolution)
+            return@withGate Mutation.Conflict("Recovery decision already recorded")
+        resolveRecovery(callId, resolution)
+    }
+
     fun resolveRecovery(callId: String, resolution: RecoveryResolution): Mutation = gate.withGate {
         val r = get(callId) ?: return@withGate Mutation.Conflict("Unknown call")
         if (r.instance?.state == InstanceState.UNCONFIRMED) return@withGate Mutation.Blocked("Actual exit still unconfirmed")

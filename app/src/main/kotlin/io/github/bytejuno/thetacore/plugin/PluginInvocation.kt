@@ -51,6 +51,8 @@ internal class PluginInvocation(
     private val totalTimeoutMillis: Long = 600_000,
     private val frozenSpec: ToolSpec? = null,
     private val reservation: PluginExecutionBudget.Lease? = null,
+    /** Only the ledger-backed host hook can evaluate non-interactive grants. */
+    private val unattendedApprovalPolicy: Boolean = false,
 ) : AutoCloseable {
     init { require(defaultTimeoutMillis > 0 && totalTimeoutMillis in 1..600_000) }
     private val completion = CompletableDeferred<PluginInvocationResult>()
@@ -112,7 +114,7 @@ internal class PluginInvocation(
                     val env = ToolEnv(request.runId, request.sessionId, request.callId, request.unattended,
                         onProgress = { text, fraction -> reportProgress(text, fraction) },
                         onApproval = { summary, risk ->
-                            if (completion.isCompleted) false
+                            if (completion.isCompleted || (request.unattended && !unattendedApprovalPolicy)) false
                             else requestApproval(summary, risk) && !completion.isCompleted
                         },
                         onInput = { prompt, schema ->
