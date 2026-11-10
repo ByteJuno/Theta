@@ -18,6 +18,8 @@ dependencies {
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.okhttp)
+    implementation(libs.androidx.sqlite)
+    testImplementation(libs.androidx.sqlite.bundled)
     implementation("com.networknt:json-schema-validator:1.5.3")
     testImplementation(kotlin("test-junit"))
     testImplementation(libs.kotlinx.coroutines.test)

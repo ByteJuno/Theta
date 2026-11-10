@@ -279,8 +279,8 @@ class RuntimeDecisionTest {
         val request = f.ledger.pendingRecoveries().single()
         f.store.close()
         var fail = true
-        f.store = JsonInvocationStore.open(f.directory, Durability.PROCESS_CRASH_ONLY) {
-            if (fail && it == WriteStage.BEFORE_REPLACE) error("injected")
+        f.store = TestInvocationStore.open(f.directory) {
+            if (fail && it == SqliteWriteStage.BEFORE_COMMIT) error("injected")
         }
         f.ledger = InvocationLedger(f.store, f.gate, ArgumentsValidator { _, _ -> true })
         f.ledger.recoverColdStart("epoch-3")

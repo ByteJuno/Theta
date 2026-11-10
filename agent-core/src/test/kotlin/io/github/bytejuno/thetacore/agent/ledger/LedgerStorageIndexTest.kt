@@ -58,8 +58,7 @@ class LedgerStorageIndexTest {
         val attempt = claimed.ticket!!.attemptId
         val text = "unique-result-结果-😀-".repeat(100)
         val done = assertIs<Mutation.Applied>(f.ledger.complete(callId, attempt, Status.SUCCEEDED, text)).record
-        val file = f.directory.resolve("$callId.json")
-        val encoded = String(Files.readAllBytes(file), Charsets.UTF_8)
+        val encoded = String(payload(f.directory, callId), Charsets.UTF_8)
         assertEquals(1, Regex(Regex.escape(text)).findAll(encoded).count())
         assertEquals(listOf(text), Json.parseToJsonElement(encoded).jsonObject.getValue("texts").jsonArray.map { it.jsonPrimitive.content })
         f.reopen()
@@ -83,18 +82,17 @@ class LedgerStorageIndexTest {
         assertEquals(listOf("cut?", "cut?"), reopened.evidence.map { it.text })
     }
 
-    @Test fun legacyInlineFilesAreReadWithoutRewriteAndUpgradedOnNextSave() = Fixture().use { f ->
+    @Test fun inlineCodecPayloadsAreReadWithoutRewriteAndUpgradedOnNextSave() = Fixture().use { f ->
         val claimed = f.claim(f.ready())
         val r = assertIs<Mutation.Applied>(f.ledger.complete(claimed.record.callId, claimed.ticket!!.attemptId, Status.SUCCEEDED, "legacy result")).record
         f.store.close()
-        val file = f.directory.resolve("${r.callId}.json")
         val inline = Json { encodeDefaults = true }.encodeToString(r)
-        Files.write(file, inline.toByteArray(Charsets.UTF_8))
+        replacePayload(f.directory, r.callId, inline.toByteArray(Charsets.UTF_8))
         f.reopen()
         assertEquals(r, f.ledger.get(r.callId))
-        assertEquals(inline, String(Files.readAllBytes(file), Charsets.UTF_8))
+        assertEquals(inline, String(payload(f.directory, r.callId), Charsets.UTF_8))
         assertIs<Mutation.Applied>(f.ledger.recordActualExit(r.callId, claimed.ticket!!.attemptId, "extra exit evidence"))
-        assertTrue(String(Files.readAllBytes(file), Charsets.UTF_8).contains("\"storageVersion\":1"))
+        assertTrue(String(payload(f.directory, r.callId), Charsets.UTF_8).contains("\"storageVersion\":1"))
         f.reopen("epoch-3")
         assertEquals("legacy result", f.ledger.get(r.callId)!!.result!!.text)
     }
@@ -111,13 +109,12 @@ class LedgerStorageIndexTest {
             val claimed = f.claim(f.ready())
             val r = assertIs<Mutation.Applied>(f.ledger.complete(claimed.record.callId, claimed.ticket!!.attemptId, Status.SUCCEEDED, "result")).record
             f.store.close()
-            val file = f.directory.resolve("${r.callId}.json")
-            val original = String(Files.readAllBytes(file), Charsets.UTF_8)
+            val original = String(payload(f.directory, r.callId), Charsets.UTF_8)
             val broken = corrupt(original)
             assertNotEquals(original, broken)
-            Files.write(file, broken.toByteArray(Charsets.UTF_8))
-            assertFailsWith<StoreException> { JsonInvocationStore.open(f.directory, Durability.PROCESS_CRASH_ONLY) }
-            assertEquals(broken, String(Files.readAllBytes(file), Charsets.UTF_8))
+            replacePayload(f.directory, r.callId, broken.toByteArray(Charsets.UTF_8))
+            assertFailsWith<StoreException> { TestInvocationStore.open(f.directory) }
+            assertEquals(broken, String(payload(f.directory, r.callId), Charsets.UTF_8))
         }
     }
 

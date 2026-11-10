@@ -35,15 +35,13 @@ class AndroidInvocationStoreTest {
 
     @Test fun clockValidatesExecutesPersistsAndColdReopensWithoutReplay() = runBlocking {
         temporary { root -> runBlocking {
-            val syncs = mutableListOf<String>()
-            val sync: (File) -> Unit = { syncs += it.name }
             val budget = PluginExecutionBudget()
-            val store = AndroidInvocationStore.open(root, sync)
+            val store = openTestStore(root)
             try {
                 val bridge = HostToolBridgeRoot(budget)
                 val service = bridge.initialize { store }
                 assertSame(service, bridge.initialize { error("Must not reopen a live writer") })
-                assertEquals(listOf(".${AndroidInvocationStore.DIRECTORY}.initializing", root.name, AndroidInvocationStore.DIRECTORY), syncs)
+                assertTrue(File(root, AgentDatabase.FILE_NAME).isFile)
                 val bad = input(service, "{\"extra\":1}")
                 assertEquals(Status.REJECTED, (service.prepare(bad) as Mutation.Applied).record.state)
                 assertNull(service.ledger.get(bad.binding.callId)!!.instance)
@@ -54,10 +52,10 @@ class AndroidInvocationStoreTest {
                 assertEquals(Status.SUCCEEDED, completed.state)
                 assertTrue(completed.result!!.text.contains("epochMillis"))
                 assertEquals(Effect.NONE, completed.result!!.effect)
-                assertTrue(syncs.size > 5)
-                assertTrue(File(root, "${AndroidInvocationStore.DIRECTORY}/${completed.callId}.json").isFile)
+                assertTrue(appPayload(root, completed.callId).isNotEmpty())
+                assertFalse(File(root, "host-invocations").exists())
                 store.close()
-                AndroidInvocationStore.open(root, sync).use { reopened ->
+                openTestStore(root).use { reopened ->
                     val fresh = HostToolBridgeRoot(budget).initialize { reopened }
                     assertEquals(completed, fresh.ledger.get(completed.callId))
                     assertEquals(2, reopened.records().size)
@@ -68,160 +66,35 @@ class AndroidInvocationStoreTest {
         } }
     }
 
-    @Test fun directorySyncFailureNeverAcknowledgesOrAllowsAnotherSubmission() = runBlocking {
-        temporary { root -> runBlocking {
-            var fail = false
-            val budget = PluginExecutionBudget()
-            AndroidInvocationStore.open(root) { if (fail) throw IOException("fsync failed") }.use { store ->
-                try {
-                    val service = HostToolBridgeRoot(budget).initialize { store }
-                    val call = input(service)
-                    fail = true
-                    val result = service.prepare(call) as Mutation.StorageFailure
-                    assertTrue(result.uncertain)
-                    assertNull(service.ledger.get(call.binding.callId))
-                    fail = false
-                    assertTrue(service.prepare(input(service)) is Mutation.Blocked)
-                    assertTrue(service.dispatch(call.binding.callId) is Mutation.Blocked)
-                    assertTrue(store.records().isEmpty())
-                } finally { budget.close() }
-            }
-            // Atomic replacement may have happened, but no instance was ever claimed.
-            AndroidInvocationStore.open(root) {}.use { reopened ->
-                assertEquals(1, reopened.records().size)
-                assertNull(reopened.records().single().instance)
-            }
-        } }
-    }
-
-    @Test fun blobDirectorySyncFailurePreventsReferenceAcknowledgementAndCleansOnReopen() = temporary { root ->
+    @Test fun lostCommitAcknowledgementBlocksEveryWriteUntilReopen() = temporary { root ->
         var fail = false
-        lateinit var id: String
-        lateinit var raw: BlobRef
-        AndroidInvocationStore.open(root) { if (fail) throw IOException("blob sync failed") }.use { store ->
+        AndroidInvocationStore.open(root, androidx.sqlite.driver.bundled.BundledSQLiteDriver()) {
+            if (fail && it == SqliteWriteStage.AFTER_COMMIT) throw IOException("ack lost")
+        }.use { store ->
             val gate = DefinitionGate()
-            val validator = ArgumentsValidator { _, _ -> true }
-            val ledger = InvocationLedger(store, gate, validator)
+            val ledger = InvocationLedger(store, gate, ArgumentsValidator { _, _ -> true })
             ledger.recoverColdStart("first")
-            val definition = FrozenDefinition("host/test", "host_test", "test", "test", "{}", Risk.READ,
+            val d = FrozenDefinition("host/test", "host_test", "test", "test", "{}", Risk.READ,
                 Source.FIRST_PARTY, "host", "1", 1, true, null, false, null)
-            gate.install(definition); gate.freezeRun("run", listOf(definition))
+            gate.install(d); gate.freezeRun("run", listOf(d))
             val input = InvocationInput(BindingValue.copyOf(callBinding("test", "req", null, 0, "wire")),
-                "chain", "session", "run", "step", 0, "{}", definition, false, Risk.READ)
-            id = input.binding.callId
-            ledger.recordInvocation(input)
-            val ready = (ledger.validateAndPrepare(id) as Mutation.Applied).record
-            val ticket = (ledger.claimExecution(id, ready.revision) as Mutation.Applied).ticket!!
-            val out = ToolOutputNormalizer.normalize(listOf(OutputPart.Text("x".repeat(100000))),
-                null, false, null, null, validator, "host_blob_read")
-            raw = out.stored.raw
+                "chain", "session", "run", "step", 0, "{}", d, false, Risk.READ)
             fail = true
-            assertTrue(ledger.recordToolOutput(id, ticket.attemptId, Status.SUCCEEDED, out, null) is Mutation.StorageFailure)
-            assertEquals(Status.RUNNING, ledger.get(id)!!.state)
-            assertTrue(ledger.recordActualExit(id, ticket.attemptId, "exit") is Mutation.StorageFailure)
-            assertEquals(InstanceState.UNCONFIRMED, ledger.get(id)!!.instance!!.state)
+            val result = ledger.recordInvocation(input) as Mutation.StorageFailure
+            assertTrue(result.uncertain)
+            assertTrue(store.records().isEmpty())
+            fail = false
+            assertTrue(ledger.recordInvocation(input) is Mutation.Blocked)
         }
-        AndroidInvocationStore.open(root) {}.use { store ->
-            assertEquals(Status.RUNNING, store.records().single().state)
-            assertFalse(File(root, "${AndroidInvocationStore.DIRECTORY}/${raw.contentHash}.blob").exists())
-        }
+        openTestStore(root).use { assertEquals(1, it.records().size); assertNull(it.records().single().instance) }
     }
 
-    @Test fun publishedBlobDamageOnOrdinaryExitClosesAndroidWriter() {
-        for (damage in listOf("missing", "corrupt", "unreadable")) temporary { root ->
-            AndroidInvocationStore.open(root) {}.use { store ->
-                val gate = DefinitionGate()
-                val validator = ArgumentsValidator { _, _ -> true }
-                val ledger = InvocationLedger(store, gate, validator)
-                ledger.recoverColdStart("first")
-                val definition = FrozenDefinition("host/test", "host_test", "test", "test", "{}", Risk.READ,
-                    Source.FIRST_PARTY, "host", "1", 1, true, null, false, null)
-                gate.install(definition); gate.freezeRun("run", listOf(definition))
-                val input = InvocationInput(BindingValue.copyOf(callBinding("test", "req", null, 0, "wire")),
-                    "chain", "session", "run", "step", 0, "{}", definition, false, Risk.READ)
-                val id = input.binding.callId
-                ledger.recordInvocation(input)
-                val ready = (ledger.validateAndPrepare(id) as Mutation.Applied).record
-                val ticket = (ledger.claimExecution(id, ready.revision) as Mutation.Applied).ticket!!
-                val out = ToolOutputNormalizer.normalize(listOf(OutputPart.Text("x".repeat(100000))),
-                    null, false, null, null, validator, "host_blob_read")
-                val saved = (ledger.recordToolOutput(id, ticket.attemptId, Status.SUCCEEDED, out, null) as Mutation.Applied).record
-                val path = File(root, "${AndroidInvocationStore.DIRECTORY}/${out.stored.raw.contentHash}.blob").toPath()
-                val original = Files.readAllBytes(path)
-                when (damage) {
-                    "missing" -> Files.delete(path)
-                    "corrupt" -> Files.write(path, original.copyOf().also { it[0] = 0 })
-                    else -> { Files.delete(path); Files.createDirectory(path) }
-                }
-                val failed = ledger.recordActualExit(id, ticket.attemptId, "exit") as Mutation.StorageFailure
-                assertFalse(failed.uncertain)
-                assertEquals(saved, ledger.get(id))
-                if (Files.isDirectory(path)) Files.delete(path)
-                Files.write(path, original) // repair does not reopen a failed Android writer
-                val retry = ledger.recordActualExit(id, ticket.attemptId, "exit") as Mutation.StorageFailure
-                assertTrue(retry.uncertain)
-                assertThrows(StoreException::class.java) { store.save(saved.copy(revision = saved.revision + 1), saved.revision) }
-                assertEquals(saved, store.records().single())
-            }
-        }
-    }
-
-    @Test fun everyInitializationCutpointCanRetryWithoutPublishingAnIncompleteStore() {
-        for (stage in InitializationStage.entries) temporary { root ->
-            assertThrows(StoreException::class.java) {
-                AndroidInvocationStore.open(root, { if (it == stage) throw IOException("crash at $stage") }) {}
-            }
-            val directory = File(root, AndroidInvocationStore.DIRECTORY)
-            if (stage < InitializationStage.AFTER_RENAME) assertFalse(directory.exists())
-            else assertEquals("theta-invocation-ledger-v1", File(directory, "ledger.identity").readText())
-            AndroidInvocationStore.open(root) {}.use { assertTrue(it.records().isEmpty()) }
-            assertFalse(File(root, ".${AndroidInvocationStore.DIRECTORY}.initializing").exists())
-        }
-    }
-
-    @Test fun everyInitialDirectorySyncFailureCanRetry() {
-        for (failureAt in 1..3) temporary { root ->
-            var calls = 0
-            assertThrows(StoreException::class.java) {
-                AndroidInvocationStore.open(root) { if (++calls == failureAt) throw IOException("sync $failureAt") }
-            }
-            AndroidInvocationStore.open(root) {}.use { assertTrue(it.records().isEmpty()) }
-        }
-    }
-
-    @Test fun corruptFormalDirectoryWinsOverAnAbandonedStage() = temporary { root ->
-        val stage = File(root, ".${AndroidInvocationStore.DIRECTORY}.initializing").apply { mkdir() }
-        File(stage, "ledger.identity").writeText("theta-invocation-ledger-v1")
-        val directory = File(root, AndroidInvocationStore.DIRECTORY).apply { mkdir() }
-        assertThrows(StoreException::class.java) { AndroidInvocationStore.open(root) {} }
-        assertTrue(directory.listFiles()!!.isEmpty())
-        assertTrue(stage.isDirectory)
-    }
-
-    @Test fun existingEmptyOrCorruptDirectoryDoesNotBecomeFresh() = temporary { root ->
-        val directory = File(root, AndroidInvocationStore.DIRECTORY).apply { mkdir() }
-        assertThrows(StoreException::class.java) { AndroidInvocationStore.open(root) {} }
-        File(directory, "ledger.identity").writeText("bad identity")
-        assertThrows(StoreException::class.java) { AndroidInvocationStore.open(root) {} }
-        assertEquals("bad identity", File(directory, "ledger.identity").readText())
-    }
-
-    @Test fun initialSyncFailureIsClosedAndBridgeNeverRetriesOpen() = runBlocking {
-        temporary { root -> runBlocking {
-            val budget = PluginExecutionBudget()
-            try {
-                val bridge = HostToolBridgeRoot(budget)
-                var attempts = 0
-                try {
-                    bridge.initialize { attempts++; AndroidInvocationStore.open(root) { throw IOException("fsync") } }
-                    fail("Expected storage failure")
-                } catch (_: StoreException) { }
-                try { bridge.initialize { attempts++; AndroidInvocationStore.open(root) {} }; fail("Expected closed bridge") }
-                catch (_: IllegalStateException) { }
-                assertEquals(1, attempts)
-                assertFalse(File(root, "${AndroidInvocationStore.DIRECTORY}/ledger.identity").exists())
-            } finally { budget.close() }
-        } }
+    @Test fun databaseLivesInNoBackupRootAndReopens() = temporary { root ->
+        // The schema is a SQLite transaction, not a published directory marker.
+        openTestStore(root).close()
+        assertTrue(File(root, AgentDatabase.FILE_NAME).isFile)
+        assertFalse(File(root, "host-invocations").exists())
+        openTestStore(root).use { assertTrue(it.records().isEmpty()) }
     }
 
     private class BlockedSpecTool(private val release: CountDownLatch) : Tool {
@@ -239,7 +112,7 @@ class AndroidInvocationStoreTest {
             val hold = CompletableDeferred<Unit>()
             try {
                 val leases = List(2) { checkNotNull(budget.submit("plugin", plugins, {}, {}) { hold.await() }) }
-                AndroidInvocationStore.open(root) {}.use { store ->
+                openTestStore(root).use { store ->
                     val service = HostToolBridgeRoot(budget).initialize { store }
                     val call = input(service)
                     assertEquals(Status.READY, (service.prepare(call) as Mutation.Applied).record.state)
@@ -259,12 +132,12 @@ class AndroidInvocationStoreTest {
             val release = CountDownLatch(1)
             try {
                 val failure = runCatching {
-                    HostToolBridgeRoot(budget, BlockedSpecTool(release)).initialize { AndroidInvocationStore.open(root) {} }
+                    HostToolBridgeRoot(budget, BlockedSpecTool(release)).initialize { openTestStore(root) }
                 }.exceptionOrNull()
                 assertTrue("$failure", failure is IllegalStateException && failure !is CancellationException)
                 // Coroutine stack-trace recovery may wrap the rethrown exception in a copy.
                 assertTrue(generateSequence(failure) { it.cause }.any { it is TimeoutCancellationException })
-                AndroidInvocationStore.open(root) {}.close() // The failed startup released its writer.
+                openTestStore(root).close() // The failed startup released its writer.
             } finally { release.countDown(); budget.close() }
         } }
     }
@@ -276,7 +149,7 @@ class AndroidInvocationStoreTest {
             val tool = BlockedSpecTool(release)
             val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
             try {
-                val startup = scope.async { HostToolBridgeRoot(budget, tool).initialize { AndroidInvocationStore.open(root) {} } }
+                val startup = scope.async { HostToolBridgeRoot(budget, tool).initialize { openTestStore(root) } }
                 withContext(Dispatchers.IO) { assertTrue(tool.entered.await(5, TimeUnit.SECONDS)) }
                 startup.cancel()
                 withTimeout(3_000) { startup.join() }
@@ -285,27 +158,58 @@ class AndroidInvocationStoreTest {
         } }
     }
 
+    @Test fun helperOnCreateOrderingCannotReinitializeEstablishedEvidence() = temporary { root ->
+        // Real SQLite with the SupportSQLiteDriver contract: helper creates schema inside
+        // driver.open BEFORE AgentDatabase can inspect pragmas. Not an Android device test.
+        var creates = 0
+        var opens = 0
+        val driver = object : androidx.sqlite.SQLiteDriver {
+            override val hasConnectionPool = true
+            override fun open(fileName: String): androidx.sqlite.SQLiteConnection {
+                opens++
+                val db = androidx.sqlite.driver.bundled.BundledSQLiteDriver().open(fileName)
+                fun exec(sql: String) { db.prepare(sql).use { it.step() } }
+                exec("PRAGMA journal_mode=WAL"); exec("PRAGMA synchronous=FULL"); exec("PRAGMA foreign_keys=ON")
+                val version = db.prepare("PRAGMA user_version").use { it.step(); it.getLong(0) }
+                if (version == 0L) {
+                    exec("BEGIN IMMEDIATE")
+                    AgentDatabase.createSchema(db); creates++
+                    exec("COMMIT")
+                }
+                return db
+            }
+        }
+        AndroidInvocationStore.open(root, driver).close()
+        assertEquals(1, creates)
+        for (deleted in listOf(false, true)) {
+            val file = File(root, AgentDatabase.FILE_NAME)
+            if (deleted) file.delete() else file.writeBytes(byteArrayOf())
+            assertThrows(StoreException::class.java) { AndroidInvocationStore.open(root, driver).close() }
+            assertEquals(1, opens); assertEquals(1, creates)
+            assertEquals(!deleted, file.exists())
+            if (!deleted) assertEquals(0L, file.length())
+        }
+    }
+
     @Test fun secondWriterRejectedAndFailedOpenReleasesLocks() = temporary { root ->
-        AndroidInvocationStore.open(root) {}.use {
-            assertThrows(StoreException::class.java) { AndroidInvocationStore.open(root) {} }
+        openTestStore(root).use {
+            assertThrows(StoreException::class.java) { openTestStore(root) }
         }
-        var count = 0
-        assertThrows(StoreException::class.java) {
-            AndroidInvocationStore.open(root) { if (++count == 2) throw IOException("post-open sync") }
-        }
-        AndroidInvocationStore.open(root) {}.close()
+        openTestStore(root).close()
     }
 
     @Test fun malformedRecordBlocksStartupWithoutDeletingEvidence() = runBlocking {
         temporary { root -> runBlocking {
-            AndroidInvocationStore.open(root) {}.close()
-            val corrupt = File(root, "${AndroidInvocationStore.DIRECTORY}/${UUID.randomUUID()}.json")
-            corrupt.writeText("{broken")
+            openTestStore(root).close()
+            val corrupt = File(root, AgentDatabase.FILE_NAME)
+            androidx.sqlite.driver.bundled.BundledSQLiteDriver().open(corrupt.path).use { db ->
+                db.prepare("INSERT INTO invocations VALUES('broken',1,1,'invalid-checksum')").use { it.step() }
+            }
             val budget = PluginExecutionBudget()
             try {
-                try { HostToolBridgeRoot(budget).initialize { AndroidInvocationStore.open(root) {} }; fail("Expected failure") }
+                try { HostToolBridgeRoot(budget).initialize { openTestStore(root) }; fail("Expected failure") }
                 catch (_: StoreException) { }
-                assertEquals("{broken", corrupt.readText())
+                assertTrue(corrupt.isFile)
             } finally { budget.close() }
         } }
     }

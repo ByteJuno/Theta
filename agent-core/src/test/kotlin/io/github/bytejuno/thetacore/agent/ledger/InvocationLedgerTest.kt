@@ -172,7 +172,7 @@ class InvocationLedgerTest {
         val r = f.claim(f.ready())
         val pending = assertIs<Mutation.Applied>(f.ledger.requestRiskUpgrade(r.record.callId, r.ticket!!.attemptId, Risk.WRITE)).record
         assertEquals(Risk.READ, pending.effectiveRisk)
-        f.stage = WriteStage.BEFORE_REPLACE
+        f.stage = SqliteWriteStage.BEFORE_COMMIT
         assertIs<Mutation.StorageFailure>(f.ledger.resolveApproval(pending.callId, pending.pending!!, Decision.ALLOW_ONCE))
         assertEquals(Risk.READ, f.ledger.get(pending.callId)!!.effectiveRisk)
         f.stage = null
