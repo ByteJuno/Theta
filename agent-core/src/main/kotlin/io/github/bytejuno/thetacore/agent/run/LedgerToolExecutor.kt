@@ -38,6 +38,41 @@ class LedgerToolExecutor(
 
     fun freeze(identity: RunIdentity) = gate.freezeRun(identity.runId, definitions)
 
+    /** Checkpoints retain full ledger truth, including late-exit evidence and resource isolation. */
+    internal fun checkpointRecords(messages: List<Message>): List<InvocationRecord> = messages.flatMapIndexed { index, m ->
+        val calls = m.parts.filterIsInstance<ContentPart.ToolCall>()
+        if (calls.isNotEmpty()) {
+            val first = ledger.get(calls.first().binding.callId) ?: throw ToolStepBlocked("Checkpoint missing ledger record")
+            val expected = ledger.resultsForStep(first.input.sessionId, first.input.runId, first.input.stepId,
+                calls.map { it.binding.callId }) ?: throw ToolStepBlocked("Incomplete checkpoint step")
+            require(HistoryCodec.atLedgerPrecision(HistoryCodec.encodeMessage(expected)) ==
+                HistoryCodec.atLedgerPrecision(HistoryCodec.encodeMessage(messages[index + 1]))) { "Checkpoint result disagrees with ledger" }
+        }
+        calls.map { call ->
+            val r = ledger.get(call.binding.callId) ?: throw ToolStepBlocked("Checkpoint missing ledger record")
+            require(r.input.binding == BindingValue.copyOf(call.binding) && r.input.argsJson == call.argsJson &&
+                r.input.modelName == call.name) { "Checkpoint source disagrees with ledger" }
+            r
+        }
+    }
+
+    internal fun currentCheckpointRecords(saved: List<InvocationRecord>): List<InvocationRecord> = saved.map { old ->
+        val current = ledger.get(old.callId) ?: throw ToolStepBlocked("Checkpoint missing ledger record")
+        require(current.atLedgerPrecision().input == old.atLedgerPrecision().input) { "Checkpoint invocation changed" }
+        current
+    }
+
+    // UNKNOWN remains forensic truth after resolution. Only a real exited instance with current
+    // VERIFIED_CLEAR may pass: resolveRecovery is a no-op without isolation, and new UNKNOWN
+    // outcome evidence replaces isolation with an unresolved value in the ledger.
+    internal fun checkpointBlocked(records: List<InvocationRecord>): Boolean = records.any { r ->
+        !r.state.terminal || (r.result?.effect == Effect.UNKNOWN &&
+            (r.instance?.state != InstanceState.EXIT_CONFIRMED || r.isolation?.resolution != RecoveryResolution.VERIFIED_CLEAR)) ||
+            r.instance?.state == InstanceState.UNCONFIRMED ||
+            r.recoveryPending || r.restartRequired ||
+            r.isolation?.let { it.resolution != RecoveryResolution.VERIFIED_CLEAR } == true
+    }
+
     fun register(identity: RunIdentity, step: String, calls: List<CollectedCall>, cancelled: Boolean) {
         calls.forEachIndexed { order, call ->
             val d = byName[call.name]

@@ -1,7 +1,9 @@
 package io.github.bytejuno.thetacore.agent.run
 
 import io.github.bytejuno.thetacore.agent.protocol.*
+import io.github.bytejuno.thetacore.agent.ledger.*
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.InputStream
 import java.io.OutputStream
@@ -98,6 +100,10 @@ internal data class StoredPending(val version: Int = 1, val revision: Long, val 
     val assistant: StoredMessage)
 @Serializable
 internal data class CallLocation(val callId: String, val revision: Long, val batchHash: String)
+/** Accounting is independent of context admission and remains writable with pending tool intent. */
+@Serializable
+internal data class RunAccounting(val sessionId: String, val taskChainId: String, val runId: String,
+    val steps: Int, val retries: Int)
 @Serializable
 internal data class CheckedHistoryValue(val payload: String, val sha256: String)
 
@@ -107,8 +113,17 @@ internal object HistoryCodec {
     /** kotlinx JSON's encodeToStream still buffers an entire escaped string token. Emit this
      * small, closed storage schema directly so even a huge result needs only writer/frame buffers.
      * Field order and escaping match the v1 serializer, preserving existing chain digests. */
-    fun writeValue(value: Any, output: OutputStream) {
-        val writer = java.io.OutputStreamWriter(output, Charsets.UTF_8).buffered(8192)
+    fun writeValue(value: Any, output: OutputStream) = writeValue(value,
+        java.io.OutputStreamWriter(output, Charsets.UTF_8).buffered(8192))
+
+    internal fun writeValue(value: Any, writer: java.io.Writer) {
+        fun span(s: String, start: Int, length: Int) {
+            var offset = start
+            while (offset < start + length) {
+                val count = minOf(8192, start + length - offset)
+                writer.write(s, offset, count); offset += count
+            }
+        }
         fun quoted(s: String) {
             writer.write("\"")
             var start = 0
@@ -123,11 +138,11 @@ internal object HistoryCodec {
                         "\\u" + c.code.toString(16).padStart(4, '0') else null
                 }
                 if (escape != null) {
-                    if (i > start) writer.write(s, start, i - start)
+                    if (i > start) span(s, start, i - start)
                     writer.write(escape); start = i + 1
                 }
             }
-            if (start < s.length) writer.write(s, start, s.length - start)
+            if (start < s.length) span(s, start, s.length - start)
             writer.write("\"")
         }
         lateinit var emit: (Any?) -> Unit
@@ -161,6 +176,47 @@ internal object HistoryCodec {
             is StoredBinding -> fields("provider" to v.provider, "requestId" to v.requestId, "responseId" to v.responseId,
                 "index" to v.index, "wireId" to v.wireId, "callId" to v.callId)
             is StoredReplay -> fields("protocol" to v.protocol, "model" to v.model, "payload" to v.payload)
+            is Enum<*> -> quoted(v.name)
+            is RunAccounting -> fields("sessionId" to v.sessionId, "taskChainId" to v.taskChainId,
+                "runId" to v.runId, "steps" to v.steps, "retries" to v.retries)
+            is ExecutionBarrier -> fields("sessionId" to v.sessionId, "taskChainId" to v.taskChainId,
+                "runId" to v.runId, "reason" to v.reason, "steps" to v.steps, "retries" to v.retries)
+            is ContextCheckpoint -> fields("version" to v.version, "id" to v.id, "sessionId" to v.sessionId,
+                "taskChainId" to v.taskChainId, "runId" to v.runId, "nextRunId" to v.nextRunId,
+                "unattended" to v.unattended, "sourceRevision" to v.sourceRevision, "sourceCount" to v.sourceCount,
+                "sourceDigest" to v.sourceDigest, "settingsKey" to v.settingsKey, "goal" to v.goal,
+                "steps" to v.steps, "retries" to v.retries, "kind" to v.kind, "summary" to v.summary,
+                "reason" to v.reason, "serverUnresolved" to v.serverUnresolved, "ledger" to v.ledger,
+                "catalog" to v.catalog, "pauseClass" to v.pauseClass, "budgetKey" to v.budgetKey)
+            is InvocationRecord -> fields("formatVersion" to v.formatVersion, "revision" to v.revision,
+                "input" to v.input, "definitionDigest" to v.definitionDigest, "state" to v.state,
+                "effectiveRisk" to v.effectiveRisk, "executionArgs" to v.executionArgs, "pending" to v.pending,
+                "receipts" to v.receipts, "instance" to v.instance, "result" to v.result, "evidence" to v.evidence,
+                "isolation" to v.isolation, "restartRequired" to v.restartRequired,
+                "recoveryPending" to v.recoveryPending, "restartRequiredUntilExit" to v.restartRequiredUntilExit)
+            is InvocationInput -> fields("binding" to v.binding, "taskChainId" to v.taskChainId,
+                "sessionId" to v.sessionId, "runId" to v.runId, "stepId" to v.stepId, "callOrder" to v.callOrder,
+                "argsJson" to v.argsJson, "definition" to v.definition, "unattended" to v.unattended,
+                "initialRisk" to v.initialRisk, "cancelledBeforeExecution" to v.cancelledBeforeExecution, "modelName" to v.modelName)
+            is BindingValue -> fields("provider" to v.provider, "requestId" to v.requestId, "responseId" to v.responseId,
+                "index" to v.index, "wireId" to v.wireId, "callId" to v.callId)
+            is FrozenDefinition -> fields("toolKey" to v.toolKey, "modelName" to v.modelName, "name" to v.name,
+                "description" to v.description, "inputSchema" to v.inputSchema, "declaredRisk" to v.declaredRisk,
+                "source" to v.source, "owner" to v.owner, "version" to v.version, "generation" to v.generation,
+                "parallelSafe" to v.parallelSafe, "exclusiveResource" to v.exclusiveResource, "idempotent" to v.idempotent,
+                "outputSchema" to v.outputSchema, "timeoutMillis" to v.timeoutMillis)
+            is ApprovalRequest -> fields("id" to v.id, "callId" to v.callId, "digest" to v.digest,
+                "version" to v.version, "generation" to v.generation, "risk" to v.risk,
+                "unknownCalls" to v.unknownCalls, "internal" to v.internal)
+            is ApprovalReceipt -> fields("request" to v.request, "decision" to v.decision)
+            is ExecutionInstance -> fields("attemptId" to v.attemptId, "processEpoch" to v.processEpoch, "state" to v.state)
+            is LogicalResult -> fields("status" to v.status, "effect" to v.effect, "text" to v.text,
+                "inconsistentRead" to v.inconsistentRead, "output" to v.output)
+            is ExitEvidence -> fields("attemptId" to v.attemptId, "text" to v.text, "outcome" to v.outcome)
+            is Isolation -> fields("reason" to v.reason, "resource" to v.resource, "resolution" to v.resolution)
+            is StoredToolOutput -> fields("raw" to v.raw, "media" to v.media, "warning" to v.warning)
+            is BlobRef -> fields("id" to v.id, "mimeType" to v.mimeType, "sizeBytes" to v.sizeBytes,
+                "contentHash" to v.contentHash, "chunksHash" to v.chunksHash)
             else -> error("Unsupported history value")
         } }
         emit(value); writer.flush() // caller owns channel, force, frame footer, and commit
@@ -190,7 +246,7 @@ internal object HistoryCodec {
     /** InvocationRecordCodec stores text as UTF-8, turning a lone surrogate into '?' after a restart.
      * History keeps the original, so comparing the two needs this same reduction on both sides. */
     fun atLedgerPrecision(m: StoredMessage) = m.copy(parts = m.parts.map { p ->
-        p.copy(text = p.text?.let { String(it.toByteArray(Charsets.UTF_8), Charsets.UTF_8) })
+        if (p.kind == "result") p.copy(text = p.text?.atLedgerPrecision()) else p
     })
     fun requireUtf8(m: StoredMessage) {
         for (p in m.parts) {

@@ -60,16 +60,19 @@ class FileRunHistory private constructor(
         if (head.revision == 0L) require(head.messageCount == 0L && head.hash == EMPTY_HASH)
         else batch(cursor()) // bounded tail validation; never scan all history on open
         discardUncommittedBatch()
+        createDirectoryChain(directory.resolve("accounting"), durability)
         discardTemporaryFiles()
+        migrateAccounting()
     }
 
     /** Only our exact temporary names, and only regular files (never follow links). A partial
      * temp is expected after death and is never committed evidence. Unknown names and every final
      * file, including corrupt finals, are retained. This runs only while holding writer.lock. */
     private fun discardTemporaryFiles() {
-        val patterns = listOf(directory to Regex("\\.(head|pending)\\.json\\.tmp"),
+        val patterns = listOf(directory to Regex("\\.(head|pending|context|view|execution|accounting)\\.json\\.tmp"),
             directory.resolve("batches") to Regex("\\.[1-9][0-9]*\\.json\\.tmp"),
-            directory.resolve("calls") to Regex("\\.[0-9a-f]{64}\\.json\\.tmp"))
+            directory.resolve("calls") to Regex("\\.[0-9a-f]{64}\\.json\\.tmp"),
+            directory.resolve("accounting") to Regex("\\.[0-9a-f]{64}\\.json\\.tmp"))
         for ((parent, pattern) in patterns) {
             Files.newDirectoryStream(parent).use { paths ->
                 for (path in paths) if (pattern.matches(path.fileName.toString()) &&
@@ -116,6 +119,98 @@ class FileRunHistory private constructor(
     private fun batchPath(revision: Long) = directory.resolve("batches").resolve("$revision.json")
     private fun callPath(callId: String) = directory.resolve("calls").resolve("${digest(callId.toByteArray(Charsets.UTF_8))}.json")
     private fun pendingPath() = directory.resolve("pending.json")
+    private fun checkpointPath() = directory.resolve("context.json")
+
+    private fun accountingPath(taskChainId: String): Path {
+        require(taskChainId.isNotBlank())
+        HistoryCodec.requireUtf8(taskChainId)
+        return directory.resolve("accounting").resolve("${digest(taskChainId.toByteArray(Charsets.UTF_8))}.json")
+    }
+
+    /** One bounded atomic counter per chain, independent of history and context-view provenance. */
+    @Synchronized internal fun loadAccounting(taskChainId: String): RunAccounting? {
+        ready()
+        val path = accountingPath(taskChainId)
+        return if (Files.exists(path)) read<RunAccounting>(path).also {
+            require(it.sessionId == sessionId && it.taskChainId == taskChainId && it.steps >= 0 && it.retries >= 0) {
+                "Accounting identity or counters disagree"
+            }
+        } else null
+    }
+    @Synchronized internal fun saveAccounting(value: RunAccounting) {
+        ready(); require(value.sessionId == sessionId && value.steps >= 0 && value.retries >= 0)
+        val prior = loadAccounting(value.taskChainId)
+        write(accountingPath(value.taskChainId), value.copy(
+            steps = maxOf(value.steps, prior?.steps ?: 0), retries = maxOf(value.retries, prior?.retries ?: 0)))
+    }
+
+    /** Copy/force/replace before deleting the legacy slot. A crash at either commit point is
+     * restartable: both copies merge monotonically; corrupt legacy data never silently resets. */
+    private fun migrateAccounting() {
+        val legacy = directory.resolve("accounting.json")
+        if (!Files.exists(legacy)) return
+        val value = read<RunAccounting>(legacy)
+        saveAccounting(value)
+        try { Files.delete(legacy); syncDirectory(directory, durability) }
+        catch (e: Exception) { poisoned = true; throw HistoryStorageException("Accounting migration uncertain", e) }
+    }
+
+    @Synchronized internal fun saveBarrier(value: ExecutionBarrier) {
+        ready(); require(value.sessionId == sessionId)
+        val previous = loadBarrier()
+        require(previous == null || previous.taskChainId == value.taskChainId)
+        write(directory.resolve("execution.json"), value)
+    }
+    @Synchronized internal fun loadBarrier(): ExecutionBarrier? {
+        ready()
+        val path = directory.resolve("execution.json")
+        return if (Files.exists(path)) read<ExecutionBarrier>(path).also { require(it.sessionId == sessionId) } else null
+    }
+    @Synchronized internal fun completeServerExecution(identity: RunIdentity) {
+        ready()
+        val barrier = loadBarrier() ?: return
+        require(barrier.taskChainId == identity.taskChainId && barrier.runId == identity.runId)
+        try { Files.delete(directory.resolve("execution.json")); syncDirectory(directory, durability) }
+        catch (e: Exception) { poisoned = true; throw HistoryStorageException("Execution barrier cleanup uncertain", e) }
+    }
+    @Synchronized internal fun loadView(): ContextCheckpoint? {
+        ready()
+        return if (Files.exists(directory.resolve("view.json"))) read<ContextCheckpoint>(directory.resolve("view.json")) else null
+    }
+
+    /** Independent atomic derived-view commit under the SAME session lock. Never advances HEAD.
+     * A stale checkpoint is not replayed; corrupt committed data fails closed and is retained. */
+    @Synchronized internal fun saveCheckpoint(value: ContextCheckpoint) {
+        ready()
+        val source = snapshot() // validates the complete source chain and refuses pending intent
+        require(value.sessionId == sessionId && value.sourceRevision == source.revision)
+        require(value.matches(source, value.settingsKey))
+        require(value.steps >= 0 && value.retries >= 0 && value.goal.isNotBlank())
+        require(value.kind in setOf("VIEW", "CONTINUATION", "PAUSED", "COMPLETE"))
+        require((value.kind == "CONTINUATION") == (value.nextRunId != null))
+        require(value.kind in setOf("PAUSED", "COMPLETE") || value.summary != null)
+        value.ledger.forEach { it.validate() }
+        // View first: a crash may retain an unused view, never lose admission protection.
+        if (value.summary != null) write(directory.resolve("view.json"), value.copy(kind = "VIEW", nextRunId = null))
+        write(checkpointPath(), value)
+    }
+
+    @Synchronized internal fun loadCheckpoint(): ContextCheckpoint? {
+        ready()
+        if (!Files.exists(checkpointPath())) return null
+        return read<ContextCheckpoint>(checkpointPath()).also {
+            require(it.version == 1 && it.sessionId == sessionId && it.steps >= 0 && it.retries >= 0)
+            require(it.kind in setOf("VIEW", "CONTINUATION", "PAUSED", "COMPLETE"))
+            require((it.kind == "CONTINUATION") == (it.nextRunId != null))
+            require(it.kind in setOf("PAUSED", "COMPLETE") || it.summary != null)
+            it.ledger.forEach { record -> record.validate() }
+        }
+    }
+
+    /** Null means absent/stale, not that an uncertain checkpoint can be safely resumed. */
+    @Synchronized fun checkpointInfo(): CheckpointInfo? = loadCheckpoint()?.takeIf {
+        it.matches(snapshot(), it.settingsKey)
+    }?.info()
 
     private inline fun <reified T> read(path: Path): T {
         try {

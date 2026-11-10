@@ -46,6 +46,40 @@ class OpenAiSettingsStoreTest {
         throw AssertionError()
     }
 
+    @Test fun cacheCompatSurvivesEncryptedStoreAndControlsWire() = runBlocking {
+        val root = temp.newFolder()
+        val c = cipher()
+        val store = OpenAiSettingsStore(root, c)
+        val base = settings()
+        val keys = mutableListOf<String>()
+        for (enabled in listOf(false, true)) {
+            store.replace(OpenAiProviderSettings(base.providerId, base.baseUrl, base.model, base.parameters,
+                OpenAiChatConfig.Compat(explicitCacheControl = enabled)), secret)
+            val snapshot = OpenAiSettingsStore(root, c).snapshotForNewRun()
+            assertEquals(enabled, snapshot.settings.compat.explicitCacheControl)
+            var submitted = false
+            val target = snapshot.target(ModelTransport { _, body, credential -> flow {
+                submitted = true
+                assertEquals(secret, credential)
+                assertEquals(enabled, body.contains("cache_control"))
+                emit(TransportEvent.Headers(200, "text/event-stream", null))
+                emit(TransportEvent.Bytes(("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}\n\n" +
+                    "data: [DONE]\n\n").toByteArray()))
+            } })
+            keys += target.provider.contextConfigurationKey()
+            val request = snapshot.request { messages = listOf(io.github.bytejuno.thetacore.agent.protocol.message(
+                io.github.bytejuno.thetacore.agent.protocol.Role.USER,
+                io.github.bytejuno.thetacore.agent.protocol.textPart("cached"), cacheBreakpoint = true)) }
+            assertTrue(target.provider.chat(request, target.credentials).toList().last() is ModelEvent.Finished)
+            assertTrue(submitted)
+        }
+        assertNotEquals(keys[0], keys[1])
+        val encoded = Json.parseToJsonElement(ProviderSettingsCodec.encode(base, secret).toString(Charsets.UTF_8)).jsonObject
+        val legacy = JsonObject(encoded + ("compat" to JsonObject(encoded.getValue("compat").jsonObject - "explicitCacheControl")))
+        record(root).writeBytes(c.encrypt(legacy.toString().toByteArray()))
+        assertFalse(OpenAiSettingsStore(root, c).snapshotForNewRun().settings.compat.explicitCacheControl)
+    }
+
     @Test fun roundTripAndBackupBoundary() {
         val root = temp.newFolder("no_backup")
         val files = temp.newFolder("files")
