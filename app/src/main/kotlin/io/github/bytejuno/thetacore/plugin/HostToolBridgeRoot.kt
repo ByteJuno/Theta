@@ -22,7 +22,8 @@ internal class HostToolBridgeRoot(
     private var service: HostToolExecutionService? = null
 
     /** Open inside the one-shot gate: even a failed open must not retry as a fresh installation. */
-    suspend fun initialize(openStore: () -> InvocationStore): HostToolExecutionService = withContext(Dispatchers.IO) {
+    suspend fun initialize(screenBackend: io.github.bytejuno.thetacore.plugin.tools.ScreenBackend? = null,
+        openStore: () -> InvocationStore): HostToolExecutionService = withContext(Dispatchers.IO) {
         mutex.withLock {
             service?.let { return@withLock it }
             check(!attempted) { "Bridge initialization already attempted; process restart required" }
@@ -39,6 +40,9 @@ internal class HostToolBridgeRoot(
                 }
                 val catalog = FrozenToolCatalog(gate, metadataBudget, owner, validator)
                 catalog.registerHost("host/clock", "1", hostTool)
+                screenBackend?.let {
+                    catalog.registerHost("host/screen_info", "1", io.github.bytejuno.thetacore.plugin.tools.HostScreenTool(it))
+                }
                 catalog.registerHost("host/blob_read", "1", io.github.bytejuno.thetacore.plugin.tools.HostBlobReadTool(ledger))
                 HostToolExecutionService(budget, owner, catalog, ledger, validator).also { service = it }
             } catch (error: Throwable) {
