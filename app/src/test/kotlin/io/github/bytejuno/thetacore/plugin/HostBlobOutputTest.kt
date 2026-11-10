@@ -132,6 +132,119 @@ class HostBlobOutputTest {
             }
         } finally { returnBody.countDown(); releaseChild.countDown(); budget.close(); root.deleteRecursively() }
     }
+    @Test fun runtimeApprovedRichReturnKeepsReceiptsAndCancelledUnknownBarrier() = runBlocking {
+        for (cancelled in listOf(false, true)) {
+            val root = Files.createTempDirectory("host-approved-blob").toFile()
+            val budget = PluginExecutionBudget()
+            val approved = CompletableDeferred<Boolean>()
+            val returnBody = CountDownLatch(1)
+            val childEntered = CountDownLatch(1)
+            val releaseChild = CountDownLatch(1)
+            val text = "approved😀".repeat(10000)
+            val media = byteArrayOf(1, 2, 3, 4)
+            val structured = buildJsonObject { put("approved", true) }
+            val tool = object : Tool {
+                override val id = "approved"
+                override val spec = ToolSpec("approved", "approved", JsonObject(emptyMap()), timeoutMs = 60000)
+                override suspend fun call(args: JsonObject, env: ToolEnv): ToolResult {
+                    val allowed = env.requestApproval("publish rich result", ToolRisk.WRITE)
+                    approved.complete(allowed)
+                    check(allowed)
+                    CoroutineScope(currentCoroutineContext()).launch(Dispatchers.Default) {
+                        withContext(NonCancellable) { childEntered.countDown(); releaseChild.await() }
+                    }
+                    returnBody.await()
+                    return ToolResult(text, structured, effect = if (cancelled) ToolEffect.UNKNOWN else null)
+                        .withContent(listOf(ToolContent.Media(ToolMediaKind.IMAGE, "image/png", media)))
+                }
+            }
+            try {
+                lateinit var callId: String
+                lateinit var rawRef: BlobRef
+                lateinit var receipt: ApprovalReceipt
+                AndroidInvocationStore.open(root) {}.use { store ->
+                    val service = HostToolBridgeRoot(budget, tool).initialize { store }
+                    val frozen = service.catalog.freeze("run")
+                    val source = frozen.values.single { it.toolKey == "host/clock" }
+                    val reader = frozen.values.single { it.toolKey == "host/blob_read" }
+                    val input = InvocationInput(BindingValue.copyOf(callBinding("test", "approved", null, 0, "wire")),
+                        "chain", "session", "run", "step", 0, "{}", source, false, Risk.READ)
+                    callId = input.binding.callId
+                    service.prepare(input); service.dispatch(callId)
+                    val pending = withTimeout(5000) {
+                        while (service.ledger.get(callId)!!.pending == null) delay(5)
+                        service.ledger.get(callId)!!.pending!!
+                    }
+                    assertTrue(pending.internal)
+                    assertFalse(approved.isCompleted)
+                    assertTrue(service.decide(callId, pending.id, Decision.ALLOW_ONCE) is Mutation.Applied)
+                    assertTrue(withTimeout(5000) { approved.await() })
+                    assertTrue(childEntered.await(5, TimeUnit.SECONDS))
+                    receipt = service.ledger.get(callId)!!.receipts.single()
+                    assertEquals(pending, receipt.request)
+                    assertEquals(Decision.ALLOW_ONCE, receipt.decision)
+                    assertEquals(Risk.WRITE, service.ledger.get(callId)!!.effectiveRisk)
+                    if (cancelled) service.cancel(callId) else releaseChild.countDown()
+                    returnBody.countDown()
+                    if (cancelled) {
+                        withTimeout(15000) {
+                            while (service.ledger.get(callId)!!.evidence.none { it.outcome?.output != null }) delay(5)
+                        }
+                        val late = service.ledger.get(callId)!!
+                        assertEquals(Status.CANCELLED, late.state)
+                        assertEquals(Effect.UNKNOWN, late.result!!.effect)
+                        assertNull(late.result!!.output)
+                        assertEquals(InstanceState.UNCONFIRMED, late.instance!!.state)
+                        assertTrue(service.ledger.pendingRecoveries().isEmpty())
+                        val next = InvocationInput(BindingValue.copyOf(callBinding("test", "next", null, 0, "wire")),
+                            "chain", "session", "run", "next", 0,
+                            buildJsonObject {
+                                put("id", late.evidence.single { it.outcome?.output != null }.outcome!!.output!!.raw.id)
+                                put("offset", 0)
+                            }.toString(),
+                            reader, false, Risk.READ)
+                        assertEquals(Status.READY, (service.prepare(next) as Mutation.Applied).record.state)
+                        val blocked = service.dispatch(next.binding.callId) as Mutation.Blocked
+                        assertEquals("Task chain awaits unknown instance actual exit", blocked.reason)
+                        assertTrue(service.decide(callId, pending.id, Decision.ALLOW_ALWAYS) is Mutation.Conflict)
+                    }
+                    releaseChild.countDown(); service.awaitObservedExit(callId)
+                    val record = service.ledger.get(callId)!!
+                    assertEquals(if (cancelled) Status.CANCELLED else Status.SUCCEEDED, record.state)
+                    assertEquals(InstanceState.EXIT_CONFIRMED, record.instance!!.state)
+                    assertEquals(listOf(receipt), record.receipts)
+                    assertEquals(1L, service.normalizationCount)
+                    val outcome = record.evidence.single { it.outcome != null }.outcome!!
+                    assertEquals(if (cancelled) Effect.UNKNOWN else Effect.APPLIED, outcome.effect)
+                    assertFalse(outcome.inconsistentRead)
+                    if (!cancelled) assertEquals(outcome, record.result)
+                    rawRef = outcome.output!!.raw
+                    assertArrayEquals(media, service.ledger.readBlob("run", outcome.output!!.media.single().id, 0).second)
+                    if (cancelled) {
+                        val recovery = service.ledger.pendingRecoveries().single()
+                        assertTrue(service.decideRecovery(callId, recovery.id, RecoveryResolution.VERIFIED_CLEAR) is Mutation.Applied)
+                        assertEquals(Effect.UNKNOWN, service.ledger.get(callId)!!.result!!.effect)
+                        assertEquals(outcome, service.ledger.get(callId)!!.evidence.single { it.outcome != null }.outcome)
+                    }
+                }
+                AndroidInvocationStore.open(root) {}.use { store ->
+                    val record = store.records().single { it.callId == callId }
+                    assertEquals(listOf(receipt), record.receipts)
+                    assertEquals(rawRef, record.evidence.single { it.outcome != null }.outcome!!.output!!.raw)
+                    val bytes = java.io.ByteArrayOutputStream()
+                    var offset = 0L
+                    while (offset < rawRef.sizeBytes) {
+                        val chunk = store.readBlob(rawRef, offset, 8192); bytes.write(chunk); offset += chunk.size
+                    }
+                    val raw = Json.decodeFromString(RawToolOutput.serializer(), bytes.toString("UTF-8"))
+                    assertEquals(text, raw.content.first().text)
+                    assertEquals(structured, raw.structured)
+                    assertEquals(if (cancelled) Effect.UNKNOWN else null, raw.effect)
+                }
+            } finally { returnBody.countDown(); releaseChild.countDown(); budget.close(); root.deleteRecursively() }
+        }
+    }
+
     @Test fun plainEscapedOutputsUseBlobPathEvenBelowRawByteLimit() = runBlocking {
         for (text in listOf("a".repeat(32768), "\n".repeat(32768), "\u0000".repeat(32768), "😀".repeat(8192))) {
             val root = Files.createTempDirectory("host-plain-budget").toFile()

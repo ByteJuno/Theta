@@ -11,7 +11,8 @@ import kotlinx.serialization.json.*
  * consumer. Freeze must precede prepare; only the host catalog supplies definitions. No
  * automatic approval, execution at startup, replay, or recovery-barrier bypass is provided.
  * Prepare requires a caller-persisted canonical UUID callId; retries retain every input field.
- * Cold UNKNOWN decisions are the separate issue22 API; get exposes the retained barrier.
+ * Pending decisions are host-only IDs bound to current durable state. Recovery acknowledges
+ * evidence without changing the recorded effect, re-executing a call, or releasing live leases.
  */
 internal class HostToolRuntimeApi(private val service: HostToolExecutionService) {
     /** Freeze/get take the definition gate, which is held across ledger fsyncs: never on the caller's thread. */
@@ -36,6 +37,11 @@ internal class HostToolRuntimeApi(private val service: HostToolExecutionService)
                 mutation(service.prepare(input))
             }
             "decide" -> mutation(service.decide(field("callId"), field("approvalId"), Decision.valueOf(field("decision"))))
+            "pendingApprovals" -> Json.encodeToString(service.ledger.pendingApprovals())
+            "pendingRecoveries" -> Json.encodeToString(service.ledger.pendingRecoveries())
+            "decideRecovery" -> mutation(service.decideRecovery(field("callId"), field("recoveryId"),
+                RecoveryResolution.valueOf(field("resolution"))))
+            "cancel" -> mutation(service.cancel(field("callId")))
             "dispatch" -> mutation(service.dispatch(field("callId")))
             "get" -> service.ledger.get(field("callId"))?.let { Json.encodeToString(it) } ?: "null"
             else -> error("Unknown host operation")
