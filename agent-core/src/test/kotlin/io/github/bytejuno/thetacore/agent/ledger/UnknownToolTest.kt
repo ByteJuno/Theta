@@ -69,18 +69,17 @@ class UnknownToolTest {
     @Test fun existingKnownRecordsWithoutModelNameStillReopen(): Unit = Fixture().use { f ->
         val record = f.record()
         f.store.close()
-        val file = f.directory.resolve("${record.callId}.json")
-        val json = Json.parseToJsonElement(String(java.nio.file.Files.readAllBytes(file), Charsets.UTF_8)).jsonObject
+        val json = Json.parseToJsonElement(String(payload(f.directory, record.callId), Charsets.UTF_8)).jsonObject
         val input = kotlinx.serialization.json.JsonObject(json["input"]!!.jsonObject - "modelName")
         val legacy = kotlinx.serialization.json.JsonObject(json + ("input" to input))
-        java.nio.file.Files.write(file, legacy.toString().toByteArray(Charsets.UTF_8))
+        replacePayload(f.directory, record.callId, legacy.toString().toByteArray(Charsets.UTF_8))
         f.reopen()
         assertEquals(record, f.ledger.get(record.callId))
     }
 
     @Test fun uncertainUnknownWriteReopensToOneRejectionWithoutExecution(): Unit = Fixture().use { f ->
         val input = unknown(f)
-        f.stage = WriteStage.AFTER_REPLACE
+        f.stage = SqliteWriteStage.AFTER_COMMIT
         assertTrue(assertIs<Mutation.StorageFailure>(f.ledger.recordInvocation(input)).uncertain)
         f.reopen()
         val record = assertIs<Mutation.AlreadyApplied>(f.ledger.recordInvocation(input)).record
@@ -93,7 +92,7 @@ class UnknownToolTest {
 
     @Test fun failedUnknownWriteDoesNotAcknowledgeResultAndCanRetry(): Unit = Fixture().use { f ->
         val input = unknown(f)
-        f.stage = WriteStage.BEFORE_REPLACE
+        f.stage = SqliteWriteStage.BEFORE_COMMIT
         assertIs<Mutation.StorageFailure>(f.ledger.recordInvocation(input))
         assertNull(f.ledger.get(input.binding.callId))
         assertNull(f.ledger.resultsForStep(input.sessionId, input.runId, input.stepId, listOf(input.binding.callId)))

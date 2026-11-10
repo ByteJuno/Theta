@@ -43,7 +43,7 @@ class BridgeBoundaryTest {
     @Test fun outcomeWriteFailureDoesNotPretendWorkerExited() {
         Fixture().use { f ->
             val ready = f.ready(); val ticket = f.claim(ready).ticket!!
-            f.stage = WriteStage.BEFORE_TEMP
+            f.stage = SqliteWriteStage.AFTER_BEGIN
             assertIs<Mutation.StorageFailure>(f.ledger.recordOutcome(ready.callId, ticket.attemptId, Status.SUCCEEDED, "returned"))
             assertEquals(Status.RUNNING, f.ledger.get(ready.callId)!!.state)
             assertEquals(InstanceState.UNCONFIRMED, f.ledger.get(ready.callId)!!.instance!!.state)

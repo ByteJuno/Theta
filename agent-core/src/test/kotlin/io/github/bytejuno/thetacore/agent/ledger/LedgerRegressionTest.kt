@@ -80,10 +80,10 @@ class LedgerRegressionTest {
         val active = f.claim(f.ready())
         val ready = f.ready()
         f.reopen()
-        f.stage = WriteStage.BEFORE_REPLACE
+        f.stage = SqliteWriteStage.BEFORE_COMMIT
         // Reopened fixture has no injector; reopen explicitly with the failing writer.
         f.store.close()
-        f.store = JsonInvocationStore.open(f.directory, Durability.PROCESS_CRASH_ONLY) {
+        f.store = TestInvocationStore.open(f.directory) {
             if (it == f.stage) error("injected recovery failure")
         }
         f.ledger = InvocationLedger(f.store, f.gate, ArgumentsValidator { _, _ -> true })
@@ -106,7 +106,7 @@ class LedgerRegressionTest {
         f.approve(asked, Decision.ALLOW_ALWAYS)
         f.ledger.complete(grantSource.record.callId, grantSource.ticket.attemptId, Status.SUCCEEDED, "done")
         val active = f.claim(f.ready(f.input(d, unattended = true)))
-        f.stage = WriteStage.BEFORE_REPLACE
+        f.stage = SqliteWriteStage.BEFORE_COMMIT
         assertIs<Mutation.StorageFailure>(f.ledger.requestRiskUpgrade(active.record.callId, active.ticket!!.attemptId, Risk.WRITE))
         assertEquals(Risk.READ, f.ledger.get(active.record.callId)!!.effectiveRisk)
         f.stage = null
@@ -143,9 +143,9 @@ class LedgerRegressionTest {
                 assertIs<Mutation.Applied>(f.ledger.complete(ready.callId, active.ticket!!.attemptId, Status.FAILED, "unknown")).record
             } else ready
             f.store.close()
-            Files.writeString(f.directory.resolve("${record.callId}.json"),
-                Json { encodeDefaults = true }.encodeToString(transform(record)))
-            assertFailsWith<StoreException> { JsonInvocationStore.open(f.directory, Durability.PROCESS_CRASH_ONLY).close() }
+            replacePayload(f.directory, record.callId,
+                Json { encodeDefaults = true }.encodeToString(transform(record)).toByteArray())
+            assertFailsWith<StoreException> { TestInvocationStore.open(f.directory).close() }
         }
     }
 

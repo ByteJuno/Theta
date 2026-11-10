@@ -35,7 +35,7 @@ object HistoryCrashChild {
                 // Persist actual RUNNING WRITE state, then recover it before the history write.
                 // If killed before HEAD, pending intent survives and the new parent reconstructs LOST.
                 val ledgerDir = directory.resolve("ledger")
-                JsonInvocationStore.create(ledgerDir, Durability.PROCESS_CRASH_ONLY).use { store ->
+                TestInvocationStore.create(ledgerDir).use { store ->
                     val d = testDefinition(risk = Risk.WRITE)
                     val gate = DefinitionGate().apply { install(d); freezeRun("run", listOf(d)) }
                     val ledger = InvocationLedger(store, gate, ArgumentsValidator { _, _ -> true })
@@ -69,7 +69,8 @@ object HistoryLockChild {
 class HistoryProcessTest {
     // Gradle 9 may use a non-URL application loader. Code sources work with both loaders.
     private val classpath get() = (listOf(HistoryCrashChild::class.java, HistoryLockChild::class.java, FileRunHistory::class.java,
-        kotlin.Unit::class.java, kotlinx.serialization.json.Json::class.java,
+        kotlin.Unit::class.java, androidx.sqlite.SQLiteDriver::class.java,
+        androidx.sqlite.driver.bundled.BundledSQLiteDriver::class.java, kotlinx.serialization.json.Json::class.java,
         kotlinx.serialization.SerializationException::class.java, kotlinx.coroutines.Job::class.java)
         .map { File(it.protectionDomain.codeSource.location.toURI()).absolutePath } +
         generateSequence(javaClass.classLoader) { it.parent }.filterIsInstance<URLClassLoader>()
@@ -143,7 +144,7 @@ class HistoryProcessTest {
                     } else {
                         assertEquals(if (file == "head.json" && stage in setOf(HistoryWriteStage.AFTER_REPLACE,
                             HistoryWriteStage.AFTER_DIRECTORY_SYNC)) 3 else 1, visible.size)
-                        JsonInvocationStore.open(path.resolve("ledger"), Durability.PROCESS_CRASH_ONLY).use { store ->
+                        TestInvocationStore.open(path.resolve("ledger")).use { store ->
                             val ledger = InvocationLedger(store, DefinitionGate(), ArgumentsValidator { _, _ -> true })
                             ledger.recoverColdStart("parent")
                             assertTrue(h.recoverPending(ledger).requiresDecision)

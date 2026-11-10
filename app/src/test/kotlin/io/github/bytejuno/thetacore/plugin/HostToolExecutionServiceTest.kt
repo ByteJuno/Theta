@@ -711,7 +711,7 @@ class HostToolExecutionServiceTest {
         val dir = java.nio.file.Files.createTempDirectory("unknown-bridge-store")
         val budget = PluginExecutionBudget()
         val owner = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        var store: JsonInvocationStore? = null
+        var store: AndroidInvocationStore? = null
         try {
             val gate = DefinitionGate()
             val validator = Schema202012Validator()
@@ -721,7 +721,7 @@ class HostToolExecutionServiceTest {
                 executions.incrementAndGet(); ToolResult("known", effect = ToolEffect.NONE)
             })
             catalog.freeze("run")
-            store = JsonInvocationStore.create(dir, Durability.PROCESS_CRASH_ONLY)
+            store = openTestStore(dir.toFile())
             val ledger = InvocationLedger(store, gate, validator)
             ledger.recoverColdStart("before-reopen")
             val service = HostToolExecutionService(budget, owner, catalog, ledger, validator)
@@ -729,7 +729,7 @@ class HostToolExecutionServiceTest {
             val result = service.executeStep(reducer, "chain", "session", "run", "step")!!
             val before = store.records().sortedBy { it.input.callOrder }
             store.close()
-            store = JsonInvocationStore.open(dir, Durability.PROCESS_CRASH_ONLY)
+            store = openTestStore(dir.toFile())
             val recovered = InvocationLedger(store, gate, validator)
             recovered.recoverColdStart("after-reopen")
             val reopenedService = HostToolExecutionService(budget, owner, catalog, recovered, validator)
@@ -1953,9 +1953,9 @@ class HostToolExecutionServiceTest {
     @Test fun realClockBridgePersistsWithProductionStoreAndReopensWithoutReplay() = runBlocking {
         val dir = java.nio.file.Files.createTempDirectory("host-bridge-store")
         val budget = PluginExecutionBudget()
-        var store: JsonInvocationStore? = null
+        var store: AndroidInvocationStore? = null
         try {
-            store = JsonInvocationStore.create(dir, Durability.PROCESS_CRASH_ONLY)
+            store = openTestStore(dir.toFile())
             val service = HostToolBridgeRoot(budget).initialize { checkNotNull(store) }
             val d = service.catalog.freeze("run").values.single { it.toolKey == "host/clock" }
             val reducer = ModelEventReducer("recorded", "disk")
@@ -1965,7 +1965,7 @@ class HostToolExecutionServiceTest {
             val id = reducer.calls().single().binding.callId
             val persisted = service.ledger.get(id)!!
             store.close()
-            store = JsonInvocationStore.open(dir, Durability.PROCESS_CRASH_ONLY)
+            store = openTestStore(dir.toFile())
             assertEquals(persisted, store.records().single())
             assertEquals(Status.SUCCEEDED, persisted.state)
             assertEquals(InstanceState.EXIT_CONFIRMED, persisted.instance!!.state)

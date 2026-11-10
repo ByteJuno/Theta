@@ -38,7 +38,8 @@ class HostBlobOutputTest {
                 .withContent(listOf(ToolContent.Media(ToolMediaKind.DOCUMENT, "application/octet-stream", media)))
         }
         try {
-            JsonInvocationStore.create(root, Durability.PROCESS_CRASH_ONLY).use { store ->
+            SqliteInvocationStore.open(root.resolve(AgentDatabase.FILE_NAME),
+                androidx.sqlite.driver.bundled.BundledSQLiteDriver()).use { store ->
                 val service = HostToolBridgeRoot(budget, tool).initialize { store }
                 val frozen = service.catalog.freeze("run")
                 val source = frozen.values.single { it.toolKey == "host/clock" }
@@ -48,8 +49,7 @@ class HostBlobOutputTest {
                 assertEquals(1L, service.normalizationCount)
                 assertEquals(1, record.evidence.count { it.outcome != null })
                 val ref = record.result!!.output!!.media.single()
-                val scans = counter(store, "orphanDirectoryScans")
-                val gc = counter(store, "orphanCandidates")
+                val bytesBefore = counter(store, "blobBytesRead")
                 val roots = indexCounter(store, "roots", "rootVisits")
                 val ledgerRoots = indexCounter(service.ledger, "blobRoots", "rootVisits")
                 val records = indexCounter(store, "roots", "recordVisits")
@@ -71,14 +71,25 @@ class HostBlobOutputTest {
                 }
                 assertEquals(25, count)
                 assertArrayEquals(media, downloaded.toByteArray())
-                assertEquals(scans, counter(store, "orphanDirectoryScans"))
-                assertEquals(gc, counter(store, "orphanCandidates"))
+                assertEquals(media.size.toLong(), counter(store, "blobBytesRead") - bytesBefore)
                 assertEquals(roots, indexCounter(store, "roots", "rootVisits"))
                 assertEquals(ledgerRoots, indexCounter(service.ledger, "blobRoots", "rootVisits"))
                 assertEquals(9L * count, indexCounter(store, "roots", "recordVisits") - records)
                 assertEquals(9L * count, indexCounter(service.ledger, "blobRoots", "recordVisits") - ledgerRecords)
                 assertEquals(1L, service.normalizationCount)
-                println("BLOB_HOST_WORK chunks=$count saves=${5 * count} rootVisits=0 directoryScans=0 gcCandidates=0 indexRecordVisits=${9 * count} normalizations=1")
+                println("BLOB_HOST_WORK chunks=$count saves=${5 * count} rootVisits=0 externalBlobFiles=0 indexRecordVisits=${9 * count} normalizations=1")
+                androidx.sqlite.driver.bundled.BundledSQLiteDriver().open(root.resolve(AgentDatabase.FILE_NAME).toString()).use { db ->
+                    db.prepare("UPDATE content_chunks SET bytes=zeroblob(length(bytes)) WHERE hash=? AND ordinal=0").use {
+                        it.bindText(1, ref.contentHash); it.step()
+                    }
+                }
+                val failed = service.executeStep(calls(reader.modelName,
+                    buildJsonObject { put("id", ref.id); put("offset", 0) }.toString(), "damaged"),
+                    "chain", "session", "run", "damaged")!!
+                val failedPart = failed.parts.single() as ContentPart.ToolResult
+                assertTrue(failedPart.text.contains("Result content is unavailable: missing or corrupt."))
+                assertFalse(failedPart.text.contains("StoreException"))
+                assertEquals(Status.FAILED, service.ledger.get(failedPart.callId)!!.state)
             }
         } finally { budget.close(); root.toFile().deleteRecursively() }
     }
@@ -102,7 +113,7 @@ class HostBlobOutputTest {
         }
         try {
             lateinit var ref: BlobRef
-            AndroidInvocationStore.open(root) {}.use { store ->
+            openTestStore(root).use { store ->
                 val service = HostToolBridgeRoot(budget, tool).initialize { store }
                 val d = service.catalog.freeze("run").values.single { it.toolKey == "host/clock" }
                 val input = InvocationInput(BindingValue.copyOf(callBinding("test", "late", null, 0, "wire")),
@@ -124,7 +135,7 @@ class HostBlobOutputTest {
                 assertEquals(1, service.ledger.get(id)!!.evidence.count { it.outcome?.output != null })
                 assertEquals(Status.CANCELLED, service.ledger.get(id)!!.state)
             }
-            AndroidInvocationStore.open(root) {}.use { store ->
+            openTestStore(root).use { store ->
                 val bytes = java.io.ByteArrayOutputStream()
                 var offset = 0L
                 while (offset < ref.sizeBytes) { val chunk = store.readBlob(ref, offset, 8192); bytes.write(chunk); offset += chunk.size }
@@ -162,7 +173,7 @@ class HostBlobOutputTest {
                 lateinit var callId: String
                 lateinit var rawRef: BlobRef
                 lateinit var receipt: ApprovalReceipt
-                AndroidInvocationStore.open(root) {}.use { store ->
+                openTestStore(root).use { store ->
                     val service = HostToolBridgeRoot(budget, tool).initialize { store }
                     val frozen = service.catalog.freeze("run")
                     val source = frozen.values.single { it.toolKey == "host/clock" }
@@ -227,7 +238,7 @@ class HostBlobOutputTest {
                         assertEquals(outcome, service.ledger.get(callId)!!.evidence.single { it.outcome != null }.outcome)
                     }
                 }
-                AndroidInvocationStore.open(root) {}.use { store ->
+                openTestStore(root).use { store ->
                     val record = store.records().single { it.callId == callId }
                     assertEquals(listOf(receipt), record.receipts)
                     assertEquals(rawRef, record.evidence.single { it.outcome != null }.outcome!!.output!!.raw)
@@ -255,7 +266,7 @@ class HostBlobOutputTest {
                 override suspend fun call(args: JsonObject, env: ToolEnv) = ToolResult(text)
             }
             try {
-                AndroidInvocationStore.open(root) {}.use { store ->
+                openTestStore(root).use { store ->
                     val service = HostToolBridgeRoot(budget, tool).initialize { store }
                     val frozen = service.catalog.freeze("run")
                     val source = frozen.values.single { it.toolKey == "host/clock" }
@@ -287,7 +298,7 @@ class HostBlobOutputTest {
         try {
             lateinit var ref: BlobRef
             lateinit var callId: String
-            AndroidInvocationStore.open(root) {}.use { store ->
+            openTestStore(root).use { store ->
                 val service = HostToolBridgeRoot(budget, tool).initialize { store }
                 val frozen = service.catalog.freeze("run")
                 val source = frozen.values.single { it.toolKey == "host/clock" }
@@ -325,9 +336,9 @@ class HostBlobOutputTest {
                 val raw = Json.decodeFromString(RawToolOutput.serializer(), rawBytes.toString("UTF-8"))
                 assertEquals(text, raw.content.first().text)
                 assertEquals(mediaRef, raw.content.last().blob)
-                assertTrue(Files.size(root.resolve("${AndroidInvocationStore.DIRECTORY}/$callId.json").toPath()) < 50000)
+                assertTrue(appPayload(root, callId).size < 50000)
             }
-            AndroidInvocationStore.open(root) {}.use { store ->
+            openTestStore(root).use { store ->
                 assertEquals(ref, store.records().single { it.callId == callId }.result!!.output!!.raw)
                 assertTrue(store.readBlob(ref, 0, 8192).isNotEmpty())
             }

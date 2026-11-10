@@ -696,7 +696,7 @@ class ContextPolicyTest {
         val definition = testDefinition()
         val dir = root.resolve("h"); val ledgerDir = root.resolve("ledger")
         lateinit var saved: ContextCheckpoint
-        JsonInvocationStore.create(ledgerDir, durability).use { store ->
+        TestInvocationStore.create(ledgerDir).use { store ->
             val gate = DefinitionGate().apply { install(definition) }
             val ledger = InvocationLedger(store, gate, ArgumentsValidator { _, _ -> true })
             ledger.recoverColdStart("first-process")
@@ -717,7 +717,7 @@ class ContextPolicyTest {
                 saved = h.loadCheckpoint()!!; assertEquals("CONTINUATION", saved.kind)
             }
         }
-        JsonInvocationStore.open(ledgerDir, durability).use { store ->
+        TestInvocationStore.open(ledgerDir).use { store ->
             val gate = DefinitionGate().apply { install(definition) }
             val ledger = InvocationLedger(store, gate, ArgumentsValidator { _, _ -> true })
             ledger.recoverColdStart("second-process")
@@ -1099,7 +1099,7 @@ class ContextPolicyTest {
             val dir = root.resolve("local-$scenario"); val ledgerDir = root.resolve("ledger-$scenario")
             val definition = testDefinition(); val request = RunFixture(listOf(definition)).request()
             lateinit var ticket: ExecutionTicket
-            JsonInvocationStore.create(ledgerDir, durability).use { store ->
+            TestInvocationStore.create(ledgerDir).use { store ->
                 val gate = DefinitionGate().apply { install(definition) }
                 val ledger = InvocationLedger(store, gate, ArgumentsValidator { _, _ -> true })
                 ledger.recoverColdStart("first")
@@ -1146,7 +1146,7 @@ class ContextPolicyTest {
                     }
                 }
             }
-            JsonInvocationStore.open(ledgerDir, durability).use { store ->
+            TestInvocationStore.open(ledgerDir).use { store ->
                 val gate = DefinitionGate().apply { install(definition) }
                 val ledger = InvocationLedger(store, gate, ArgumentsValidator { _, _ -> true })
                 ledger.recoverColdStart("second")
@@ -1183,7 +1183,7 @@ class ContextPolicyTest {
             val dir = root.resolve("precision-$kind-$changed"); val ledgerDir = root.resolve("precision-ledger-$kind-$changed")
             val definition = testDefinition(); val request = RunFixture(listOf(definition)).request()
             lateinit var saved: ContextCheckpoint
-            JsonInvocationStore.create(ledgerDir, durability).use { store ->
+            TestInvocationStore.create(ledgerDir).use { store ->
                 val gate = DefinitionGate().apply { install(definition) }
                 val ledger = InvocationLedger(store, gate, ArgumentsValidator { _, _ -> true })
                 ledger.recoverColdStart("first")
@@ -1244,7 +1244,7 @@ class ContextPolicyTest {
                     }
                 }
             }
-            JsonInvocationStore.open(ledgerDir, durability).use { store ->
+            TestInvocationStore.open(ledgerDir).use { store ->
                 val gate = DefinitionGate().apply { install(definition) }
                 val ledger = InvocationLedger(store, gate, ArgumentsValidator { _, _ -> true })
                 ledger.recoverColdStart("second")
@@ -1290,7 +1290,7 @@ class ContextPolicyTest {
             val request = RunFixture(definitions).request()
             lateinit var ticket: ExecutionTicket
             lateinit var paired: List<Message>
-            JsonInvocationStore.create(ledgerDir, durability).use { store ->
+            TestInvocationStore.create(ledgerDir).use { store ->
                 val gate = DefinitionGate().apply { definitions.forEach(::install) }
                 val ledger = InvocationLedger(store, gate, ArgumentsValidator { _, _ -> true })
                 ledger.recoverColdStart("first")
@@ -1338,7 +1338,7 @@ class ContextPolicyTest {
                 }
                 ledger.recordActualExit(ticket.callId, ticket.attemptId, "real exit")
             }
-            JsonInvocationStore.open(ledgerDir, durability).use { store ->
+            TestInvocationStore.open(ledgerDir).use { store ->
                 val gate = DefinitionGate().apply { definitions.forEach(::install) }
                 val ledger = InvocationLedger(store, gate, ArgumentsValidator { _, _ -> true })
                 ledger.recoverColdStart("second")

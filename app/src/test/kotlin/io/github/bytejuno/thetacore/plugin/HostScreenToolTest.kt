@@ -52,7 +52,7 @@ class HostScreenToolTest {
         val calls = AtomicInteger()
         val backend = ScreenBackend { calls.incrementAndGet(); info }
         try {
-            AndroidInvocationStore.open(dir) {}.use { store ->
+            openTestStore(dir).use { store ->
                 val service = HostToolBridgeRoot(budget).initialize(backend) { store }
                 val bad = input(service, args = "{\"capture\":true}")
                 assertEquals(Status.REJECTED, (service.prepare(bad) as Mutation.Applied).record.state)
@@ -108,7 +108,7 @@ class HostScreenToolTest {
             }
             info
         }
-        val store = ObservedStore(AndroidInvocationStore.open(dir) {})
+        val store = ObservedStore(openTestStore(dir))
         var service: HostToolExecutionService? = null
         var firstId: String? = null
         try {
@@ -165,7 +165,7 @@ class HostScreenToolTest {
             // All workers/observers have exited before closing disk storage. Reopen real files,
             // construct a NEW ledger/composition and recover; never reuse an in-memory snapshot.
             store.close()
-            AndroidInvocationStore.open(dir) {}.use { reopened ->
+            openTestStore(dir).use { reopened ->
                 val cold = HostToolBridgeRoot(budget).initialize(backend) { reopened }
                 val recovered = cold.ledger.get(firstId)!!
                 assertEquals(exited, recovered)

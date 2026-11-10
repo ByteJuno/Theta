@@ -62,7 +62,7 @@ class ToolOutputTest {
         val run = claimed.record.input.runId
         assertContentEquals(byteArrayOf(0, -1, 4), f.ledger.readBlob(run, out.stored.media.single().id, 0).second)
         assertFails { f.ledger.readBlob("other", out.stored.raw.id, 0) }
-        val recordBytes = Files.readAllBytes(f.directory.resolve("${ticket.callId}.json"))
+        val recordBytes = payload(f.directory, ticket.callId)
         assertTrue(recordBytes.size < 50000)
         f.ledger.recordActualExit(ticket.callId, ticket.attemptId, "exited")
         assertIs<Mutation.AlreadyApplied>(f.ledger.recordToolOutput(ticket.callId, ticket.attemptId, Status.SUCCEEDED, out, Effect.UNKNOWN))
@@ -75,37 +75,30 @@ class ToolOutputTest {
     }
 
     @Test fun crashCutpointsNeverCollectCommittedReferencesAndRecoverOrphans() {
-        for (stage in listOf(WriteStage.AFTER_BLOB_WRITE, WriteStage.AFTER_BLOB_PUBLISH,
-            WriteStage.AFTER_CHUNKS_WRITE, WriteStage.AFTER_CHUNKS_PUBLISH,
-            WriteStage.AFTER_BLOB_DIRECTORY_SYNC, WriteStage.BEFORE_REPLACE, WriteStage.AFTER_REPLACE, WriteStage.AFTER_DIRECTORY_SYNC)) Fixture().use { f ->
+        for (stage in SqliteWriteStage.entries) Fixture().use { f ->
             val claim = f.claim(f.ready())
             val t = claim.ticket!!
             val out = output()
             f.stage = stage
             val failure = assertIs<Mutation.StorageFailure>(f.ledger.recordToolOutput(t.callId, t.attemptId, Status.SUCCEEDED, out, Effect.APPLIED))
-            val committed = stage in listOf(WriteStage.AFTER_REPLACE, WriteStage.AFTER_DIRECTORY_SYNC)
+            val committed = stage == SqliteWriteStage.AFTER_COMMIT
             assertEquals(committed, failure.uncertain)
-            if (committed) assertTrue(Files.exists(f.directory.resolve("${out.stored.raw.contentHash}.blob")))
+            if (committed) assertTrue(hasContent(f.directory, out.stored.raw.contentHash))
             f.reopen()
             assertEquals(if (committed) Status.SUCCEEDED else Status.LOST, f.ledger.get(t.callId)!!.state)
-            assertEquals(committed, Files.exists(f.directory.resolve("${out.stored.raw.contentHash}.blob")))
+            assertEquals(committed, hasContent(f.directory, out.stored.raw.contentHash))
             if (committed) assertTrue(f.ledger.readBlob(claim.record.input.runId, out.stored.raw.id, 0).second.isNotEmpty())
         }
     }
 
-    @Test fun openCollectsCrashOrphansButCorruptRootsPreventAllCleanup() = Fixture().use { f ->
+    @Test fun corruptContentIsQuarantinedWithoutRemovingLedgerEvidence() = Fixture().use { f ->
         val c = f.claim(f.ready()); val t = c.ticket!!; val out = output()
-        assertIs<Mutation.Applied>(f.ledger.recordToolOutput(t.callId, t.attemptId, Status.SUCCEEDED, out, Effect.NONE))
-        val orphan = f.directory.resolve("${"a".repeat(64)}.blob")
-        Files.write(orphan, byteArrayOf(1))
-        Files.write(f.directory.resolve(".abandoned.tmp"), byteArrayOf(2))
+        assertIs<Mutation.Applied>(f.ledger.recordToolOutput(t.callId, t.attemptId, Status.SUCCEEDED, out, Effect.UNKNOWN))
+        damageContent(f.directory, out.stored.raw.contentHash, "corrupt")
         f.reopen()
-        assertFalse(Files.exists(orphan)); assertFalse(Files.exists(f.directory.resolve(".abandoned.tmp")))
-        Files.write(orphan, byteArrayOf(1))
-        Files.write(f.directory.resolve("${out.stored.raw.contentHash}.blob"), byteArrayOf(3))
-        f.store.close()
-        assertFails { JsonInvocationStore.open(f.directory, Durability.PROCESS_CRASH_ONLY) }
-        assertTrue(Files.exists(orphan))
+        assertEquals(Status.SUCCEEDED, f.ledger.get(t.callId)!!.state)
+        assertFailsWith<StoreException> { f.store.readBlob(out.stored.raw, 0, 8192) }
+        assertTrue(hasContent(f.directory, out.stored.raw.contentHash))
     }
 
     @Test fun replacementCollectsOnlyUnreferencedContentAndNeverSharedLiveRoots() = Fixture().use { f ->
@@ -114,14 +107,13 @@ class ToolOutputTest {
         val out = output()
         for (c in listOf(first, second)) assertIs<Mutation.Applied>(f.ledger.recordToolOutput(
             c.record.callId, c.ticket!!.attemptId, Status.SUCCEEDED, out, Effect.NONE))
-        val path = f.directory.resolve("${out.stored.raw.contentHash}.blob")
         // Exercise the existing revision-CAS replacement API, not an invented deletion API.
         // Production ledger transitions retain all evidence; this is a storage ownership test.
         for ((index, c) in listOf(first, second).withIndex()) {
             val r = f.store.records().single { it.callId == c.record.callId }
             f.store.save(r.copy(revision = r.revision + 1, result = r.result!!.copy(output = null),
                 evidence = r.evidence.map { it.copy(outcome = it.outcome?.copy(output = null)) }), r.revision)
-            assertEquals(index == 0, Files.exists(path))
+            assertEquals(index == 0, hasContent(f.directory, out.stored.raw.contentHash))
         }
     }
 
@@ -137,10 +129,10 @@ class ToolOutputTest {
                 repeat(5) { assertTrue(f.ledger.readBlob(claim.record.input.runId, out.stored.raw.id, 0).second.isNotEmpty()) }
             } catch (e: Throwable) { errors += e }
         } }
-        assertFails { JsonInvocationStore.open(f.directory, Durability.PROCESS_CRASH_ONLY) }
+        assertFails { TestInvocationStore.open(f.directory) }
         start.countDown(); threads.forEach { it.join(10000); assertFalse(it.isAlive) }
         assertTrue(errors.isEmpty(), errors.toString())
         f.reopen()
-        Files.newDirectoryStream(f.directory, "*.blob").use { assertEquals(1, it.count()) }
+        sql(f.directory) { assertEquals(1L, it.longValue("SELECT count(*) FROM contents")) }
     }
 }

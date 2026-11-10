@@ -40,24 +40,16 @@ class BlobRegressionTest {
         println("MODEL_BOUND_WORK cases=${units.size} inputUnits=2000000 maxScanned=LIMIT+notice+2 maxPrefix=LIMIT")
     }
 
-    @Test fun ordinarySaveBlobValidationIsDefiniteStorageFailure() {
-        for (damage in listOf("missing", "corrupt", "unreadable")) Fixture().use { f ->
+    @Test fun damagedContentDoesNotBlockExitOrColdRecovery() {
+        for (damage in listOf("missing", "corrupt", "size")) Fixture().use { f ->
             val out = normalize(listOf(OutputPart.Text("large".repeat(10000))))
             val r = publish(f, out)
-            val path = f.directory.resolve("${out.stored.raw.contentHash}.blob")
-            when (damage) {
-                "missing" -> Files.delete(path)
-                "corrupt" -> FileChannel.open(path, WRITE).use { it.write(ByteBuffer.wrap(byteArrayOf(0))) }
-                // Deterministic non-readable-as-blob path on Windows too, without chmod assumptions.
-                else -> { Files.delete(path); Files.createDirectory(path) }
-            }
-            val failed = assertIs<Mutation.StorageFailure>(f.ledger.recordActualExit(r.callId, r.instance!!.attemptId, "exit"))
-            assertFalse(failed.uncertain)
-            assertEquals(r.revision, f.ledger.get(r.callId)!!.revision)
-            assertEquals(InstanceState.UNCONFIRMED, f.ledger.get(r.callId)!!.instance!!.state)
-            val error = assertFailsWith<StoreException> { f.store.save(r.copy(revision = r.revision + 1), r.revision) }
-            assertFalse(error.uncertain)
-            assertFailsWith<IllegalArgumentException> { f.store.save(r.copy(revision = r.revision + 2), r.revision) }
+            damageContent(f.directory, out.stored.raw.contentHash, damage)
+            assertFailsWith<StoreException> { f.store.readBlob(out.stored.raw, 0, 8192) }
+            assertIs<Mutation.Applied>(f.ledger.recordActualExit(r.callId, r.instance!!.attemptId, "exit"))
+            f.reopen()
+            assertEquals(InstanceState.EXIT_CONFIRMED, f.ledger.get(r.callId)!!.instance!!.state)
+            assertFailsWith<StoreException> { f.store.readBlob(out.stored.raw, 0, 8192) }
         }
     }
 
@@ -92,17 +84,16 @@ class BlobRegressionTest {
         val out = normalize(listOf(OutputPart.Text("x".repeat(40000))))
         val r = publish(f, out)
         val ref = out.stored.raw
-        val path = f.directory.resolve("${ref.contentHash}.blob")
-        f.stage = WriteStage.AFTER_REPLACE
+        f.stage = SqliteWriteStage.AFTER_COMMIT
         val error = assertFailsWith<StoreException> {
             f.store.save(r.copy(revision = r.revision + 1, result = r.result!!.copy(output = null),
                 evidence = emptyList()), r.revision)
         }
         assertTrue(error.uncertain)
-        assertTrue(Files.exists(path))
+        assertFalse(hasContent(f.directory, ref.contentHash))
         assertFails { f.store.readBlob(ref, 0, 8192) }
         f.reopen()
-        assertFalse(Files.exists(path))
+        assertFalse(hasContent(f.directory, ref.contentHash))
         assertFails { f.ledger.readBlob("run", ref.id, 0) }
     }
 
@@ -190,12 +181,10 @@ class BlobRegressionTest {
                 assertEquals(ref, actual); assertContentEquals(bytes, data)
             }
         }
-        val path = f.directory.resolve("${refs[0].contentHash}.blob")
-        val chunks = f.directory.resolve("${refs[0].contentHash}.chunks")
         f.store.records().forEachIndexed { index, r ->
             f.store.save(r.copy(revision = r.revision + 1, result = r.result!!.copy(output = null),
                 evidence = r.evidence.map { it.copy(outcome = it.outcome?.copy(output = null)) }), r.revision)
-            assertEquals(index == 0, Files.exists(path)); assertEquals(index == 0, Files.exists(chunks))
+            assertEquals(index == 0, hasContent(f.directory, refs[0].contentHash))
         }
     }
 
@@ -215,15 +204,12 @@ class BlobRegressionTest {
         assertContentEquals(bytes, downloaded.toByteArray())
         assertEquals(bytes.size.toLong(), f.store.blobBytesRead - before)
         assertContentEquals(bytes.copyOfRange(8190, 8200), f.store.readBlob(ref, 8190, 10))
-        val path = f.directory.resolve("${ref.contentHash}.blob")
-        val modified = Files.getLastModifiedTime(path)
-        FileChannel.open(path, WRITE).use { it.position(9000); it.write(ByteBuffer.wrap(byteArrayOf(-1))) }
-        Files.setLastModifiedTime(path, modified)
-        assertFailsWith<IllegalArgumentException> { f.store.readBlob(ref, 8192, 8192) }
-        // Unrelated chunks remain independently verifiable; reopen checks ALL chunks/full hash.
-        assertContentEquals(bytes.copyOfRange(0, 8192), f.store.readBlob(ref, 0, 8192))
-        f.store.close()
-        assertFails { JsonInvocationStore.open(f.directory, Durability.PROCESS_CRASH_ONLY) }
+        damageContent(f.directory, ref.contentHash, "corrupt", 1)
+        assertFailsWith<StoreException> { f.store.readBlob(ref, 8192, 8192) }
+        // Once damage is observed, the whole content is unavailable, not a partial normal result.
+        assertFailsWith<StoreException> { f.store.readBlob(ref, 0, 8192) }
+        f.reopen()
+        assertFailsWith<StoreException> { f.store.readBlob(ref, 0, 8192) }
     }
 
     @Test fun legacyHashOnlyReferencesReadButConflictingMimeFailsExplicitly(): Unit = Fixture().use { f ->
@@ -233,7 +219,15 @@ class BlobRegressionTest {
         val second = f.claim(f.ready(f.input(run = "legacy", order = 1)))
         f.ledger.complete(first.record.callId, first.ticket!!.attemptId, Status.SUCCEEDED, "old", Effect.NONE)
         f.ledger.complete(second.record.callId, second.ticket!!.attemptId, Status.SUCCEEDED, "old", Effect.NONE)
-        Files.write(f.directory.resolve("$hash.blob"), bytes)
+        sql(f.directory) { db ->
+            db.prepare("INSERT INTO contents(hash,size) VALUES(?,?)").use {
+                it.bindText(1, hash); it.bindLong(2, bytes.size.toLong()); it.step()
+            }
+            db.writeManifest(hash, chunkManifest(bytes))
+            db.prepare("INSERT INTO content_chunks(hash,ordinal,bytes) VALUES(?,0,?)").use {
+                it.bindText(1, hash); it.bindBlob(2, bytes); it.step()
+            }
+        }
         val refs = listOf("text/plain", "text/csv").map { mime ->
             // Decode the actual old three-field schema, not a newly constructed v2 reference.
             Json.decodeFromString(BlobRef.serializer(), "{\"id\":\"$hash\",\"mimeType\":\"$mime\",\"sizeBytes\":${bytes.size}}")
@@ -250,15 +244,12 @@ class BlobRegressionTest {
         assertFailsWith<IllegalArgumentException> { BlobRef(hash, "text/plain", bytes.size.toLong(), hash, "a".repeat(64)) }
     }
 
-    @Test fun corruptedManifestFailsReopenBeforeOrphanCleanup() = Fixture().use { f ->
+    @Test fun corruptedManifestIsUnavailableAfterReopen(): Unit = Fixture().use { f ->
         val out = normalize(listOf(OutputPart.Text("x".repeat(40000))))
-        publish(f, out)
-        val orphan = f.directory.resolve("${"a".repeat(64)}.chunks")
-        Files.write(orphan, byteArrayOf(1))
-        val path = f.directory.resolve("${out.stored.raw.contentHash}.chunks")
-        val bytes = Files.readAllBytes(path); bytes[0] = (bytes[0].toInt() xor 1).toByte(); Files.write(path, bytes)
-        f.store.close()
-        assertFails { JsonInvocationStore.open(f.directory, Durability.PROCESS_CRASH_ONLY) }
-        assertTrue(Files.exists(orphan))
+        val record = publish(f, out)
+        damageContent(f.directory, out.stored.raw.contentHash, "manifest")
+        f.reopen()
+        assertNotNull(f.ledger.get(record.callId))
+        assertFailsWith<StoreException> { f.store.readBlob(out.stored.raw, 0, 8192) }
     }
 }
