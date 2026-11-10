@@ -83,6 +83,13 @@ class OpenAiChatCodec(private val config: OpenAiChatConfig) {
         }.toString()
     }
 
+    private fun cachedText(text: String, breakpoint: Boolean): JsonElement =
+        if (!breakpoint || !config.compat.explicitCacheControl) JsonPrimitive(text)
+        else buildJsonArray { add(buildJsonObject {
+            put("type", "text"); put("text", text)
+            putJsonObject("cache_control") { put("type", "ephemeral") }
+        }) }
+
     private fun encodeHistory(request: ChatRequest): JsonArray {
         val output = mutableListOf<JsonElement>()
         request.system?.let { output += buildJsonObject { put("role", "system"); put("content", it) } }
@@ -99,7 +106,7 @@ class OpenAiChatCodec(private val config: OpenAiChatConfig) {
                 require(pending.isNotEmpty() && message.parts.size == pending.size) { "Tool results must exactly follow calls" }
                 message.parts.zip(pending).forEach { (part, call) ->
                     require(part is ContentPart.ToolResult && part.callId == call.binding.callId) { "Tool result order or identity mismatch" }
-                    output += buildJsonObject { put("role", "tool"); put("tool_call_id", wireIds.getValue(part.callId)); put("content", part.text) }
+                    output += buildJsonObject { put("role", "tool"); put("tool_call_id", wireIds.getValue(part.callId)); put("content", cachedText(part.text, message.cacheBreakpoint && part == message.parts.last())) }
                 }
                 pending = emptyList()
             } else {
@@ -124,7 +131,7 @@ class OpenAiChatCodec(private val config: OpenAiChatConfig) {
                 output += buildJsonObject {
                     put("role", message.role.name.lowercase())
                     val text = message.parts.filterIsInstance<ContentPart.Text>().joinToString("") { it.text }
-                    put("content", if (text.isEmpty() && calls.isNotEmpty()) JsonNull else JsonPrimitive(text))
+                    put("content", if (text.isEmpty() && calls.isNotEmpty()) JsonNull else cachedText(text, message.cacheBreakpoint))
                     if (reasonings.isNotEmpty() && config.compat.replayReasoning) {
                         put(config.compat.reasoningField!!, reasonings.joinToString("") {
                             Json.parseToJsonElement(it.replay!!.payload).jsonObject.string("text")!!
