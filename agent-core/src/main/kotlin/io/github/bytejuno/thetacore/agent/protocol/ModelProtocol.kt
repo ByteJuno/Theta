@@ -7,6 +7,9 @@ import java.util.UUID
 
 /** Experimental host protocol, NOT the plugin SDK ABI. No tool execution lives here. */
 interface ModelProvider {
+    /** Non-secret endpoint/translation revision for persisted context. Empty means the host's
+     * ModelTarget.id must uniquely version those settings. Never include authentication material. */
+    fun contextConfigurationKey(): String = ""
     fun executionMode(request: ChatRequest): ModelExecutionMode = ModelExecutionMode.MAY_EXECUTE_SERVER_TOOLS
     fun canReplay(data: ReplayData, targetModel: String): Boolean = false
     fun chat(request: ChatRequest, auth: Credentials): Flow<ModelEvent>
@@ -85,9 +88,15 @@ private data class CallValue(override val binding: CallBinding, override val nam
 private data class ResultValue(override val callId: String, override val text: String,
     override val isError: Boolean, override val replay: ReplayData? = null) : ContentPart.ToolResult
 
-interface Message { val role: Role; val parts: List<ContentPart> }
-fun message(role: Role, vararg parts: ContentPart): Message = MessageValue(role, frozen(parts.toList()))
-private data class MessageValue(override val role: Role, override val parts: List<ContentPart>) : Message
+interface Message {
+    val role: Role; val parts: List<ContentPart>
+    /** Request-view hint only. Adapters without explicit prompt caching ignore it. */
+    val cacheBreakpoint: Boolean get() = false
+}
+fun message(role: Role, vararg parts: ContentPart, cacheBreakpoint: Boolean = false): Message =
+    MessageValue(role, frozen(parts.toList()), cacheBreakpoint)
+private data class MessageValue(override val role: Role, override val parts: List<ContentPart>,
+    override val cacheBreakpoint: Boolean) : Message
 interface ModelTool { val name: String; val description: String; val inputSchema: JsonObject }
 fun modelTool(name: String, description: String, inputSchema: JsonObject): ModelTool = ToolValue(name, description, inputSchema)
 private data class ToolValue(override val name: String, override val description: String,
@@ -127,7 +136,7 @@ class ChatRequestBuilder(val model: String) {
         require(maxOutputTokens == null || maxOutputTokens!! > 0)
         require(temperature == null || (temperature!!.isFinite() && temperature!! in 0.0..2.0))
         require(topP == null || (topP!!.isFinite() && topP!! in 0.0..1.0))
-        return RequestValue(requestId, model, system, frozen(messages.map { message(it.role, *it.parts.toTypedArray()) }),
+        return RequestValue(requestId, model, system, frozen(messages.map { message(it.role, *it.parts.toTypedArray(), cacheBreakpoint = it.cacheBreakpoint) }),
             frozen(tools.sortedBy { it.name }), toolChoice, parallelToolCalls, reasoningLevel,
             maxOutputTokens, temperature, topP, frozen(stopSequences), responseSchema, extraBody)
     }

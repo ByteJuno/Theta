@@ -26,6 +26,7 @@ internal object ProviderSettingsCodec {
             c.reasoningField?.let { put("reasoningField", it) }
             put("replayReasoning", c.replayReasoning)
             put("streamUsage", c.streamUsage)
+            put("explicitCacheControl", c.explicitCacheControl)
             put("schema", c.schemaProfile.name)
         }
     }.toString().toByteArray(Charsets.UTF_8).also {
@@ -51,6 +52,7 @@ internal object ProviderSettingsCodec {
             reasoningField = c["reasoningField"]?.jsonPrimitive?.content,
             replayReasoning = c.getValue("replayReasoning").jsonPrimitive.boolean,
             streamUsage = c.getValue("streamUsage").jsonPrimitive.boolean,
+            explicitCacheControl = c["explicitCacheControl"]?.jsonPrimitive?.boolean ?: false,
             schemaProfile = SchemaProfile.valueOf(c.getValue("schema").jsonPrimitive.content),
         )
         return OpenAiRunSnapshot(OpenAiProviderSettings(

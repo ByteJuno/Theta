@@ -22,13 +22,19 @@ private const val TERMINAL_GRACE_MS = 2_000L
 private class TerminalGraceExpired : Exception()
 // Do not retain arbitrary echoed strings or truncated credentials in error metadata.
 private val SAFE_ERROR_PARAMETERS = setOf("temperature", "top_p", "parallel_tool_calls", "response_format",
-    "stop", "reasoning_effort", "max_tokens", "max_completion_tokens", "stream_options")
+    "stop", "reasoning_effort", "max_tokens", "max_completion_tokens", "stream_options", "cache_control")
 
 class OpenAiChatProvider(
     private val config: OpenAiChatConfig,
     private val transport: ModelTransport = OkHttpModelTransport(),
 ) : ModelProvider {
     private val codec = OpenAiChatCodec(config)
+    override fun contextConfigurationKey(): String = buildJsonObject {
+        put("version", 1); put("provider", config.providerId); put("endpoint", config.endpoint.toString())
+        put("maxTokens", config.compat.maxTokensField); put("reasoning", config.compat.reasoningField)
+        put("replay", config.compat.replayReasoning); put("usage", config.compat.streamUsage)
+        put("schema", config.compat.schemaProfile.name); put("cache", config.compat.explicitCacheControl)
+    }.toString()
     override fun canReplay(data: ReplayData, targetModel: String): Boolean = codec.canReplay(data, targetModel)
     override fun executionMode(request: ChatRequest): ModelExecutionMode =
         if (request.extraBody.isEmpty()) ModelExecutionMode.GENERATION_ONLY else ModelExecutionMode.MAY_EXECUTE_SERVER_TOOLS

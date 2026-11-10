@@ -38,6 +38,59 @@ class LedgerToolExecutor(
 
     fun freeze(identity: RunIdentity) = gate.freezeRun(identity.runId, definitions)
 
+    /** Checkpoints retain full ledger truth, including late-exit evidence and resource isolation. */
+    internal fun checkpointRecords(messages: List<Message>): List<InvocationRecord> = messages.flatMapIndexed { index, m ->
+        val calls = m.parts.filterIsInstance<ContentPart.ToolCall>()
+        if (calls.isNotEmpty()) {
+            val first = ledger.get(calls.first().binding.callId) ?: throw ToolStepBlocked("Checkpoint missing ledger record")
+            val expected = ledger.resultsForStep(first.input.sessionId, first.input.runId, first.input.stepId,
+                calls.map { it.binding.callId }) ?: throw ToolStepBlocked("Incomplete checkpoint step")
+            require(HistoryCodec.atLedgerPrecision(HistoryCodec.encodeMessage(expected)) ==
+                HistoryCodec.atLedgerPrecision(HistoryCodec.encodeMessage(messages[index + 1]))) { "Checkpoint result disagrees with ledger" }
+        }
+        calls.map { call ->
+            val r = ledger.get(call.binding.callId) ?: throw ToolStepBlocked("Checkpoint missing ledger record")
+            require(r.input.binding == BindingValue.copyOf(call.binding) && r.input.argsJson == call.argsJson &&
+                r.input.modelName == call.name) { "Checkpoint source disagrees with ledger" }
+            r
+        }
+    }
+
+    internal fun currentCheckpointRecords(saved: List<InvocationRecord>): List<InvocationRecord> = saved.map { old ->
+        val current = ledger.get(old.callId) ?: throw ToolStepBlocked("Checkpoint missing ledger record")
+        val durable = current.atLedgerPrecision()
+        val savedRecord = old.atLedgerPrecision()
+        require(durable.input == savedRecord.input) { "Checkpoint invocation changed" }
+        // Receipts are immutable evidence, unlike live exit/recovery state. Older lossy history
+        // writers omitted approval summaries; never silently acknowledge fabricated empty text.
+        require(savedRecord.receipts.all { it in durable.receipts } &&
+            (savedRecord.pending == null || savedRecord.pending == durable.pending ||
+                durable.receipts.any { it.request == savedRecord.pending })) { "Checkpoint approval evidence changed or incomplete" }
+        current
+    }
+
+    /** Ordinary runs may inspect unresolved effects after actual exit. Resource isolation and
+     * same-chain UNKNOWN write approvals remain enforced by the ledger on every tool submission. */
+    internal fun localExecutionBlocked(records: List<InvocationRecord>): Boolean = records.any {
+        !it.state.terminal || it.instance?.state == InstanceState.UNCONFIRMED || it.recoveryPending || it.restartRequired
+    }
+
+    /** Ordinary prior-history compaction needs actual exit and a recorded host/user decision for
+     * any isolation (ACCEPTED_UNCERTAINTY or VERIFIED_CLEAR); it is not checkpoint continuation. */
+    internal fun compactionBlocked(records: List<InvocationRecord>): Boolean =
+        localExecutionBlocked(records) || records.any { it.isolation != null && it.isolation.resolution == null }
+
+    // UNKNOWN remains forensic truth after resolution. Only a real exited instance with current
+    // VERIFIED_CLEAR may pass: resolveRecovery is a no-op without isolation, and new UNKNOWN
+    // outcome evidence replaces isolation with an unresolved value in the ledger.
+    internal fun checkpointBlocked(records: List<InvocationRecord>): Boolean = records.any { r ->
+        !r.state.terminal || (r.result?.effect == Effect.UNKNOWN &&
+            (r.instance?.state != InstanceState.EXIT_CONFIRMED || r.isolation?.resolution != RecoveryResolution.VERIFIED_CLEAR)) ||
+            r.instance?.state == InstanceState.UNCONFIRMED ||
+            r.recoveryPending || r.restartRequired ||
+            r.isolation?.let { it.resolution != RecoveryResolution.VERIFIED_CLEAR } == true
+    }
+
     fun register(identity: RunIdentity, step: String, calls: List<CollectedCall>, cancelled: Boolean) {
         calls.forEachIndexed { order, call ->
             val d = byName[call.name]

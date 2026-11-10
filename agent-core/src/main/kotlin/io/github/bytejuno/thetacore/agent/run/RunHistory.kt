@@ -62,7 +62,7 @@ internal fun freezeMessages(messages: List<Message>): List<Message> = frozen(mes
             }
             is ContentPart.ToolResult -> FrozenResult(p.callId, p.text, p.isError, replay)
         }
-    }.toTypedArray())
+    }.toTypedArray(), cacheBreakpoint = m.cacheBreakpoint)
 })
 
 private data class FrozenResult(override val callId: String, override val text: String,

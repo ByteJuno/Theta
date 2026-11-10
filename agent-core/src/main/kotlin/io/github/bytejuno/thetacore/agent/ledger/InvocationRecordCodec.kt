@@ -13,7 +13,7 @@ internal class InvocationRecordCodec(private val json: Json) {
             val text = value.jsonPrimitive.also { require(it.isString) }.content
             // Intern what UTF-8 will store: unpaired surrogates become '?', so distinct in-memory
             // strings can collapse and would otherwise fail the duplicate check on the next open.
-            JsonPrimitive(texts.getOrPut(String(text.toByteArray(Charsets.UTF_8), Charsets.UTF_8)) { texts.size })
+            JsonPrimitive(texts.getOrPut(text.atLedgerPrecision()) { texts.size })
         }
         return JsonObject(body + mapOf(
             "storageVersion" to JsonPrimitive(1),
@@ -76,6 +76,20 @@ internal class InvocationRecordCodec(private val json: Json) {
             }),
         ))
     }
+}
+
+/** The store writes UTF-8, including non-interned fields. Comparison uses that representation,
+ * without rewriting forensic source or building an escaped copy of a potentially huge record. */
+internal fun String.atLedgerPrecision(): String = String(toByteArray(Charsets.UTF_8), Charsets.UTF_8)
+
+private val precisionJson = Json { encodeDefaults = true; explicitNulls = true }
+internal fun InvocationRecord.atLedgerPrecision(): InvocationRecord {
+    fun normalize(value: JsonElement): JsonElement = when (value) {
+        is JsonObject -> JsonObject(value.mapValues { normalize(it.value) })
+        is JsonArray -> JsonArray(value.map { normalize(it) })
+        is JsonPrimitive -> if (value.isString) JsonPrimitive(value.content.atLedgerPrecision()) else value
+    }
+    return precisionJson.decodeFromJsonElement(normalize(precisionJson.encodeToJsonElement(this)))
 }
 
 /** Detach the only collection-valued fields before publishing or retaining a snapshot. */

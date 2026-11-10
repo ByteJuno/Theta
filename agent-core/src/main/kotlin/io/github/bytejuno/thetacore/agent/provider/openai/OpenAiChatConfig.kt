@@ -31,6 +31,9 @@ class OpenAiChatConfig(
         val replayReasoning: Boolean = false,
         val streamUsage: Boolean = true,
         val schemaProfile: SchemaProfile = SchemaProfile.FULL,
+        /** Explicit opt-in for compatible endpoints accepting content-block cache_control.
+         * Standard OpenAI Chat has automatic caching and MUST leave this false. */
+        val explicitCacheControl: Boolean = false,
     ) {
         init {
             require(maxTokensField in setOf("max_tokens", "max_completion_tokens"))
