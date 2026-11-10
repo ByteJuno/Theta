@@ -18,7 +18,27 @@ internal class InvocationRecordCodec(private val json: Json) {
         return JsonObject(body + mapOf(
             "storageVersion" to JsonPrimitive(1),
             "texts" to JsonArray(texts.keys.map(::JsonPrimitive)),
-        )).toString()
+        )).toString().escapeUnpairedSurrogates()
+    }
+
+    /** JSON permits escaped UTF-16 code units, but UTF-8 replaces raw unpaired surrogates.
+     * Visit actual code units only: existing JSON escapes (including literal backslash-u text)
+     * remain untouched, and valid surrogate pairs keep their original UTF-8 representation.
+     * Result/evidence text has already undergone the storage-v1 normalization above.
+     */
+    private fun String.escapeUnpairedSurrogates(): String = buildString(length) {
+        var index = 0
+        while (index < this@escapeUnpairedSurrogates.length) {
+            val unit = this@escapeUnpairedSurrogates[index++]
+            if (unit in '\uD800'..'\uDBFF' && index < this@escapeUnpairedSurrogates.length &&
+                this@escapeUnpairedSurrogates[index] in '\uDC00'..'\uDFFF') {
+                append(unit)
+                append(this@escapeUnpairedSurrogates[index++])
+            } else if (unit in '\uD800'..'\uDFFF') {
+                append("\\u")
+                append(unit.code.toString(16).padStart(4, '0'))
+            } else append(unit)
+        }
     }
 
     fun decode(encoded: String): InvocationRecord {

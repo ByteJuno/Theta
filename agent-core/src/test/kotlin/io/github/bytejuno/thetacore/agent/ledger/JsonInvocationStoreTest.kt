@@ -55,6 +55,59 @@ class JsonInvocationStoreTest {
         assertEquals(r, f.store.records().single())
     }
 
+    @Test fun unknownNamesReplayAfterUtf8DiskReopen() {
+        for (value in surrogateInputs()) Fixture().use { f ->
+            val input = f.input(args = "{\"value\":\"$value\"}").let {
+                it.copy(definition = null, modelName = "missing-$value",
+                    binding = it.binding.copy(provider = value, requestId = value, responseId = value, wireId = value))
+            }
+            val first = f.record(input)
+            assertEquals(Status.REJECTED, first.state)
+            assertEquals(input, assertIs<Mutation.AlreadyApplied>(f.ledger.recordInvocation(input)).record.input)
+            val file = f.directory.resolve("${first.callId}.json")
+            val bytes = Files.readAllBytes(file)
+            val stored = Charsets.UTF_8.newDecoder().decode(java.nio.ByteBuffer.wrap(bytes)).toString()
+            assertTrue(stored.contains("\"storageVersion\":1"))
+            f.reopen()
+            val replay = assertIs<Mutation.AlreadyApplied>(f.ledger.recordInvocation(input)).record
+            assertEquals(input, replay.input)
+            assertEquals(Status.REJECTED, replay.state)
+            // Result text keeps its established UTF-8 normalization; input identity does not.
+            assertEquals(String(first.result!!.text.toByteArray(Charsets.UTF_8), Charsets.UTF_8), replay.result!!.text)
+            assertContentEquals(bytes, Files.readAllBytes(file))
+            assertIs<Mutation.Conflict>(f.ledger.recordInvocation(input.copy(modelName = "different")))
+        }
+    }
+
+    @Test fun knownArgumentsAndNamesReplayAndExecuteAfterDiskReopen() {
+        for (value in surrogateInputs()) Fixture().use { f ->
+            val args = "{\"value\":\"$value\"}"
+            val input = f.input(d = definition().copy(modelName = "tool-$value"), args = args)
+            val ready = f.ready(input)
+            assertEquals(Status.READY, ready.state)
+            assertEquals(args, ready.executionArgs)
+            assertEquals(ready, assertIs<Mutation.AlreadyApplied>(f.ledger.recordInvocation(input)).record)
+            val file = f.directory.resolve("${ready.callId}.json")
+            val bytes = Files.readAllBytes(file)
+            f.reopen()
+            assertEquals(ready, assertIs<Mutation.AlreadyApplied>(f.ledger.recordInvocation(input)).record)
+            assertContentEquals(bytes, Files.readAllBytes(file))
+            val claimed = f.claim(ready)
+            assertEquals(args, claimed.ticket!!.argsJson)
+            assertEquals(input.modelName, claimed.ticket.definition.modelName)
+            val done = assertIs<Mutation.Applied>(f.ledger.complete(ready.callId, claimed.ticket.attemptId,
+                Status.SUCCEEDED, "done")).record
+            f.reopen("epoch-3")
+            assertEquals(done, assertIs<Mutation.AlreadyApplied>(f.ledger.recordInvocation(input)).record)
+            assertIs<Mutation.Conflict>(f.ledger.recordInvocation(input.copy(argsJson = "{}")))
+        }
+    }
+
+    private fun surrogateInputs() = listOf(
+        "\uD800", "\uDC00", "\uD800𐀀\uDC00", "\uDC00😀\uD800",
+        "emoji-😀-literal-\\ud800-\\udc00-control-\\u0000-\\n-quote-\\\"-slash-\\\\",
+    )
+
     @Test fun everyWritePhaseIsOldOrNewCompleteAndUncertainHalts() {
         for (stage in WriteStage.entries.filter { it <= WriteStage.AFTER_DIRECTORY_SYNC }) Fixture().use { f ->
             val ready = f.ready()

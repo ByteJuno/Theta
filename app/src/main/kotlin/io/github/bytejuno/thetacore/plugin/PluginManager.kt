@@ -90,7 +90,9 @@ internal class PluginManager(context: Context) {
 
     /** Application startup owns the store and the single recovery attempt, never an Activity. */
     suspend fun initializeHostTools(): HostToolExecutionService =
-        hostToolBridge.initialize { AndroidInvocationStore.open(app.noBackupFilesDir) }
+        hostToolBridge.initialize(io.github.bytejuno.thetacore.plugin.tools.AndroidScreenBackend(app)) {
+            AndroidInvocationStore.open(app.noBackupFilesDir)
+        }
     private val stageCleanup = PluginStageCleanup()
     private val store = PluginStore(app.filesDir, app.cacheDir, PlatformPluginSignatureVerifier(app.packageManager), stageCleanup)
     private val states = PluginStateStore(app.filesDir)
