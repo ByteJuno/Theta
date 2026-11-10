@@ -54,6 +54,8 @@ class LedgerRegressionTest {
         val first = f.ready(a)
         val second = f.prepare(f.input(d, run = a.runId, order = 1))
         f.ledger.timeout(old.record.callId)
+        assertIs<Mutation.Blocked>(f.ledger.claimExecution(first.callId, first.revision))
+        f.ledger.recordActualExit(old.record.callId, old.ticket!!.attemptId, "worker exited")
         val renewed = assertIs<Mutation.Applied>(f.ledger.claimExecution(first.callId, first.revision)).record
         assertEquals(Status.WAITING_APPROVAL, renewed.state)
         assertIs<Mutation.Blocked>(f.ledger.resolveApproval(second.callId, second.pending!!, Decision.ALLOW_ONCE))

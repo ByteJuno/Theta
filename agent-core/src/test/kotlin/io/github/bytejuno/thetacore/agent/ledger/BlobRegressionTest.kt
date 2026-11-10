@@ -64,6 +64,8 @@ class BlobRegressionTest {
     @Test fun indexReplacementCountsSharedAndLateRootsWithoutHistoryWalk() = Fixture().use { f ->
         val out = normalize(listOf(OutputPart.Text("value".repeat(10000))))
         val first = publish(f, out)
+        // Shared roots need a second invocation, not a bypass of the live UNKNOWN chain barrier.
+        assertIs<Mutation.Applied>(f.ledger.recordActualExit(first.callId, first.instance!!.attemptId, "worker exited"))
         val second = publish(f, out, order = 1)
         val index = BlobReferenceIndex(listOf(first, second))
         val ref = out.stored.raw
@@ -175,7 +177,8 @@ class BlobRegressionTest {
         val bytes = "a,b\n1,2".toByteArray()
         val refs = listOf("text/plain", "text/csv").mapIndexed { index, mime ->
             val out = normalize(listOf(OutputPart.Media(MediaKind.DOCUMENT, mime, bytes)))
-            publish(f, out, order = index)
+            val published = publish(f, out, order = index)
+            assertIs<Mutation.Applied>(f.ledger.recordActualExit(published.callId, published.instance!!.attemptId, "worker exited"))
             out.stored.media.single()
         }
         assertNotEquals(refs[0].id, refs[1].id)
