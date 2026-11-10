@@ -1547,6 +1547,41 @@ class ContextPolicyTest {
         }
     }
 
+    @Test fun `accepted uncertainty allows ordinary prior compaction but undecided isolation does not`() = runTest {
+        for (decided in listOf(false, true)) {
+            val f = RunFixture(listOf(testDefinition(risk = Risk.WRITE)))
+            f.onSubmit = { f.ledger.recordOutcome(it.callId, it.attemptId, Status.FAILED, "write uncertain", Effect.UNKNOWN) }
+            FileRunHistory.create(root.resolve("accepted-compact-$decided"), "session", durability).use { h ->
+                h.append(0, listOf(user("x".repeat(1400))))
+                assertEquals(RunState.PAUSED, loop(f, ScriptProvider(listOf(calls("tool"))), h,
+                    ContextPolicy("goal"), b = budget(100_000)).run().state)
+                val ticket = f.submitted.single()
+                f.ledger.recordActualExit(ticket.callId, ticket.attemptId, "worker exited")
+                if (decided) assertIs<Mutation.Applied>(f.ledger.resolveRecovery(ticket.callId, RecoveryResolution.ACCEPTED_UNCERTAINTY))
+                repeat(2) { n ->
+                    h.append(h.revision(), listOf(user("question $n")))
+                    val s = ScriptProvider(listOf(answer("write outcome unknown; user accepted")))
+                    val p = ScriptProvider(listOf(answer("a$n")))
+                    val result = loop(f, p, h, ContextPolicy("goal", h.snapshot().messages.size - 1, summary(s)),
+                        identity.copy(runId = "r$n"), limits = RunLimits(maxRetries = 50)).run()
+                    assertEquals(if (decided) RunState.COMPLETED else RunState.PAUSED, result.state)
+                    assertEquals(if (decided) 1 else 0, p.requests.size)
+                    if (!decided || n > 0) assertTrue(s.requests.isEmpty()) // decided view is reused, not re-summarized
+                }
+                assertEquals(Effect.UNKNOWN, f.ledger.get(ticket.callId)!!.result!!.effect)
+                if (decided) {
+                    var approval: ApprovalRequest? = null
+                    f.approve = { approval = it; Decision.DENY }
+                    val next = ScriptProvider(listOf(calls("tool", args = "{\"next\":true}"), answer()))
+                    h.append(h.revision(), listOf(user("write again")))
+                    f.loop(next, history = h).run()
+                    assertTrue(ticket.callId in assertNotNull(approval).unknownCalls)
+                    assertEquals(1, f.submitted.size)
+                }
+            }
+        }
+    }
+
     @Test fun `late benign ledger evidence drops stale view instead of locking session`() = runTest {
         val f = RunFixture(listOf(testDefinition()))
         FileRunHistory.create(root.resolve("late-view"), "session", durability).use { h ->

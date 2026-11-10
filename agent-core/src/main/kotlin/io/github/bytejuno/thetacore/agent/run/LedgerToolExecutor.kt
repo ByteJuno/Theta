@@ -75,6 +75,11 @@ class LedgerToolExecutor(
         !it.state.terminal || it.instance?.state == InstanceState.UNCONFIRMED || it.recoveryPending || it.restartRequired
     }
 
+    /** Ordinary prior-history compaction needs actual exit and a recorded host/user decision for
+     * any isolation (ACCEPTED_UNCERTAINTY or VERIFIED_CLEAR); it is not checkpoint continuation. */
+    internal fun compactionBlocked(records: List<InvocationRecord>): Boolean =
+        localExecutionBlocked(records) || records.any { it.isolation != null && it.isolation.resolution == null }
+
     // UNKNOWN remains forensic truth after resolution. Only a real exited instance with current
     // VERIFIED_CLEAR may pass: resolveRecovery is a no-op without isolation, and new UNKNOWN
     // outcome evidence replaces isolation with an unresolved value in the ledger.

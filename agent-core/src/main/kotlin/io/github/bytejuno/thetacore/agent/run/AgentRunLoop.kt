@@ -177,9 +177,9 @@ class AgentRunLoop(
                 view.catalog == tools.definitions.sortedBy { it.modelName } &&
                 view.matches(source, settingsKey(target.id, config, target.provider.contextConfigurationKey()))) {
                 val records = tools.checkpointRecords(source.messages)
-                // Ordinary runs can fall back to full history after accepted uncertainty;
-                // do not turn stricter automatic-summary eligibility into a session lock.
-                if (tools.checkpointBlocked(records)) return
+                // Ordinary prior-history compaction (2.11) is not checkpoint continuation: after
+                // actual exit and a recorded decision, the ledger keeps enforcing UNKNOWN approvals.
+                if (tools.compactionBlocked(records)) return
                 val durableRecords = records.map { it.atLedgerPrecision() }.associateBy { it.callId }
                 // A derived view whose ledger snapshot no longer matches (e.g. late exit evidence)
                 // is stale, not a session lock: fall back to raw history, which may re-compact.
@@ -224,7 +224,9 @@ class AgentRunLoop(
         val disk = history as? FileRunHistory ?: return false
         if (contextView != null || policy.priorMessageCount == 0 || serverLoopOpen || serverUnknown) return false
         val records = tools.checkpointRecords(source.messages)
-        if (tools.checkpointBlocked(records)) return false
+        // Only live/undecided local execution blocks ordinary compaction; accepted UNKNOWN effects
+        // stay in the ledger and still gate later writes. Checkpoint continuation remains stricter.
+        if (tools.compactionBlocked(records)) return false
         val summary = summarize(source.messages.take(policy.priorMessageCount),
             "${identity.sessionId}@${source.revision}") ?: return false
         val saved = checkpoint(source, policy.priorMessageCount, summary, "VIEW", "Prior history summary", false)
