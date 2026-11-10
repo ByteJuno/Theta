@@ -126,7 +126,13 @@ internal class PluginInvocation(
                         val rawResult = tool.call(args, env)
                         rawResult.copy(structured = rawResult.structured?.let {
                             Json.parseToJsonElement(it.toString())
-                        }).also {
+                        }).withContent(rawResult.content.map { part -> when (part) {
+                            is io.github.bytejuno.thetacore.sdk.ToolContent.Text -> part.copy()
+                            is io.github.bytejuno.thetacore.sdk.ToolContent.Media -> {
+                                require(part.mimeType.length in 1..128 && part.mimeType.none { it.isISOControl() })
+                                part.copy(bytes = part.bytes.copyOf())
+                            }
+                        } }).also {
                             // Capture before coroutineScope checks cancellation on return.
                             capture(PluginInvocationResult(
                                 if (it.isError) PluginInvocationStatus.FAILED else PluginInvocationStatus.SUCCEEDED, it))

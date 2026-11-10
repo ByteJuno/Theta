@@ -77,7 +77,7 @@ class AgentRunLoop(
         val transientCauses = mutableMapOf<Pair<String, String>, Int>()
         while (steps < limits.maxSteps) {
             currentCoroutineContext().ensureActive()
-            check(history.snapshot().revision == view.revision) { "History changed during active run" }
+            check(history.revision() == view.revision) { "History changed during active run" }
             val request = copyRequest(config, view.messages, requestId = UUID.randomUUID().toString())
             val estimate = budget.tokens(request)
             val capacity = budget.limit(request.model)
@@ -160,6 +160,9 @@ class AgentRunLoop(
             val step = request.requestId
             var executionFailure: Exception? = null
             if (calls.isNotEmpty()) {
+                // Persist the complete assistant before registration, so a process loss during
+                // registration/execution can reconcile the entire ordered step from ledger truth.
+                history.prepareStep(view.revision, identity, step, assistant)
                 try {
                     tools.register(identity, step, calls, cancelled = !execute)
                     if (execute) tools.execute(calls)
@@ -178,7 +181,7 @@ class AgentRunLoop(
                     val batch = if (calls.isEmpty()) listOf(assistant)
                         else listOf(assistant, tools.results(identity, step, calls))
                     history.append(view.revision, batch)
-                    view = history.snapshot()
+                    view = HistorySnapshot(history.revision(), freezeMessages(view.messages + batch))
                 }
             } catch (e: Exception) {
                 executionFailure?.let { e.addSuppressed(it) }

@@ -6,10 +6,14 @@ import kotlinx.serialization.json.JsonObject
 
 /** Atomic append seam. Implementations must CAS the revision and commit the ENTIRE batch or none.
  * An uncertain write must throw and halt the run, never trigger model/tool replay. Session disk
- * persistence and crash reconciliation are host work; this in-memory implementation is not durable.
+ * persistence is supplied by FileRunHistory; this in-memory implementation is not durable.
  */
 interface RunHistory {
     fun snapshot(): HistorySnapshot
+    /** Cheap CAS check; disk implementations must not load messages here. */
+    fun revision(): Long = snapshot().revision
+    /** Durable intent before ANY tool registration/submission. Not replayable until append commits. */
+    fun prepareStep(expectedRevision: Long, identity: RunIdentity, stepId: String, assistant: Message) {}
     fun append(expectedRevision: Long, messages: List<Message>)
 }
 data class HistorySnapshot(val revision: Long, val messages: List<Message>)

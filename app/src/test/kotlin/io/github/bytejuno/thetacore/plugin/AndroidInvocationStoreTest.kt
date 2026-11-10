@@ -20,7 +20,7 @@ import java.util.concurrent.TimeUnit
 
 class AndroidInvocationStoreTest {
     private fun input(service: HostToolExecutionService, args: String = "{}", run: String = UUID.randomUUID().toString()): InvocationInput {
-        val definition = service.catalog.freeze(run).values.single()
+        val definition = service.catalog.freeze(run).values.single { it.toolKey == "host/clock" }
         return InvocationInput(BindingValue.copyOf(callBinding("android-test", run, null, 0, "clock")),
             run, "session", run, "step", 0, args, definition, false, definition.declaredRisk)
     }
@@ -92,6 +92,78 @@ class AndroidInvocationStoreTest {
                 assertNull(reopened.records().single().instance)
             }
         } }
+    }
+
+    @Test fun blobDirectorySyncFailurePreventsReferenceAcknowledgementAndCleansOnReopen() = temporary { root ->
+        var fail = false
+        lateinit var id: String
+        lateinit var raw: BlobRef
+        AndroidInvocationStore.open(root) { if (fail) throw IOException("blob sync failed") }.use { store ->
+            val gate = DefinitionGate()
+            val validator = ArgumentsValidator { _, _ -> true }
+            val ledger = InvocationLedger(store, gate, validator)
+            ledger.recoverColdStart("first")
+            val definition = FrozenDefinition("host/test", "host_test", "test", "test", "{}", Risk.READ,
+                Source.FIRST_PARTY, "host", "1", 1, true, null, false, null)
+            gate.install(definition); gate.freezeRun("run", listOf(definition))
+            val input = InvocationInput(BindingValue.copyOf(callBinding("test", "req", null, 0, "wire")),
+                "chain", "session", "run", "step", 0, "{}", definition, false, Risk.READ)
+            id = input.binding.callId
+            ledger.recordInvocation(input)
+            val ready = (ledger.validateAndPrepare(id) as Mutation.Applied).record
+            val ticket = (ledger.claimExecution(id, ready.revision) as Mutation.Applied).ticket!!
+            val out = ToolOutputNormalizer.normalize(listOf(OutputPart.Text("x".repeat(100000))),
+                null, false, null, null, validator, "host_blob_read")
+            raw = out.stored.raw
+            fail = true
+            assertTrue(ledger.recordToolOutput(id, ticket.attemptId, Status.SUCCEEDED, out, null) is Mutation.StorageFailure)
+            assertEquals(Status.RUNNING, ledger.get(id)!!.state)
+            assertTrue(ledger.recordActualExit(id, ticket.attemptId, "exit") is Mutation.StorageFailure)
+            assertEquals(InstanceState.UNCONFIRMED, ledger.get(id)!!.instance!!.state)
+        }
+        AndroidInvocationStore.open(root) {}.use { store ->
+            assertEquals(Status.RUNNING, store.records().single().state)
+            assertFalse(File(root, "${AndroidInvocationStore.DIRECTORY}/${raw.contentHash}.blob").exists())
+        }
+    }
+
+    @Test fun publishedBlobDamageOnOrdinaryExitClosesAndroidWriter() {
+        for (damage in listOf("missing", "corrupt", "unreadable")) temporary { root ->
+            AndroidInvocationStore.open(root) {}.use { store ->
+                val gate = DefinitionGate()
+                val validator = ArgumentsValidator { _, _ -> true }
+                val ledger = InvocationLedger(store, gate, validator)
+                ledger.recoverColdStart("first")
+                val definition = FrozenDefinition("host/test", "host_test", "test", "test", "{}", Risk.READ,
+                    Source.FIRST_PARTY, "host", "1", 1, true, null, false, null)
+                gate.install(definition); gate.freezeRun("run", listOf(definition))
+                val input = InvocationInput(BindingValue.copyOf(callBinding("test", "req", null, 0, "wire")),
+                    "chain", "session", "run", "step", 0, "{}", definition, false, Risk.READ)
+                val id = input.binding.callId
+                ledger.recordInvocation(input)
+                val ready = (ledger.validateAndPrepare(id) as Mutation.Applied).record
+                val ticket = (ledger.claimExecution(id, ready.revision) as Mutation.Applied).ticket!!
+                val out = ToolOutputNormalizer.normalize(listOf(OutputPart.Text("x".repeat(100000))),
+                    null, false, null, null, validator, "host_blob_read")
+                val saved = (ledger.recordToolOutput(id, ticket.attemptId, Status.SUCCEEDED, out, null) as Mutation.Applied).record
+                val path = File(root, "${AndroidInvocationStore.DIRECTORY}/${out.stored.raw.contentHash}.blob").toPath()
+                val original = Files.readAllBytes(path)
+                when (damage) {
+                    "missing" -> Files.delete(path)
+                    "corrupt" -> Files.write(path, original.copyOf().also { it[0] = 0 })
+                    else -> { Files.delete(path); Files.createDirectory(path) }
+                }
+                val failed = ledger.recordActualExit(id, ticket.attemptId, "exit") as Mutation.StorageFailure
+                assertFalse(failed.uncertain)
+                assertEquals(saved, ledger.get(id))
+                if (Files.isDirectory(path)) Files.delete(path)
+                Files.write(path, original) // repair does not reopen a failed Android writer
+                val retry = ledger.recordActualExit(id, ticket.attemptId, "exit") as Mutation.StorageFailure
+                assertTrue(retry.uncertain)
+                assertThrows(StoreException::class.java) { store.save(saved.copy(revision = saved.revision + 1), saved.revision) }
+                assertEquals(saved, store.records().single())
+            }
+        }
     }
 
     @Test fun everyInitializationCutpointCanRetryWithoutPublishingAnIncompleteStore() {

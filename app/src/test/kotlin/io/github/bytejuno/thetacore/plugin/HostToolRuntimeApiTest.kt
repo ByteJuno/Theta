@@ -32,7 +32,7 @@ class HostToolRuntimeApiTest {
             AndroidInvocationStore.open(root) {}.use { store ->
                 val service = HostToolBridgeRoot(budget).initialize { store }
                 val api = HostToolRuntimeApi(service)
-                val input = request(service.catalog.freeze("run").keys.single())
+                val input = request(service.catalog.freeze("run").values.single { it.toolKey == "host/clock" }.modelName)
                 service.catalog.freeze("other")
                 val first = call(api, input)
                 assertEquals("applied", first.getValue("kind").jsonPrimitive.content)
@@ -92,7 +92,7 @@ class HostToolRuntimeApiTest {
             lateinit var ready: InvocationRecord
             AndroidInvocationStore.open(root) {}.use { store ->
                 val service = HostToolBridgeRoot(budget).initialize { store }
-                input = request(service.catalog.freeze("run").keys.single())
+                input = request(service.catalog.freeze("run").values.single { it.toolKey == "host/clock" }.modelName)
                 call(HostToolRuntimeApi(service), input)
                 ready = service.ledger.get(input["callId"]!!.jsonPrimitive.content)!!
                 assertEquals(Status.READY, ready.state)
@@ -126,7 +126,7 @@ class HostToolRuntimeApiTest {
             lateinit var id: String
             AndroidInvocationStore.open(root) {}.use { store ->
                 val service = HostToolBridgeRoot(budget).initialize { store }
-                input = request(service.catalog.freeze("run").keys.single())
+                input = request(service.catalog.freeze("run").values.single { it.toolKey == "host/clock" }.modelName)
                 id = input["callId"]!!.jsonPrimitive.content
                 call(HostToolRuntimeApi(service), input)
                 val ready = service.ledger.get(id)!!
