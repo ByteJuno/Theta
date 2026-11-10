@@ -167,7 +167,11 @@ class SqliteInvocationStore private constructor(
             for (blob in blobs.distinctBy { it.ref.contentHash }) {
                 val ref = blob.ref
                 val exists = db.prepare("SELECT 1 FROM contents WHERE hash=?").use { it.bindText(1, ref.contentHash); it.step() }
-                if (!exists || ref.contentHash in unavailable) {
+                // Content damaged after startup verification is quarantined here, then repaired
+                // by this explicit publication instead of blocking the identical result forever.
+                val healthy = exists && ref.contentHash !in unavailable &&
+                    runCatching { verifyContent(ref) }.onFailure { unavailable += ref.contentHash }.isSuccess
+                if (!healthy) {
                     // Explicit identical-byte publication repairs quarantined content, not a
                     // bookkeeping save. Child rows are replaced in this same transaction.
                     if (exists) {
@@ -189,8 +193,8 @@ class SqliteInvocationStore private constructor(
                             fault(SqliteWriteStage.AFTER_CONTENT_CHUNK)
                         }
                     }
+                    verifyContent(ref)
                 }
-                verifyContent(ref)
                 published += ref.contentHash
             }
             // Existing evidence may reference quarantined content. Do not prevent cold recovery,

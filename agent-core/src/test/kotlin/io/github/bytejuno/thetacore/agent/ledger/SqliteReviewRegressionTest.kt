@@ -46,6 +46,37 @@ class SqliteReviewRegressionTest {
         f.store.saveWithBlobs(next, second.revision, listOf(blob))
         for (r in listOf(first, next)) assertContentEquals(blob.bytes().copyOfRange(0, 8192), f.store.readBlob(r.result!!.output!!.raw, 0, 8192))
     }
+    @Test fun damageAfterStartupIsRepairedByIdenticalPublication() = Fixture().use { f ->
+        val blob = BlobWrite(ByteArray(30_000) { (it % 251).toByte() }, "application/octet-stream")
+        val first = completed(f)
+        f.store.saveWithBlobs(first.copy(revision = first.revision + 1,
+            result = first.result!!.copy(output = StoredToolOutput(blob.ref, emptyList()))), first.revision, listOf(blob))
+        // Damaged after open-time verification and never read: no quarantine has been observed yet.
+        damageContent(f.directory, blob.ref.contentHash, "chunk", 1)
+        val second = completed(f)
+        val next = second.copy(revision = second.revision + 1, result = second.result!!.copy(output = StoredToolOutput(blob.ref, emptyList())))
+        f.store.saveWithBlobs(next, second.revision, listOf(blob))
+        assertContentEquals(blob.bytes().copyOfRange(8192, 16384), f.store.readBlob(blob.ref, 8192, 8192))
+        f.store.close()
+        TestInvocationStore.open(f.directory).use { assertContentEquals(blob.bytes().copyOfRange(8192, 16384), it.readBlob(blob.ref, 8192, 8192)) }
+    }
+    @Test fun failedRepairOfContentDamagedAfterStartupStaysQuarantined() = Fixture().use { f ->
+        val blob = BlobWrite(ByteArray(30_000) { (it % 251).toByte() }, "application/octet-stream")
+        val first = completed(f)
+        f.store.saveWithBlobs(first.copy(revision = first.revision + 1,
+            result = first.result!!.copy(output = StoredToolOutput(blob.ref, emptyList()))), first.revision, listOf(blob))
+        damageContent(f.directory, blob.ref.contentHash, "chunk", 1)
+        val second = completed(f)
+        f.stage = SqliteWriteStage.BEFORE_COMMIT
+        val error = assertFailsWith<StoreException> {
+            f.store.saveWithBlobs(second.copy(revision = second.revision + 1,
+                result = second.result!!.copy(output = StoredToolOutput(blob.ref, emptyList()))), second.revision, listOf(blob))
+        }
+        assertFalse(error.uncertain)
+        // Rolled-back repair must not leave damaged content readable as normal content.
+        assertFailsWith<StoreException> { f.store.readBlob(blob.ref, 0, 8192) }
+        Unit
+    }
     @Test fun repairRollbackAndUncertainCommitRemainQuarantined() {
         for (stage in listOf(SqliteWriteStage.BEFORE_COMMIT, SqliteWriteStage.AFTER_COMMIT)) Fixture().use { f ->
             val blob = BlobWrite(ByteArray(30_000) { (it % 251).toByte() }, "application/octet-stream")
