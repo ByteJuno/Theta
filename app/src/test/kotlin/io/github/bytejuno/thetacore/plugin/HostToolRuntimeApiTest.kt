@@ -154,6 +154,19 @@ class HostToolRuntimeApiTest {
                 val view = call(api, buildJsonObject { put("operation", "get"); put("callId", id) })
                 assertTrue(view["recoveryPending"]!!.jsonPrimitive.boolean)
                 assertEquals(recovered, service.ledger.get(id))
+                val pending = Json.parseToJsonElement(api.request("""{"operation":"pendingRecoveries"}""")).jsonArray.single().jsonObject
+                val decision = buildJsonObject {
+                    put("operation", "decideRecovery"); put("callId", id)
+                    put("recoveryId", pending["id"]!!); put("resolution", "VERIFIED_CLEAR")
+                    put("effect", "NONE"); put("evidence", JsonArray(emptyList()))
+                }
+                assertEquals("applied", call(api, decision)["kind"]!!.jsonPrimitive.content)
+                val resolved = service.ledger.get(id)!!
+                assertFalse(resolved.recoveryPending)
+                assertEquals(recovered.result, resolved.result)
+                assertEquals(recovered.evidence, resolved.evidence)
+                assertEquals(Effect.UNKNOWN, resolved.result!!.effect)
+                assertEquals("conflict", call(api, decision)["kind"]!!.jsonPrimitive.content)
             }
         } finally { budget.close(); root.deleteRecursively() }
     }

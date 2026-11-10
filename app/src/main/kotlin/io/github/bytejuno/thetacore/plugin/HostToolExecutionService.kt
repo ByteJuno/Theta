@@ -20,12 +20,18 @@ internal class HostToolExecutionService(
     private val validator: Schema202012Validator,
     /** How long a cancelled or timed-out worker may take to exit before the owner needs a restart. */
     private val exitGraceMillis: Long = 2_000,
+    /** Test scheduling seam outside the gate; never supplies authorization or executes plugin code. */
+    private val afterRuntimeApprovalStart: suspend () -> Unit = {},
 ) {
     private val gate get() = catalog.gate
     private val control = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val active = mutableMapOf<String, PluginInvocation>()
     private val observations = mutableMapOf<String, Deferred<Unit>>()
     private val logicalResults = mutableMapOf<String, CompletableDeferred<Unit>>()
+    // Signals carry no authorization. On wake the coroutine re-reads the durable record under gate.
+    private class ApprovalWaiter(var requestId: String, var signal: CompletableDeferred<Unit> = CompletableDeferred())
+    private val approvalWaiters = mutableMapOf<String, ApprovalWaiter>()
+    private fun wakeApproval(callId: String) { approvalWaiters[callId]?.signal?.complete(Unit) }
     @Volatile private var storageFailed = false
     private val storageFailure = CompletableDeferred<Unit>()
     private fun closeSubmissions() {
@@ -44,10 +50,85 @@ internal class HostToolExecutionService(
             val record = ledger.get(callId) ?: return@withGate Mutation.Conflict("Unknown call")
             val request = record.pending
             if (request == null || request.id != requestId) Mutation.Conflict("Approval is not current")
+            else if (request.internal && (active[callId] == null || active[callId]!!.terminal.isCompleted ||
+                    active[callId]!!.actualExited.isCompleted)) Mutation.Conflict("Runtime approval instance is no longer live")
             else if (catalog.frozen(record.input.runId) == null) Mutation.Blocked("Run catalog not frozen")
-            else observe(ledger.resolveApproval(callId, request, decision))
+            else observe(ledger.decideApproval(callId, requestId, decision)).also { mutation ->
+                // Only the owner of the replaced ID follows an evidence-driven renewal.
+                if (mutation is Mutation.Applied) approvalWaiters[callId]?.takeIf { it.requestId == requestId }?.let { waiter ->
+                    mutation.record.pending?.takeIf { it.internal }?.let { waiter.requestId = it.id }
+                }
+                wakeApproval(callId)
+            }
         }
     }
+    suspend fun decideRecovery(callId: String, requestId: String, resolution: RecoveryResolution): Mutation =
+        withContext(Dispatchers.IO) {
+            gate.withGate {
+                if (storageFailed) Mutation.Blocked("Storage failed; submissions closed")
+                else observe(ledger.decideRecovery(callId, requestId, resolution))
+            }
+        }
+
+    private suspend fun requestRuntimeApproval(ticket: ExecutionTicket, summary: String, risk: Risk): Boolean =
+        withContext(Dispatchers.IO) {
+            var owned: ApprovalWaiter? = null
+            try {
+                // Decide the no-wait result in this gate too: it must never inspect/adopt a
+                // different request that starts after this gate is released.
+                val immediate = gate.withGate {
+                    if (storageFailed || approvalWaiters.containsKey(ticket.callId) ||
+                        active[ticket.callId]?.terminal?.isCompleted != false) return@withGate false
+                    val m = observe(ledger.requestRiskUpgrade(ticket.callId, ticket.attemptId, risk, summary))
+                    val r = (m as? Mutation.Applied)?.record ?: return@withGate false
+                    val pending = r.pending ?: return@withGate true
+                    owned = ApprovalWaiter(pending.id).also { approvalWaiters[ticket.callId] = it }
+                    null
+                }
+                afterRuntimeApprovalStart()
+                if (immediate != null) return@withContext immediate
+                val waiter = requireNotNull(owned)
+                while (true) {
+                    select<Unit> {
+                        waiter.signal.onAwait { }
+                        storageFailure.onAwait { }
+                    }
+                    val answer = gate.withGate {
+                        val r = ledger.get(ticket.callId)
+                        if (approvalWaiters[ticket.callId] !== waiter || storageFailed || r == null ||
+                            active[ticket.callId]?.terminal?.isCompleted != false || r.state != Status.RUNNING ||
+                            r.instance?.attemptId != ticket.attemptId || r.instance?.state != InstanceState.UNCONFIRMED)
+                            return@withGate false
+                        if (r.pending != null) {
+                            if (r.pending?.id != waiter.requestId) return@withGate false
+                        } else {
+                            val checked = observe(ledger.checkRiskApproval(ticket.callId, ticket.attemptId, waiter.requestId))
+                            val current = when (checked) {
+                                is Mutation.Applied -> checked.record
+                                is Mutation.AlreadyApplied -> checked.record
+                                else -> return@withGate false
+                            }
+                            val renewed = current.pending ?: return@withGate true
+                            waiter.requestId = renewed.id
+                        }
+                        waiter.signal = CompletableDeferred()
+                        null
+                    }
+                    answer?.let { return@withContext it }
+                }
+                @Suppress("UNREACHABLE_CODE") false
+            } finally {
+                gate.withGate {
+                    owned?.let { waiter ->
+                        if (approvalWaiters[ticket.callId] === waiter) {
+                            approvalWaiters.remove(ticket.callId)
+                            observe(ledger.withdrawRiskUpgrade(ticket.callId, ticket.attemptId, waiter.requestId))
+                        }
+                    }
+                }
+            }
+        }
+
     suspend fun prepare(input: InvocationInput): Mutation = withContext(Dispatchers.IO) {
         gate.withGate {
             if (storageFailed) return@withGate Mutation.Blocked("Storage failed; submissions closed")
@@ -87,19 +168,8 @@ internal class HostToolExecutionService(
             invocation = PluginInvocation(budget, entry.definition.owner, owner, entry.tool,
                 Json.parseToJsonElement(ticket.argsJson).jsonObject,
                 ToolInvocationRequest(record.input.runId, record.input.sessionId, callId, record.input.unattended),
-                requestApproval = { _, risk ->
-                    // SDK's unattended path returns false before this hook. Explicitly narrower than
-                    // ledger ALLOW_ALWAYS: no unattended internal upgrades in this SDK slice.
-                    withContext(Dispatchers.IO) {
-                        gate.withGate {
-                            if (storageFailed) false else {
-                                val m = observe(ledger.requestRiskUpgrade(callId, ticket.attemptId, Risk.valueOf(risk.name)))
-                                val r = when (m) { is Mutation.Applied -> m.record; is Mutation.AlreadyApplied -> m.record; else -> null }
-                                r != null && r.pending == null && r.effectiveRisk >= Risk.valueOf(risk.name)
-                            }
-                        }
-                    }
-                }, frozenSpec = entry.spec, reservation = reservation)
+                requestApproval = { summary, risk -> requestRuntimeApproval(ticket, summary, Risk.valueOf(risk.name)) },
+                frozenSpec = entry.spec, reservation = reservation, unattendedApprovalPolicy = true)
             val call = invocation
             active[callId] = call
             logicalResults[callId] = CompletableDeferred()
@@ -145,7 +215,7 @@ internal class HostToolExecutionService(
                     PluginInvocationStatus.CANCELLED -> observe(ledger.cancel(ticket.callId))
                     PluginInvocationStatus.TIMED_OUT -> observe(ledger.timeout(ticket.callId))
                     else -> outcome(ticket, logical, call.bodyEntered)
-                })
+                }).also { wakeApproval(ticket.callId) }
             }
             gate.withGate { logicalResults[ticket.callId] }?.complete(Unit)
             coroutineScope {
@@ -187,6 +257,7 @@ internal class HostToolExecutionService(
     suspend fun cancel(callId: String): Mutation = withContext(Dispatchers.IO) {
         gate.withGate {
             val mutation = observe(ledger.cancel(callId))
+            wakeApproval(callId)
             active[callId]?.cancel()
             mutation
         }

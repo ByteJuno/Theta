@@ -83,7 +83,10 @@ internal fun sha256(value: String) = MessageDigest.getInstance("SHA-256")
 @Serializable data class ApprovalRequest(
     val id: String, val callId: String, val digest: String, val version: String, val generation: Long,
     val risk: Risk, val unknownCalls: List<String>, val internal: Boolean,
+    val summary: String = "",
 )
+/** Revision-bound identifier: survives reopen, but any new evidence invalidates the decision. */
+@Serializable data class RecoveryRequest(val id: String, val callId: String, val revision: Long)
 @Serializable data class ApprovalReceipt(val request: ApprovalRequest, val decision: Decision)
 @Serializable data class ExecutionInstance(val attemptId: String, val processEpoch: String, val state: InstanceState)
 @Serializable data class LogicalResult(val status: Status, val effect: Effect, val text: String, val inconsistentRead: Boolean)
@@ -147,7 +150,7 @@ internal fun sha256(value: String) = MessageDigest.getInstance("SHA-256")
             require(request.internal || request.risk == input.initialRisk)
             require(!request.internal || instance != null)
         }
-        require(pending == null || !pending.internal || pending.risk > effectiveRisk)
+        // An internal request may reauthorize an already-reached risk; the watermark never grants permission.
         require(receipts.filter { it.decision != Decision.DENY }.all { it.request.risk <= effectiveRisk })
         require(isolation != null || (result?.effect != Effect.UNKNOWN && evidence.none { it.outcome?.effect == Effect.UNKNOWN })) {
             "Unknown effect without isolation"

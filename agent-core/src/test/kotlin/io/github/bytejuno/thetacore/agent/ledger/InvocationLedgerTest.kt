@@ -244,7 +244,8 @@ class InvocationLedgerTest {
         assertEquals(Status.WAITING_APPROVAL, retry.state)
         assertEquals(listOf(first.callId), retry.pending!!.unknownCalls)
         assertEquals(Status.REJECTED, f.prepare(f.input(d, args = first.input.argsJson, unattended = true)).state)
-        assertEquals(Status.READY, f.prepare(f.input(d, args = "{\"a\":\"1\",\"b\":2}")).state)
+        // 3.8: even different arguments require approval while the chain has unverified UNKNOWN.
+        assertEquals(Status.WAITING_APPROVAL, f.prepare(f.input(d, args = "{\"a\":\"1\",\"b\":2}")).state)
         f.approve(retry)
         assertEquals(InstanceState.UNCONFIRMED, f.ledger.get(active.record.callId)!!.instance!!.state)
     }

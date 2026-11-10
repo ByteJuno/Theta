@@ -24,6 +24,7 @@ class HostToolExecutionServiceTest {
     private class MemoryStore : InvocationStore {
         val data = linkedMapOf<String, InvocationRecord>()
         var bound = false
+        val writes = kotlinx.coroutines.channels.Channel<InvocationRecord>(kotlinx.coroutines.channels.Channel.UNLIMITED)
         var fail: (InvocationRecord) -> Boolean = { false }
         override fun bindCoordinator() { check(!bound); bound = true }
         override fun records() = data.values.toList()
@@ -32,11 +33,13 @@ class HostToolExecutionServiceTest {
             record.validate()
             check(data[record.callId]?.revision == expectedRevision)
             data[record.callId] = record
+            writes.trySend(record)
         }
         override fun close() {}
     }
     private class Fixture(policy: ApprovalPolicy = ApprovalPolicy(), maxClaims: Int = Int.MAX_VALUE,
-        slots: Int = 2, exitGraceMillis: Long = 2_000) : AutoCloseable {
+        slots: Int = 2, exitGraceMillis: Long = 2_000,
+        afterRuntimeApprovalStart: suspend () -> Unit = {}) : AutoCloseable {
         val budget = PluginExecutionBudget(slots, slots)
         val owner = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val store = MemoryStore()
@@ -44,7 +47,7 @@ class HostToolExecutionServiceTest {
         val validator = Schema202012Validator()
         val ledger = InvocationLedger(store, gate, validator, policy, maxClaims)
         val catalog = FrozenToolCatalog(gate, budget, owner, validator)
-        val service = HostToolExecutionService(budget, owner, catalog, ledger, validator, exitGraceMillis)
+        val service = HostToolExecutionService(budget, owner, catalog, ledger, validator, exitGraceMillis, afterRuntimeApprovalStart)
         init { ledger.recoverColdStart(UUID.randomUUID().toString()) }
         suspend fun register(tool: Tool = HostClockTool { 42 }): FrozenDefinition {
             val d = catalog.registerHost("host/test", "1", tool)
@@ -1243,6 +1246,441 @@ class HostToolExecutionServiceTest {
                 assertEquals(Status.CANCELLED, f.ledger.get(i.binding.callId)!!.state)
                 assertEquals(0, f.budget.occupiedSlots())
             } finally { release.countDown() }
+        }
+    }
+
+    private suspend fun pendingUpgrade(f: Fixture, id: String): ApprovalRequest = withTimeout(5_000) {
+        var r = f.store.writes.receive()
+        while (r.callId != id || r.pending?.internal != true) r = f.store.writes.receive()
+        r.pending!!
+    }
+
+    @Test fun immediateRuntimeRequestCannotAdoptOrWithdrawConcurrentHighRiskWaiter() = runBlocking {
+        for (grantedWrite in listOf(false, true)) for (cancelImmediate in listOf(false, true)) {
+            val firstAtGap = CompletableDeferred<Unit>(); val releaseFirst = CompletableDeferred<Unit>()
+            val starts = AtomicInteger()
+            Fixture(afterRuntimeApprovalStart = {
+                if (starts.incrementAndGet() == 1) { firstAtGap.complete(Unit); releaseFirst.await() }
+            }).use { f ->
+                val envReady = CompletableDeferred<ToolEnv>(); val finish = CompletableDeferred<Unit>()
+                val d = f.register(tool(timeout = 30_000) { env ->
+                    envReady.complete(env); finish.await(); ToolResult("done", effect = ToolEffect.NONE)
+                })
+                if (grantedWrite) {
+                    // Seed a real durable ALWAYS receipt, without consuming the scheduling seam.
+                    val seed = f.input(d, step = "grant")
+                    val ready = (f.service.prepare(seed) as Mutation.Applied).record
+                    val claim = f.ledger.claimExecution(ready.callId, ready.revision) as Mutation.Applied
+                    val ask = (f.ledger.requestRiskUpgrade(ready.callId, claim.ticket!!.attemptId, Risk.WRITE) as Mutation.Applied).record.pending!!
+                    f.ledger.decideApproval(ready.callId, ask.id, Decision.ALLOW_ALWAYS)
+                    f.ledger.complete(ready.callId, claim.ticket!!.attemptId, Status.SUCCEEDED, "grant", Effect.NONE)
+                }
+                val i = f.input(d); val id = i.binding.callId
+                f.service.prepare(i); f.service.dispatch(id)
+                val env = withTimeout(5_000) { envReady.await() }
+                val a = async { env.requestApproval("A immediate", if (grantedWrite) ToolRisk.WRITE else ToolRisk.READ) }
+                withTimeout(5_000) { firstAtGap.await() }
+                val b = async { env.requestApproval("B owns pending", ToolRisk.ROOT) }
+                var pending = pendingUpgrade(f, id)
+                while (pending.summary != "B owns pending") pending = pendingUpgrade(f, id)
+                assertFalse(b.isCompleted)
+                if (cancelImmediate) a.cancelAndJoin() else {
+                    releaseFirst.complete(Unit)
+                    assertTrue(withTimeout(5_000) { a.await() })
+                }
+                assertEquals(pending.id, f.ledger.get(id)!!.pending!!.id)
+                assertFalse(b.isCompleted)
+                assertTrue(f.service.decide(id, pending.id, Decision.ALLOW_ONCE) is Mutation.Applied)
+                assertTrue(withTimeout(5_000) { b.await() })
+                assertNull(f.ledger.get(id)!!.pending)
+                // Ownership was released; a fresh request must not be rejected by a leaked waiter.
+                val c = async { env.requestApproval("C fresh", ToolRisk.ROOT) }
+                val fresh = pendingUpgrade(f, id)
+                assertEquals("C fresh", fresh.summary)
+                f.service.decide(id, fresh.id, Decision.DENY)
+                assertFalse(withTimeout(5_000) { c.await() })
+                finish.complete(Unit); withTimeout(5_000) { f.service.awaitObservedExit(id) }
+                assertEquals(0, f.budget.occupiedSlots())
+                assertTrue(f.ledger.pendingApprovals().isEmpty())
+            }
+        }
+    }
+
+    @Test fun pendingRuntimeDenialResumesFalseAfterDefinitionChangesWithoutEndingInvocation() = runBlocking {
+        for (stale in listOf(false, true)) Fixture().use { f ->
+            val returned = CompletableDeferred<Boolean>(); val finish = CompletableDeferred<Unit>()
+            val d = f.register(tool(timeout = 30_000) { env ->
+                returned.complete(env.requestApproval("pending before refresh", ToolRisk.WRITE))
+                finish.await(); ToolResult("done", effect = ToolEffect.NONE)
+            })
+            val id = f.input(d).also { f.service.prepare(it) }.binding.callId
+            f.service.dispatch(id)
+            val ask = pendingUpgrade(f, id)
+            if (stale) f.gate.install(d.copy(description = "changed")) else f.gate.beginRefresh(d.toolKey)
+            assertTrue(f.service.decide(id, "obsolete", Decision.DENY) is Mutation.Conflict)
+            assertTrue(f.service.decide(id, ask.id, Decision.DENY) is Mutation.Applied)
+            assertFalse(withTimeout(5_000) { returned.await() })
+            val record = f.ledger.get(id)!!
+            assertNull(record.pending)
+            assertEquals(ApprovalReceipt(ask, Decision.DENY), record.receipts.last())
+            assertEquals(Status.RUNNING, record.state)
+            assertEquals(Risk.READ, record.effectiveRisk)
+            assertEquals(InstanceState.UNCONFIRMED, record.instance!!.state)
+            assertEquals(1, f.budget.occupiedSlots())
+            finish.complete(Unit); withTimeout(5_000) { f.service.awaitObservedExit(id) }
+            assertEquals(Status.SUCCEEDED, f.ledger.get(id)!!.state)
+            assertEquals(0, f.budget.occupiedSlots())
+        }
+    }
+
+    @Test fun durableRuntimeAllowRechecksCurrentPolicyAndDefinitionAtPausedConsumption() = runBlocking {
+        for (change in listOf("root-disabled", "denied", "refresh", "stale")) {
+            for (decision in listOf(Decision.ALLOW_SESSION, Decision.ALLOW_ALWAYS, Decision.ALLOW_ONCE)) {
+                var longTerm = true; var denied = false
+                val paused = CompletableDeferred<Unit>(); val consume = CompletableDeferred<Unit>()
+                Fixture(policy = ApprovalPolicy(denied = { denied }, allowRootLongTerm = { longTerm }),
+                    afterRuntimeApprovalStart = { paused.complete(Unit); consume.await() }).use { f ->
+                    val returned = CompletableDeferred<Boolean>(); val finish = CompletableDeferred<Unit>()
+                    val d = f.register(tool(timeout = 30_000) { env ->
+                        returned.complete(env.requestApproval("root action", ToolRisk.ROOT))
+                        finish.await(); ToolResult("done", effect = ToolEffect.NONE)
+                    })
+                    val id = f.input(d).also { f.service.prepare(it) }.binding.callId
+                    f.service.dispatch(id)
+                    withTimeout(5_000) { paused.await() }
+                    val ask = pendingUpgrade(f, id)
+                    val approved = f.service.decide(id, ask.id, decision) as Mutation.Applied
+                    assertNull(approved.record.pending)
+                    assertEquals(ApprovalReceipt(ask, decision), approved.record.receipts.last())
+                    assertEquals(Risk.ROOT, approved.record.effectiveRisk)
+                    assertFalse(returned.isCompleted)
+                    f.gate.withGate {
+                        when (change) {
+                            "root-disabled" -> longTerm = false
+                            "denied" -> denied = true
+                            "refresh" -> f.gate.beginRefresh(d.toolKey)
+                            "stale" -> f.gate.install(d.copy(description = "changed"))
+                        }
+                    }
+                    consume.complete(Unit)
+                    assertEquals(change == "root-disabled" && decision == Decision.ALLOW_ONCE,
+                        withTimeout(5_000) { returned.await() })
+                    assertEquals(approved.record, f.ledger.get(id))
+                    assertEquals(1, f.budget.occupiedSlots())
+                    finish.complete(Unit); withTimeout(5_000) { f.service.awaitObservedExit(id) }
+                    assertEquals(Status.SUCCEEDED, f.ledger.get(id)!!.state)
+                    assertEquals(0, f.budget.occupiedSlots())
+                }
+            }
+        }
+    }
+
+    @Test fun unknownAfterDurableAllowBeforeConsumptionRenewsOnlyOwnedRuntimeRequest() = runBlocking {
+        val paused = CompletableDeferred<Unit>(); val consume = CompletableDeferred<Unit>()
+        Fixture(afterRuntimeApprovalStart = { paused.complete(Unit); consume.await() }).use { f ->
+            val returned = CompletableDeferred<Boolean>(); val finish = CompletableDeferred<Unit>()
+            val d = f.register(tool(timeout = 30_000, parallel = true) { env ->
+                returned.complete(env.requestApproval("write", ToolRisk.WRITE))
+                finish.await(); ToolResult("done", effect = ToolEffect.NONE)
+            })
+            val id = f.input(d).also { f.service.prepare(it) }.binding.callId
+            f.service.dispatch(id)
+            withTimeout(5_000) { paused.await() }
+            val ask = pendingUpgrade(f, id)
+            assertTrue(f.service.decide(id, ask.id, Decision.ALLOW_ONCE) is Mutation.Applied)
+            assertNull(f.ledger.get(id)!!.pending)
+            assertFalse(returned.isCompleted)
+            val other = (f.service.prepare(f.input(d, step = "other")) as Mutation.Applied).record
+            val claim = f.ledger.claimExecution(other.callId, other.revision) as Mutation.Applied
+            f.ledger.complete(other.callId, claim.ticket!!.attemptId, Status.FAILED, "unknown", Effect.UNKNOWN)
+            consume.complete(Unit)
+            val renewed = pendingUpgrade(f, id)
+            assertNotEquals(ask.id, renewed.id)
+            assertEquals(listOf(other.callId), renewed.unknownCalls)
+            assertFalse(returned.isCompleted)
+            assertTrue(f.service.decide(id, ask.id, Decision.ALLOW_ONCE) is Mutation.Conflict)
+            assertTrue(f.service.decide(id, renewed.id, Decision.DENY) is Mutation.Applied)
+            assertFalse(withTimeout(5_000) { returned.await() })
+            assertNull(f.ledger.get(id)!!.pending)
+            assertEquals(Risk.WRITE, f.ledger.get(id)!!.effectiveRisk)
+            finish.complete(Unit); withTimeout(5_000) { f.service.awaitObservedExit(id) }
+            assertEquals(0, f.budget.occupiedSlots())
+        }
+    }
+
+    @Test fun reachedRuntimeRiskDenialReturnsFalseAndCurrentChecksCannotBeSkipped() = runBlocking {
+        var deny = false
+        Fixture(policy = ApprovalPolicy(denied = { deny })).use { f ->
+            val envReady = CompletableDeferred<ToolEnv>(); val finish = CompletableDeferred<Unit>()
+            val d = f.register(tool(risk = ToolRisk.WRITE, timeout = 30_000) { env ->
+                envReady.complete(env); finish.await(); ToolResult("done", effect = ToolEffect.NONE)
+            })
+            val i = f.input(d); val id = i.binding.callId
+            f.service.prepare(i); approve(f, id); f.service.dispatch(id)
+            val env = withTimeout(5_000) { envReady.await() }
+            val denied = async { env.requestApproval("already WRITE", ToolRisk.WRITE) }
+            val ask = pendingUpgrade(f, id)
+            f.service.decide(id, ask.id, Decision.DENY)
+            assertFalse(withTimeout(5_000) { denied.await() })
+            assertEquals(Risk.WRITE, f.ledger.get(id)!!.effectiveRisk)
+            deny = true
+            assertFalse(env.requestApproval("current deny", ToolRisk.WRITE))
+            deny = false
+            f.gate.beginRefresh(d.toolKey)
+            assertFalse(env.requestApproval("refresh pending", ToolRisk.WRITE))
+            f.gate.install(d.copy(description = "changed"))
+            assertFalse(env.requestApproval("stale", ToolRisk.WRITE))
+            f.gate.install(d)
+            val granted = async { env.requestApproval("always", ToolRisk.WRITE) }
+            val always = pendingUpgrade(f, id)
+            f.service.decide(id, always.id, Decision.ALLOW_ALWAYS)
+            assertTrue(withTimeout(5_000) { granted.await() })
+            assertTrue(env.requestApproval("always reused", ToolRisk.WRITE))
+            // A new UNKNOWN overrides the ALWAYS grant even though WRITE is already reached.
+            val other = f.input(d, step = "other").copy(taskChainId = "chain")
+            val ready = (f.service.prepare(other) as Mutation.Applied).record
+            val claim = f.ledger.claimExecution(ready.callId, ready.revision) as Mutation.Applied
+            f.ledger.complete(ready.callId, claim.ticket!!.attemptId, Status.FAILED, "unknown", Effect.UNKNOWN)
+            val afterUnknown = async { env.requestApproval("new UNKNOWN", ToolRisk.WRITE) }
+            val unknownAsk = pendingUpgrade(f, id)
+            assertEquals(listOf(ready.callId), unknownAsk.unknownCalls)
+            f.service.decide(id, unknownAsk.id, Decision.DENY)
+            assertFalse(withTimeout(5_000) { afterUnknown.await() })
+            finish.complete(Unit); withTimeout(5_000) { f.service.awaitObservedExit(id) }
+            assertEquals(0, f.budget.occupiedSlots())
+        }
+    }
+
+    @Test fun unknownWithoutResourceBlocksDispatchWithSpareBudgetBeforeRestartGrace() = runBlocking {
+        for (cancel in listOf(false, true)) Fixture(slots = 3, exitGraceMillis = 60_000).use { f ->
+            val entered = CountDownLatch(1); val release = CountDownLatch(1)
+            try {
+                val a = f.catalog.registerHost("host/a", "1", tool(risk = ToolRisk.WRITE,
+                    timeout = if (cancel) 30_000 else 150, parallel = true) {
+                    entered.countDown(); release.await(); ToolResult("late", effect = ToolEffect.NONE)
+                })
+                val bRuns = AtomicInteger()
+                val b = f.catalog.registerHost("host/b", "1", tool(risk = ToolRisk.WRITE, parallel = true) {
+                    bRuns.incrementAndGet(); ToolResult("b", effect = ToolEffect.NONE)
+                })
+                f.catalog.freeze("run")
+                val ia = f.input(a); val id = ia.binding.callId
+                f.service.prepare(ia); approve(f, id); f.service.dispatch(id)
+                assertTrue(entered.await(5, TimeUnit.SECONDS))
+                if (cancel) f.service.cancel(id)
+                withTimeout(5_000) {
+                    var r = f.store.writes.receive()
+                    while (r.callId != id || r.state != if (cancel) Status.CANCELLED else Status.TIMED_OUT) r = f.store.writes.receive()
+                }
+                assertFalse(f.ledger.get(id)!!.restartRequired)
+                assertEquals(1, f.budget.occupiedSlots())
+                val ib = f.input(b, step = "different-step")
+                f.service.prepare(ib); approve(f, ib.binding.callId)
+                val blocked = f.service.dispatch(ib.binding.callId) as Mutation.Blocked
+                assertEquals("Task chain awaits unknown instance actual exit", blocked.reason)
+                assertEquals(0, bRuns.get())
+                assertEquals(1, f.budget.occupiedSlots()) // failed reservation was abandoned
+                release.countDown(); withTimeout(5_000) { f.service.awaitObservedExit(id) }
+                assertEquals(Effect.UNKNOWN, f.ledger.get(id)!!.result!!.effect)
+                assertTrue(f.service.dispatch(ib.binding.callId) is Mutation.Applied)
+                withTimeout(5_000) { f.service.awaitObservedExit(ib.binding.callId) }
+                assertEquals(1, bRuns.get())
+                assertEquals(0, f.budget.occupiedSlots())
+            } finally { release.countDown() }
+        }
+    }
+
+    @Test fun runtimeAskSuspendsAndHostApiCommitsRiskBeforeReturningTrue() = runBlocking {
+        Fixture().use { f ->
+            val returned = CompletableDeferred<Boolean>()
+            val release = CompletableDeferred<Unit>()
+            val i = f.input(f.register(tool(timeout = 30_000) { env ->
+                val allowed = env.requestApproval("actual write summary", ToolRisk.WRITE)
+                assertEquals(Risk.WRITE, f.ledger.get(env.callId)!!.effectiveRisk)
+                returned.complete(allowed)
+                release.await()
+                ToolResult("wrote")
+            }))
+            val id = i.binding.callId
+            f.service.prepare(i); f.service.dispatch(id)
+            val pending = pendingUpgrade(f, id)
+            assertEquals("actual write summary", pending.summary)
+            assertFalse(returned.isCompleted)
+            assertEquals(1, f.budget.occupiedSlots())
+            val api = HostToolRuntimeApi(f.service)
+            val payload = buildJsonObject {
+                put("operation", "decide"); put("callId", id); put("approvalId", pending.id)
+                put("decision", "ALLOW_ONCE"); put("risk", "ROOT"); put("digest", "forged")
+            }.toString()
+            val start = CompletableDeferred<Unit>()
+            val decisions = List(2) { async { start.await(); Json.parseToJsonElement(api.request(payload)).jsonObject["kind"]!!.jsonPrimitive.content } }
+            start.complete(Unit)
+            assertEquals(setOf("applied", "conflict"), decisions.awaitAll().toSet())
+            assertTrue(withTimeout(5_000) { returned.await() })
+            assertTrue(f.ledger.pendingApprovals().isEmpty())
+            release.complete(Unit); f.service.awaitObservedExit(id)
+            assertEquals(Effect.APPLIED, f.ledger.get(id)!!.result!!.effect)
+        }
+    }
+
+    @Test fun newUnknownEvidenceRenewsRuntimeRequestWithoutWakingToolAsAllowed() = runBlocking {
+        Fixture().use { f ->
+            val returned = CompletableDeferred<Boolean>()
+            val d = f.register(tool(timeout = 30_000, parallel = true) { env ->
+                returned.complete(env.requestApproval("write", ToolRisk.WRITE))
+                ToolResult("done", effect = ToolEffect.NONE)
+            })
+            val i = f.input(d); val id = i.binding.callId
+            f.service.prepare(i); f.service.dispatch(id)
+            val first = pendingUpgrade(f, id)
+            val other = f.input(d, step = "other")
+            val ready = (f.service.prepare(other) as Mutation.Applied).record
+            val claim = f.ledger.claimExecution(ready.callId, ready.revision) as Mutation.Applied
+            f.ledger.complete(ready.callId, claim.ticket!!.attemptId, Status.FAILED, "unknown", Effect.UNKNOWN)
+            val renewed = f.service.decide(id, first.id, Decision.ALLOW_ONCE) as Mutation.Applied
+            assertNotEquals(first.id, renewed.record.pending!!.id)
+            assertFalse(returned.isCompleted)
+            assertEquals(Risk.READ, renewed.record.effectiveRisk)
+            assertTrue(f.service.decide(id, first.id, Decision.ALLOW_ONCE) is Mutation.Conflict)
+            assertTrue(f.service.decide(id, renewed.record.pending!!.id, Decision.ALLOW_ONCE) is Mutation.Applied)
+            assertTrue(withTimeout(5_000) { returned.await() })
+            f.service.awaitObservedExit(id)
+        }
+    }
+
+    @Test fun cancelledChildWaiterWithdrawsOnlyItsPendingStep() = runBlocking {
+        Fixture().use { f ->
+            val child = CompletableDeferred<Job>()
+            val continueTool = CompletableDeferred<Unit>()
+            val answer = CompletableDeferred<Boolean>()
+            val d = f.register(tool(timeout = 30_000) { env ->
+                coroutineScope {
+                    val waiting = launch { env.requestApproval("abandoned", ToolRisk.WRITE) }
+                    child.complete(waiting)
+                    waiting.join()
+                }
+                continueTool.await()
+                answer.complete(env.requestApproval("fresh", ToolRisk.WRITE))
+                ToolResult("done", effect = ToolEffect.NONE)
+            })
+            val i = f.input(d); val id = i.binding.callId
+            f.service.prepare(i); f.service.dispatch(id)
+            val abandoned = pendingUpgrade(f, id)
+            withTimeout(5_000) { child.await().cancelAndJoin() }
+            assertNull(f.ledger.get(id)!!.pending)
+            assertEquals(Status.RUNNING, f.ledger.get(id)!!.state)
+            assertTrue(f.service.decide(id, abandoned.id, Decision.ALLOW_ALWAYS) is Mutation.Conflict)
+            continueTool.complete(Unit)
+            val fresh = pendingUpgrade(f, id)
+            assertNotEquals(abandoned.id, fresh.id)
+            f.service.decide(id, fresh.id, Decision.ALLOW_ONCE)
+            assertTrue(withTimeout(5_000) { answer.await() })
+            f.service.awaitObservedExit(id)
+        }
+    }
+
+    @Test fun runtimeDenyOnlyDeniesStepAndNextRequestHasFreshId() = runBlocking {
+        Fixture().use { f ->
+            val answers = CompletableDeferred<Pair<Boolean, Boolean>>()
+            val i = f.input(f.register(tool(timeout = 30_000) { env ->
+                val first = env.requestApproval("first", ToolRisk.WRITE)
+                val second = env.requestApproval("second", ToolRisk.WRITE)
+                answers.complete(first to second)
+                ToolResult("done", effect = ToolEffect.NONE)
+            }))
+            val id = i.binding.callId
+            f.service.prepare(i); f.service.dispatch(id)
+            val first = pendingUpgrade(f, id)
+            assertTrue(f.service.decide(id, first.id, Decision.DENY) is Mutation.Applied)
+            val second = pendingUpgrade(f, id)
+            assertNotEquals(first.id, second.id)
+            assertTrue(f.service.decide(id, first.id, Decision.ALLOW_ONCE) is Mutation.Conflict)
+            assertEquals(Status.RUNNING, f.ledger.get(id)!!.state)
+            assertTrue(f.service.decide(id, second.id, Decision.ALLOW_ONCE) is Mutation.Applied)
+            assertEquals(false to true, withTimeout(5_000) { answers.await() })
+            f.service.awaitObservedExit(id)
+        }
+    }
+
+    @Test fun cancelledPendingApprovalRejectsLateDecisionAndRetainsLeaseUntilHandlerExit() = runBlocking {
+        Fixture().use { f ->
+            val handler = CountDownLatch(1); val release = CountDownLatch(1)
+            try {
+                val i = f.input(f.register(tool(timeout = 30_000, resource = "screen") { env ->
+                    currentCoroutineContext()[Job]!!.invokeOnCompletion { handler.countDown(); release.await() }
+                    env.requestApproval("write", ToolRisk.WRITE)
+                    ToolResult("late")
+                }))
+                val id = i.binding.callId
+                f.service.prepare(i); f.service.dispatch(id)
+                val pending = pendingUpgrade(f, id)
+                f.service.cancel(id)
+                assertTrue(handler.await(5, TimeUnit.SECONDS))
+                assertTrue(f.service.decide(id, pending.id, Decision.ALLOW_ONCE) is Mutation.Conflict)
+                assertEquals(Status.CANCELLED, f.ledger.get(id)!!.state)
+                assertEquals(Effect.NONE, f.ledger.get(id)!!.result!!.effect)
+                assertEquals(InstanceState.UNCONFIRMED, f.ledger.get(id)!!.instance!!.state)
+                assertEquals(1, f.budget.occupiedSlots())
+                release.countDown(); f.service.awaitObservedExit(id)
+                assertEquals(InstanceState.EXIT_CONFIRMED, f.ledger.get(id)!!.instance!!.state)
+                assertEquals(0, f.budget.occupiedSlots())
+            } finally { release.countDown() }
+        }
+    }
+
+    @Test fun timeoutDuringPendingUpgradeRetainsPriorRiskAndRejectsLateDecision() = runBlocking {
+        Fixture().use { f ->
+            val release = CountDownLatch(1); val handler = CountDownLatch(1)
+            try {
+                val i = f.input(f.register(tool(risk = ToolRisk.WRITE, timeout = 1_000) { env ->
+                    currentCoroutineContext()[Job]!!.invokeOnCompletion { handler.countDown(); release.await() }
+                    env.requestApproval("root", ToolRisk.ROOT)
+                    ToolResult("not authorized")
+                }))
+                val id = i.binding.callId
+                f.service.prepare(i); approve(f, id); f.service.dispatch(id)
+                val pending = pendingUpgrade(f, id)
+                withTimeout(5_000) {
+                    var r = f.store.writes.receive()
+                    while (r.callId != id || r.state != Status.TIMED_OUT) r = f.store.writes.receive()
+                }
+                assertTrue(handler.await(5, TimeUnit.SECONDS))
+                assertTrue(f.service.decide(id, pending.id, Decision.ALLOW_ONCE) is Mutation.Conflict)
+                val timed = f.ledger.get(id)!!
+                assertEquals(Risk.WRITE, timed.effectiveRisk)
+                assertEquals(Effect.UNKNOWN, timed.result!!.effect)
+                assertEquals(InstanceState.UNCONFIRMED, timed.instance!!.state)
+                assertEquals(1, f.budget.occupiedSlots())
+                release.countDown(); f.service.awaitObservedExit(id)
+                assertEquals(timed.result, f.ledger.get(id)!!.result)
+                assertEquals(InstanceState.EXIT_CONFIRMED, f.ledger.get(id)!!.instance!!.state)
+            } finally { release.countDown() }
+        }
+    }
+
+    @Test fun unattendedRuntimeUsesAlwaysGrantButNeverCreatesPrompt() = runBlocking {
+        Fixture().use { f ->
+            val answers = kotlinx.coroutines.channels.Channel<Boolean>(3)
+            val d = f.register(tool(timeout = 30_000) { env ->
+                answers.send(env.requestApproval("write", ToolRisk.WRITE))
+                ToolResult("done", effect = ToolEffect.NONE)
+            })
+            suspend fun invoke(step: String, unattended: Boolean): String {
+                val i = f.input(d, step = step).copy(unattended = unattended)
+                f.service.prepare(i); f.service.dispatch(i.binding.callId)
+                return i.binding.callId
+            }
+            val denied = invoke("denied", true)
+            assertFalse(withTimeout(5_000) { answers.receive() }); f.service.awaitObservedExit(denied)
+            assertTrue(f.ledger.pendingApprovals().isEmpty())
+            val grant = invoke("grant", false)
+            val pending = pendingUpgrade(f, grant)
+            assertTrue(f.service.decide(grant, pending.id, Decision.ALLOW_ALWAYS) is Mutation.Applied)
+            assertTrue(withTimeout(5_000) { answers.receive() }); f.service.awaitObservedExit(grant)
+            val allowed = invoke("allowed", true)
+            assertTrue(withTimeout(5_000) { answers.receive() }); f.service.awaitObservedExit(allowed)
+            assertEquals(Risk.WRITE, f.ledger.get(allowed)!!.effectiveRisk)
+            assertTrue(f.ledger.pendingApprovals().isEmpty())
         }
     }
 

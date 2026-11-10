@@ -44,8 +44,9 @@ class ToolEnv(
     private val onInput: suspend (String, JsonObject) -> JsonObject? = { _, _ -> null },
 ) {
     fun progress(text: String, fraction: Float? = null) = onProgress(text, fraction)
-    suspend fun requestApproval(summary: String, risk: ToolRisk): Boolean =
-        if (unattended) false else onApproval(summary, risk)
+    // The trusted host hook enforces unattended policy without prompting; it may use an existing
+    // ALLOW_ALWAYS grant. Default remains deny. Keep the constructor/method ABI unchanged.
+    suspend fun requestApproval(summary: String, risk: ToolRisk): Boolean = onApproval(summary, risk)
     suspend fun requestInput(prompt: String, schema: JsonObject): JsonObject? =
         if (unattended) null else onInput(prompt, schema)
 }
