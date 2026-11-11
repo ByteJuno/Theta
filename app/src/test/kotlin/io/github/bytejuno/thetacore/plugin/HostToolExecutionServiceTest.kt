@@ -580,7 +580,9 @@ class HostToolExecutionServiceTest {
             val slow = f.catalog.registerHost("host/slow", "1", tool(parallel = true, timeout = 10_000) {
                 entered.countDown(); release.await(); ToolResult("slow", effect = ToolEffect.NONE)
             })
-            val fast = f.catalog.registerHost("host/fast", "1", tool(parallel = true) {
+            val fast = f.catalog.registerHost("host/fast", "1", tool(parallel = true, timeout = 10_000) {
+                // Fail storage only after the slow sibling has entered its tool body.
+                assertTrue(entered.await(5, TimeUnit.SECONDS))
                 ToolResult("fast", effect = ToolEffect.NONE)
             })
             f.catalog.freeze("run")
@@ -1339,6 +1341,165 @@ class HostToolExecutionServiceTest {
             finish.complete(Unit); withTimeout(5_000) { f.service.awaitObservedExit(id) }
             assertEquals(Status.SUCCEEDED, f.ledger.get(id)!!.state)
             assertEquals(0, f.budget.occupiedSlots())
+        }
+    }
+
+    @Test fun sharedHistoryPoisonAtRealWorkerAdmissionPreventsBodyEntry() = runBlocking {
+        val file = java.nio.file.Files.createTempDirectory("worker-shared-poison").resolve(AgentDatabase.FILE_NAME)
+        AgentDatabase.open(file, androidx.sqlite.driver.bundled.BundledSQLiteDriver()).use { db ->
+            SqliteInvocationStore.open(db).use { durable ->
+                val paused = CountDownLatch(1); val resume = CountDownLatch(1)
+                val store = object : InvocationStore by durable {
+                    override fun checkAdmission() {
+                        if (Thread.currentThread().name.startsWith("theta-execution")) {
+                            paused.countDown(); check(resume.await(5, TimeUnit.SECONDS))
+                        }
+                        durable.checkAdmission()
+                    }
+                }
+                val budget = PluginExecutionBudget(1, 1)
+                val owner = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+                val gate = DefinitionGate(); val validator = Schema202012Validator()
+                val ledger = InvocationLedger(store, gate, validator)
+                val catalog = FrozenToolCatalog(gate, budget, owner, validator)
+                val service = HostToolExecutionService(budget, owner, catalog, ledger, validator)
+                val effects = AtomicInteger()
+                ledger.recoverColdStart("epoch")
+                try {
+                    val d = catalog.registerHost("host/test", "1", tool(timeout = 30_000) {
+                        effects.incrementAndGet(); ToolResult("must not run")
+                    })
+                    catalog.freeze("run")
+                    val input = InvocationInput(BindingValue.copyOf(callBinding("p", "r", null, 0, "w")),
+                        "chain", "session", "run", "step", 0, "{}", d, false, Risk.READ)
+                    service.prepare(input); service.dispatch(input.binding.callId)
+                    assertTrue(paused.await(5, TimeUnit.SECONDS))
+                    assertEquals(1, budget.occupiedSlots())
+                    SqliteRunHistory.create(db, "fault").close()
+                    SqliteRunHistory.open(db, "fault") {
+                        if (it.stage == HistoryWriteStage.AFTER_COMMIT) error("ack lost")
+                    }.use { assertTrue(runCatching { it.append(0, listOf(message(Role.USER, textPart("committed")))) }.isFailure) }
+                    resume.countDown()
+                    withTimeout(5_000) { while (budget.occupiedSlots() != 0) delay(5) }
+                    assertEquals(0, effects.get())
+                    assertTrue(ledger.executionAdmissionFailure() is Mutation.Blocked)
+                    // No fictitious durable exit: shared failure preserves the last confirmed claim.
+                    assertEquals(InstanceState.UNCONFIRMED, ledger.get(input.binding.callId)!!.instance!!.state)
+                } finally { resume.countDown(); budget.close(); owner.cancel() }
+            }
+        }
+    }
+
+    @Test fun sharedHistoryFailureRejectsDurableAndImmediateRuntimeAllowBeforeConsumption() = runBlocking {
+        for (immediate in listOf(false, true)) {
+            val file = java.nio.file.Files.createTempDirectory("host-shared-poison").resolve(AgentDatabase.FILE_NAME)
+            AgentDatabase.open(file, androidx.sqlite.driver.bundled.BundledSQLiteDriver()).use { db ->
+                SqliteInvocationStore.open(db).use { store ->
+                    val budget = PluginExecutionBudget(2, 2)
+                    val owner = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+                    val gate = DefinitionGate(); val validator = Schema202012Validator()
+                    val ledger = InvocationLedger(store, gate, validator)
+                    val catalog = FrozenToolCatalog(gate, budget, owner, validator)
+                    val paused = CompletableDeferred<Unit>(); val consume = CompletableDeferred<Unit>()
+                    val returned = CompletableDeferred<Boolean>(); val finish = CompletableDeferred<Unit>()
+                    val effects = AtomicInteger()
+                    val service = HostToolExecutionService(budget, owner, catalog, ledger, validator,
+                        afterRuntimeApprovalStart = { paused.complete(Unit); consume.await() })
+                    ledger.recoverColdStart("live")
+                    try {
+                        val d = catalog.registerHost("host/test", "1", tool(timeout = 30_000) { env ->
+                            val allowed = env.requestApproval("next operation", if (immediate) ToolRisk.READ else ToolRisk.WRITE)
+                            if (allowed) effects.incrementAndGet()
+                            returned.complete(allowed)
+                            finish.await(); ToolResult("done", effect = ToolEffect.NONE)
+                        })
+                        catalog.freeze("run")
+                        val input = InvocationInput(BindingValue.copyOf(callBinding("test", "req", null, 0, "wire")),
+                            "chain", "session", "run", "step", 0, "{}", d, false, Risk.READ)
+                        val id = input.binding.callId
+                        service.prepare(input); service.dispatch(id)
+                        withTimeout(5_000) { paused.await() }
+                        if (!immediate) {
+                            val ask = ledger.get(id)!!.pending!!
+                            assertTrue(service.decide(id, ask.id, Decision.ALLOW_ONCE) is Mutation.Applied)
+                        }
+                        val approved = ledger.get(id)!!
+                        assertNull(approved.pending); assertFalse(returned.isCompleted)
+                        SqliteRunHistory.create(db, "fault").close()
+                        SqliteRunHistory.open(db, "fault") {
+                            if (it.stage == HistoryWriteStage.AFTER_COMMIT) error("history acknowledgement lost")
+                        }.use { history ->
+                            assertTrue(runCatching { history.append(0, listOf(message(Role.USER, textPart("committed")))) }.isFailure)
+                        }
+                        consume.complete(Unit)
+                        assertFalse(withTimeout(5_000) { returned.await() })
+                        assertEquals(0, effects.get())
+                        assertEquals(approved, ledger.get(id))
+                        assertEquals(listOf(approved), store.records())
+                        assertTrue(ledger.continuationBlocked("unrelated-chain"))
+                        assertEquals(1, budget.occupiedSlots()) // failure does not pretend the running worker exited
+                        println("ISSUE78_HOST_POISON immediate=$immediate allowed=false effects=0 projection_unchanged=true")
+                    } finally {
+                        consume.complete(Unit); finish.complete(Unit)
+                        withTimeout(5_000) { while (budget.occupiedSlots() != 0) delay(5) }
+                        budget.close(); owner.cancel()
+                    }
+                }
+            }
+        }
+    }
+
+    @Test fun immediateAllowRechecksPolicyDenial() = immediateConsumption("denied")
+    @Test fun immediateAllowRechecksDefinitionRefresh() = immediateConsumption("refresh")
+    @Test fun immediateAllowRechecksStaleDefinition() = immediateConsumption("stale")
+    @Test fun immediateAllowRechecksChainIsolation() = immediateConsumption("isolation")
+    @Test fun immediateAllowRechecksUnknownEvidence() = immediateConsumption("unknown")
+    @Test fun immediateAllowWithoutReceiptStillSucceeds() = immediateConsumption("healthy")
+    private fun immediateConsumption(change: String) = runBlocking {
+        var denied = false
+        val paused = CompletableDeferred<Unit>(); val consume = CompletableDeferred<Unit>()
+        Fixture(policy = ApprovalPolicy(denied = { denied }),
+            afterRuntimeApprovalStart = { paused.complete(Unit); consume.await() }).use { f ->
+            val returned = CompletableDeferred<Boolean>(); val finish = CompletableDeferred<Unit>()
+            val effects = AtomicInteger()
+            val d = f.register(tool(timeout = 30_000, parallel = true,
+                resource = if (change == "isolation") "external" else null) { env ->
+                val allowed = env.requestApproval("read step", ToolRisk.READ)
+                if (allowed) effects.incrementAndGet()
+                returned.complete(allowed)
+                finish.await(); ToolResult("done", effect = ToolEffect.NONE)
+            })
+            if (change in setOf("isolation", "unknown")) {
+                val earlier = (f.service.prepare(f.input(d, step = "earlier")) as Mutation.Applied).record
+                val claim = f.ledger.claimExecution(earlier.callId, earlier.revision) as Mutation.Applied
+                f.ledger.complete(earlier.callId, claim.ticket!!.attemptId, Status.SUCCEEDED, "confirmed", Effect.NONE)
+            }
+            val id = f.input(d).also { f.service.prepare(it) }.binding.callId
+            f.service.dispatch(id)
+            try {
+                withTimeout(5_000) { paused.await() }
+                val approved = f.ledger.get(id)!!
+                assertNull(approved.pending); assertTrue(approved.receipts.isEmpty())
+                f.gate.withGate {
+                    when (change) {
+                        "denied" -> denied = true
+                        "refresh" -> f.gate.beginRefresh(d.toolKey)
+                        "stale" -> f.gate.install(d.copy(description = "changed"))
+                        "isolation", "unknown" -> {
+                            val other = f.store.records().single { it.input.stepId == "earlier" }
+                            f.ledger.recordOutcome(other.callId, other.instance!!.attemptId, Status.FAILED, "late unknown", Effect.UNKNOWN)
+                        }
+                    }
+                }
+                consume.complete(Unit)
+                assertEquals(change == "healthy", withTimeout(5_000) { returned.await() })
+                assertEquals(if (change == "healthy") 1 else 0, effects.get())
+                assertNull(f.ledger.get(id)!!.pending)
+                assertEquals(1, f.budget.occupiedSlots())
+            } finally {
+                consume.complete(Unit); finish.complete(Unit)
+                withTimeout(5_000) { f.service.awaitObservedExit(id) }
+            }
         }
     }
 

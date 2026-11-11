@@ -50,15 +50,15 @@ class HistoryStorageRegressionTest {
         )
         for ((run, message) in cases) {
             val path = Files.createTempDirectory("history-bad-intent")
-            FileRunHistory.create(path, "session", durability).use { h ->
+            TestRunHistory.create(path, "session", durability).use { h ->
                 val before = h.io()
                 assertFails { h.prepareStep(0, run, "step", message) }
                 assertEquals(before.bytesWritten, h.io().bytesWritten)
-                assertFalse(Files.exists(path.resolve("pending.json")))
+                assertFalse(h.hasValue("pending"))
                 assertTrue(temps(path).isEmpty())
                 assertEquals(0, h.revision())
             }
-            FileRunHistory.open(path, durability).use { h ->
+            TestRunHistory.open(path, durability).use { h ->
                 h.prepareStep(0, identity, "valid", assistant(call()))
                 assertTrue(h.recoverPending(ledger()).recovered)
                 assertEquals(2, h.snapshot().messages.size)
@@ -69,13 +69,13 @@ class HistoryStorageRegressionTest {
     @Test fun usedIdentityAndBlankStepAreRejectedBeforeIntentButInvalidArgumentsRemainEvidence() {
         val path = Files.createTempDirectory("history-identity")
         val c = call()
-        FileRunHistory.create(path, "session", durability).use { h ->
+        TestRunHistory.create(path, "session", durability).use { h ->
             assertFails { h.prepareStep(0, identity, " ", assistant(c)) }
             h.append(0, listOf(assistant(c), message(Role.TOOL, toolResultPart(c.binding.callId, "done"))))
             assertFails { h.prepareStep(1, identity, "step", assistant(c)) }
-            assertFalse(Files.exists(path.resolve("pending.json")))
+            assertFalse(h.hasValue("pending"))
         }
-        FileRunHistory.open(path, durability).use { h ->
+        TestRunHistory.open(path, durability).use { h ->
             val l = ledger()
             // Do not invent stricter argument JSON rules than InvocationInput: truncated and
             // malformed inputs must still be recorded, cancelled and projected losslessly.
@@ -100,7 +100,7 @@ class HistoryStorageRegressionTest {
             val gate = DefinitionGate().apply { install(d); freezeRun("run", listOf(d)) }
             val l = InvocationLedger(store, gate, ArgumentsValidator { _, _ -> true })
             l.recoverColdStart("before")
-            FileRunHistory.create(path, "session", durability).use {
+            TestRunHistory.create(path, "session", durability).use {
                 it.prepareStep(0, identity, "step", assistant(*calls.toTypedArray()))
             }
             calls.forEachIndexed { order, c ->
@@ -114,20 +114,21 @@ class HistoryStorageRegressionTest {
         TestInvocationStore.open(ledgerPath).use { store ->
             val l = InvocationLedger(store, DefinitionGate(), ArgumentsValidator { _, _ -> true })
             l.recoverColdStart("after")
-            FileRunHistory.open(path, durability) {
-                if (it.file == "head.json" && it.stage == HistoryWriteStage.BEFORE_REPLACE) throw IOException("lost commit")
+            TestRunHistory.open(path, durability) {
+                if (it.file == "append" && it.stage == HistoryWriteStage.BEFORE_COMMIT) throw IOException("lost commit")
             }.use { h -> assertFailsWith<HistoryStorageException> { h.recoverPending(l) } }
-            assertTrue(Files.size(path.resolve("batches/1.json")) > 64L * 1024 * 1024)
-            FileRunHistory.open(path, durability).use { h ->
+
+            TestRunHistory.open(path, durability).use { h ->
                 assertEquals(0, h.revision())
                 assertTrue(h.recoverPending(l).recovered)
                 assertFalse(h.recoverPending(l).recovered)
                 assertEquals(1, h.revision())
-                assertFalse(Files.exists(path.resolve("pending.json")))
+                assertFalse(h.hasValue("pending"))
             }
         }
-        FileRunHistory.open(path, durability).use { h ->
+        TestRunHistory.open(path, durability).use { h ->
             val page = h.recent(1)
+            assertTrue(TestRunHistory.bytes(path, "batches/1").size > 64L * 1024 * 1024)
             assertEquals(2, page.messages.size) // transport frames never split a transaction/page
             assertNull(page.older)
             val results = page.messages.last().parts.map { it as ContentPart.ToolResult }
@@ -136,34 +137,17 @@ class HistoryStorageRegressionTest {
             assertTrue(expected.toByteArray(Charsets.UTF_8).size <= ModelResultText.LIMIT)
             results.forEach { assertEquals(expected, it.text) }
         }
-        println("ISSUE19_LARGE_RESULT calls=${calls.size}; rawChars=${text.length}; batchBytes=${Files.size(path.resolve("batches/1.json"))}; ledger=$ledgerPath; history=$path")
-    }
-
-    @Test fun legacyCheckedJsonBatchCanBeReadAndExtendedByFramedWrites() {
-        val path = Files.createTempDirectory("history-legacy")
-        val m = message(Role.USER, textPart("legacy\n原样"))
-        FileRunHistory.create(path, "session", durability).use { it.append(0, listOf(m)) }
-        val batch = HistoryBatch(sessionId = "session", revision = 1, previousHash = "ROOT", previousCount = 0,
-            messages = listOf(HistoryCodec.encodeMessage(m)))
-        val payload = HistoryCodec.json.encodeToString(HistoryBatch.serializer(), batch)
-        val digest = java.security.MessageDigest.getInstance("SHA-256").digest(payload.toByteArray(Charsets.UTF_8))
-            .joinToString("") { "%02x".format(it) }
-        val legacy = HistoryCodec.json.encodeToString(CheckedHistoryValue.serializer(), CheckedHistoryValue(payload, digest))
-        Files.write(path.resolve("batches/1.json"), legacy.toByteArray(Charsets.UTF_8))
-        FileRunHistory.open(path, durability).use { h ->
-            h.append(1, listOf(message(Role.USER, textPart("new"))))
-            assertEquals(listOf("legacy\n原样", "new"), h.snapshot().messages.map { (it.parts.single() as ContentPart.Text).text })
-        }
+        println("ISSUE19_LARGE_RESULT calls=${calls.size}; rawChars=${text.length}; batchBytes=${TestRunHistory.bytes(path, "batches/1").size}; ledger=$ledgerPath; history=$path")
     }
 
     @Test fun framedHistoryPreservesLoneSurrogatesInResultsWithoutChangingLedgerTruth() {
         val path = Files.createTempDirectory("history-result-surrogates")
         val c = call()
         val text = "partial\uD800 text \uDC00"
-        FileRunHistory.create(path, "session", durability).use { h ->
+        TestRunHistory.create(path, "session", durability).use { h ->
             h.append(0, listOf(assistant(c), message(Role.TOOL, toolResultPart(c.binding.callId, text))))
         }
-        FileRunHistory.open(path, durability).use { h ->
+        TestRunHistory.open(path, durability).use { h ->
             assertEquals(text, (h.recent(1).messages.last().parts.single() as ContentPart.ToolResult).text)
         }
     }
@@ -180,9 +164,9 @@ class HistoryStorageRegressionTest {
             val gate = DefinitionGate().apply { install(d); freezeRun("run", listOf(d)) }
             val l = InvocationLedger(store, gate, ArgumentsValidator { _, _ -> true })
             l.recoverColdStart("before")
-            FileRunHistory.create(path, "session", durability).close()
-            FileRunHistory.open(path, durability) {
-                if (it.file == "head.json" && it.stage == HistoryWriteStage.AFTER_REPLACE) throw IOException("ack lost")
+            TestRunHistory.create(path, "session", durability).close()
+            TestRunHistory.open(path, durability) {
+                if (it.file == "append" && it.stage == HistoryWriteStage.AFTER_COMMIT) throw IOException("ack lost")
             }.use { h ->
                 h.prepareStep(0, identity, "step", a)
                 l.recordInvocation(InvocationInput(BindingValue.copyOf(c.binding), "chain", "session", "run", "step",
@@ -196,9 +180,9 @@ class HistoryStorageRegressionTest {
         TestInvocationStore.open(ledgerPath).use { store ->
             val l = InvocationLedger(store, DefinitionGate(), ArgumentsValidator { _, _ -> true })
             l.recoverColdStart("after")
-            FileRunHistory.open(path, durability).use { h ->
+            TestRunHistory.open(path, durability).use { h ->
                 assertTrue(h.recoverPending(l).recovered)
-                assertFalse(Files.exists(path.resolve("pending.json")))
+                assertFalse(h.hasValue("pending"))
                 assertEquals(1, h.revision())
                 val result = h.snapshot().messages.last().parts.single() as ContentPart.ToolResult
                 assertEquals(text, Json.parseToJsonElement(result.text).jsonObject.getValue("message").jsonPrimitive.content)
@@ -211,9 +195,9 @@ class HistoryStorageRegressionTest {
         val c = call()
         val a = assistant(c)
         val l = ledger()
-        FileRunHistory.create(path, "session", durability).close()
-        FileRunHistory.open(path, durability) {
-            if (it.file == "head.json" && it.stage == HistoryWriteStage.AFTER_REPLACE) throw IOException("ack lost")
+        TestRunHistory.create(path, "session", durability).close()
+        TestRunHistory.open(path, durability) {
+            if (it.file == "append" && it.stage == HistoryWriteStage.AFTER_COMMIT) throw IOException("ack lost")
         }.use { h ->
             h.prepareStep(0, identity, "step", a)
             l.recordInvocation(InvocationInput(BindingValue.copyOf(c.binding), "chain", "session", "run", "step",
@@ -222,9 +206,9 @@ class HistoryStorageRegressionTest {
                 h.append(0, listOf(a, message(Role.TOOL, toolResultPart(c.binding.callId, "not what the ledger says"))))
             }
         }
-        FileRunHistory.open(path, durability).use { h ->
+        TestRunHistory.open(path, durability).use { h ->
             assertFails { h.recoverPending(l) }
-            assertTrue(Files.exists(path.resolve("pending.json")))
+            assertTrue(h.hasValue("pending"))
         }
     }
 
@@ -260,169 +244,5 @@ class HistoryStorageRegressionTest {
         }
     }
 
-    @Test fun temporaryCleanupIsRestartableAndPreservesUnknownAndCorruptFinalEvidence() {
-        val path = Files.createTempDirectory("history-temp-restart")
-        FileRunHistory.create(path, "session", durability).close()
-        val known = listOf(path.resolve(".pending.json.tmp"), path.resolve(".head.json.tmp"),
-            path.resolve("batches/.1.json.tmp"), path.resolve("calls/.${"a".repeat(64)}.json.tmp"),
-            path.resolve("calls/.${"b".repeat(64)}.json.tmp"))
-        known.forEach { Files.write(it, byteArrayOf(1, 2, 3)) }
-        val evidence = listOf(path.resolve("calls/unknown.tmp"), path.resolve("calls/${"c".repeat(64)}.json"),
-            path.resolve("batches/unknown.json"))
-        evidence.forEach { Files.write(it, byteArrayOf(4, 5, 6)) }
-        assertFails { FileRunHistory.open(path, durability) {
-            if (it.file.endsWith(".tmp") && it.stage == HistoryWriteStage.AFTER_REPLACE) throw IOException("cleanup interrupted")
-        } }
-        assertEquals(known.size - 1, known.count { Files.exists(it) })
-        repeat(2) {
-            FileRunHistory.open(path, durability).use { h -> assertEquals(0, h.revision()) }
-            assertTrue(known.none { Files.exists(it) })
-            evidence.forEach { assertContentEquals(byteArrayOf(4, 5, 6), Files.readAllBytes(it)) }
-        }
-    }
 
-    @Test fun errorDuringOpenPropagatesAndReleasesTheWriterSlot() {
-        val path = Files.createTempDirectory("history-open-error")
-        FileRunHistory.create(path, "session", durability).close()
-        Files.write(path.resolve(".head.json.tmp"), byteArrayOf(1)) // reaches the fault seam inside open
-        val stored = Files.readAllBytes(path.resolve("head.json"))
-        assertFailsWith<OutOfMemoryError> {
-            FileRunHistory.open(path, durability) { throw OutOfMemoryError("large tail batch") }
-        }
-        assertContentEquals(stored, Files.readAllBytes(path.resolve("head.json")))
-        FileRunHistory.open(path, durability).use { h -> assertEquals(0, h.revision()) }
-        assertTrue(temps(path).isEmpty())
-    }
-
-    @Test fun repeatedCallWriteFailuresDoNotAccumulateTemporaryFiles() {
-        val path = Files.createTempDirectory("history-temp-faults")
-        FileRunHistory.create(path, "session", durability).close()
-        for (stage in HistoryWriteStage.entries) {
-            val c = call()
-            FileRunHistory.open(path, durability) {
-                if (it.file.startsWith("calls/") && it.stage == stage) throw IOException("call failure")
-            }.use { h -> assertFails { h.append(0, listOf(assistant(c), message(Role.TOOL, toolResultPart(c.binding.callId, "r")))) } }
-            assertTrue(temps(path).isEmpty(), "ordinary failure must clean temp: $stage")
-            FileRunHistory.open(path, durability).use { assertEquals(0, it.revision()) }
-            Files.newDirectoryStream(path.resolve("calls")).use { assertFalse(it.iterator().hasNext()) }
-        }
-    }
-
-    @Test fun directoryChainSyncsOnlyMissingDirectoriesAndTheirParentsBeforeChildren() {
-        val base = Files.createTempDirectory("history-parent-sync").toAbsolutePath().normalize()
-        val one = base.resolve("one")
-        val two = one.resolve("two")
-        val target = two.resolve("session")
-        val expected = listOf(base, one, one, two, two, target)
-        val synced = mutableListOf<Path>()
-        FileRunHistory.createDirectoryChain(target, Durability.REQUIRE_DIRECTORY_SYNC) { p, d ->
-            if (!p.startsWith(base)) throw java.nio.file.AccessDeniedException(p.toString())
-            assertEquals(Durability.REQUIRE_DIRECTORY_SYNC, d)
-            assertEquals(expected[synced.size], p)
-            assertTrue(Files.isDirectory(p))
-            val child = listOf(two, two, target, target, null, null)[synced.size]
-            if (child != null) assertFalse(Files.exists(child), "child created before directory sync: $child")
-            synced.add(p)
-        }
-        assertEquals(expected, synced)
-    }
-
-    @Test fun precreatedSessionSyncsOnlyItselfAndItsDirectParent() {
-        val base = Files.createTempDirectory("history-precreated-sync").toAbsolutePath().normalize()
-        val parent = Files.createDirectories(base.resolve("existing/parent"))
-        val target = Files.createDirectory(parent.resolve("session"))
-        val synced = mutableListOf<Path>()
-        FileRunHistory.createDirectoryChain(target, Durability.REQUIRE_DIRECTORY_SYNC) { p, _ ->
-            if (!p.startsWith(parent)) throw java.nio.file.AccessDeniedException(p.toString())
-            synced.add(p)
-        }
-        assertEquals(listOf(parent, target), synced)
-    }
-
-    @Test fun directoryChainPropagatesEverySyncFailureBeforeCreatingFurtherChildren() {
-        for (failureIndex in 0..5) {
-            val base = Files.createTempDirectory("history-failed-sync").toAbsolutePath().normalize()
-            val one = base.resolve("one")
-            val two = one.resolve("two")
-            val target = two.resolve("session")
-            val expected = listOf(base, one, one, two, two, target)
-            val synced = mutableListOf<Path>()
-            val failure = IOException("directory fsync failure $failureIndex")
-            assertSame(failure, assertFailsWith<IOException> {
-                FileRunHistory.createDirectoryChain(target, Durability.REQUIRE_DIRECTORY_SYNC) { p, _ ->
-                    if (!p.startsWith(base)) throw java.nio.file.AccessDeniedException(p.toString())
-                    synced.add(p)
-                    if (synced.size == failureIndex + 1) throw failure
-                }
-            })
-            assertEquals(expected.take(failureIndex + 1), synced)
-            assertTrue(Files.isDirectory(one))
-            assertEquals(failureIndex >= 2, Files.exists(two))
-            assertEquals(failureIndex >= 4, Files.exists(target))
-        }
-        for (failureIndex in 0..1) {
-            val parent = Files.createTempDirectory("history-existing-failed-sync").toAbsolutePath().normalize()
-            val target = Files.createDirectory(parent.resolve("session"))
-            val synced = mutableListOf<Path>()
-            val failure = IOException("precreated fsync failure")
-            assertSame(failure, assertFailsWith<IOException> {
-                FileRunHistory.createDirectoryChain(target, Durability.REQUIRE_DIRECTORY_SYNC) { p, _ ->
-                    synced.add(p)
-                    if (synced.size == failureIndex + 1) throw failure
-                }
-            })
-            assertEquals(listOf(parent, target).take(failureIndex + 1), synced)
-        }
-    }
-
-    @Test fun directoryChainRejectsExistingFilesWithoutSyncingAncestors() {
-        val base = Files.createTempDirectory("history-chain-file")
-        val file = Files.write(base.resolve("file"), byteArrayOf(1))
-        for (target in listOf(file, file.resolve("child/session"))) {
-            var syncs = 0
-            assertFails { FileRunHistory.createDirectoryChain(target, durability) { _, _ -> syncs++ } }
-            assertEquals(0, syncs)
-            assertContentEquals(byteArrayOf(1), Files.readAllBytes(file))
-        }
-    }
-
-    @Test fun directoryChainAcceptsConcurrentlyCreatedDirectoryButRejectsFile() {
-        for (asDirectory in listOf(true, false)) {
-            val base = Files.createTempDirectory("history-chain-race").toAbsolutePath().normalize()
-            val one = base.resolve("one")
-            val two = one.resolve("two")
-            val target = two.resolve("session")
-            val synced = mutableListOf<Path>()
-            val create = {
-                FileRunHistory.createDirectoryChain(target, durability) { p, _ ->
-                    synced.add(p)
-                    if (p == base) {
-                        if (asDirectory) Files.createDirectory(two) else Files.write(two, byteArrayOf(1))
-                    }
-                }
-            }
-            if (asDirectory) {
-                create()
-                assertEquals(listOf(base, one, one, two, two, target), synced)
-                assertTrue(Files.isDirectory(target))
-            } else {
-                assertFailsWith<java.nio.file.FileAlreadyExistsException> { create() }
-                assertEquals(listOf(base, one), synced)
-                assertFalse(Files.exists(target))
-            }
-        }
-    }
-
-    @Test fun realDirectorySyncEitherSucceedsOrFailsExplicitlyOnThisOs() {
-        val base = Files.createTempDirectory("history-directory-sync")
-        val supported = runCatching { FileChannel.open(base, READ).use { it.force(true) } }.isSuccess
-        val target = base.resolve("a/b/session")
-        if (supported) {
-            FileRunHistory.create(target, "session", Durability.REQUIRE_DIRECTORY_SYNC).use {
-                it.append(0, listOf(message(Role.USER, textPart("durable"))))
-            }
-            FileRunHistory.open(target, Durability.REQUIRE_DIRECTORY_SYNC).use { assertEquals(1, it.revision()) }
-        } else assertFails { FileRunHistory.create(target, "session", Durability.REQUIRE_DIRECTORY_SYNC) }
-        println("ISSUE19_DIRECTORY_SYNC supported=$supported; os=${System.getProperty("os.name")}; power_loss_tested=false")
-    }
 }

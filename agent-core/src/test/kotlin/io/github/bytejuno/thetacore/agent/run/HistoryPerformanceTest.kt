@@ -10,7 +10,7 @@ import kotlin.test.*
 
 /** Reproducible local microbenchmark, not a cold-cache or Android latency claim.
  * 10,000 separate acknowledged transactions, alternating USER/ASSISTANT, 512 ASCII chars each.
- * Every append forces its batch and HEAD and atomically renames both. OS caches are NOT flushed.
+ * Every append commits its new batch and HEAD in one FULL WAL transaction. OS caches are NOT flushed.
  * Timings use monotonic nanoTime; counters are actual bytes passed through storage reads/writes,
  * not filesystem block traffic. create() initialization/locks/metadata I/O are excluded from counters.
  * No latency threshold: assert the bounded work and loaded-message counts, publish measured times.
@@ -24,13 +24,13 @@ class HistoryPerformanceTest {
         var appendMs = 0.0
         var appendOneMs = 0.0
         var appendOneBytes = 0L
-        FileRunHistory.create(path, "benchmark-session", durability).use { h ->
+        TestRunHistory.create(path, "benchmark-session", durability).use { h ->
             val baseline = h.io()
             appendMs = measureNanoTime {
                 repeat(10_000) { i ->
                     h.append(i.toLong(), listOf(message(if (i % 2 == 0) Role.USER else Role.ASSISTANT,
                         textPart(i.toString().padEnd(512, 'x')))))
-                    if (i == 0) firstBatch = Files.readAllBytes(path.resolve("batches/1.json"))
+                    if (i == 0) firstBatch = TestRunHistory.bytes(path, "batches/1")
                 }
             } / 1e6
             appendIo = h.io()
@@ -44,10 +44,10 @@ class HistoryPerformanceTest {
             appendOneBytes = h.io().bytesWritten - before.bytesWritten
             assertEquals(before.bytesRead, h.io().bytesRead)
             assertEquals(2, h.io().filesWritten - before.filesWritten)
-            assertContentEquals(firstBatch, Files.readAllBytes(path.resolve("batches/1.json")))
+            assertContentEquals(firstBatch, TestRunHistory.bytes(path, "batches/1"))
         }
-        lateinit var opened: FileRunHistory
-        val openMs = measureNanoTime { opened = FileRunHistory.open(path, durability) } / 1e6
+        lateinit var opened: TestRunHistory
+        val openMs = measureNanoTime { opened = TestRunHistory.open(path, durability) } / 1e6
         opened.use { h ->
             val openIo = h.io()
             lateinit var recent: HistoryPage
@@ -78,7 +78,7 @@ class HistoryPerformanceTest {
             }
             val metrics = buildJsonObject {
                 put("messages", 10_000); put("payloadAsciiChars", 512); put("transactions", 10_000)
-                put("durability", durability.name); put("os", System.getProperty("os.name"))
+                put("durability", "SQLite WAL synchronous=FULL"); put("os", System.getProperty("os.name"))
                 put("java", System.getProperty("java.version")); put("appendTotalMs", appendMs)
                 put("appendMeanMs", appendMs / 10_000); put("appendBytesWritten", appendIo.bytesWritten)
                 put("appendFilesWritten", appendIo.filesWritten); put("appendMessagesDecoded", appendIo.messagesDecoded)
@@ -96,7 +96,7 @@ class HistoryPerformanceTest {
                 put("diskBytes", Files.walk(path).use { paths -> paths.filter { Files.isRegularFile(it) }.mapToLong { Files.size(it) }.sum() })
                 put("osCacheFlushed", false); put("physicalPowerLossTested", false)
             }
-            println("ISSUE19_PERFORMANCE=$metrics")
+            println("ISSUE78_SQLITE_PERFORMANCE=$metrics")
         }
     }
 }

@@ -68,7 +68,7 @@ class AgentRunLoop(
     private var confirmedGenerationResponse = false
 
     private fun persistAccounting() {
-        if (accountingActive) (history as? FileRunHistory)?.saveAccounting(
+        if (accountingActive) (history as? SqliteRunHistory)?.saveAccounting(
             RunAccounting(identity.sessionId, identity.taskChainId, identity.runId, steps, retries))
     }
 
@@ -92,7 +92,7 @@ class AgentRunLoop(
         }).joinToString("|")
 
     private fun restoreContext(source: HistorySnapshot) {
-        val disk = history as? FileRunHistory
+        val disk = history as? SqliteRunHistory
         val barrier = disk?.loadBarrier()
         val saved = disk?.loadCheckpoint()
         // Retained per-chain accounting is authoritative even after another chain or history edit.
@@ -197,7 +197,7 @@ class AgentRunLoop(
                 steps++; retries++
                 persistAccounting()
                 val snapshot = history.snapshot()
-                (history as? FileRunHistory)?.saveCheckpoint(checkpoint(snapshot, snapshot.messages.size,
+                (history as? SqliteRunHistory)?.saveCheckpoint(checkpoint(snapshot, snapshot.messages.size,
                     null, "PAUSED", "Summary attempt reserved; interrupted work requires review", false)
                     .copy(pauseClass = "SUMMARY_RESERVED"))
                 true
@@ -221,7 +221,7 @@ class AgentRunLoop(
     /** Old-history compaction only; the active run's prefix is never partly stripped. */
     private suspend fun compactPrior(source: HistorySnapshot): Boolean {
         val policy = contextPolicy ?: return false
-        val disk = history as? FileRunHistory ?: return false
+        val disk = history as? SqliteRunHistory ?: return false
         if (contextView != null || policy.priorMessageCount == 0 || serverLoopOpen || serverUnknown) return false
         val records = tools.checkpointRecords(source.messages)
         // Only live/undecided local execution blocks ordinary compaction; accepted UNKNOWN effects
@@ -241,7 +241,7 @@ class AgentRunLoop(
     /** Checkpoint creation never starts a new run. The host explicitly selects the returned ID.
      * A failed summary, unknown side effect, or open server loop yields a durable PAUSED record. */
     private suspend fun pauseContext(source: HistorySnapshot, reason: String): RunResult {
-        val disk = history as? FileRunHistory
+        val disk = history as? SqliteRunHistory
         if (contextPolicy == null || disk == null) return result(RunState.PAUSED, reason, serverUnknown)
         val remoteBlocked = serverUnknown || serverLoopOpen
         val localBlocked = tools.checkpointBlocked(tools.checkpointRecords(source.messages))
@@ -271,7 +271,7 @@ class AgentRunLoop(
         }
     }
     private fun persistServerBarrier(reason: String) {
-        val disk = history as? FileRunHistory ?: return
+        val disk = history as? SqliteRunHistory ?: return
         val prior = disk.loadBarrier()
         disk.saveBarrier(prior?.copy(steps = maxOf(prior.steps, steps), retries = maxOf(prior.retries, retries))
             ?: ExecutionBarrier(identity.sessionId, identity.taskChainId, identity.runId, reason, steps, retries,
@@ -292,7 +292,7 @@ class AgentRunLoop(
         if (unresolved) persistServerBarrier(reason)
         // Admission state is not accounting. Retire only a resolved admission/local wait;
         // summary reservations, budget pauses and continuations must survive every exit.
-        val disk = history as? FileRunHistory
+        val disk = history as? SqliteRunHistory
         if (!unresolved && persistedPause == null && disk != null) {
             val saved = disk.loadCheckpoint()
             val source = history.snapshot()
@@ -312,7 +312,7 @@ class AgentRunLoop(
 
     suspend fun run(): RunResult {
         check(started.compareAndSet(false, true)) { "Run is one-shot; do not replay a partially executed step" }
-        val disk = history as? FileRunHistory
+        val disk = history as? SqliteRunHistory
         disk?.beginRun()
         var failure: Throwable? = null
         try {
@@ -361,7 +361,7 @@ class AgentRunLoop(
             if (!compatible(target, request)) return pauseContext(view, "Replay incompatible; checkpoint required")
             val mode = target.provider.executionMode(request) // freeze BEFORE submission, including extraBody
             val reducer = ModelEventReducer(target.id, request.requestId)
-            if (admissionPending) (history as? FileRunHistory)?.let { disk ->
+            if (admissionPending) (history as? SqliteRunHistory)?.let { disk ->
                 val reserved = if (contextPolicy != null) checkpoint(view, view.messages.size,
                     null, "PAUSED", "Admitted request awaiting durable response", false)
                 else refreshCheckpoint(requireNotNull(disk.loadCheckpoint()), view)
@@ -509,10 +509,10 @@ class AgentRunLoop(
             serverLoopOpen = finish.reason == FinishReason.PAUSED
             if (serverLoopOpen) persistServerBarrier("Server loop paused; continuation incomplete")
             else if (!truncated && disposition != HistoryDisposition.DISCARD)
-                (history as? FileRunHistory)?.completeServerExecution(identity)
+                (history as? SqliteRunHistory)?.completeServerExecution(identity)
             val localBlocked = calls.isNotEmpty() && tools.localExecutionBlocked(tools.checkpointRecords(view.messages))
             if (localBlocked && !serverUnknown && !serverLoopOpen && contextPolicy != null) {
-                (history as? FileRunHistory)?.saveCheckpoint(checkpoint(view, view.messages.size,
+                (history as? SqliteRunHistory)?.saveCheckpoint(checkpoint(view, view.messages.size,
                     null, "PAUSED", "Tool execution or effect unresolved", false).copy(pauseClass = "LOCAL_WAIT"))
             }
             executionFailure?.let {

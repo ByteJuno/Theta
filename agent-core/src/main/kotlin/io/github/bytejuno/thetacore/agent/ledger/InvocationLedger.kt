@@ -32,6 +32,15 @@ class InvocationLedger(
     private var epoch: String? = null
     private var halted = false
     fun get(callId: String): InvocationRecord? = gate.withGate { recordsById[callId]?.detached() }
+    /** Checked at authorization consumption as well as writes. Cached results remain readable. */
+    fun executionAdmissionFailure(): Mutation? = gate.withGate {
+        if (halted) return@withGate Mutation.Blocked("Storage acknowledgement uncertain; reopen and cold-recover")
+        try { store.checkAdmission(); null }
+        catch (e: StoreException) {
+            if (e.uncertain) halted = true
+            Mutation.StorageFailure(e.message ?: "storage failure", e.uncertain)
+        }
+    }
     private fun all() = recordsById.values.toList()
     private fun id() = UUID.randomUUID().toString()
     private fun persist(previous: InvocationRecord?, next: InvocationRecord, ticket: ExecutionTicket? = null,
@@ -113,7 +122,7 @@ class InvocationLedger(
     /** Effect uncertainty alone permits continuation, but actual execution, cold recovery and
      * external resource isolation do not. Consult the entire chain, including checkpoint ancestors. */
     fun continuationBlocked(taskChainId: String): Boolean = gate.withGate {
-        halted || epoch == null || all().any { r ->
+        executionAdmissionFailure() != null || epoch == null || all().any { r ->
             r.input.taskChainId == taskChainId &&
                 (r.instance?.state == InstanceState.UNCONFIRMED || r.recoveryPending || r.restartRequired || denialPending(r) ||
                     r.isolation?.let { it.resource != null && it.resolution != RecoveryResolution.VERIFIED_CLEAR } == true)
@@ -152,6 +161,7 @@ class InvocationLedger(
     }
 
     fun validateAndPrepare(callId: String): Mutation = gate.withGate {
+        executionAdmissionFailure()?.let { return@withGate it }
         val r = get(callId) ?: return@withGate Mutation.Conflict("Unknown call")
         if (r.state == Status.READY) definitionCheck(r)?.let { return@withGate it }
         if (r.state != Status.RECEIVED) return@withGate Mutation.AlreadyApplied(r)
@@ -183,6 +193,7 @@ class InvocationLedger(
 
     /** The entire stored request must match; a UI-supplied digest/version is not trusted. */
     fun resolveApproval(callId: String, approval: ApprovalRequest, decision: Decision): Mutation = gate.withGate {
+        executionAdmissionFailure()?.let { return@withGate it }
         val r = get(callId) ?: return@withGate Mutation.Conflict("Unknown call")
         r.receipts.find { it.request.id == approval.id }?.let {
             return@withGate if (it.request == approval && it.decision == decision) Mutation.AlreadyApplied(r)
@@ -212,6 +223,7 @@ class InvocationLedger(
     }
 
     fun claimExecution(callId: String, expectedRevision: Long): Mutation = gate.withGate {
+        executionAdmissionFailure()?.let { return@withGate it }
         if (halted || epoch == null) return@withGate Mutation.Blocked("Cold recovery required")
         val r = get(callId) ?: return@withGate Mutation.Conflict("Unknown call")
         if (r.revision != expectedRevision || r.state != Status.READY || r.instance != null)
@@ -256,6 +268,7 @@ class InvocationLedger(
      * acknowledgement. ASK is identified by its pending ID; resolve it from that ID's receipt,
      * never from effectiveRisk. ALLOW_ONCE on an earlier internal step cannot authorize this one. */
     fun requestRiskUpgrade(callId: String, attemptId: String, risk: Risk, summary: String = ""): Mutation = gate.withGate {
+        executionAdmissionFailure()?.let { return@withGate it }
         val r = get(callId) ?: return@withGate Mutation.Conflict("Unknown call")
         if (r.state != Status.RUNNING || r.instance?.attemptId != attemptId || r.instance.state != InstanceState.UNCONFIRMED)
             return@withGate Mutation.Conflict("Instance not running")
@@ -270,9 +283,27 @@ class InvocationLedger(
         }
     }
 
+    /** Consume a policy ALLOW, which has no decision receipt. Re-evaluate the risk admitted
+     * for this request, not a concurrent request's higher watermark; never adopt its waiter.
+     * ASK fails closed here so only a fresh explicit request can own a new prompt. */
+    fun checkImmediateRiskApproval(callId: String, attemptId: String, risk: Risk, summary: String): Mutation = gate.withGate {
+        executionAdmissionFailure()?.let { return@withGate it }
+        val r = get(callId) ?: return@withGate Mutation.Conflict("Unknown call")
+        if (r.state != Status.RUNNING || r.instance?.attemptId != attemptId || r.instance.state != InstanceState.UNCONFIRMED)
+            return@withGate Mutation.Conflict("Instance not running")
+        definitionCheck(r)?.let { return@withGate it }
+        chainBarrier(r, internal = true)?.let { return@withGate it }
+        when (policy.evaluate(r, risk, unknown(r, risk), all())) {
+            ApprovalPolicy.Verdict.ALLOW -> Mutation.AlreadyApplied(r)
+            ApprovalPolicy.Verdict.DENY -> denyInternal(r, risk, summary, "Internal upgrade denied at consumption")
+            ApprovalPolicy.Verdict.ASK -> Mutation.Blocked("Runtime policy changed; request approval again")
+        }
+    }
+
     /** Recheck the specific durable decision at the bridge's consumption boundary. A new UNKNOWN
      * set re-arms only this request, while denial, stale definitions and live occupancy fail closed. */
     fun checkRiskApproval(callId: String, attemptId: String, requestId: String): Mutation = gate.withGate {
+        executionAdmissionFailure()?.let { return@withGate it }
         val r = get(callId) ?: return@withGate Mutation.Conflict("Unknown call")
         if (r.state != Status.RUNNING || r.instance?.attemptId != attemptId || r.instance.state != InstanceState.UNCONFIRMED)
             return@withGate Mutation.Conflict("Instance not running")
@@ -443,6 +474,7 @@ class InvocationLedger(
     }
 
     fun resolveRecovery(callId: String, resolution: RecoveryResolution): Mutation = gate.withGate {
+        executionAdmissionFailure()?.let { return@withGate it }
         val r = get(callId) ?: return@withGate Mutation.Conflict("Unknown call")
         if (r.instance?.state == InstanceState.UNCONFIRMED) return@withGate Mutation.Blocked("Actual exit still unconfirmed")
         val isolation = r.isolation
@@ -457,6 +489,7 @@ class InvocationLedger(
      * Affected task chains remain blocked until resolveRecovery persists a host/user decision,
      * including READ/no-resource instances. Accepting uncertainty does not clear resource isolation. */
     fun recoverColdStart(newProcessEpoch: String): Mutation = gate.withGate {
+        executionAdmissionFailure()?.let { return@withGate it }
         require(newProcessEpoch.isNotBlank())
         if (halted) return@withGate Mutation.Blocked("Reopen storage required")
         if (epoch != null && epoch != newProcessEpoch) return@withGate Mutation.Conflict("Live coordinator cannot change epoch")

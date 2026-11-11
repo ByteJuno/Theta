@@ -13,7 +13,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlin.test.*
 
-/** A separate JVM is killed by the parent while holding the actual file locks. No shutdown hooks,
+/** A separate JVM is killed by the parent while holding the actual SQLite transactions and database writer lock. No shutdown hooks,
  * close(), catch/finally cleanup, or simulated exceptions execute in the child after the checkpoint. */
 object HistoryCrashChild {
     @JvmStatic fun main(args: Array<String>) {
@@ -21,21 +21,19 @@ object HistoryCrashChild {
         val file = args[1]
         val stage = HistoryWriteStage.valueOf(args[2])
         val fault: (HistoryWritePoint) -> Unit = { point ->
-            if ((point.file == file || file == "calls/" && point.file.startsWith(file)) && point.stage == stage) {
+            if ((point.file == file || file == "append" && point.file == "batches/2" && stage in setOf(HistoryWriteStage.AFTER_CHUNK, HistoryWriteStage.AFTER_VALUE)) && point.stage == stage) {
                 println("KILL_READY"); System.out.flush(); CountDownLatch(1).await()
             }
         }
         val id = UUID.randomUUID().toString()
         val assistant = message(Role.ASSISTANT,
             toolCallPart(callBinding("p", "req", "resp", 0, "wire", id), "tool", "{}"))
-        FileRunHistory.open(directory, Durability.PROCESS_CRASH_ONLY, fault).use { history ->
-            if (file == "pending.json") {
-                history.prepareStep(1, RunIdentity("chain", "session", "run"), "step", assistant)
-            } else {
-                // Persist actual RUNNING WRITE state, then recover it before the history write.
-                // If killed before HEAD, pending intent survives and the new parent reconstructs LOST.
-                val ledgerDir = directory.resolve("ledger")
-                TestInvocationStore.create(ledgerDir).use { store ->
+        AgentDatabase.open(directory.resolve(AgentDatabase.FILE_NAME), androidx.sqlite.driver.bundled.BundledSQLiteDriver()).use { db ->
+            if (file == "create") {
+                SqliteRunHistory.create(db, "session", fault).close()
+            } else SqliteRunHistory.open(db, "session", fault).use { history ->
+                if (file == "pending") history.prepareStep(1, RunIdentity("chain", "session", "run"), "step", assistant)
+                else SqliteInvocationStore.open(db).use { store ->
                     val d = testDefinition(risk = Risk.WRITE)
                     val gate = DefinitionGate().apply { install(d); freezeRun("run", listOf(d)) }
                     val ledger = InvocationLedger(store, gate, ArgumentsValidator { _, _ -> true })
@@ -47,7 +45,6 @@ object HistoryCrashChild {
                     ledger.validateAndPrepare(id)
                     ledger.resolveApproval(id, ledger.get(id)!!.pending!!, Decision.ALLOW_ONCE)
                     check(ledger.claimExecution(id, ledger.get(id)!!.revision) is Mutation.Applied)
-                    // Logical cancellation is UNKNOWN and instance exit remains unconfirmed.
                     ledger.cancel(id)
                     val result = requireNotNull(ledger.resultsForStep("session", "run", "step", listOf(id)))
                     history.append(1, listOf(assistant, result))
@@ -61,14 +58,14 @@ object HistoryCrashChild {
 /** Reports whether a genuinely separate process can become a writer of the session. */
 object HistoryLockChild {
     @JvmStatic fun main(args: Array<String>) {
-        val opened = runCatching { FileRunHistory.open(Paths.get(args[0]), Durability.PROCESS_CRASH_ONLY).close() }.isSuccess
+        val opened = runCatching { TestRunHistory.open(Paths.get(args[0]), Durability.PROCESS_CRASH_ONLY).close() }.isSuccess
         println(if (opened) "OPENED" else "BLOCKED")
     }
 }
 
 class HistoryProcessTest {
     // Gradle 9 may use a non-URL application loader. Code sources work with both loaders.
-    private val classpath get() = (listOf(HistoryCrashChild::class.java, HistoryLockChild::class.java, FileRunHistory::class.java,
+    private val classpath get() = (listOf(HistoryCrashChild::class.java, HistoryLockChild::class.java, SqliteRunHistory::class.java,
         kotlin.Unit::class.java, androidx.sqlite.SQLiteDriver::class.java,
         androidx.sqlite.driver.bundled.BundledSQLiteDriver::class.java, kotlinx.serialization.json.Json::class.java,
         kotlinx.serialization.SerializationException::class.java, kotlinx.coroutines.Job::class.java)
@@ -79,7 +76,7 @@ class HistoryProcessTest {
     private val java get() = File(System.getProperty("java.home"), "bin/java" + if (System.getProperty("os.name").startsWith("Windows")) ".exe" else "")
 
     private fun otherProcessCanOpen(path: java.nio.file.Path): Boolean {
-        val child = ProcessBuilder(java.absolutePath, "-cp", classpath, HistoryLockChild::class.java.name, path.toString())
+        val child = ProcessBuilder(java.absolutePath, "--enable-native-access=ALL-UNNAMED", "-cp", classpath, HistoryLockChild::class.java.name, path.toString())
             .redirectErrorStream(true).start()
         val output = child.inputStream.bufferedReader().readText().trim()
         assertTrue(child.waitFor(30, TimeUnit.SECONDS))
@@ -89,26 +86,26 @@ class HistoryProcessTest {
 
     @Test fun rejectedSameProcessOpenKeepsTheWriterLockForOtherProcesses() {
         val path = Files.createTempDirectory("history-lock")
-        FileRunHistory.create(path, "session", Durability.PROCESS_CRASH_ONLY).use { h ->
+        TestRunHistory.create(path, "session", Durability.PROCESS_CRASH_ONLY).use { h ->
             assertFalse(otherProcessCanOpen(path))
-            assertFailsWith<HistoryStorageException> { FileRunHistory.open(path, Durability.PROCESS_CRASH_ONLY) }
+            assertFails { TestRunHistory.open(path, Durability.PROCESS_CRASH_ONLY) }
             assertFalse(otherProcessCanOpen(path), "a rejected duplicate must not release the OS lock")
             assertEquals(0, h.revision())
         }
         assertTrue(otherProcessCanOpen(path))
-        FileRunHistory.open(path, Durability.PROCESS_CRASH_ONLY).close()
+        TestRunHistory.open(path, Durability.PROCESS_CRASH_ONLY).close()
     }
 
     @Test fun actualSubprocessKillAtEveryWriteStageRecoversCoherentHistoryAndLedger() {
         assertTrue(classpath.isNotBlank())
         var killed = 0
-        for (file in listOf("pending.json", "batches/2.json", "calls/", "head.json")) {
+        for (file in listOf("create", "pending", "append")) {
             for (stage in HistoryWriteStage.entries) {
                 val path = Files.createTempDirectory("history-real-kill")
-                FileRunHistory.create(path, "session", Durability.PROCESS_CRASH_ONLY).use {
+                if (file != "create") TestRunHistory.create(path, "session", Durability.PROCESS_CRASH_ONLY).use {
                     it.append(0, listOf(message(Role.USER, textPart("base"))))
                 }
-                val child = ProcessBuilder(java.absolutePath, "-cp", classpath, HistoryCrashChild::class.java.name,
+                val child = ProcessBuilder(java.absolutePath, "--enable-native-access=ALL-UNNAMED", "-cp", classpath, HistoryCrashChild::class.java.name,
                     path.toString(), file, stage.name).redirectErrorStream(true).start()
                 val reader = Executors.newSingleThreadExecutor()
                 try {
@@ -132,19 +129,40 @@ class HistoryProcessTest {
                     if (child.isAlive) { child.destroyForcibly(); child.waitFor(15, TimeUnit.SECONDS) }
                     reader.shutdownNow()
                 }
-                FileRunHistory.open(path, Durability.PROCESS_CRASH_ONLY).use { h ->
+                if (file == "create") {
+                    // Inspect the killed transaction BEFORE idempotent create can repair absence.
+                    AgentDatabase.open(path.resolve(AgentDatabase.FILE_NAME), androidx.sqlite.driver.bundled.BundledSQLiteDriver()).use { db ->
+                        val committed = stage == HistoryWriteStage.AFTER_COMMIT
+                        assertEquals(if (committed) 1L else 0L,
+                            db.connection.longValue("SELECT count(*) FROM sessions WHERE session_id='session'"), stage.name)
+                        if (committed) SqliteRunHistory.open(db, "session").use {
+                            assertEquals(0, it.revision()); assertTrue(it.snapshot().messages.isEmpty())
+                        } else {
+                            assertFails { SqliteRunHistory.open(db, "session") }
+                            assertEquals(0L, db.connection.longValue("SELECT count(*) FROM history_values"))
+                            assertEquals(0L, db.connection.longValue("SELECT count(*) FROM history_chunks"))
+                        }
+                        println("ISSUE78_CREATE_KILL stage=$stage visible=$committed inspected_before_retry=true")
+                    }
+                    TestRunHistory.create(path, "session", Durability.PROCESS_CRASH_ONLY).use { h ->
+                        assertEquals(0, h.revision()); h.append(0, listOf(message(Role.USER, textPart("retry"))))
+                    }
+                    TestRunHistory.create(path, "session", Durability.PROCESS_CRASH_ONLY).use { assertEquals(1, it.revision()) }
+                    continue
+                }
+                AgentDatabase.open(path.resolve(AgentDatabase.FILE_NAME), androidx.sqlite.driver.bundled.BundledSQLiteDriver()).use { db ->
+                SqliteRunHistory.open(db, "session").use { h ->
                     val visible = h.recent().messages
                     validateHistory(visible)
-                    if (file == "pending.json") {
+                    if (file == "pending") {
                         assertEquals(1, visible.size)
                         val ledger = InvocationLedger(TestStore(), DefinitionGate(), ArgumentsValidator { _, _ -> true })
                         ledger.recoverColdStart("parent")
                         val recovery = h.recoverPending(ledger)
-                        assertEquals(stage in setOf(HistoryWriteStage.AFTER_REPLACE, HistoryWriteStage.AFTER_DIRECTORY_SYNC), recovery.recovered)
+                        assertEquals(stage in setOf(HistoryWriteStage.AFTER_COMMIT), recovery.recovered)
                     } else {
-                        assertEquals(if (file == "head.json" && stage in setOf(HistoryWriteStage.AFTER_REPLACE,
-                            HistoryWriteStage.AFTER_DIRECTORY_SYNC)) 3 else 1, visible.size)
-                        TestInvocationStore.open(path.resolve("ledger")).use { store ->
+                        assertEquals(if (file == "append" && stage in setOf(HistoryWriteStage.AFTER_COMMIT)) 3 else 1, visible.size)
+                        SqliteInvocationStore.open(db).use { store ->
                             val ledger = InvocationLedger(store, DefinitionGate(), ArgumentsValidator { _, _ -> true })
                             ledger.recoverColdStart("parent")
                             assertTrue(h.recoverPending(ledger).requiresDecision)
@@ -161,9 +179,10 @@ class HistoryProcessTest {
                             "Killed writer temporary files must be reclaimed: $file $stage")
                     }
                 }
+                }
             }
         }
-        println("ISSUE19_REAL_KILLS=$killed; method=Process.destroyForcibly; power_loss_tested=false")
-        assertEquals(28, killed)
+        println("ISSUE78_SQLITE_REAL_KILLS=$killed; method=Process.destroyForcibly; power_loss_tested=false")
+        assertEquals(15, killed)
     }
 }

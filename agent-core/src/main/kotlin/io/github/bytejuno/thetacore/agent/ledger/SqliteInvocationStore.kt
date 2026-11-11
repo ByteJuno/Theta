@@ -18,12 +18,15 @@ enum class SqliteWriteStage { AFTER_BEGIN, AFTER_MANIFEST_CHUNK, AFTER_CONTENT_C
 class SqliteInvocationStore private constructor(
     private val database: AgentDatabase,
     private val fault: (SqliteWriteStage) -> Unit,
+    private val ownsDatabase: Boolean,
 ) : InvocationStore {
     private val db = database.connection
     private val codec = InvocationRecordCodec(Json { encodeDefaults = true; ignoreUnknownKeys = false; explicitNulls = true })
     private var closed = false
     private var poisoned = false
     private var bound = false
+    /** Test-only fatal failure seam before publishing the confirmed record projection. */
+    internal var afterCacheUpdate: () -> Unit = {}
     private val recordsById = loadRecords().associateByTo(linkedMapOf()) { it.callId }
     private val roots = BlobReferenceIndex(recordsById.values)
     private val manifests = mutableMapOf<String, ByteArray>()
@@ -37,14 +40,19 @@ class SqliteInvocationStore private constructor(
         }
     }
 
-    @Synchronized override fun bindCoordinator() {
+    override fun checkAdmission() = synchronized(database) {
+        database.ready()
+        if (closed || poisoned) throw StoreException("Store closed or uncertain; reopen and recover", poisoned)
+    }
+    override fun bindCoordinator() = synchronized(database) {
         check(!closed && !bound) { "Store already has a coordinator" }
         bound = true
     }
-    @Synchronized override fun records(): List<InvocationRecord> {
+    override fun records(): List<InvocationRecord> { synchronized(database) {
+        // Immutable last-confirmed projection remains available after an uncertain commit.
         check(!closed)
         return recordsById.values.map { it.detached() }
-    }
+    } }
     private fun loadRecords(): List<InvocationRecord> = try {
         val records = db.prepare("SELECT ${textColumn("call_id", 36)}, ${integerColumn("revision")}, ${integerColumn("size")}, ${textColumn("hash", 64)} FROM invocations ORDER BY rowid").use { statement ->
             buildList {
@@ -104,8 +112,8 @@ class SqliteInvocationStore private constructor(
         manifests[ref.contentHash] = manifest
     }
 
-    @Synchronized override fun readBlob(ref: BlobRef, offset: Long, limit: Int): ByteArray {
-        check(!closed && !poisoned) { "Reopen and recover required" }
+    override fun readBlob(ref: BlobRef, offset: Long, limit: Int): ByteArray { synchronized(database) {
+        database.ready(); check(!closed && !poisoned) { "Reopen and recover required" }
         require(offset in 0..ref.sizeBytes && limit in 1..8192)
         require(roots.contains(ref)) { "Unreferenced blob" }
         if (ref.contentHash in unavailable) throw StoreException("Result content is unavailable: missing or corrupt")
@@ -143,12 +151,12 @@ class SqliteInvocationStore private constructor(
             unavailable += ref.contentHash
             throw StoreException("Result content is unavailable: missing or corrupt", cause = error)
         }
-    }
+    } }
 
-    @Synchronized override fun save(record: InvocationRecord, expectedRevision: Long?) = saveWithBlobs(record, expectedRevision, emptyList())
+    override fun save(record: InvocationRecord, expectedRevision: Long?) = saveWithBlobs(record, expectedRevision, emptyList())
 
-    @Synchronized override fun saveWithBlobs(record: InvocationRecord, expectedRevision: Long?, blobs: List<BlobWrite>) {
-        check(!closed)
+    override fun saveWithBlobs(record: InvocationRecord, expectedRevision: Long?, blobs: List<BlobWrite>) { synchronized(database) {
+        check(!closed); database.ready()
         if (poisoned) throw StoreException("Reopen and recover required", true)
         record.validate()
         val previous = recordsById[record.callId]
@@ -232,7 +240,6 @@ class SqliteInvocationStore private constructor(
             db.execute("COMMIT"); begun = false
             fault(SqliteWriteStage.AFTER_COMMIT)
             roots.replace(previous, snapshot)
-            recordsById[snapshot.callId] = snapshot
             // Only a confirmed, fully verified publication repairs quarantine. Failed or
             // uncertain commits never unquarantine previously damaged evidence.
             unavailable.removeAll(published)
@@ -240,20 +247,35 @@ class SqliteInvocationStore private constructor(
                 manifests.remove(ref.contentHash)
                 unavailable.remove(ref.contentHash)
             }
-        } catch (error: Exception) {
+            afterCacheUpdate()
+            // Publish the read-only projection last, after all other fallible cache work.
+            recordsById[snapshot.callId] = snapshot
+        } catch (error: Throwable) {
             val rolledBack = !begun || runCatching { db.execute("ROLLBACK") }.isSuccess
-            poisoned = commitAttempted || !rolledBack
+            // Fatal failures may interrupt cache maintenance too. Even a confirmed rollback
+            // cannot establish that the in-memory owner is safe for further admission.
+            poisoned = error !is Exception || commitAttempted || !rolledBack
+            if (poisoned) database.poison()
+            if (error !is Exception) throw error
             throw StoreException("Invocation transaction failed", poisoned, error)
         }
-    }
+    } }
 
-    @Synchronized override fun close() {
-        if (!closed) { closed = true; database.close() }
+    override fun close() = synchronized(database) {
+        if (!closed) { closed = true; database.releaseLedger(); if (ownsDatabase) database.close() }
     }
     companion object {
+        fun open(database: AgentDatabase, fault: (SqliteWriteStage) -> Unit = {}): SqliteInvocationStore =
+            attach(database, fault, false)
+        private fun attach(database: AgentDatabase, fault: (SqliteWriteStage) -> Unit, owned: Boolean): SqliteInvocationStore = database.access {
+            database.bindLedger()
+            try { SqliteInvocationStore(database, fault, owned) }
+            catch (error: Throwable) { database.releaseLedger(); throw error }
+        }
+
         fun open(file: Path, driver: SQLiteDriver, fault: (SqliteWriteStage) -> Unit = {}): SqliteInvocationStore {
             val database = AgentDatabase.open(file, driver)
-            try { return SqliteInvocationStore(database, fault) }
+            try { return attach(database, fault, true) }
             catch (error: Exception) {
                 runCatching { database.close() }
                 if (error is StoreException) throw error

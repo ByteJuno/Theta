@@ -6,7 +6,7 @@ import kotlinx.serialization.json.JsonObject
 
 /** Atomic append seam. Implementations must CAS the revision and commit the ENTIRE batch or none.
  * An uncertain write must throw and halt the run, never trigger model/tool replay. Session disk
- * persistence is supplied by FileRunHistory; this in-memory implementation is not durable.
+ * persistence is supplied by SqliteRunHistory; this in-memory implementation is not durable.
  */
 interface RunHistory {
     fun snapshot(): HistorySnapshot

@@ -55,7 +55,7 @@ internal class DatabaseProvenance(private val file: Path, private val channel: F
         val header = ByteBuffer.allocate(100)
         FileChannel.open(file, READ).use { while (header.hasRemaining()) require(it.read(header) > 0) }
         require(header.array().copyOfRange(0, 16).contentEquals("SQLite format 3\u0000".toByteArray(Charsets.US_ASCII)) &&
-            header.getInt(60) == AgentDatabase.SCHEMA_VERSION && header.getInt(68) == 0x54485441) {
+            header.getInt(60) in 1..AgentDatabase.SCHEMA_VERSION && header.getInt(68) == 0x54485441) {
             "Established agent database header is corrupt or unsupported"
         }
     }
