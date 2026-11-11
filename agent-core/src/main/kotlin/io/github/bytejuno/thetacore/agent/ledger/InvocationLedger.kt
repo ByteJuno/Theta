@@ -27,6 +27,8 @@ class InvocationLedger(
     init { require(maxClaimsPerTaskChain > 0); store.bindCoordinator() }
     private val recordsById = store.records().associateByTo(linkedMapOf()) { it.callId }
     private val blobRoots = BlobReferenceIndex(recordsById.values)
+    private val stepCalls = StepCallIndex(recordsById.values)
+    internal val stepCallVisits get() = stepCalls.callVisits
     internal val blobRootVisits get() = blobRoots.rootVisits
     internal val blobRecordVisits get() = blobRoots.recordVisits
     private var epoch: String? = null
@@ -43,6 +45,7 @@ class InvocationLedger(
             else store.saveWithBlobs(snapshot, previous?.revision, blobs)
             blobRoots.replace(previous, snapshot)
             recordsById[next.callId] = snapshot.detached()
+            if (previous == null) stepCalls.add(snapshot, recordsById)
             Mutation.Applied(next.detached(), ticket)
         } catch (e: StoreException) {
             if (e.uncertain) halted = true
@@ -486,8 +489,8 @@ class InvocationLedger(
     /** Pure projection, not an append operation. Caller must freeze/register the entire step first.
      * expectedCallIds is the authoritative ordered assistant-call list, preventing partial batches. */
     fun resultsForStep(sessionId: String, runId: String, stepId: String, expectedCallIds: List<String>): Message? = gate.withGate {
-        val records = all().filter { it.input.sessionId == sessionId && it.input.runId == runId && it.input.stepId == stepId }
-            .sortedBy { it.input.callOrder }
+        // Resolve every indexed member to current truth, including unexpected calls and late evidence.
+        val records = stepCalls.calls(sessionId, runId, stepId).map { recordsById.getValue(it) }
         if (records.isEmpty() || records.map { it.callId } != expectedCallIds || records.any { !it.state.terminal }) return@withGate null
         message(Role.TOOL, *records.map { r ->
             val result = r.result!!
