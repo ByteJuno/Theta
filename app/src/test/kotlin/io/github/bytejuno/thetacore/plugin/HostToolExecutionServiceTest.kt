@@ -580,7 +580,9 @@ class HostToolExecutionServiceTest {
             val slow = f.catalog.registerHost("host/slow", "1", tool(parallel = true, timeout = 10_000) {
                 entered.countDown(); release.await(); ToolResult("slow", effect = ToolEffect.NONE)
             })
-            val fast = f.catalog.registerHost("host/fast", "1", tool(parallel = true) {
+            val fast = f.catalog.registerHost("host/fast", "1", tool(parallel = true, timeout = 10_000) {
+                // Fail storage only after the slow sibling has entered its tool body.
+                assertTrue(entered.await(5, TimeUnit.SECONDS))
                 ToolResult("fast", effect = ToolEffect.NONE)
             })
             f.catalog.freeze("run")

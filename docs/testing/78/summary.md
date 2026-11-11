@@ -6,6 +6,10 @@
 
 ## 本地相关测试
 
+PR92 2026-11-11 退回修正：仅修改 siblingStorageFailureInterruptsWaitingForSlowFirstCall 的测试前置同步。fast 有界等待 slow 已进入后才返回；fast 夹具 deadline 为10秒，等待上限5秒，原有2秒 step 结束断言、slow RUNNING、fast UNCONFIRMED及entered断言均保留。生产代码不变。
+
+修正后目标用例重复两轮各30/30通过；随后 HostToolExecutionServiceTest 全类79/79通过，均0 failures/errors/skips。重复Probe直接调用原方法，验证后已删除，原始日志/XML未提交。本轮没有重跑未修复版本，不声称复现原CI具体内部断言。定向命令为 :app:testDebugUnitTest --tests 对应临时重复类或 HostToolExecutionServiceTest，沿用严格配置缓存、no-build-cache、rerun-tasks、Kotlin in-process。
+
 最终定向运行（green-c3）：`SharedHistoryDatabaseTest` 13、`SqliteInvocationStoreTest` 8、`RuntimeDecisionTest` 12、`PluginInvocationTest` 10、`HostToolExecutionServiceTest` 79，共 **122/122 通过**，0 failures/errors/skips。
 
 执行 `:agent-core:cleanTest :agent-core:test --tests '*SharedHistoryDatabaseTest' --tests '*SqliteInvocationStoreTest' --tests '*RuntimeDecisionTest' :app:testDebugUnitTest --tests '*PluginInvocationTest' --tests '*HostToolExecutionServiceTest' --rerun-tasks -Pkotlin.compiler.execution.strategy=in-process`，configuration-cache problems=fail、no-build-cache。
