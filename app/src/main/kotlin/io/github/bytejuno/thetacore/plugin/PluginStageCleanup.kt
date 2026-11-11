@@ -13,13 +13,13 @@ internal class PluginStageCleanup(private val capacity: Int = 8) {
     @Volatile var hasPending = false
         private set
     fun reserve(delete: () -> Unit): Ticket {
-        dataRequire(!hasPending && tickets.size < capacity, "Import cleanup/capacity pending; retry cleanup before importing")
+        dataRequire(!hasPending && tickets.size < capacity, "Import cleanup/capacity pending; retry cleanup before importing", PluginFailureReason.IMPORT_CLEANUP_PENDING)
         return Ticket(delete).also { tickets += it }
     }
     // Cold-start recovery may need to reserve BOTH roots even when the first deletion fails.
     // This never creates bytes or grants import admission.
     fun reserveRecovery(delete: () -> Unit): Ticket {
-        dataRequire(tickets.size < capacity, "Recovery cleanup capacity exhausted")
+        dataRequire(tickets.size < capacity, "Recovery cleanup capacity exhausted", PluginFailureReason.IMPORT_CLEANUP_PENDING)
         return Ticket(delete).also { it.abandoned = true; tickets += it; hasPending = true }
     }
     fun discard(ticket: Ticket) {

@@ -37,19 +37,19 @@ internal class PlatformPluginSignatureVerifier(private val packages: PackageMana
         try {
             val flags = PackageManager.GET_SIGNATURES.toLong() or PackageManager.GET_SIGNING_CERTIFICATES.toLong()
             val info = packages.getPackageArchiveInfo(file.absolutePath, PackageManager.PackageInfoFlags.of(flags))
-                ?: throw PluginPackageException("APK signature verification failed")
+                ?: throw PluginPackageException("APK signature verification failed", PluginFailureReason.SIGNATURE_INVALID)
             val targetSdk = info.applicationInfo?.targetSdkVersion
                 ?: throw PluginPackageException("Missing APK application information")
             if (targetSdk < 30) throw PluginPackageException("Plugin APK must target Android API 30 or newer")
             val signers = info.signingInfo?.apkContentsSigners
-            if (signers.isNullOrEmpty()) throw PluginPackageException("APK has no verified current signers")
+            if (signers.isNullOrEmpty()) throw PluginPackageException("APK has no verified current signers", PluginFailureReason.SIGNATURE_INVALID)
             return PluginSigners(signers.map { signature ->
                 MessageDigest.getInstance("SHA-256").digest(signature.toByteArray())
                     .joinToString("") { "%02x".format(it) }
             })
         } catch (error: RuntimeException) {
             // Preserve the package-error contract consumed by the import UI.
-            throw PluginPackageException("APK signature verification failed: ${error.message}")
+            throw PluginPackageException("APK signature verification failed: ${error.message}", PluginFailureReason.SIGNATURE_INVALID)
         }
     }
 }

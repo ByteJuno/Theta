@@ -242,6 +242,6 @@ internal fun readDataDestination(path: String, bytes: ByteArray): PluginDataDest
     return PluginDataDestination(path, value, uri.host.lowercase(java.util.Locale.ROOT))
 }
 
-internal fun dataRequire(condition: Boolean, message: String) {
-    if (!condition) throw PluginPackageException(message)
+internal fun dataRequire(condition: Boolean, message: String, reason: PluginFailureReason = PluginFailureReason.UNKNOWN) {
+    if (!condition) throw PluginPackageException(message, reason)
 }

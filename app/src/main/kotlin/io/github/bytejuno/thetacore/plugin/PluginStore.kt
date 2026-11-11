@@ -100,7 +100,7 @@ internal class PluginStore(
             val dataDir = pluginPath(data, id)
             if (!Files.notExists(packageDir.toPath(), NOFOLLOW_LINKS) ||
                 !Files.notExists(dataDir.toPath(), NOFOLLOW_LINKS)) {
-                throw PluginPackageException("Missing signer binding for $id; clear-data uninstall required")
+                throw PluginPackageException("Missing signer binding for $id; clear-data uninstall required", PluginFailureReason.SIGNER_BINDING_MISSING)
             }
         }
     }
@@ -111,7 +111,7 @@ internal class PluginStore(
         requireNoDataOwnership(filesDir, manifest.id)
         val highest = versions(manifest.id).lastOrNull()
         if (highest != null && manifest.versionCode <= highest) {
-            throw PluginPackageException("Install requires a higher version than $highest")
+            throw PluginPackageException("Install requires a higher version than $highest", PluginFailureReason.HIGHER_VERSION_REQUIRED)
         }
         checkTrustForInstall(manifest.id, staged.signers)
         // Confirmation pins trust before creating any published APK. Failed first
@@ -125,9 +125,9 @@ internal class PluginStore(
                     staged.file.inputStream().use { copyLimited(it, out) }
                     out.fd.sync()
                 }
-                if (sha256(temp) != staged.sha256) throw PluginPackageException("Package changed while installing")
+                if (sha256(temp) != staged.sha256) throw PluginPackageException("Package changed while installing", PluginFailureReason.PACKAGE_DIGEST_MISMATCH)
                 val copiedSigners = verifier.verify(temp)
-                if (copiedSigners != staged.signers) throw PluginPackageException("Package signers changed while installing")
+                if (copiedSigners != staged.signers) throw PluginPackageException("Package signers changed while installing", PluginFailureReason.SIGNER_MISMATCH)
                 trust.requireMatch(manifest.id, copiedSigners)
                 if (readPluginManifest(temp) != manifest) {
                     throw PluginPackageException("Package manifest changed while installing")

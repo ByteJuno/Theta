@@ -148,7 +148,7 @@ def run(host, probe, hello):
         tap_card("Hello")
         wait_for("Hello page", lambda t: t == "Hello from a plugin")
         adb("shell", "input", "keyevent", "KEYCODE_BACK")
-        wait_for("back on the list", lambda t: t == "Hello")
+        wait_for("back on the list", lambda t: t == "Hello", sweep=True)
 
     step("install Probe")
     install_plugin(probe, "Probe")
@@ -237,7 +237,7 @@ def run(host, probe, hello):
     absent("pending uninstall still exposes its page", lambda t: t == "Probe")
     adb("shell", "am", "force-stop", PACKAGE)
     adb("shell", "am", "start", "-W", "-n", f"{PACKAGE}/.MainActivity")
-    wait_for("host restored after deletion", lambda t: t == ("Hello" if hello else "No plugins installed"))
+    wait_for("host restored after deletion", lambda t: t == ("Hello" if hello else "No plugins installed"), sweep=True)
     absent("Probe still installed after deferred deletion", lambda t: "Probe" in t)
 
     if crashed():

@@ -18,6 +18,8 @@ kotlin {
 
 dependencies {
     compileOnly(libs.android.gradle.api)
+    // Reuse Kotlin's real PSI parser for the UI resource check, not a home-grown lexer.
+    compileOnly("org.jetbrains.kotlin:kotlin-compiler-embeddable:2.2.21")
 }
 
 gradlePlugin {
