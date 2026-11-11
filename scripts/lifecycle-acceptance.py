@@ -93,30 +93,58 @@ def wait(description, predicate, timeout=None):
     raise FAIL(description + ": timed out")
 
 
-def scroll(down):
-    # One card can still exceed a small screen when failure messages wrap.
-    size = re.findall(r"(\d+)x(\d+)", adb("shell", "wm", "size"))[-1]
-    width, height = map(int, size)
-    top, bottom = int(height * 0.25), int(height * 0.80)
-    adb("shell", "input", "swipe", str(width // 2), str(bottom if down else top), str(width // 2), str(top if down else bottom), "200")
+def scroll(down, nodes=None):
+    # Use the observed scroll body, not display fractions which can fall outside
+    # a short list or on a dialog's buttons. Reuse matching()'s dump per attempt.
+    nodes = em.screen() if nodes is None else nodes
+    bodies = []
+    for node in nodes:
+        if node.get("scrollable") != "true":
+            continue
+        numbers = re.findall(r"-?\d+", node.get("bounds", ""))
+        if len(numbers) != 4:
+            continue
+        x1, y1, x2, y2 = map(int, numbers)
+        if 0 <= x1 < x2 and 0 <= y1 < y2 and y2 - y1 > 60:
+            bodies.append((x1, y1, x2, y2))
+    if not bodies:
+        return False  # No valid XML/body is not permission to swipe blindly.
+    x1, y1, x2, y2 = min(bodies, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]))
+    x = (x1 + x2) // 2
+    top, bottom = y1 + (y2 - y1) // 5, y2 - (y2 - y1) // 5
+    adb("shell", "input", "swipe", str(x), str(bottom if down else top),
+        str(x), str(top if down else bottom), "200")
+    return True
 
 
 def matching(description, predicate, timeout=None):
-    # Sweep up to the top, then down to the bottom, flipping when a swipe no longer
-    # changes the screen. A fixed down-3/up-3 cycle returns to its start and never
-    # reaches the far end once the host list is longer than a few screens.
-    sweep = {"down": False, "last": None}
+    # One top-to-bottom sweep, not endless flips between both ends. After both
+    # ends, keep observing for an asynchronous result under the ORIGINAL deadline.
+    # Each direction also has a hard cap, as in absent(), for changing/stuck XML.
+    sweep = {"down": False, "last": None, "steps": 0, "finished": False}
 
     def locate():
         nodes = em.screen()
-        node = em.find(nodes, predicate)
-        if node is None:
-            signature = tuple((n.get("text", ""), n.get("bounds", "")) for n in nodes)
-            if nodes and signature == sweep["last"]:
-                sweep["down"] = not sweep["down"]
+        matches = [n for n in nodes if predicate(n.get("text", ""))]
+        require(len(matches) <= 1, f"Ambiguous match for {description}: {len(matches)} nodes")
+        if matches:
+            return matches[0]  # Never use Element truthiness (leaf nodes are falsey).
+        if not nodes:
+            sweep["last"] = None  # A failed dump cannot establish a list boundary.
+            return None
+        if sweep["finished"]:
+            return None
+        signature = tuple((n.get("text", ""), n.get("bounds", "")) for n in nodes)
+        if signature == sweep["last"]:
+            if sweep["down"]:
+                sweep["finished"] = True
+                return None
+            sweep.update(down=True, steps=0)
+        require(sweep["steps"] < 30, f"Could not reach the list end while finding {description}")
+        if scroll(sweep["down"], nodes):
             sweep["last"] = signature
-            scroll(sweep["down"])  # Bounded by wait(), never an unbounded search.
-        return node
+            sweep["steps"] += 1
+        return None
 
     return wait(description, locate, timeout)
 
