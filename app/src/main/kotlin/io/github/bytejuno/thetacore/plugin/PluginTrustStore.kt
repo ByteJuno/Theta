@@ -36,8 +36,8 @@ internal class PluginTrustStore(private val filesDir: File) {
     }
 
     fun requireMatch(id: String, signers: PluginSigners) {
-        val bound = read(id) ?: throw PluginPackageException("Missing signer binding for $id; clear-data uninstall required")
-        if (bound != signers) throw PluginPackageException("APK signer does not match trusted signer set for $id")
+        val bound = read(id) ?: throw PluginPackageException("Missing signer binding for $id; clear-data uninstall required", PluginFailureReason.SIGNER_BINDING_MISSING)
+        if (bound != signers) throw PluginPackageException("APK signer does not match trusted signer set for $id", PluginFailureReason.SIGNER_MISMATCH)
     }
 
     /** Called only by the confirmed publication path; never by staging or loading. */

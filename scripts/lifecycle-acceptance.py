@@ -27,6 +27,7 @@ import subprocess
 import sys
 import time
 import zipfile
+import xml.etree.ElementTree as ET
 
 spec = importlib.util.spec_from_file_location("theta_emulator", Path(__file__).with_name("emulator-test.py"))
 em = importlib.util.module_from_spec(spec)
@@ -124,6 +125,14 @@ def text(value):
     return matching(repr(value), lambda t: t == value)
 
 
+def resource_text(key):
+    """Match the exact localized diagnostic, never a generic error fallback."""
+    resources = Path(__file__).resolve().parents[1] / "app/src/main/res"
+    expected = {next(n.text for n in ET.parse(resources / locale / "strings.xml").getroot()
+                     if n.get("name") == key) for locale in ("values", "values-zh")}
+    return matching(key, lambda value: value in expected)
+
+
 def tap(value):
     em.tap(text(value))
 
@@ -144,6 +153,12 @@ def absent(value):
             scroll(down)
         else:
             raise FAIL(f"Could not reach the list end while checking absence of {value!r}")
+
+
+def diagnostic(description, predicate):
+    """Technical exception details moved from UI into the host's ThetaUi log."""
+    return wait(description, lambda: any(predicate(line) for line in
+                adb("logcat", "-d", "-v", "raw", "ThetaUi:W", "*:S").splitlines()))
 
 
 def event(flavor, value, timeout=None):
@@ -263,7 +278,7 @@ def upgrade_data(host, apks):
     # Equal and lower versions must not replace the active v2 package or data.
     for flavor, version in (("normalV2", "2.0"), ("normalV1", "1.0")):
         install(apks[flavor], version)
-        text("Install requires a higher version than 2")
+        resource_text("failure_higher_version")
         page("normalV2", 3)
         back()
     clear_logs()
@@ -332,7 +347,7 @@ def init_fault(host, apks, flavor):
         require("enable:block:end" not in events(flavor), "Inconclusive: initialization timeout observed after return")
     absent("Fixture page")
     if flavor == "initBlock":
-        matching("observable initialization timeout", lambda t: "Initialization timed out" in t)
+        diagnostic("observable initialization timeout", lambda t: "Initialization timed out; restart required" in t)
         event(flavor, "late-register:rejected", timeout=90)
         event(flavor, "late-cleanup:rejected")
     event(flavor, "cleanup:first")
@@ -409,13 +424,16 @@ def rejected_packages(host, apks):
     truncated = OUTPUT / "truncated.apk"
     truncated.write_bytes(apks["normalV1"].read_bytes()[:128])
     for apk, expected in ((invalid, "Missing assets/theta-plugin.json"), (truncated, None)):
+        clear_logs()
         stage(apk)
+        resource_text("operation_failed")
         if expected:
-            text(expected)
+            diagnostic("missing manifest rejected", lambda t: expected in t)
         else:
-            # Android versions differ in ZipException wording; require a ZIP error,
-            # not just an unchanged list (which could be a dropped import intent).
-            matching("truncated ZIP rejected", lambda t: any(s in t.lower() for s in ("zip", "central directory", "end header")))
+            # A generic localized failure alone is insufficient: require the
+            # specific fresh host exception, not a UI label containing 'ZIP'.
+            diagnostic("truncated ZIP rejected", lambda t: "ZipException" in t and any(
+                s in t.lower() for s in ("zip", "central directory", "end header")))
         text("No plugins installed")
         absent("Install Fixture 1.0?")
         absent("Fixture page")
@@ -439,7 +457,7 @@ def update_to_broken(host, apks, flavor):
 
 def rolled_back(flavor):
     """The fixture wrote 99 over the counter, so 1 proves a snapshot restore, not merely v1 code."""
-    matching("rollback report", lambda t: "rolled back to version 1" in t)
+    diagnostic("rollback report", lambda t: DATA_ID + ": rolled back to version 1" == t.strip())
     page("normalV1", 1)
     require(not events(flavor), "Broken update executed after rollback")
     back()
@@ -481,7 +499,7 @@ def rollback_manual(host, apks):
     install(apks["normalV2"], "2.0")
     text("Update installed; restart required")
     install(apks["normalV2"], "2.0")  # A second update must wait for the first to activate.
-    text("Update or rollback pending; restart required")
+    resource_text("failure_restart_pending")
     restart()
     page("normalV2", 1)
     increment(2)
@@ -632,8 +650,10 @@ def data_content(body):
 
 
 def code_refused():
+    clear_logs()
     stage(next(iter(APKS.values())))
-    matching("code APK refused for data-owned ID", lambda t: "Data-owned ID; code action refused" in t)
+    resource_text("operation_failed")
+    diagnostic("code APK refused for data-owned ID", lambda t: "Data-owned ID; code action refused: " + DATA_ID in t)
     absent("Install Fixture 1.0?")
     require(not events("normalV1"), "Code fixture ran under a data-owned ID")
 
@@ -643,8 +663,10 @@ def data_zip(host, apks):
     APKS["normalV1"] = apks["normalV1"]
     fresh(host)
     text("No selected data packages")
+    clear_logs()
     stage_data(data_archive(1, "Fixture skill one", extra="classes.dex"))
-    matching("code payload rejected", lambda t: "Unsupported data ZIP payload: classes.dex" in t)
+    resource_text("operation_failed")
+    diagnostic("code payload rejected", lambda t: "Unsupported data ZIP payload: classes.dex" in t)
     text("No selected data packages")
     install_data(data_archive(1, "Fixture skill one"), 1)
     data_content("Fixture skill one")

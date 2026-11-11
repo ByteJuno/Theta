@@ -71,7 +71,7 @@ internal class PluginUpdates(
         // Same message as PluginStore: an equal/lower version is a user-visible rejection,
         // not a confirmation mismatch.
         if (from > 0 && to <= from && versions.lastOrNull() == from) {
-            throw PluginPackageException("Install requires a higher version than $from")
+            throw PluginPackageException("Install requires a higher version than $from", PluginFailureReason.HIGHER_VERSION_REQUIRED)
         }
         if (from <= 0 || to <= from || versions.lastOrNull() != from ||
             (update == null && versions.size != 1) ||

@@ -117,6 +117,7 @@ private fun ThetaCoreApp(
     resumed: Boolean,
     onIncomingTaken: () -> Unit,
 ) {
+    val strings = uiStrings()
     val context = LocalContext.current
     val colors = if (isSystemInDarkTheme()) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
     val scope = rememberCoroutineScope()
@@ -133,7 +134,7 @@ private fun ThetaCoreApp(
     var toolSelection by remember { mutableStateOf<HostToolSelection?>(null) }
     var removingRejected by remember { mutableStateOf<String?>(null) }
     var clearData by remember { mutableStateOf(false) }
-    var error by remember { mutableStateOf<String?>(null) }
+    var error by remember { mutableStateOf<UiText?>(null) }
     var staging by remember { mutableStateOf(false) }
     var restorePolicy by remember { mutableStateOf(crashRecovery.policy) }
     var resumeRequested by remember { mutableStateOf(crashRecovery.resumeRequested) }
@@ -151,11 +152,11 @@ private fun ThetaCoreApp(
                 action()
                 restorePolicy = crashRecovery.policy
             } catch (e: PluginPackageException) {
-                error = e.message
+                error = uiFailure(e)
             } catch (e: IOException) {
-                error = e.message
+                error = uiFailure(e)
             } catch (e: SecurityException) {
-                error = e.message ?: "Cannot access the selected file"
+                error = uiFailure(e)
             }
         }
     }
@@ -170,7 +171,7 @@ private fun ThetaCoreApp(
     fun stage(uri: Uri, data: Boolean = false) {
         if (staging) return
         if (data && (manager.dataRecoveryBlocked || restorePolicy.skipData)) {
-            error = "Data recovery mode: importing is unavailable until a resumed cold start."
+            error = uiText(R.string.data_import_recovery_blocked)
             return
         }
         val request = requests.begin()
@@ -189,7 +190,7 @@ private fun ThetaCoreApp(
                 }
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) {
-                if (requests.owns(request)) error = e.message ?: "Import failed"
+                if (requests.owns(request)) error = uiFailure(e)
             } finally {
                 if (requests.finishReading(request)) staging = false
             }
@@ -208,9 +209,9 @@ private fun ThetaCoreApp(
             manager.restore(skipPlugins = recovery)
             restorePolicy = crashRecovery.policy
         } catch (e: IOException) {
-            error = e.message
+            error = uiFailure(e)
         } catch (e: PluginPackageException) {
-            error = e.message
+            error = uiFailure(e)
         }
     }
     LaunchedEffect(incoming) {
@@ -236,9 +237,9 @@ private fun ThetaCoreApp(
         Surface(modifier = Modifier.fillMaxSize()) {
             Column(modifier = Modifier.safeDrawingPadding()) {
                 if ((activeDataPage != null || activePage != null) && !pageAdmitted) {
-                    Text(if (!resumed || !pageLease.ownsPage) "Plugin page paused."
-                        else "Cannot save plugin-page recovery journal; page execution blocked.")
-                    TextButton(onClick = { leavePage() }) { Text("Back to plugins") }
+                    Text(if (!resumed || !pageLease.ownsPage) strings.get(R.string.plugin_page_paused)
+                        else strings.get(R.string.plugin_page_journal_blocked))
+                    TextButton(onClick = { leavePage() }) { Text(strings.get(R.string.back_to_plugins)) }
                 } else if (activeDataPage != null) {
                     BackHandler { leavePage() }
                     PluginDataPage(manager, activeDataPage) { leavePage() }
@@ -247,14 +248,14 @@ private fun ThetaCoreApp(
                     activePage.Content()
                 } else {
                     if (restorePolicy.skipCode || restorePolicy.skipData || restorePolicy.suspects.isNotEmpty()) {
-                        Text(if (restorePolicy.skipData) "Safe mode: code and data suppressed for this process."
-                            else if (restorePolicy.skipCode) "Safe mode: code suppressed for this process."
-                            else "Suspect plugins remain quarantined.")
-                        if (restorePolicy.suspects.isNotEmpty()) Text("Suspects: ${restorePolicy.suspects.sorted().joinToString()}")
+                        Text(if (restorePolicy.skipData) strings.get(R.string.safe_mode_all)
+                            else if (restorePolicy.skipCode) strings.get(R.string.safe_mode_code)
+                            else strings.get(R.string.suspects_quarantined))
+                        if (restorePolicy.suspects.isNotEmpty()) Text(strings.get(R.string.suspect_plugins, restorePolicy.suspects.sorted().joinToString()))
                         TextButton(enabled = !resumeRequested, onClick = {
                             if (crashRecovery.requestResumeNextColdStart()) resumeRequested = true
-                            else error = "Could not save recovery request; plugins remain suppressed."
-                        }) { Text(if (resumeRequested) "Resume saved for next cold start" else "Resume non-suspects next cold start") }
+                            else error = uiText(R.string.recovery_save_failed)
+                        }) { Text(if (resumeRequested) strings.get(R.string.resume_saved) else strings.get(R.string.resume_next_start)) }
                     }
                     PluginList(
                         manager = manager,
@@ -268,13 +269,13 @@ private fun ThetaCoreApp(
                         onOpen = { page ->
                             val owner = manager.plugins.firstOrNull { it.pages.any { candidate -> candidate === page } }
                             if (owner != null && pageLease.beforeRender(owner.manifest.id)) openPage = page
-                            else error = "Cannot save plugin-page recovery journal."
+                            else error = uiText(R.string.page_journal_failed)
                         },
                         onPick = { picker.launch(arrayOf("*/*")) },
                         onPickData = { dataPicker.launch(arrayOf("*/*")) },
                         onOpenData = { page ->
                             if (pageLease.beforeRender(page.selection.manifest.id)) dataPage = page
-                            else error = "Cannot save plugin-page recovery journal."
+                            else error = uiText(R.string.page_journal_failed)
                         },
                         onToggleData = { plugin -> operate { manager.setDataEnabled(plugin.id, !plugin.state.enabled) } },
                         onUninstallData = { dataUninstall = it.id },
@@ -291,10 +292,10 @@ private fun ThetaCoreApp(
             importKindUri?.let { uri ->
                 AlertDialog(
                     onDismissRequest = { importKindUri = null },
-                    title = { Text("Choose package kind before import") },
-                    text = { Text("APK and data ZIP are separate routes. Failed APK verification never falls back to data.") },
-                    confirmButton = { TextButton(enabled = !staging && !manager.dataRecoveryBlocked && !restorePolicy.skipData, onClick = { importKindUri = null; stage(uri, data = true) }) { Text("Data ZIP") } },
-                    dismissButton = { TextButton(enabled = !staging, onClick = { importKindUri = null; stage(uri) }) { Text("Code APK") } },
+                    title = { Text(strings.get(R.string.import_kind_title)) },
+                    text = { Text(strings.get(R.string.import_kind_notice)) },
+                    confirmButton = { TextButton(enabled = !staging && !manager.dataRecoveryBlocked && !restorePolicy.skipData, onClick = { importKindUri = null; stage(uri, data = true) }) { Text(strings.get(R.string.data_zip)) } },
+                    dismissButton = { TextButton(enabled = !staging, onClick = { importKindUri = null; stage(uri) }) { Text(strings.get(R.string.code_apk)) } },
                 )
             }
             stagedData?.let { plugin ->
@@ -302,22 +303,22 @@ private fun ThetaCoreApp(
                 var acknowledged by remember(plugin) { mutableStateOf(false) }
                 AlertDialog(
                     onDismissRequest = { stagedData = null; operate { manager.discardImport(importSession) } },
-                    title = { Text("Confirm data ZIP / unsigned update") },
+                    title = { Text(strings.get(R.string.data_confirm_title)) },
                     text = {
                         Column(Modifier.verticalScroll(rememberScrollState())) {
-                            Text("Name: ${plugin.manifest.name}\nID: ${plugin.manifest.id}\nVersion: ${plugin.manifest.version} (${plugin.manifest.versionCode})\nAPI: ${plugin.manifest.apiLevel}")
-                            Text("Provides: ${plugin.manifest.provides.joinToString()}\nDeclares: ${plugin.manifest.declares.joinToString()}")
-                            Text(plugin.authorNotice)
-                            Text(plugin.digestNotice)
-                            Text("SHA-256: ${plugin.sha256}")
-                            Text("Destinations (metadata only):")
+                            Text(strings.get(R.string.package_metadata, plugin.manifest.name, plugin.manifest.id, plugin.manifest.version, plugin.manifest.versionCode, plugin.manifest.apiLevel))
+                            Text(strings.get(R.string.package_capabilities, plugin.manifest.provides.joinToString(), plugin.manifest.declares.joinToString()))
+                            Text(strings.get(R.string.author_unverified))
+                            Text(strings.get(R.string.digest_notice))
+                            Text(strings.get(R.string.package_digest, plugin.sha256))
+                            Text(strings.get(R.string.destinations_title))
                             plugin.destinations.forEach { destination ->
-                                Text("${destination.path}\nURL: ${destination.url}\nHost: ${destination.host}")
+                                Text(strings.get(R.string.destination_metadata, destination.path, destination.url, destination.host))
                             }
-                            Text("Only a host-owned read-only content page is enabled. No provider engine, MCP connection/auth, Skill execution, persona application or language override. Updates replace the page snapshot, not an agent run. Existing disabled state is preserved.")
+                            Text(strings.get(R.string.data_capability_notice))
                             Row {
                                 Checkbox(checked = acknowledged, onCheckedChange = { acknowledged = it })
-                                Text("I reviewed this exact digest and every full destination; author identity is unverified.")
+                                Text(strings.get(R.string.data_acknowledgement))
                             }
                         }
                     },
@@ -325,18 +326,18 @@ private fun ThetaCoreApp(
                         TextButton(enabled = acknowledged && !manager.dataRecoveryBlocked && !restorePolicy.skipData, onClick = {
                             stagedData = null
                             operate { manager.installData(importSession, plugin, plugin.sha256, acknowledged) }
-                        }) { Text("Confirm this ZIP") }
+                        }) { Text(strings.get(R.string.confirm_zip)) }
                     },
-                    dismissButton = { TextButton(onClick = { stagedData = null; operate { manager.discardImport(importSession) } }) { Text("Cancel") } },
+                    dismissButton = { TextButton(onClick = { stagedData = null; operate { manager.discardImport(importSession) } }) { Text(strings.get(R.string.cancel)) } },
                 )
             }
             dataUninstall?.let { id ->
                 AlertDialog(
                     onDismissRequest = { dataUninstall = null },
-                    title = { Text("Uninstall data $id?") },
-                    text = { Text("Revoke its host page and delete archives. ID ownership is retained, including after restart; code reuse and explicit release are not offered. No plugin private data was initialized.") },
-                    confirmButton = { TextButton(onClick = { dataUninstall = null; operate { manager.uninstallData(id) } }) { Text("Uninstall data") } },
-                    dismissButton = { TextButton(onClick = { dataUninstall = null }) { Text("Cancel") } },
+                    title = { Text(strings.get(R.string.uninstall_data_title, id)) },
+                    text = { Text(strings.get(R.string.uninstall_data_notice)) },
+                    confirmButton = { TextButton(onClick = { dataUninstall = null; operate { manager.uninstallData(id) } }) { Text(strings.get(R.string.uninstall_data)) } },
+                    dismissButton = { TextButton(onClick = { dataUninstall = null }) { Text(strings.get(R.string.cancel)) } },
                 )
             }
             staged?.let { plugin ->
@@ -350,20 +351,20 @@ private fun ThetaCoreApp(
                     title = { Text(stringResource(R.string.install_title, plugin.manifest.name, plugin.manifest.version)) },
                     text = {
                         Column(Modifier.verticalScroll(rememberScrollState())) {
-                            Text("${plugin.manifest.id}\nFirst install enables the plugin. Updates preserve enabled state and take effect after restarting the app.")
-                            Text("Normal rollback restores this plugin's private data directory, including preferences and secrets. Changes outside it are not restored.")
+                            Text(strings.get(R.string.install_activation_notice, plugin.manifest.id))
+                            Text(strings.get(R.string.rollback_data_boundary))
                             if (isUpdate) {
-                                Text("The 24-hour observation starts at the updated version's first successful start, not installation or reopening this dialog.")
+                                Text(strings.get(R.string.observation_start_notice))
                                 Row {
                                     Checkbox(checked = allowCodeOnlyRollback, onCheckedChange = { allowCodeOnlyRollback = it })
-                                    Text("Allow code-only rollback for this update (off by default)")
+                                    Text(strings.get(R.string.allow_code_only_rollback))
                                 }
-                                if (allowCodeOnlyRollback) Text("WARNING: no data snapshot or data rollback, including preferences and secrets. Old code will receive the newer data and may be incompatible.", color = MaterialTheme.colorScheme.error)
+                                if (allowCodeOnlyRollback) Text(strings.get(R.string.code_only_warning), color = MaterialTheme.colorScheme.error)
                             }
-                            Text("Integrity verified; author identity not authenticated.")
-                            Text("Current signer certificate SHA-256:")
+                            Text(strings.get(R.string.integrity_notice))
+                            Text(strings.get(R.string.signer_digest_title))
                             plugin.signers.sha256.forEach { Text(it) }
-                            Text("This signer set is pinned until an explicit clear-data uninstall. Plugins execute with the host's full privileges.")
+                            Text(strings.get(R.string.signer_binding_notice))
                         }
                     },
                     confirmButton = {
@@ -383,13 +384,13 @@ private fun ThetaCoreApp(
             removingRejected?.let { id ->
                 AlertDialog(
                     onDismissRequest = { removingRejected = null },
-                    title = { Text("Clear-data uninstall $id?") },
-                    text = { Text("Delete this rejected package, all its data and its signer binding. This does not trust or run the package.") },
+                    title = { Text(strings.get(R.string.rejected_uninstall_title, id)) },
+                    text = { Text(strings.get(R.string.rejected_uninstall_notice)) },
                     confirmButton = {
                         TextButton(onClick = {
                             removingRejected = null
                             operate { manager.uninstallRejected(id) }
-                        }) { Text("Delete package and data") }
+                        }) { Text(strings.get(R.string.delete_package_data)) }
                     },
                     dismissButton = {
                         TextButton(onClick = { removingRejected = null }) { Text(stringResource(R.string.cancel)) }
@@ -399,23 +400,23 @@ private fun ThetaCoreApp(
             rollingBack?.let { plugin ->
                 AlertDialog(
                     onDismissRequest = { rollingBack = null },
-                    title = { Text("Roll back ${plugin.manifest.name}?") },
+                    title = { Text(strings.get(R.string.rollback_title, plugin.manifest.name)) },
                     text = {
                         Column {
                             val observation = plugin.updateObservation
                             Text(when (observation?.dataRestorable) {
-                                false -> "CODE-ONLY rollback: after a cold restart the previous code returns, but current data, preferences and secrets remain unchanged. There is NO data rollback; the old code may be incompatible with newer data."
-                                true -> "Normal rollback: after a cold restart the previous code and its pre-update private data, preferences and secrets return. Changes saved in that directory since the snapshot are lost. Changes outside it are not restored."
-                                null -> "Rollback details are unavailable; this confirmation cannot proceed."
+                                false -> strings.get(R.string.rollback_code_only_detail)
+                                true -> strings.get(R.string.rollback_normal_detail)
+                                null -> strings.get(R.string.rollback_unavailable)
                             })
-                            observation?.let { Text("Versions: ${it.to} → ${it.from}") }
+                            observation?.let { Text(strings.get(R.string.rollback_versions, it.to, it.from)) }
                         }
                     },
                     confirmButton = {
                         TextButton(enabled = plugin.canRollback && plugin.updateObservation != null && !plugin.busy && !plugin.pendingDelete, onClick = {
                             rollingBack = null
                             operate { manager.rollback(plugin.manifest.id) }
-                        }) { Text("Confirm rollback") }
+                        }) { Text(strings.get(R.string.confirm_rollback)) }
                     },
                     dismissButton = {
                         TextButton(onClick = { rollingBack = null }) { Text(stringResource(R.string.cancel)) }
@@ -425,13 +426,13 @@ private fun ThetaCoreApp(
             uninstalling?.let { plugin ->
                 AlertDialog(
                     onDismissRequest = { uninstalling = null },
-                    title = { Text("Uninstall ${plugin.manifest.name}?") },
+                    title = { Text(strings.get(R.string.uninstall_title, plugin.manifest.name)) },
                     text = {
                         Column {
-                            Text("Host extensions are removed immediately. Loaded code and files may remain until the app restarts.")
+                            Text(strings.get(R.string.uninstall_notice))
                             Row {
                                 Checkbox(checked = clearData, onCheckedChange = { clearData = it })
-                                Text("Delete plugin data")
+                                Text(strings.get(R.string.delete_plugin_data))
                             }
                         }
                     },
@@ -440,7 +441,7 @@ private fun ThetaCoreApp(
                             val deleteData = clearData
                             uninstalling = null
                             operate { manager.uninstall(plugin.manifest.id, deleteData) }
-                        }) { Text("Confirm uninstall") }
+                        }) { Text(strings.get(R.string.confirm_uninstall)) }
                     },
                     dismissButton = {
                         TextButton(onClick = { uninstalling = null }) { Text(stringResource(R.string.cancel)) }
@@ -454,7 +455,7 @@ private fun ThetaCoreApp(
 @Composable
 private fun PluginList(
     manager: PluginManager,
-    error: String?,
+    error: UiText?,
     recovery: Boolean,
     staging: Boolean,
     dataRecoveryBlocked: Boolean,
@@ -472,77 +473,82 @@ private fun PluginList(
     onRollback: (ManagedPlugin) -> Unit,
     onRemoveRejected: (String) -> Unit,
 ) {
+    val strings = uiStrings()
     Column(
         modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text(stringResource(R.string.app_name), style = MaterialTheme.typography.headlineMedium)
         Text(stringResource(R.string.api_level, THETA_API_LEVEL))
-        if (recovery) Text("Recovery requested. To skip all plugins, launch recovery after force-stopping the app.")
-        Button(onClick = onPick, enabled = !staging) { Text("Import code APK") }
-        Button(onClick = onPickData, enabled = !staging && !dataRecoveryBlocked) { Text("Import data ZIP") }
-        if (dataRecoveryBlocked) Text("Data recovery mode: import and enabling are unavailable in this process. Resume only applies at the next cold start.")
-        if (staging) TextButton(onClick = onCancelReading) { Text("Cancel reading") }
-        TextButton(onClick = onRetryCleanup) { Text("Retry import cleanup") }
-        error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-        manager.failures.forEach { Text(it, color = MaterialTheme.colorScheme.error) }
-        manager.rejectedIds.forEach { id ->
-            TextButton(onClick = { onRemoveRejected(id) }) { Text("Clear-data uninstall $id") }
+        AppLanguageSetting()
+        if (recovery) Text(strings.get(R.string.recovery_requested))
+        Button(onClick = onPick, enabled = !staging) { Text(strings.get(R.string.import_code)) }
+        Button(onClick = onPickData, enabled = !staging && !dataRecoveryBlocked) { Text(strings.get(R.string.import_data)) }
+        if (dataRecoveryBlocked) Text(strings.get(R.string.data_recovery_notice))
+        if (staging) TextButton(onClick = onCancelReading) { Text(strings.get(R.string.cancel_reading)) }
+        TextButton(onClick = onRetryCleanup) { Text(strings.get(R.string.retry_import_cleanup)) }
+        error?.let { Text(strings.get(it), color = MaterialTheme.colorScheme.error) }
+        if (manager.failures.isNotEmpty()) {
+            LaunchedEffect(manager.failures.toList()) { manager.failures.forEach(::logUiDiagnostic) }
+            Text(strings.get(R.string.plugin_diagnostics_failed, manager.failures.size), color = MaterialTheme.colorScheme.error)
         }
-        Text("Data packages", style = MaterialTheme.typography.titleLarge)
-        Text("Uninstall retains data ID ownership; cross-type reuse is unavailable.")
-        if (manager.dataInventory.isEmpty()) Text("No selected data packages")
+        manager.rejectedIds.forEach { id ->
+            TextButton(onClick = { onRemoveRejected(id) }) { Text(strings.get(R.string.rejected_uninstall, id)) }
+        }
+        Text(strings.get(R.string.data_packages), style = MaterialTheme.typography.titleLarge)
+        Text(strings.get(R.string.data_ownership_notice))
+        if (manager.dataInventory.isEmpty()) Text(strings.get(R.string.no_data_packages))
         manager.dataInventory.forEach { plugin ->
             val manifest = plugin.record.selection?.manifest
-            Text(manifest?.let { "${it.name} · ${it.version}" }
-                ?: "${plugin.id} · recorded version ${plugin.state.version}")
+            Text(manifest?.let { strings.get(R.string.package_name_version, it.name, it.version) }
+                ?: strings.get(R.string.recorded_version, plugin.id, plugin.state.version))
             Text(plugin.id)
-            Text(plugin.status)
-            if (manifest == null) Text("Recorded SHA-256: ${plugin.state.sha256}")
+            Text(strings.get(plugin.status))
+            if (manifest == null) Text(strings.get(R.string.recorded_digest, plugin.state.sha256))
             Row {
                 TextButton(enabled = !plugin.state.pendingDelete && (plugin.state.enabled || (!dataRecoveryBlocked && plugin.canEnable)),
                     onClick = { onToggleData(plugin) }) {
-                    Text(if (plugin.state.enabled) "Disable data" else "Enable data")
+                    Text(if (plugin.state.enabled) strings.get(R.string.disable_data) else strings.get(R.string.enable_data))
                 }
                 TextButton(onClick = { onUninstallData(plugin) }) {
-                    Text(if (plugin.state.pendingDelete) "Retry uninstall data" else "Uninstall data")
+                    Text(if (plugin.state.pendingDelete) strings.get(R.string.retry_data_uninstall) else strings.get(R.string.uninstall_data))
                 }
             }
             plugin.page?.takeIf { it.active }?.let { page ->
-                TextButton(onClick = { onOpenData(page) }) { Text("View data content") }
+                TextButton(onClick = { onOpenData(page) }) { Text(strings.get(R.string.view_data_content)) }
             }
         }
-        Text("Code packages", style = MaterialTheme.typography.titleLarge)
+        Text(strings.get(R.string.code_packages), style = MaterialTheme.typography.titleLarge)
         if (manager.plugins.isEmpty()) Text(stringResource(R.string.no_plugins))
         manager.plugins.forEach { plugin ->
-            Text("${plugin.manifest.name} · ${plugin.manifest.version}", style = MaterialTheme.typography.titleMedium)
-            Text(plugin.status)
+            Text(strings.get(R.string.package_name_version, plugin.manifest.name, plugin.manifest.version), style = MaterialTheme.typography.titleMedium)
+            Text(strings.get(plugin.status))
             Row {
                 TextButton(
                     onClick = { onToggle(plugin) },
                     enabled = !plugin.busy && !plugin.pendingDelete,
-                ) { Text("${if (plugin.enabled) "Disable" else "Enable"} ${plugin.manifest.name}") }
+                ) { Text(strings.get(R.string.toggle_plugin, if (plugin.enabled) strings.get(R.string.disable) else strings.get(R.string.enable), plugin.manifest.name)) }
                 TextButton(
                     onClick = { onUninstall(plugin) },
                     enabled = !plugin.busy && !plugin.pendingDelete,
-                ) { Text("Uninstall ${plugin.manifest.name}") }
+                ) { Text(strings.get(R.string.uninstall_plugin_named, plugin.manifest.name)) }
             }
             if (plugin.canRollback) {
                 TextButton(
                     onClick = { onRollback(plugin) },
                     enabled = !plugin.busy && !plugin.pendingDelete,
-                ) { Text("Roll back ${plugin.manifest.name}") }
+                ) { Text(strings.get(R.string.rollback_plugin_named, plugin.manifest.name)) }
             }
             plugin.updateObservation?.let { HostUpdateObservation(it) }
-            if (plugin.entryCapacityExceeded) Text("Entry lifetime attempt limit reached; additional listeners were not started. Restart required.")
+            if (plugin.entryCapacityExceeded) Text(strings.get(R.string.entry_capacity_notice))
             val entries = plugin.entries
-            if (entries.isNotEmpty()) Text("Entry state describes the listener only. No agent/chat backend is connected; opening a session remains unavailable.")
+            if (entries.isNotEmpty()) Text(strings.get(R.string.entry_backend_notice))
             entries.forEachIndexed { index, entry -> HostEntryState(entry, index) }
             plugin.tools.forEachIndexed { index, tool ->
                 TextButton(enabled = !plugin.busy && !plugin.pendingDelete,
                     onClick = { onTool(HostToolSelection(plugin.manifest.id, index, tool)) }) {
                     // No Tool.id/spec (or other plugin getter) on Main.
-                    Text("Invoke tool ${index + 1}")
+                    Text(strings.get(R.string.invoke_tool, index + 1))
                 }
             }
             plugin.pages.forEach { page ->

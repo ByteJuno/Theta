@@ -71,8 +71,8 @@ class PluginDataStoreTest {
             text("providers/example.json", """{"id":"example","name":"Example","protocol":"openai-chat","baseUrl":"https://api.example.com/v1","models":[{"id":"example-large"}]}"""),
             text("mcp/home.json", """{"id":"home","name":"Home","url":"https://mcp.example.com/mcp","auth":"oauth"}"""))
         val staged = store.stageData(ByteArrayInputStream(bytes))
-        assertTrue(staged.authorNotice.contains("unverified"))
-        assertTrue(staged.digestNotice.contains("not author identity"))
+        assertEquals(DataNotice.AUTHOR_UNVERIFIED, staged.authorNotice)
+        assertEquals(DataNotice.DIGEST_ONLY, staged.digestNotice)
         assertEquals(setOf("api.example.com", "mcp.example.com"), staged.destinations.map { it.host }.toSet())
         assertFalse(root.resolve("plugins/$id/1").exists())
         val result = store.publishConfirmedData(staged, staged.sha256, true)
