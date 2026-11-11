@@ -65,6 +65,22 @@ class FileRunHistory private constructor(
         migrateAccounting()
     }
 
+    // Initialized only after the existing writer lock and source validation; no independent owner.
+    private val summaryWorkspace = SummaryWorkspace(directory)
+    private var summarySpools = 0
+
+    @Synchronized internal fun createSummarySpool(): SummarySpool {
+        ready()
+        val path = summaryWorkspace.create()
+        summarySpools++
+        return SummarySpool(path) { releaseSummarySpool(path) }
+    }
+
+    @Synchronized private fun releaseSummarySpool(path: Path) {
+        try { summaryWorkspace.delete(path) }
+        finally { summarySpools-- }
+    }
+
     /** Only our exact temporary names, and only regular files (never follow links). A partial
      * temp is expected after death and is never committed evidence. Unknown names and every final
      * file, including corrupt finals, are retained. This runs only while holding writer.lock. */
@@ -515,6 +531,7 @@ class FileRunHistory private constructor(
         directory.relativize(path).toString().replace('\\', '/'), stage))
     @Synchronized override fun close() {
         if (!closed) {
+            check(!runActive && summarySpools == 0) { "Cannot close history with an active run or summary spool" }
             closed = true
             try { lock.release() } finally {
                 // Only after the channel is closed: a later open must not overlap this descriptor.
@@ -579,32 +596,42 @@ class FileRunHistory private constructor(
         fun create(directory: Path, sessionId: String = UUID.randomUUID().toString(),
                    durability: Durability, fault: (HistoryWritePoint) -> Unit = {}): FileRunHistory {
             require(sessionId.isNotBlank())
-            createDirectoryChain(directory, durability)
-            Files.newDirectoryStream(directory).use { require(!it.iterator().hasNext()) { "Session directory is not empty" } }
-            Files.createDirectory(directory.resolve("batches")); Files.createDirectory(directory.resolve("calls"))
-            syncDirectory(directory.resolve("batches"), durability)
-            syncDirectory(directory.resolve("calls"), durability)
+            val session = checkedSessionDirectory(directory, allowMissing = true)
+            createDirectoryChain(session, durability)
+            Files.newDirectoryStream(session).use { require(!it.iterator().hasNext()) { "Session directory is not empty" } }
+            Files.createDirectory(session.resolve("batches")); Files.createDirectory(session.resolve("calls"))
+            syncDirectory(session.resolve("batches"), durability)
+            syncDirectory(session.resolve("calls"), durability)
             val payload = HistoryCodec.json.encodeToString(HistoryHead(sessionId = sessionId, revision = 0, messageCount = 0, hash = EMPTY_HASH))
             val bytes = HistoryCodec.json.encodeToString(CheckedHistoryValue(payload, digest(payload.toByteArray(Charsets.UTF_8))))
                 .toByteArray(Charsets.UTF_8)
-            FileChannel.open(directory.resolve("head.json"), CREATE_NEW, WRITE).use {
+            FileChannel.open(session.resolve("head.json"), CREATE_NEW, WRITE).use {
                 val buffer = ByteBuffer.wrap(bytes); while (buffer.hasRemaining()) it.write(buffer); it.force(true)
             }
-            syncDirectory(directory, durability)
-            return open(directory, durability, fault)
+            syncDirectory(session, durability)
+            return open(session, durability, fault)
         }
         fun open(directory: Path, durability: Durability, fault: (HistoryWritePoint) -> Unit = {}): FileRunHistory {
-            require(Files.isDirectory(directory.resolve("batches")) && Files.isDirectory(directory.resolve("calls")))
-            syncDirectory(directory, durability)
-            val writerKey = directory.toRealPath()
+            // Before opening writer.lock or performing any recovery/migration writes, reject raw
+            // ambiguous paths and linked directories. Cleanup still happens only under the lock.
+            val session = try {
+                checkedSessionDirectory(directory).also { path ->
+                    checkedSessionDirectory(path.resolve("batches"))
+                    checkedSessionDirectory(path.resolve("calls"))
+                    checkedSessionDirectory(path.resolve("accounting"), allowMissing = true)
+                    checkedSessionDirectory(path.resolve("summary-tmp"), allowMissing = true)
+                }
+            } catch (e: Exception) { throw HistoryStorageException("Cannot open session $directory", e) }
+            syncDirectory(session, durability)
+            val writerKey = session.toRealPath()
             if (!activeWriters.add(writerKey)) throw HistoryStorageException("Cannot open session $directory",
                 IllegalStateException("Session already has a writer in this process"))
             var channel: FileChannel? = null
             var lock: FileLock? = null
             try {
-                channel = FileChannel.open(directory.resolve("writer.lock"), CREATE, WRITE)
+                channel = FileChannel.open(session.resolve("writer.lock"), CREATE, WRITE)
                 lock = channel.tryLock() ?: error("Session already has a writer")
-                return FileRunHistory(directory, durability, fault, channel, lock, writerKey)
+                return FileRunHistory(session, durability, fault, channel, lock, writerKey)
             } catch (e: Throwable) {
                 // Errors too: decoding a large tail batch can exhaust the heap, and a leaked slot
                 // would make this session unopenable until the process dies. Close before removing.

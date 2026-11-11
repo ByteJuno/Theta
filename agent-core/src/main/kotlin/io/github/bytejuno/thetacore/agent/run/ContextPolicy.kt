@@ -159,6 +159,7 @@ internal class ContextSummarizer(
     private val model: SummaryModel,
     private val journal: RunJournal,
     private val timeouts: EventTimeouts,
+    private val createSpool: () -> SummarySpool,
     private val onAttempt: () -> Boolean,
 ) {
     private fun request(data: String) = copyRequest(model.request,
@@ -219,10 +220,12 @@ internal class ContextSummarizer(
             val ref = "Source $reference messages $start..${index - 1}"
             // Spool canonical escaped data through the same bounded writer used by history.
             // Never encode an entire oversized tool result into a second giant String first.
-            val spool = java.nio.file.Files.createTempFile("theta-summary-", ".data")
-            try {
-                java.nio.file.Files.newOutputStream(spool).use { HistoryCodec.writeValue(visible, it) }
-                java.nio.file.Files.newBufferedReader(spool, Charsets.UTF_8).use { reader ->
+            createSpool().use { spool ->
+                java.nio.file.Files.newOutputStream(spool.path, java.nio.file.LinkOption.NOFOLLOW_LINKS).use {
+                    HistoryCodec.writeValue(visible, it)
+                }
+                java.nio.file.Files.newInputStream(spool.path, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+                    .bufferedReader(Charsets.UTF_8).use { reader ->
                     val buffer = CharArray(sourceReadChars)
                     var pending = ""
                     var eof = false
@@ -256,7 +259,7 @@ internal class ContextSummarizer(
                         }
                     }
                 }
-            } finally { java.nio.file.Files.deleteIfExists(spool) }
+            }
         }
         if (!flush()) return null
         var level = summaries.toList()

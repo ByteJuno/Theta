@@ -628,9 +628,11 @@ class ContextPolicyTest {
             message(Role.TOOL, toolResultPart(binding.callId, "result".repeat(500))))
         val p = ScriptProvider(listOf(answer("short")))
         var attempts = 0
-        assertNotNull(ContextSummarizer(summary(p, 1000), MemoryRunJournal(), EventTimeouts(100, 100)) {
-            ++attempts < 100
-        }.compact(pair, "session@7"))
+        FileRunHistory.create(root.resolve("summary"), "session", durability).use { h ->
+            assertNotNull(ContextSummarizer(summary(p, 1000), MemoryRunJournal(), EventTimeouts(100, 100), h::createSummarySpool) {
+                ++attempts < 100
+            }.compact(pair, "session@7"))
+        }
         assertTrue(p.requests.size > 2)
         assertTrue(p.requests.all { budget(1000).tokens(it)!! <= 1000 })
         assertTrue(p.requests.all { it.messages.all { m -> m.role == Role.USER && m.parts.all { part -> part is ContentPart.Text } } })
@@ -987,9 +989,11 @@ class ContextPolicyTest {
         val binding = callBinding("p", "request", "response", 0, "wire")
         val pair = listOf(message(Role.ASSISTANT, toolCallPart(binding, "tool", "{}")),
             message(Role.TOOL, toolResultPart(binding.callId, "x".repeat(80_000))))
-        assertNotNull(ContextSummarizer(summary(s, 100_000), MemoryRunJournal(), EventTimeouts(100, 100)) {
-            true
-        }.compact(pair, "original@1"))
+        FileRunHistory.create(root.resolve("summary"), "session", durability).use { h ->
+            assertNotNull(ContextSummarizer(summary(s, 100_000), MemoryRunJournal(), EventTimeouts(100, 100), h::createSummarySpool) {
+                true
+            }.compact(pair, "original@1"))
+        }
         assertEquals(1, s.requests.size)
         assertFalse(s.requests.single().messages.single().parts.filterIsInstance<ContentPart.Text>().single().text.contains("fragment"))
     }
@@ -1029,9 +1033,11 @@ class ContextPolicyTest {
         val s = ScriptProvider(listOf(answer("short")))
         val text = "\u0000\"\\😀".repeat(20_000) + "FINAL-EVIDENCE"
         var attempts = 0
-        assertNotNull(ContextSummarizer(summary(s, 100_000), MemoryRunJournal(), EventTimeouts(100, 100)) {
-            ++attempts <= 100
-        }.compact(listOf(user(text)), "original@1"))
+        FileRunHistory.create(root.resolve("summary"), "session", durability).use { h ->
+            assertNotNull(ContextSummarizer(summary(s, 100_000), MemoryRunJournal(), EventTimeouts(100, 100), h::createSummarySpool) {
+                ++attempts <= 100
+            }.compact(listOf(user(text)), "original@1"))
+        }
         assertTrue(s.requests.all { budget(100_000).tokens(it)!! <= 100_000 })
         assertTrue(s.requests.any { it.messages.single().parts.filterIsInstance<ContentPart.Text>().single().text.contains("FINAL-EVIDENCE") })
         assertTrue(s.requests.first().messages.single().parts.filterIsInstance<ContentPart.Text>().single().text.contains("offset 0"))

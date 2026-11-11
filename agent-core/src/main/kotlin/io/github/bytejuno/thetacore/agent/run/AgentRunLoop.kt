@@ -191,7 +191,8 @@ class AgentRunLoop(
 
     private suspend fun summarize(source: List<Message>, reference: String): String? {
         val model = contextPolicy?.summaryModel ?: return null
-        return ContextSummarizer(model, journal, timeouts) {
+        val disk = history as? FileRunHistory ?: return null
+        return ContextSummarizer(model, journal, timeouts, disk::createSummarySpool) {
             if (steps >= limits.maxSteps || retries >= limits.maxRetries) false
             else {
                 steps++; retries++
