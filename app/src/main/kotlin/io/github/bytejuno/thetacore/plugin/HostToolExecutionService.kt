@@ -73,6 +73,7 @@ internal class HostToolExecutionService(
     private suspend fun requestRuntimeApproval(ticket: ExecutionTicket, summary: String, risk: Risk): Boolean =
         withContext(Dispatchers.IO) {
             var owned: ApprovalWaiter? = null
+            var immediateRisk = risk
             try {
                 // Decide the no-wait result in this gate too: it must never inspect/adopt a
                 // different request that starts after this gate is released.
@@ -81,12 +82,16 @@ internal class HostToolExecutionService(
                         active[ticket.callId]?.terminal?.isCompleted != false) return@withGate false
                     val m = observe(ledger.requestRiskUpgrade(ticket.callId, ticket.attemptId, risk, summary))
                     val r = (m as? Mutation.Applied)?.record ?: return@withGate false
-                    val pending = r.pending ?: return@withGate true
+                    val pending = r.pending ?: run { immediateRisk = r.effectiveRisk; return@withGate true }
                     owned = ApprovalWaiter(pending.id).also { approvalWaiters[ticket.callId] = it }
                     null
                 }
                 afterRuntimeApprovalStart()
-                if (immediate != null) return@withContext immediate
+                if (immediate != null) return@withContext immediate && gate.withGate {
+                    if (storageFailed || active[ticket.callId]?.terminal?.isCompleted != false) return@withGate false
+                    // A policy ALLOW has no receipt; consume current authorization, not just DB health.
+                    observe(ledger.checkImmediateRiskApproval(ticket.callId, ticket.attemptId, immediateRisk, summary)) is Mutation.AlreadyApplied
+                }
                 val waiter = requireNotNull(owned)
                 while (true) {
                     select<Unit> {
@@ -169,7 +174,14 @@ internal class HostToolExecutionService(
                 Json.parseToJsonElement(ticket.argsJson).jsonObject,
                 ToolInvocationRequest(record.input.runId, record.input.sessionId, callId, record.input.unattended),
                 requestApproval = { summary, risk -> requestRuntimeApproval(ticket, summary, Risk.valueOf(risk.name)) },
-                frozenSpec = entry.spec, reservation = reservation, unattendedApprovalPolicy = true)
+                frozenSpec = entry.spec, reservation = reservation, unattendedApprovalPolicy = true,
+                beforeExecution = {
+                    gate.withGate {
+                        val failure = ledger.executionAdmissionFailure()
+                        failure?.let(::observe)
+                        !storageFailed && failure == null
+                    }
+                })
             val call = invocation
             active[callId] = call
             logicalResults[callId] = CompletableDeferred()

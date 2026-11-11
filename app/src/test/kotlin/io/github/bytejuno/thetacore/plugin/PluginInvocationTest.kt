@@ -34,6 +34,59 @@ class PluginInvocationTest {
         defaultTimeoutMillis = idle, totalTimeoutMillis = total,
     ).start()
 
+    @Test fun blockedAdmissionCannotEnterBodyAfterTimeout() = blockedAdmission(PluginInvocationStatus.TIMED_OUT)
+    @Test fun blockedAdmissionCannotEnterBodyAfterCancel() = blockedAdmission(PluginInvocationStatus.CANCELLED)
+    @Test fun healthyBlockedAdmissionEntersBody() = blockedAdmission(PluginInvocationStatus.SUCCEEDED)
+
+    private fun blockedAdmission(expected: PluginInvocationStatus) = runBlocking {
+        val budget = PluginExecutionBudget(1, 1)
+        val job = SupervisorJob()
+        val entered = CountDownLatch(1); val release = CountDownLatch(1)
+        val effects = AtomicInteger()
+        try {
+            val invocation = PluginInvocation(budget, "p", CoroutineScope(job),
+                tool { effects.incrementAndGet(); ToolResult("done") }, args, ToolInvocationRequest("r", "s"),
+                defaultTimeoutMillis = if (expected == PluginInvocationStatus.TIMED_OUT) 200 else 10_000,
+                beforeExecution = { entered.countDown(); check(release.await(5, TimeUnit.SECONDS)); true }).start()
+            assertTrue(entered.await(3, TimeUnit.SECONDS))
+            if (expected == PluginInvocationStatus.CANCELLED) invocation.cancel()
+            if (expected != PluginInvocationStatus.SUCCEEDED) {
+                assertEquals(expected, withTimeout(3_000) { invocation.terminal.await() }.status)
+                assertFalse(invocation.actualExited.isCompleted)
+                assertEquals(1, budget.occupiedSlots())
+            }
+            release.countDown()
+            withTimeout(3_000) { invocation.actualExited.await() }
+            assertEquals(expected, invocation.terminal.await().status)
+            assertEquals(expected == PluginInvocationStatus.SUCCEEDED, invocation.bodyEntered)
+            assertEquals(if (expected == PluginInvocationStatus.SUCCEEDED) 1 else 0, effects.get())
+            assertEquals(0, budget.occupiedSlots())
+        } finally { release.countDown(); budget.close(); job.cancel() }
+    }
+
+    @Test fun workerAdmissionAfterReservationRejectsBeforeEnteringToolBody() = runBlocking {
+        val budget = PluginExecutionBudget(1, 1)
+        val job = SupervisorJob()
+        val atAdmission = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val resume = kotlinx.coroutines.CompletableDeferred<Unit>()
+        var healthy = true
+        val entries = AtomicInteger()
+        try {
+            val lease = budget.reserve("p", CoroutineScope(job), {}, {})!!
+            val invocation = PluginInvocation(budget, "p", CoroutineScope(job), tool { entries.incrementAndGet(); ToolResult("bad") },
+                args, ToolInvocationRequest("r", "s"), reservation = lease,
+                beforeExecution = { atAdmission.complete(Unit); resume.await(); healthy }).start()
+            withTimeout(3_000) { atAdmission.await() }
+            assertFalse(invocation.bodyEntered); assertEquals(1, budget.occupiedSlots())
+            healthy = false; resume.complete(Unit)
+            val result = withTimeout(3_000) { invocation.terminal.await() }
+            withTimeout(3_000) { invocation.actualExited.await() }
+            assertEquals(PluginInvocationStatus.REJECTED, result.status)
+            assertEquals(0, entries.get()); assertFalse(invocation.bodyEntered)
+            assertEquals(0, budget.occupiedSlots())
+        } finally { resume.complete(Unit); budget.close(); job.cancel() }
+    }
+
     @Test fun blockedTimeoutRetainsSlotAndLateSuccessCannotReplaceTerminal() = runBlocking {
         val budget = PluginExecutionBudget(1, 1)
         val job = SupervisorJob()

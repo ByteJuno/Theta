@@ -18,7 +18,12 @@ import java.io.File
  * Unlike AndroidSQLiteDriver's default corruption handler, this callback NEVER deletes a
  * damaged ledger. Both framework auto-recovery and schema downgrade fail closed.
  */
-internal class AndroidInvocationStore private constructor(delegate: InvocationStore) : InvocationStore by delegate {
+internal class AndroidInvocationStore private constructor(
+    private val database: AgentDatabase, private val delegate: InvocationStore,
+) : InvocationStore by delegate {
+    fun createHistory(sessionId: String) = io.github.bytejuno.thetacore.agent.run.SqliteRunHistory.create(database, sessionId)
+    fun openHistory(sessionId: String) = io.github.bytejuno.thetacore.agent.run.SqliteRunHistory.open(database, sessionId)
+    override fun close() { try { delegate.close() } finally { database.close() } }
     companion object {
         fun open(context: Context): AndroidInvocationStore {
             val helper = FrameworkSQLiteOpenHelperFactory().create(
@@ -34,7 +39,7 @@ internal class AndroidInvocationStore private constructor(delegate: InvocationSt
                             AgentDatabase.createSchema(SupportSQLiteConnection(db))
                         }
                         override fun onUpgrade(db: SupportSQLiteDatabase, oldVersion: Int, newVersion: Int) {
-                            throw StoreException("Unsupported agent database schema $oldVersion")
+                            AgentDatabase.upgradeSchema(SupportSQLiteConnection(db), oldVersion, newVersion)
                         }
                         override fun onDowngrade(db: SupportSQLiteDatabase, oldVersion: Int, newVersion: Int) {
                             throw StoreException("Unsupported agent database schema $oldVersion")
@@ -70,7 +75,9 @@ internal class AndroidInvocationStore private constructor(delegate: InvocationSt
         internal fun open(root: File, driver: SQLiteDriver,
             fault: (SqliteWriteStage) -> Unit = {}): AndroidInvocationStore {
             require(root.isDirectory) { "No private no-backup directory" }
-            return AndroidInvocationStore(SqliteInvocationStore.open(File(root, AgentDatabase.FILE_NAME).toPath(), driver, fault))
+            val database = AgentDatabase.open(File(root, AgentDatabase.FILE_NAME).toPath(), driver)
+            try { return AndroidInvocationStore(database, SqliteInvocationStore.open(database, fault)) }
+            catch (error: Throwable) { database.close(); throw error }
         }
     }
 }

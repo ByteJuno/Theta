@@ -41,14 +41,14 @@ class ContextPolicyTest {
         LedgerToolExecutor(f.ledger, f.gate, f.definitions, f.bridge, RunApprovals { Decision.ALLOW_ONCE }),
         f.journal, budget = b, limits = limits, timeouts = EventTimeouts(100, 100), contextPolicy = policy)
 
-    private fun retryId(h: FileRunHistory) = assertNotNull(h.retryReconciliation()).id
-    private fun confirmRetry(h: FileRunHistory, id: String, caller: RunIdentity = identity) =
+    private fun retryId(h: TestRunHistory) = assertNotNull(h.retryReconciliation()).id
+    private fun confirmRetry(h: TestRunHistory, id: String, caller: RunIdentity = identity) =
         h.confirmRetryAfterReconciliation(id, caller, "Host inspected request journal and reconciled external results")
 
     @Test fun `definite generation failure releases continuation admission without losing view or counters`() = runTest {
         for (code in listOf(ModelErrorCode.INVALID_REQUEST, ModelErrorCode.AUTH, ModelErrorCode.MODEL_NOT_FOUND)) {
             val f = RunFixture()
-            FileRunHistory.create(root.resolve("definite-$code"), "session", durability).use { h ->
+            TestRunHistory.create(root.resolve("definite-$code"), "session", durability).use { h ->
                 h.append(0, listOf(user("old")))
                 val saved = checkpoint(h, "CONTINUATION"); h.saveCheckpoint(saved)
                 assertEquals(RunState.FAILED, loop(f, ScriptProvider(listOf(failure(code))), h,
@@ -87,7 +87,7 @@ class ContextPolicyTest {
 
     private suspend fun admittedTransportFailure(fault: String, automatic: Boolean) {
         val f = RunFixture(); val transport = FaultTransport(fault); val p = realProvider(transport)
-        FileRunHistory.create(root.resolve("admitted-$fault-$automatic"), "session", durability).use { h ->
+        TestRunHistory.create(root.resolve("admitted-$fault-$automatic"), "session", durability).use { h ->
             h.append(0, listOf(user("goal")))
             val saved = checkpoint(h, "CONTINUATION").copy(
                 settingsKey = settingsKey("provider", f.request(), p.contextConfigurationKey()))
@@ -126,7 +126,7 @@ class ContextPolicyTest {
     private suspend fun reservedTransportFailure(fault: String) {
         val f = RunFixture(); val transport = FaultTransport(fault)
         val mainTransport = FaultTransport("success"); val p = realProvider(mainTransport)
-        FileRunHistory.create(root.resolve("reserved-$fault"), "session", durability).use { h ->
+        TestRunHistory.create(root.resolve("reserved-$fault"), "session", durability).use { h ->
             h.append(0, listOf(user("old".repeat(1000)), user("goal")))
             assertEquals(RunState.PAUSED, loop(f, p, h,
                 ContextPolicy("goal", 1, summary(realProvider(transport)))).run().state)
@@ -160,7 +160,7 @@ class ContextPolicyTest {
     }
     @Test fun `real transport terminal then reset completes admitted generation`() = runTest {
         val f = RunFixture(); val transport = FaultTransport("terminal-reset"); val p = realProvider(transport)
-        FileRunHistory.create(root.resolve("terminal-reset"), "session", durability).use { h ->
+        TestRunHistory.create(root.resolve("terminal-reset"), "session", durability).use { h ->
             h.append(0, listOf(user("goal")))
             val saved = checkpoint(h, "CONTINUATION").copy(
                 settingsKey = settingsKey("provider", f.request(), p.contextConfigurationKey()))
@@ -197,7 +197,7 @@ class ContextPolicyTest {
                 }
             }
             val p = realProvider(transport)
-            FileRunHistory.create(root.resolve("http-rejection-$status"), "session", durability).use { h ->
+            TestRunHistory.create(root.resolve("http-rejection-$status"), "session", durability).use { h ->
                 h.append(0, listOf(user("goal")))
                 val saved = checkpoint(h, "CONTINUATION").copy(
                     settingsKey = settingsKey("provider", f.request(), p.contextConfigurationKey()))
@@ -218,7 +218,7 @@ class ContextPolicyTest {
         val definition = testDefinition(risk = Risk.WRITE)
         val f = RunFixture(listOf(definition, testDefinition("read")))
         f.onSubmit = { f.ledger.recordOutcome(it.callId, it.attemptId, Status.FAILED, "write uncertain", Effect.UNKNOWN) }
-        FileRunHistory.create(root.resolve("accepted-write"), "session", durability).use { h ->
+        TestRunHistory.create(root.resolve("accepted-write"), "session", durability).use { h ->
             h.append(0, listOf(user("write")))
             assertEquals(RunState.PAUSED, loop(f, ScriptProvider(listOf(calls("tool"))), h, ContextPolicy("goal")).run().state)
             val ticket = f.submitted.single()
@@ -246,7 +246,7 @@ class ContextPolicyTest {
         for (stage in HistoryWriteStage.entries) {
             val dir = root.resolve("confirm-$stage")
             lateinit var token: String
-            FileRunHistory.create(dir, "session", durability).use { h ->
+            TestRunHistory.create(dir, "session", durability).use { h ->
                 h.append(0, listOf(user("goal")))
                 h.saveBarrier(ExecutionBarrier("session", "chain", "run", "uncertain", 4, 2, "barrier-1"))
                 h.saveCheckpoint(checkpoint(h).copy(serverUnresolved = true, pauseClass = "ADMITTED"))
@@ -255,23 +255,23 @@ class ContextPolicyTest {
                 assertFalse(confirmRetry(h, stale))
                 token = retryId(h)
             }
-            FileRunHistory.open(dir, durability) { point ->
-                if (point.file == "reconciliations.json" && point.stage == stage) error("injected")
+            TestRunHistory.open(dir, durability) { point ->
+                if (point.file == "reconciliations" && point.stage == stage) error("injected")
             }.use { h ->
                 assertFailsWith<HistoryStorageException> { confirmRetry(h, token) }
                 assertFailsWith<IllegalStateException> { h.retryReconciliation() }
             }
-            FileRunHistory.open(dir, durability).use { h ->
-                val committed = stage in setOf(HistoryWriteStage.AFTER_REPLACE, HistoryWriteStage.AFTER_DIRECTORY_SYNC)
+            TestRunHistory.open(dir, durability).use { h ->
+                val committed = stage in setOf(HistoryWriteStage.AFTER_COMMIT)
                 assertEquals(committed, h.retryReconciliation() == null)
                 val f = RunFixture(); val p = ScriptProvider(listOf(answer()))
                 assertEquals(if (committed) RunState.COMPLETED else RunState.PAUSED,
                     loop(f, p, h, ContextPolicy("goal")).run().state)
                 assertEquals(if (committed) 1 else 0, p.requests.size)
-                assertTrue(Files.exists(dir.resolve("execution.json"))) // receipt, not deletion
+                assertTrue(h.hasValue("execution")) // receipt, not deletion
                 if (!committed) assertTrue(confirmRetry(h, retryId(h)))
                 assertFalse(confirmRetry(h, token))
-                assertTrue(Files.size(dir.resolve("reconciliations.json")) > 0)
+                assertTrue(h.hasValue("reconciliations/$token"))
             }
         }
     }
@@ -279,7 +279,7 @@ class ContextPolicyTest {
     @Test fun `unclosed admitted failures and transport exceptions require reconciliation not automatic retry`() = runTest {
         for (end in listOf("throw", "unclosed", "missing-terminal")) {
             val f = RunFixture()
-            FileRunHistory.create(root.resolve("uncertain-$end"), "session", durability).use { h ->
+            TestRunHistory.create(root.resolve("uncertain-$end"), "session", durability).use { h ->
                 h.append(0, listOf(user("goal")))
                 val saved = checkpoint(h, "CONTINUATION"); h.saveCheckpoint(saved)
                 val p = object : ModelProvider by ScriptProvider(emptyList()) {
@@ -306,7 +306,7 @@ class ContextPolicyTest {
     @Test fun `summary definite failure supports changed window while interrupted summary needs confirmation`() = runTest {
         for (end in listOf("failed", "cancel", "unclosed")) {
             val f = RunFixture()
-            FileRunHistory.create(root.resolve("summary-$end"), "session", durability).use { h ->
+            TestRunHistory.create(root.resolve("summary-$end"), "session", durability).use { h ->
                 h.append(0, listOf(user("old".repeat(1000)), user("goal")))
                 val p = ScriptProvider(listOf(answer()))
                 val s = if (end == "failed") ScriptProvider(listOf(failure(ModelErrorCode.INVALID_REQUEST)))
@@ -343,7 +343,7 @@ class ContextPolicyTest {
     @Test fun `replay incompatible failed summary has attended current evidence retry path`() = runTest {
         for (end in listOf("failed", "cancel", "unclosed")) {
             val f = RunFixture()
-            FileRunHistory.create(root.resolve("review-$end"), "session", durability).use { h ->
+            TestRunHistory.create(root.resolve("review-$end"), "session", durability).use { h ->
                 h.append(0, listOf(user("goal"), message(Role.ASSISTANT,
                     textPart("old", replayData("opaque", "m", "retain me")))))
                 val p = ScriptProvider(listOf(answer()), replay = false)
@@ -379,7 +379,7 @@ class ContextPolicyTest {
     @Test fun `reconciliation does not release live local execution or external isolation`() = runTest {
         val f = RunFixture(listOf(testDefinition(risk = Risk.WRITE)))
         f.onSubmit = { f.ledger.recordOutcome(it.callId, it.attemptId, Status.FAILED, "uncertain", Effect.UNKNOWN) }
-        FileRunHistory.create(root.resolve("live-confirm"), "session", durability).use { h ->
+        TestRunHistory.create(root.resolve("live-confirm"), "session", durability).use { h ->
             h.append(0, listOf(user("goal")))
             loop(f, ScriptProvider(listOf(calls("tool"))), h, ContextPolicy("goal")).run()
             h.saveBarrier(ExecutionBarrier("session", "chain", "run", "remote uncertain", 1, 0, "barrier"))
@@ -396,7 +396,7 @@ class ContextPolicyTest {
     @Test fun `confirmed retry reserves fresh identity even with context policy disabled`() = runTest {
         for (pauseClass in listOf("ADMITTED", "REVIEW")) {
         val f = RunFixture()
-        FileRunHistory.create(root.resolve("retry-again-$pauseClass"), "session", durability).use { h ->
+        TestRunHistory.create(root.resolve("retry-again-$pauseClass"), "session", durability).use { h ->
             h.append(0, listOf(user("goal")))
             h.saveCheckpoint(checkpoint(h).copy(pauseClass = pauseClass))
             val first = retryId(h)
@@ -489,7 +489,7 @@ class ContextPolicyTest {
         val f = RunFixture(listOf(testDefinition()))
         f.onSubmit = { f.ledger.complete(it.callId, it.attemptId, Status.SUCCEEDED, "x".repeat(5000)) }
         val p = ScriptProvider(listOf(calls("tool"), answer()))
-        FileRunHistory.create(root.resolve("h"), "session", durability).use { h ->
+        TestRunHistory.create(root.resolve("h"), "session", durability).use { h ->
             h.append(0, listOf(user("goal")))
             val result = loop(f, p, h, ContextPolicy("goal")).run()
             assertEquals(RunState.PAUSED, result.state)
@@ -500,7 +500,7 @@ class ContextPolicyTest {
             assertEquals("PAUSED", saved.kind); assertEquals(1, saved.steps)
             assertEquals(f.ledger.get(f.submitted.single().callId), saved.ledger.single())
         }
-        FileRunHistory.open(root.resolve("h"), durability).use { h ->
+        TestRunHistory.open(root.resolve("h"), durability).use { h ->
             val saved = assertNotNull(h.loadCheckpoint())
             assertTrue(saved.matches(h.snapshot(), settingsKey("provider", f.request())))
             assertEquals(3, saved.sourceCount); assertEquals(3, h.snapshot().messages.size)
@@ -510,7 +510,7 @@ class ContextPolicyTest {
     @Test fun `prior compaction changes only request view and retains current goal`() = runTest {
         val f = RunFixture(); val p = ScriptProvider(listOf(answer()))
         val summarizer = ScriptProvider(listOf(answer("old facts")))
-        FileRunHistory.create(root.resolve("h"), "session", durability).use { h ->
+        TestRunHistory.create(root.resolve("h"), "session", durability).use { h ->
             h.append(0, listOf(user("old".repeat(1000)), message(Role.ASSISTANT, textPart("past"))))
             h.append(1, listOf(user("goal")))
             val result = loop(f, p, h, ContextPolicy("goal", 2, summary(summarizer)),
@@ -530,7 +530,7 @@ class ContextPolicyTest {
         val f = RunFixture(listOf(testDefinition()))
         f.onSubmit = { f.ledger.complete(it.callId, it.attemptId, Status.SUCCEEDED, "x".repeat(5000)) }
         lateinit var saved: ContextCheckpoint
-        FileRunHistory.create(root.resolve("h"), "session", durability).use { h ->
+        TestRunHistory.create(root.resolve("h"), "session", durability).use { h ->
             h.append(0, listOf(user("goal")))
             val p = ScriptProvider(listOf(calls("tool")))
             val result = loop(f, p, h, ContextPolicy("goal", summaryModel = summary()),
@@ -539,7 +539,7 @@ class ContextPolicyTest {
             assertEquals("CONTINUATION", saved.kind); assertEquals(result.steps, saved.steps)
             assertTrue(saved.steps > 1); assertEquals(1, p.requests.size)
         }
-        FileRunHistory.open(root.resolve("h"), durability).use { h ->
+        TestRunHistory.open(root.resolve("h"), durability).use { h ->
             assertEquals(saved, h.loadCheckpoint())
             val p = ScriptProvider(listOf(answer()))
             val result = loop(f, p, h, ContextPolicy("goal", resumeCheckpointId = saved.id), saved.identity()).run()
@@ -553,7 +553,7 @@ class ContextPolicyTest {
     @Test fun `oversized user or system pauses without summarizing or truncating`() = runTest {
         for (system in listOf(false, true)) {
             val f = RunFixture(); val p = ScriptProvider(listOf(answer())); val s = ScriptProvider(listOf(answer()))
-            FileRunHistory.create(root.resolve("h$system"), "session", durability).use { h ->
+            TestRunHistory.create(root.resolve("h$system"), "session", durability).use { h ->
                 h.append(0, listOf(user(if (system) "goal" else "x".repeat(3000))))
                 val req = if (system) copyRequest(object : ChatRequest by f.request() { override val system = "x".repeat(3000) }) else f.request()
                 assertEquals(RunState.PAUSED, loop(f, p, h, ContextPolicy("goal", summaryModel = summary(s)), request = req).run().state)
@@ -566,7 +566,7 @@ class ContextPolicyTest {
 
     @Test fun `unknown window tries once then saves checkpoint not unchanged retry`() = runTest {
         val f = RunFixture(); val p = ScriptProvider(listOf(failure(ModelErrorCode.CONTEXT_TOO_LONG)))
-        FileRunHistory.create(root.resolve("h"), "session", durability).use { h ->
+        TestRunHistory.create(root.resolve("h"), "session", durability).use { h ->
             h.append(0, listOf(user("goal")))
             assertEquals(RunState.PAUSED, loop(f, p, h, ContextPolicy("goal"), b = budget(null)).run().state)
             assertEquals(1, p.requests.size); assertNotNull(h.checkpointInfo())
@@ -578,7 +578,7 @@ class ContextPolicyTest {
             val f = RunFixture(); val s = ScriptProvider(listOf(answer()))
             val p = ScriptProvider(listOf(if (unknown) failure(ModelErrorCode.NETWORK)
                 else answer("x".repeat(3000), FinishReason.PAUSED)), mode = ModelExecutionMode.MAY_EXECUTE_SERVER_TOOLS)
-            FileRunHistory.create(root.resolve("h$unknown"), "session", durability).use { h ->
+            TestRunHistory.create(root.resolve("h$unknown"), "session", durability).use { h ->
                 h.append(0, listOf(user("goal")))
                 assertEquals(RunState.PAUSED, loop(f, p, h, ContextPolicy("goal", summaryModel = summary(s))).run().state)
                 assertEquals(1, p.requests.size); assertTrue(s.requests.isEmpty())
@@ -589,7 +589,7 @@ class ContextPolicyTest {
 
     @Test fun `summary provider with possible server tools is never submitted`() = runTest {
         val f = RunFixture(); val s = ScriptProvider(listOf(answer()), mode = ModelExecutionMode.MAY_EXECUTE_SERVER_TOOLS)
-        FileRunHistory.create(root.resolve("h"), "session", durability).use { h ->
+        TestRunHistory.create(root.resolve("h"), "session", durability).use { h ->
             h.append(0, listOf(user("x".repeat(2500)), message(Role.ASSISTANT, textPart("old")), user("goal")))
             loop(f, ScriptProvider(listOf(answer())), h, ContextPolicy("goal", 2, summary(s))).run()
             assertTrue(s.requests.isEmpty()); assertEquals("PAUSED", h.loadCheckpoint()!!.kind)
@@ -599,7 +599,7 @@ class ContextPolicyTest {
     @Test fun `summary failure persists pause and never resends full oversized request`() = runTest {
         val f = RunFixture(); val p = ScriptProvider(listOf(answer()))
         val s = ScriptProvider(listOf(failure(ModelErrorCode.SERVER)))
-        FileRunHistory.create(root.resolve("h"), "session", durability).use { h ->
+        TestRunHistory.create(root.resolve("h"), "session", durability).use { h ->
             h.append(0, listOf(user("x".repeat(2500)), message(Role.ASSISTANT, textPart("old")), user("goal")))
             loop(f, p, h, ContextPolicy("goal", 2, summary(s))).run()
             assertTrue(p.requests.isEmpty()); assertEquals("PAUSED", h.loadCheckpoint()!!.kind)
@@ -643,10 +643,10 @@ class ContextPolicyTest {
 
     @Test fun `persisted pause prevents automatic resubmission after reopen`() = runTest {
         val f = RunFixture(); val dir = root.resolve("h")
-        FileRunHistory.create(dir, "session", durability).use { h ->
+        TestRunHistory.create(dir, "session", durability).use { h ->
             h.append(0, listOf(user("goal"))); h.saveCheckpoint(checkpoint(h))
         }
-        FileRunHistory.open(dir, durability).use { h ->
+        TestRunHistory.open(dir, durability).use { h ->
             val p = ScriptProvider(listOf(answer()))
             val result = loop(f, p, h, ContextPolicy("goal")).run()
             assertEquals(RunState.PAUSED, result.state); assertEquals(4, result.steps); assertEquals(2, result.retries)
@@ -657,13 +657,13 @@ class ContextPolicyTest {
     @Test fun `continuation admission is consumed before provider submission`() = runTest {
         val f = RunFixture(); val dir = root.resolve("h")
         lateinit var saved: ContextCheckpoint
-        FileRunHistory.create(dir, "session", durability).use { h ->
+        TestRunHistory.create(dir, "session", durability).use { h ->
             h.append(0, listOf(user("goal"))); saved = checkpoint(h, "CONTINUATION"); h.saveCheckpoint(saved)
             val p = ScriptProvider(listOf(failure(ModelErrorCode.INVALID_REQUEST)))
             loop(f, p, h, ContextPolicy("goal", resumeCheckpointId = saved.id), saved.identity()).run()
             assertEquals(1, p.requests.size); assertEquals("COMPLETE", h.loadCheckpoint()!!.kind)
         }
-        FileRunHistory.open(dir, durability).use { h ->
+        TestRunHistory.open(dir, durability).use { h ->
             h.append(h.revision(), listOf(user("new input is not admission acknowledgement")))
             val p = ScriptProvider(listOf(answer()))
             assertNotNull(h.loadView())
@@ -677,14 +677,14 @@ class ContextPolicyTest {
 
     @Test fun `checkpoint budget is rechecked on continuation and limits never reset`() = runTest {
         val f = RunFixture()
-        FileRunHistory.create(root.resolve("h"), "session", durability).use { h ->
+        TestRunHistory.create(root.resolve("h"), "session", durability).use { h ->
             h.append(0, listOf(user("goal"))); val saved = checkpoint(h, "CONTINUATION"); h.saveCheckpoint(saved)
             val p = ScriptProvider(listOf(answer()))
             val result = loop(f, p, h, ContextPolicy("goal", resumeCheckpointId = saved.id), saved.identity(),
                 limits = RunLimits(maxSteps = 4)).run()
             assertEquals(RunState.PAUSED, result.state); assertEquals(4, result.steps); assertTrue(p.requests.isEmpty())
         }
-        FileRunHistory.create(root.resolve("small"), "session", durability).use { h ->
+        TestRunHistory.create(root.resolve("small"), "session", durability).use { h ->
             h.append(0, listOf(user("goal"))); val saved = checkpoint(h, "CONTINUATION"); h.saveCheckpoint(saved)
             val p = ScriptProvider(listOf(answer()))
             val result = loop(f, p, h, ContextPolicy("goal", resumeCheckpointId = saved.id), saved.identity(), b = budget(150)).run()
@@ -707,7 +707,7 @@ class ContextPolicyTest {
                 override suspend fun awaitTerminal(callId: String) = Unit
                 override fun requestCancel(callId: String) = Unit
             }
-            FileRunHistory.create(dir, "session", durability).use { h ->
+            TestRunHistory.create(dir, "session", durability).use { h ->
                 h.append(0, listOf(user("goal")))
                 val p = ScriptProvider(listOf(calls("tool")))
                 AgentRunLoop(identity, ModelTarget("provider", p, Credentials { "fake" }),
@@ -726,7 +726,7 @@ class ContextPolicyTest {
                 override suspend fun awaitTerminal(callId: String) = error("Unexpected await")
                 override fun requestCancel(callId: String) = error("Unexpected cancel")
             }
-            FileRunHistory.open(dir, durability).use { h ->
+            TestRunHistory.open(dir, durability).use { h ->
                 val p = ScriptProvider(listOf(answer()))
                 val result = AgentRunLoop(saved.identity(), ModelTarget("provider", p, Credentials { "fake" }),
                     RunFixture(listOf(definition)).request(), h, LedgerToolExecutor(ledger, gate, listOf(definition), bridge),
@@ -742,7 +742,7 @@ class ContextPolicyTest {
         val f = RunFixture(listOf(testDefinition(risk = Risk.WRITE)))
         f.onSubmit = { f.ledger.recordOutcome(it.callId, it.attemptId, Status.SUCCEEDED, "remote outcome", Effect.UNKNOWN) }
         val s = ScriptProvider(listOf(answer()))
-        FileRunHistory.create(root.resolve("h"), "session", durability).use { h ->
+        TestRunHistory.create(root.resolve("h"), "session", durability).use { h ->
             h.append(0, listOf(user("goal")))
             val p = ScriptProvider(listOf(calls("tool")))
             val result = loop(f, p, h, ContextPolicy("goal", summaryModel = summary(s))).run()
@@ -756,16 +756,16 @@ class ContextPolicyTest {
     }
 
     @Test fun `pending intent forbids checkpoint commit before ledger reconciliation`() {
-        FileRunHistory.create(root.resolve("h"), "session", durability).use { h ->
+        TestRunHistory.create(root.resolve("h"), "session", durability).use { h ->
             h.append(0, listOf(user("goal"))); val saved = checkpoint(h)
             val binding = callBinding("p", "request", "response", 0, "wire")
             h.prepareStep(1, identity, "step", message(Role.ASSISTANT, toolCallPart(binding, "tool", "{}")))
             assertFailsWith<IllegalStateException> { h.saveCheckpoint(saved) }
-            assertTrue(Files.exists(root.resolve("h/pending.json"))); assertFalse(Files.exists(root.resolve("h/context.json")))
+            assertTrue(h.hasValue("pending")); assertFalse(h.hasValue("context"))
         }
     }
 
-    private fun checkpoint(h: FileRunHistory, kind: String = "PAUSED") = h.snapshot().let { source ->
+    private fun checkpoint(h: TestRunHistory, kind: String = "PAUSED") = h.snapshot().let { source ->
         ContextCheckpoint(id = "checkpoint", sessionId = "session", taskChainId = "chain", runId = "run",
             nextRunId = if (kind == "CONTINUATION") "next" else null, unattended = false,
             sourceRevision = source.revision, sourceCount = source.messages.size, sourceDigest = sourceDigest(source.messages),
@@ -777,17 +777,17 @@ class ContextPolicyTest {
     @Test fun `checkpoint atomic faults reopen old or committed value never half value`() {
         for (stage in HistoryWriteStage.entries) {
             val dir = root.resolve(stage.name)
-            FileRunHistory.create(dir, "session", durability).use { h ->
+            TestRunHistory.create(dir, "session", durability).use { h ->
                 h.append(0, listOf(user("goal"))); h.saveCheckpoint(checkpoint(h))
             }
-            FileRunHistory.open(dir, durability) { point ->
-                if (point.file == "context.json" && point.stage == stage) error("injected")
+            TestRunHistory.open(dir, durability) { point ->
+                if (point.file == "context" && point.stage == stage) error("injected")
             }.use { h ->
                 assertFailsWith<HistoryStorageException> { h.saveCheckpoint(checkpoint(h).copy(id = "new")) }
                 assertFailsWith<IllegalStateException> { h.snapshot() }
             }
-            FileRunHistory.open(dir, durability).use { h ->
-                val committed = stage >= HistoryWriteStage.AFTER_REPLACE
+            TestRunHistory.open(dir, durability).use { h ->
+                val committed = stage >= HistoryWriteStage.AFTER_COMMIT
                 assertEquals(if (committed) "new" else "checkpoint", h.loadCheckpoint()!!.id)
                 assertEquals(1, h.snapshot().messages.size)
             }
@@ -796,11 +796,9 @@ class ContextPolicyTest {
 
     @Test fun `corrupt final checkpoint fails closed and abandoned temporary is ignored`() {
         val dir = root.resolve("h")
-        FileRunHistory.create(dir, "session", durability).use { h -> h.append(0, listOf(user("goal"))); h.saveCheckpoint(checkpoint(h)) }
-        Files.write(dir.resolve(".context.json.tmp"), byteArrayOf(1, 2, 3))
-        FileRunHistory.open(dir, durability).use { h -> assertNotNull(h.loadCheckpoint()); assertFalse(Files.exists(dir.resolve(".context.json.tmp"))) }
-        Files.write(dir.resolve("context.json"), byteArrayOf(1, 2, 3))
-        FileRunHistory.open(dir, durability).use { h ->
+        TestRunHistory.create(dir, "session", durability).use { h -> h.append(0, listOf(user("goal"))); h.saveCheckpoint(checkpoint(h)) }
+        TestRunHistory.corrupt(dir, "context")
+        TestRunHistory.open(dir, durability).use { h ->
             assertFailsWith<HistoryStorageException> { h.loadCheckpoint() }
             assertEquals(1, h.snapshot().messages.size)
         }
@@ -808,7 +806,7 @@ class ContextPolicyTest {
 
     @Test fun `stale revision and changed settings cannot resume`() = runTest {
         val f = RunFixture()
-        FileRunHistory.create(root.resolve("h"), "session", durability).use { h ->
+        TestRunHistory.create(root.resolve("h"), "session", durability).use { h ->
             h.append(0, listOf(user("goal")))
             val saved = checkpoint(h, "CONTINUATION"); h.saveCheckpoint(saved)
             val p = ScriptProvider(listOf(answer()))
@@ -829,7 +827,7 @@ class ContextPolicyTest {
         for (scenario in listOf("failure", "paused-limit", "step-limit", "cancel")) {
             val dir = root.resolve(scenario)
             val f = RunFixture(); val s = ScriptProvider(listOf(answer()))
-            FileRunHistory.create(dir, "session", durability).use { h ->
+            TestRunHistory.create(dir, "session", durability).use { h ->
                 h.append(0, listOf(user("goal")))
                 val p = if (scenario == "cancel") object : ModelProvider by ScriptProvider(emptyList()) {
                     override fun executionMode(request: ChatRequest) = ModelExecutionMode.MAY_EXECUTE_SERVER_TOOLS
@@ -846,7 +844,7 @@ class ContextPolicyTest {
                 else assertTrue(run.run().serverExecutionUnknown)
                 assertNotNull(h.loadBarrier())
             }
-            FileRunHistory.open(dir, durability).use { h ->
+            TestRunHistory.open(dir, durability).use { h ->
                 h.append(h.revision(), listOf(user("appended".repeat(1000))))
                 val p = ScriptProvider(listOf(answer()))
                 val result = loop(f, p, h, ContextPolicy("different goal", summaryModel = summary(s)),
@@ -860,7 +858,7 @@ class ContextPolicyTest {
                 assertTrue(confirmRetry(h, token))
                 assertFalse(confirmRetry(h, token))
             }
-            FileRunHistory.open(dir, durability).use { h ->
+            TestRunHistory.open(dir, durability).use { h ->
                 val p = ScriptProvider(listOf(answer()))
                 assertEquals(RunState.COMPLETED, loop(f, p, h, ContextPolicy("goal"), b = budget(100_000)).run().state)
                 assertEquals(1, p.requests.size)
@@ -872,12 +870,12 @@ class ContextPolicyTest {
         for (addSummary in listOf(false, true)) {
             val dir = root.resolve("readmit$addSummary"); val f = RunFixture()
             lateinit var saved: ContextCheckpoint
-            FileRunHistory.create(dir, "session", durability).use { h ->
+            TestRunHistory.create(dir, "session", durability).use { h ->
                 h.append(0, listOf(user("old".repeat(800)), message(Role.ASSISTANT, textPart("past")), user("goal")))
                 loop(f, ScriptProvider(listOf(answer())), h, ContextPolicy("goal", 2)).run()
                 saved = h.loadCheckpoint()!!; assertEquals("BUDGET", saved.pauseClass)
             }
-            FileRunHistory.open(dir, durability).use { h ->
+            TestRunHistory.open(dir, durability).use { h ->
                 val p = ScriptProvider(listOf(answer())); val s = ScriptProvider(listOf(answer("facts")))
                 val policy = ContextPolicy("goal", 2, if (addSummary) summary(s) else null,
                     readmitBudgetCheckpointId = saved.id)
@@ -889,7 +887,7 @@ class ContextPolicyTest {
                 assertEquals(addSummary, s.requests.isNotEmpty())
             }
         }
-        FileRunHistory.create(root.resolve("unsafe"), "session", durability).use { h ->
+        TestRunHistory.create(root.resolve("unsafe"), "session", durability).use { h ->
             h.append(0, listOf(user("goal")))
             h.saveCheckpoint(checkpoint(h).copy(pauseClass = "ADMITTED"))
             val p = ScriptProvider(listOf(answer()))
@@ -902,14 +900,14 @@ class ContextPolicyTest {
 
     @Test fun `continuation view survives successful admission append and cold reopen`() = runTest {
         val f = RunFixture(); val dir = root.resolve("view")
-        FileRunHistory.create(dir, "session", durability).use { h ->
+        TestRunHistory.create(dir, "session", durability).use { h ->
             h.append(0, listOf(user("old".repeat(1000))))
             val saved = checkpoint(h, "CONTINUATION"); h.saveCheckpoint(saved)
             assertEquals(RunState.COMPLETED, loop(f, ScriptProvider(listOf(answer())), h,
                 ContextPolicy("goal", resumeCheckpointId = saved.id), saved.identity()).run().state)
             assertNotNull(h.loadView())
         }
-        FileRunHistory.open(dir, durability).use { h ->
+        TestRunHistory.open(dir, durability).use { h ->
             val count = h.snapshot().messages.size
             h.append(h.revision(), listOf(user("next question")))
             val p = ScriptProvider(listOf(answer())); val s = ScriptProvider(listOf(answer()))
@@ -923,7 +921,7 @@ class ContextPolicyTest {
 
     @Test fun `default limits pack thirteen complete messages into bounded summary calls`() = runTest {
         val f = RunFixture(); val s = ScriptProvider(listOf(answer("facts"))); val p = ScriptProvider(listOf(answer()))
-        FileRunHistory.create(root.resolve("packed"), "session", durability).use { h ->
+        TestRunHistory.create(root.resolve("packed"), "session", durability).use { h ->
             h.append(0, (0..13).map { user("history-$it ".repeat(20)) } + user("goal"))
             val result = loop(f, p, h, ContextPolicy("goal", 14, summary(s, 10000))).run()
             assertEquals(RunState.COMPLETED, result.state)
@@ -935,7 +933,7 @@ class ContextPolicyTest {
 
     @Test fun `definitely rejected summary reservations retain counters through explicit budget readmission`() = runTest {
         val f = RunFixture(); val dir = root.resolve("failed-summary")
-        FileRunHistory.create(dir, "session", durability).use { h ->
+        TestRunHistory.create(dir, "session", durability).use { h ->
             h.append(0, listOf(user("old".repeat(1000)), user("goal")))
             repeat(3) { n ->
                 val s = ScriptProvider(listOf(failure(ModelErrorCode.INVALID_REQUEST))); val p = ScriptProvider(listOf(answer()))
@@ -953,7 +951,7 @@ class ContextPolicyTest {
         val f = RunFixture(listOf(testDefinition()))
         val raw = "raw\u0000\"\\😀".repeat(150_000)
         f.onSubmit = { f.ledger.complete(it.callId, it.attemptId, Status.SUCCEEDED, raw) }
-        FileRunHistory.create(root.resolve("stream"), "session", durability).use { h ->
+        TestRunHistory.create(root.resolve("stream"), "session", durability).use { h ->
             h.append(0, listOf(user("goal")))
             loop(f, ScriptProvider(listOf(calls("tool"))), h, ContextPolicy("goal")).run()
             val saved = h.loadCheckpoint()!!
@@ -996,7 +994,7 @@ class ContextPolicyTest {
 
     @Test fun `crash after consume before response retains view but cannot replay admission`() = runTest {
         val f = RunFixture(); val dir = root.resolve("admission-crash")
-        FileRunHistory.create(dir, "session", durability).use { h ->
+        TestRunHistory.create(dir, "session", durability).use { h ->
             h.append(0, listOf(user("old")))
             val saved = checkpoint(h, "CONTINUATION"); h.saveCheckpoint(saved)
             val p = object : ModelProvider by ScriptProvider(emptyList()) {
@@ -1012,7 +1010,7 @@ class ContextPolicyTest {
                 }
             }
         }
-        FileRunHistory.open(dir, durability).use { h ->
+        TestRunHistory.open(dir, durability).use { h ->
             h.append(h.revision(), listOf(user("next")))
             val p = ScriptProvider(listOf(answer())); val s = ScriptProvider(listOf(answer()))
             assertEquals(RunState.PAUSED, loop(f, p, h, ContextPolicy("goal", 1, summary(s))).run().state)
@@ -1040,11 +1038,11 @@ class ContextPolicyTest {
     @Test fun `unresolved admissions are session scoped across chain config history and policy changes`() = runTest {
         for (reservation in listOf("ADMITTED", "SUMMARY_RESERVED")) for (disabled in listOf(false, true)) {
             val dir = root.resolve("$reservation-$disabled"); val f = RunFixture()
-            FileRunHistory.create(dir, "session", durability).use { h ->
+            TestRunHistory.create(dir, "session", durability).use { h ->
                 h.append(0, listOf(user("goal")))
                 h.saveCheckpoint(checkpoint(h).copy(pauseClass = reservation))
             }
-            FileRunHistory.open(dir, durability).use { h ->
+            TestRunHistory.open(dir, durability).use { h ->
                 h.append(h.revision(), listOf(user("different history")))
                 val p = ScriptProvider(listOf(answer())); val s = ScriptProvider(listOf(answer()))
                 val result = AgentRunLoop(identity.copy(taskChainId = "other-chain", runId = "other-run"),
@@ -1066,13 +1064,13 @@ class ContextPolicyTest {
     @Test fun `reused view keeps provenance but current chain limits survive repeated cold restarts`() = runTest {
         val dir = root.resolve("accounting"); val f = RunFixture()
         lateinit var original: ContextCheckpoint
-        FileRunHistory.create(dir, "session", durability).use { h ->
+        TestRunHistory.create(dir, "session", durability).use { h ->
             h.append(0, listOf(user("old")))
             original = checkpoint(h, "VIEW").copy(steps = 49, retries = 11)
             h.saveCheckpoint(original)
         }
         repeat(4) { n ->
-            FileRunHistory.open(dir, durability).use { h ->
+            TestRunHistory.open(dir, durability).use { h ->
                 h.append(h.revision(), listOf(user("B-$n")))
                 val p = ScriptProvider(listOf(failure(ModelErrorCode.UNSUPPORTED_PARAMETER, "cache_control"), answer()))
                 val result = loop(f, p, h, ContextPolicy("B goal", 1),
@@ -1086,7 +1084,7 @@ class ContextPolicyTest {
                 assertEquals(original, h.loadView())
             }
         }
-        FileRunHistory.open(dir, durability).use { h ->
+        TestRunHistory.open(dir, durability).use { h ->
             val p = ScriptProvider(listOf(answer()))
             val result = loop(f, p, h, ContextPolicy("independent", 1), identity.copy(taskChainId = "C", runId = "C")).run()
             assertEquals(1, result.steps); assertEquals(0, result.retries)
@@ -1112,7 +1110,7 @@ class ContextPolicyTest {
                     override suspend fun awaitTerminal(callId: String) = Unit
                     override fun requestCancel(callId: String) = Unit
                 }
-                FileRunHistory.create(dir, "session", durability).use { h ->
+                TestRunHistory.create(dir, "session", durability).use { h ->
                     h.append(0, listOf(user("goal")))
                     val s = ScriptProvider(listOf(answer()))
                     val result = AgentRunLoop(identity, ModelTarget("provider", ScriptProvider(listOf(calls("tool"))), Credentials { "fake" }),
@@ -1155,7 +1153,7 @@ class ContextPolicyTest {
                     override suspend fun awaitTerminal(callId: String) = error("No tool await")
                     override fun requestCancel(callId: String) = error("No tool cancel")
                 }
-                FileRunHistory.open(dir, durability).use { h ->
+                TestRunHistory.open(dir, durability).use { h ->
                     val p = ScriptProvider(listOf(answer()))
                     val executor = LedgerToolExecutor(ledger, gate, listOf(definition), bridge)
                     val stale = h.loadCheckpoint()!!.ledger
@@ -1198,7 +1196,7 @@ class ContextPolicyTest {
                     override suspend fun awaitTerminal(callId: String) = Unit
                     override fun requestCancel(callId: String) = Unit
                 }
-                FileRunHistory.create(dir, "session", durability).use { h ->
+                TestRunHistory.create(dir, "session", durability).use { h ->
                     h.append(0, listOf(user("goal")))
                     val executor = LedgerToolExecutor(ledger, gate, listOf(definition), bridge)
                     AgentRunLoop(identity, ModelTarget("provider", ScriptProvider(listOf(calls("tool"), answer())), Credentials { "fake" }),
@@ -1253,7 +1251,7 @@ class ContextPolicyTest {
                     override suspend fun awaitTerminal(callId: String) = error("No await")
                     override fun requestCancel(callId: String) = error("No cancel")
                 }
-                FileRunHistory.open(dir, durability).use { h ->
+                TestRunHistory.open(dir, durability).use { h ->
                     val p = ScriptProvider(listOf(answer()))
                     if (kind == "ADMITTED") assertTrue(confirmRetry(h, retryId(h)))
                     val policy = when (kind) {
@@ -1304,11 +1302,11 @@ class ContextPolicyTest {
                     override suspend fun awaitTerminal(callId: String) = Unit
                     override fun requestCancel(callId: String) = Unit
                 }
-                fun run(h: FileRunHistory, p: ModelProvider, runId: String) = AgentRunLoop(identity.copy(runId = runId),
+                fun run(h: TestRunHistory, p: ModelProvider, runId: String) = AgentRunLoop(identity.copy(runId = runId),
                     ModelTarget("provider", p, Credentials { "fake" }), request, h,
                     LedgerToolExecutor(ledger, gate, definitions, bridge),
                     contextPolicy = if (withPolicy) ContextPolicy("goal") else null)
-                FileRunHistory.create(dir, "session", durability).use { h ->
+                TestRunHistory.create(dir, "session", durability).use { h ->
                     h.append(0, listOf(user("goal")))
                     val p = ScriptProvider(listOf(calls("a", "b")))
                     val result = run(h, p, "run").run()
@@ -1329,7 +1327,7 @@ class ContextPolicyTest {
                         records.map { it.callId })!!), HistoryCodec.encodeMessage(paired.last()))
                 }
                 // Reopen history from disk while the actual first worker is still live.
-                FileRunHistory.open(dir, durability).use { h ->
+                TestRunHistory.open(dir, durability).use { h ->
                     val p = ScriptProvider(listOf(answer()))
                     val result = run(h, p, "waiting").run()
                     assertEquals(RunState.PAUSED, result.state); assertEquals(1, result.steps)
@@ -1347,7 +1345,7 @@ class ContextPolicyTest {
                     override suspend fun awaitTerminal(callId: String) = error("No await")
                     override fun requestCancel(callId: String) = error("No cancel")
                 }
-                FileRunHistory.open(dir, durability).use { h ->
+                TestRunHistory.open(dir, durability).use { h ->
                     assertFalse(h.recoverPending(ledger).recovered)
                     val p = ScriptProvider(listOf(answer()))
                     val result = AgentRunLoop(identity.copy(runId = "after-exit"),
@@ -1367,14 +1365,14 @@ class ContextPolicyTest {
             val dir = root.resolve("paused-accounting-$end")
             val f = RunFixture(if (end == "duplicate") listOf(testDefinition()) else emptyList())
             lateinit var original: ContextCheckpoint
-            FileRunHistory.create(dir, "session", durability).use { h ->
+            TestRunHistory.create(dir, "session", durability).use { h ->
                 h.append(0, listOf(user("old")))
                 original = checkpoint(h, "VIEW").copy(steps = 49, retries = 11, catalog = f.definitions,
                     settingsKey = settingsKey("provider", f.request()))
                 h.saveCheckpoint(original)
             }
             repeat(3) { n ->
-                FileRunHistory.open(dir, durability).use { h ->
+                TestRunHistory.open(dir, durability).use { h ->
                     h.append(h.revision(), listOf(user("B-$n")))
                     val p = ScriptProvider(listOf(failure(ModelErrorCode.UNSUPPORTED_PARAMETER, "cache_control"),
                         if (end == "length") answer("partial", FinishReason.LENGTH) else calls("tool")))
@@ -1395,13 +1393,13 @@ class ContextPolicyTest {
     @Test fun `exceptions cancellation and poisoned append retain reserved accounting across reopen`() = runTest {
         for (end in listOf("stream-cancel", "recovery-throw", "tool-cancel", "append-fail", "model-failed")) {
             val dir = root.resolve("exit-$end"); val f = RunFixture(listOf(testDefinition()))
-            FileRunHistory.create(dir, "session", durability).use { h ->
+            TestRunHistory.create(dir, "session", durability).use { h ->
                 h.append(0, listOf(user("old")))
                 h.saveCheckpoint(checkpoint(h, "VIEW").copy(steps = 49, retries = 11, catalog = f.definitions,
                     settingsKey = settingsKey("provider", f.request())))
             }
-            FileRunHistory.open(dir, durability, fault = {
-                if (end == "append-fail" && it.file == "batches/3.json" && it.stage == HistoryWriteStage.BEFORE_WRITE)
+            TestRunHistory.open(dir, durability, fault = {
+                if (end == "append-fail" && it.file == "batches/3" && it.stage == HistoryWriteStage.AFTER_VALUE)
                     error("append failure")
             }).use { h ->
                 h.append(h.revision(), listOf(user("B")))
@@ -1428,7 +1426,7 @@ class ContextPolicyTest {
                     else -> assertEquals(RunState.FAILED, run.run().state)
                 }
             }
-            FileRunHistory.open(dir, durability).use { h ->
+            TestRunHistory.open(dir, durability).use { h ->
                 val accounting = h.loadAccounting("B")!!
                 assertEquals("B", accounting.taskChainId); assertEquals(1, accounting.steps); assertEquals(1, accounting.retries)
                 if (end == "append-fail") assertTrue(h.recoverPending(f.ledger).recovered)
@@ -1446,14 +1444,14 @@ class ContextPolicyTest {
         for (kind in listOf("ADMITTED", "SUMMARY_RESERVED", "CONTINUATION", "BUDGET", "LOCAL_WAIT", "REMOTE")) {
             val dir = root.resolve("preserve-$kind"); val f = RunFixture()
             lateinit var saved: ContextCheckpoint
-            FileRunHistory.create(dir, "session", durability).use { h ->
+            TestRunHistory.create(dir, "session", durability).use { h ->
                 h.append(0, listOf(user("old")))
                 saved = checkpoint(h, if (kind == "CONTINUATION") kind else "PAUSED").copy(pauseClass = kind)
                 h.saveCheckpoint(saved)
                 h.saveAccounting(RunAccounting("session", "B", "previous", 2, 1))
                 if (kind == "REMOTE") h.saveBarrier(ExecutionBarrier("session", "chain", "run", "unresolved", 2, 1))
             }
-            FileRunHistory.open(dir, durability).use { h ->
+            TestRunHistory.open(dir, durability).use { h ->
                 val p = ScriptProvider(listOf(answer()))
                 // LOCAL_WAIT without blockers is allowed to settle, but a pre-request failure must
                 // still preserve it. Every other reservation refuses admission altogether.
@@ -1472,9 +1470,9 @@ class ContextPolicyTest {
     @Test fun `A B A restarts retain independent step and retry caps without old context override`() = runTest {
         for (cap in listOf("steps", "retries")) {
             val dir = root.resolve("chains-$cap"); val f = RunFixture()
-            FileRunHistory.create(dir, "session", durability).use { it.append(0, listOf(user("goal"))) }
+            TestRunHistory.create(dir, "session", durability).use { it.append(0, listOf(user("goal"))) }
             for ((n, chain) in listOf("A", "B", "A", "B", "A").withIndex()) {
-                FileRunHistory.open(dir, durability).use { h ->
+                TestRunHistory.open(dir, durability).use { h ->
                     h.append(h.revision(), listOf(user("history changed $n")))
                     // An old same-chain context must not replace durable counters (in either direction).
                     if (n == 2) h.saveCheckpoint(checkpoint(h, "COMPLETE").copy(taskChainId = "A",
@@ -1497,18 +1495,18 @@ class ContextPolicyTest {
 
     @Test fun `source corruption cannot be hidden by valid checkpoint`() {
         val dir = root.resolve("h")
-        FileRunHistory.create(dir, "session", durability).use { h ->
+        TestRunHistory.create(dir, "session", durability).use { h ->
             h.append(0, listOf(user("first"))); h.append(1, listOf(user("goal"))); h.saveCheckpoint(checkpoint(h))
         }
-        Files.write(dir.resolve("batches/1.json"), byteArrayOf(1, 2, 3))
-        FileRunHistory.open(dir, durability).use { h -> assertFailsWith<HistoryStorageException> { h.checkpointInfo() } }
+        TestRunHistory.corrupt(dir, "batches/1")
+        TestRunHistory.open(dir, durability).use { h -> assertFailsWith<HistoryStorageException> { h.checkpointInfo() } }
     }
 
     @Test fun `budget pause or summary offer superseded by new input does not lock session`() = runTest {
         for (offer in listOf(true, false)) {
             val f = RunFixture(if (offer) listOf(testDefinition()) else emptyList())
             f.onSubmit = { f.ledger.complete(it.callId, it.attemptId, Status.SUCCEEDED, "x".repeat(5000)) }
-            FileRunHistory.create(root.resolve("superseded-$offer"), "session", durability).use { h ->
+            TestRunHistory.create(root.resolve("superseded-$offer"), "session", durability).use { h ->
                 if (offer) {
                     h.append(0, listOf(user("goal")))
                     loop(f, ScriptProvider(listOf(calls("tool"))), h, ContextPolicy("goal", summaryModel = summary()),
@@ -1539,7 +1537,7 @@ class ContextPolicyTest {
                 }
             }
         }
-        FileRunHistory.create(root.resolve("superseded-review"), "session", durability).use { h ->
+        TestRunHistory.create(root.resolve("superseded-review"), "session", durability).use { h ->
             h.append(0, listOf(user("goal"))); h.saveCheckpoint(checkpoint(h))
             h.append(h.revision(), listOf(user("new input is not review acknowledgement")))
             val p = ScriptProvider(listOf(answer()))
@@ -1552,7 +1550,7 @@ class ContextPolicyTest {
         for (decided in listOf(false, true)) {
             val f = RunFixture(listOf(testDefinition(risk = Risk.WRITE)))
             f.onSubmit = { f.ledger.recordOutcome(it.callId, it.attemptId, Status.FAILED, "write uncertain", Effect.UNKNOWN) }
-            FileRunHistory.create(root.resolve("accepted-compact-$decided"), "session", durability).use { h ->
+            TestRunHistory.create(root.resolve("accepted-compact-$decided"), "session", durability).use { h ->
                 h.append(0, listOf(user("x".repeat(1400))))
                 assertEquals(RunState.PAUSED, loop(f, ScriptProvider(listOf(calls("tool"))), h,
                     ContextPolicy("goal"), b = budget(100_000)).run().state)
@@ -1585,7 +1583,7 @@ class ContextPolicyTest {
 
     @Test fun `late benign ledger evidence drops stale view instead of locking session`() = runTest {
         val f = RunFixture(listOf(testDefinition()))
-        FileRunHistory.create(root.resolve("late-view"), "session", durability).use { h ->
+        TestRunHistory.create(root.resolve("late-view"), "session", durability).use { h ->
             h.append(0, listOf(user("x".repeat(1400))))
             assertEquals(RunState.COMPLETED, loop(f, ScriptProvider(listOf(calls("tool"), answer())), h,
                 ContextPolicy("goal"), b = budget(100_000)).run().state)

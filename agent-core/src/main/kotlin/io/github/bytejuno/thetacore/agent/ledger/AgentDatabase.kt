@@ -24,7 +24,35 @@ class AgentDatabase private constructor(
     private val lock: FileLock,
     private val identity: Path,
 ) : Closeable {
-    override fun close() {
+    @Volatile private var closed = false
+    @Volatile private var uncertain = false
+    private val sessions = mutableSetOf<String>()
+    private var ledgerBound = false
+    internal fun ready() { if (closed || uncertain) throw StoreException("Database closed or uncertain; reopen and cold recover", uncertain) }
+    @Synchronized internal fun bindLedger() { ready(); check(!ledgerBound); ledgerBound = true }
+    @Synchronized internal fun releaseLedger() { ledgerBound = false }
+    @Synchronized internal fun bindSession(id: String) { ready(); check(sessions.add(id)) { "Session already open" } }
+    @Synchronized internal fun releaseSession(id: String) { sessions.remove(id) }
+    @Synchronized internal fun <T> access(block: () -> T): T { ready(); return block() }
+    @Synchronized internal fun poison() { uncertain = true }
+    @Synchronized internal fun <T> transaction(block: () -> T): T {
+        ready()
+        var begun = false
+        try {
+            connection.execute("BEGIN IMMEDIATE"); begun = true
+            connection.verifyWriteConfiguration()
+            val result = block()
+            connection.execute("COMMIT"); begun = false
+            return result
+        } catch (error: Throwable) {
+            if (begun) runCatching { connection.execute("ROLLBACK") }
+            uncertain = true
+            throw error
+        }
+    }
+    @Synchronized override fun close() {
+        if (closed) return
+        closed = true
         try { connection.close() } finally {
             try { lock.release() } finally {
                 try { channel.close() } finally { synchronized(writers) { writers.remove(identity) } }
@@ -34,7 +62,7 @@ class AgentDatabase private constructor(
 
     companion object {
         const val FILE_NAME = "agent.db"
-        const val SCHEMA_VERSION = 1
+        const val SCHEMA_VERSION = 2
         private const val APPLICATION_ID = 0x54485441
         // On POSIX, closing ANY descriptor of a locked file can drop this process's lock.
         // Reject duplicate instances before even opening a second descriptor.
@@ -56,7 +84,22 @@ class AgentDatabase private constructor(
             connection.execute("CREATE TABLE content_chunks (hash TEXT NOT NULL REFERENCES contents(hash) ON DELETE CASCADE, ordinal INTEGER NOT NULL, bytes BLOB NOT NULL, PRIMARY KEY(hash, ordinal)) WITHOUT ROWID")
             connection.execute("CREATE TABLE invocation_contents (call_id TEXT NOT NULL REFERENCES invocations(call_id) ON DELETE CASCADE, hash TEXT NOT NULL, PRIMARY KEY(call_id, hash)) WITHOUT ROWID")
             connection.execute("CREATE INDEX content_owners ON invocation_contents(hash)")
+            createHistorySchema(connection)
             connection.execute("PRAGMA application_id=$APPLICATION_ID")
+            connection.execute("PRAGMA user_version=$SCHEMA_VERSION")
+        }
+
+        private fun createHistorySchema(connection: SQLiteConnection) {
+            connection.execute("CREATE TABLE sessions (session_id TEXT PRIMARY KEY NOT NULL, revision INTEGER NOT NULL CHECK(revision>=0)) WITHOUT ROWID")
+            connection.execute("CREATE TABLE history_values (session_id TEXT NOT NULL REFERENCES sessions(session_id), name TEXT NOT NULL, PRIMARY KEY(session_id,name)) WITHOUT ROWID")
+            connection.execute("CREATE TABLE history_chunks (session_id TEXT NOT NULL, name TEXT NOT NULL, ordinal INTEGER NOT NULL, bytes BLOB NOT NULL, PRIMARY KEY(session_id,name,ordinal), FOREIGN KEY(session_id,name) REFERENCES history_values(session_id,name) ON DELETE CASCADE) WITHOUT ROWID")
+        }
+        /** Only the recognized SQLite v1 schema is upgraded; legacy files are never imported. */
+        fun upgradeSchema(connection: SQLiteConnection, oldVersion: Int, newVersion: Int) {
+            connection.verifyWriteConfiguration()
+            require(oldVersion == 1 && newVersion == SCHEMA_VERSION &&
+                connection.longValue("PRAGMA application_id") == APPLICATION_ID.toLong())
+            createHistorySchema(connection)
             connection.execute("PRAGMA user_version=$SCHEMA_VERSION")
         }
 
@@ -105,6 +148,7 @@ class AgentDatabase private constructor(
                 try {
                     connection.verifyWriteConfiguration()
                     if (version == 0L) createSchema(connection)
+                    else if (version == 1L) upgradeSchema(connection, 1, SCHEMA_VERSION)
                     fault(SqliteInitStage.BEFORE_SCHEMA_COMMIT)
                     connection.execute("COMMIT")
                     fault(SqliteInitStage.AFTER_SCHEMA_COMMIT)
