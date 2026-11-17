@@ -35,7 +35,7 @@ class AndroidSqliteConfigurationTest {
 
     @Test fun productionConfigurationSetsExistingAndFutureConnections() {
         val pool = Pool()
-        AndroidInvocationStore.configureConnections(pool.db)
+        AndroidAgentStore.configureConnections(pool.db)
         pool.connections += pool.futureSync
         assertEquals(listOf(2, 2, 2), pool.connections)
         assertTrue(pool.foreignKeys)
@@ -44,14 +44,14 @@ class AndroidSqliteConfigurationTest {
 
     @Test fun unsupportedPoolFailsClosedWithoutSingleConnectionFallback() {
         val pool = Pool(supported = false)
-        assertThrows(StoreException::class.java) { AndroidInvocationStore.configureConnections(pool.db) }
+        assertThrows(StoreException::class.java) { AndroidAgentStore.configureConnections(pool.db) }
         assertTrue(pool.operations.isEmpty())
         assertEquals(listOf(1, 1), pool.connections)
     }
 
     @Test fun configurationIsRejectedInsideTransaction() {
         val pool = Pool(transaction = true)
-        assertThrows(IllegalStateException::class.java) { AndroidInvocationStore.configureConnections(pool.db) }
+        assertThrows(IllegalStateException::class.java) { AndroidAgentStore.configureConnections(pool.db) }
         assertTrue(pool.operations.isEmpty())
     }
 }

@@ -6,7 +6,7 @@ import java.nio.file.Files
 import java.security.MessageDigest
 import kotlin.test.*
 
-class FileRunAccountingTest {
+class SqliteRunAccountingTest {
     private val durability = Durability.PROCESS_CRASH_ONLY
     private fun key(chain: String) = "accounting/" + MessageDigest.getInstance("SHA-256")
         .digest(chain.toByteArray()).joinToString("") { "%02x".format(it) }

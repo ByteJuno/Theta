@@ -713,7 +713,7 @@ class HostToolExecutionServiceTest {
         val dir = java.nio.file.Files.createTempDirectory("unknown-bridge-store")
         val budget = PluginExecutionBudget()
         val owner = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        var store: AndroidInvocationStore? = null
+        var store: AndroidAgentStore? = null
         try {
             val gate = DefinitionGate()
             val validator = Schema202012Validator()
@@ -2114,7 +2114,7 @@ class HostToolExecutionServiceTest {
     @Test fun realClockBridgePersistsWithProductionStoreAndReopensWithoutReplay() = runBlocking {
         val dir = java.nio.file.Files.createTempDirectory("host-bridge-store")
         val budget = PluginExecutionBudget()
-        var store: AndroidInvocationStore? = null
+        var store: AndroidAgentStore? = null
         try {
             store = openTestStore(dir.toFile())
             val service = HostToolBridgeRoot(budget).initialize { checkNotNull(store) }

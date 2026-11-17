@@ -7,6 +7,9 @@ import java.io.File;
 import java.nio.file.Files;
 import java.nio.charset.StandardCharsets;
 import java.lang.reflect.Method;
+import android.database.Cursor;
+import android.database.sqlite.SQLiteDatabase;
+import java.io.ByteArrayOutputStream;
 
 /** Test APK only. Loads the installed, unchanged R8 application's explicit runtime contract. */
 public final class LedgerInstrumentation extends Instrumentation {
@@ -33,10 +36,22 @@ public final class LedgerInstrumentation extends Instrumentation {
     }
     private String freeze(String run) throws Exception {
         JSONObject directory = call(op("freeze").put("runId", run));
-        require(directory.length() == 1, "expected host-only directory");
-        String name = directory.keys().next();
-        require("host/clock".equals(directory.getJSONObject(name).getString("toolKey")), "clock not registered");
-        return name;
+        String clock = null;
+        java.util.Set<String> keys = new java.util.HashSet<>();
+        java.util.Iterator<String> names = directory.keys();
+        while (names.hasNext()) {
+            String name = names.next();
+            String key = directory.getJSONObject(name).getString("toolKey");
+            require(keys.add(key), "duplicate tool registration");
+            if ("host/clock".equals(key)) {
+                require(clock == null, "ambiguous clock registration");
+                clock = name;
+            }
+        }
+        require(keys.equals(new java.util.HashSet<>(java.util.Arrays.asList(
+            "host/clock", "host/blob_read", "host/screen_info"))), "unexpected host directory");
+        require(clock != null, "clock not registered");
+        return clock;
     }
     private String id(JSONObject record) throws Exception {
         return record.getJSONObject("input").getJSONObject("binding").getString("callId");
@@ -46,6 +61,37 @@ public final class LedgerInstrumentation extends Instrumentation {
         Files.write(file.toPath(), text.getBytes(StandardCharsets.UTF_8));
     }
     private String read(File file) throws Exception { return new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8); }
+    private SQLiteDatabase database(boolean writable) {
+        File file = new File(root, "agent.db");
+        require(file.isFile(), "no-backup agent database missing");
+        return SQLiteDatabase.openDatabase(file.getPath(), null,
+            writable ? SQLiteDatabase.OPEN_READWRITE : SQLiteDatabase.OPEN_READONLY);
+    }
+    // Compare committed logical rows, never the mutable SQLite/WAL file bytes.
+    private String persisted(String callId) throws Exception {
+        try (SQLiteDatabase db = database(false)) {
+            ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+            try (Cursor chunks = db.rawQuery("SELECT bytes FROM record_chunks WHERE call_id=? ORDER BY ordinal", new String[]{callId})) {
+                while (chunks.moveToNext()) bytes.write(chunks.getBlob(0));
+            }
+            byte[] payload = bytes.toByteArray();
+            JSONObject stored = new JSONObject(new String(payload, StandardCharsets.UTF_8));
+            require(callId.equals(id(stored)), "persisted call binding mismatch");
+            require(get(callId).getString("state").equals(stored.getString("state")), "persisted state differs from runtime");
+            try (Cursor record = db.rawQuery("SELECT revision,size,hash FROM invocations WHERE call_id=?", new String[]{callId})) {
+                require(record.moveToFirst(), "persisted invocation missing");
+                require(record.getLong(1) == payload.length && payload.length > 0, "persisted size mismatch");
+                StringBuilder hash = new StringBuilder();
+                for (byte b : java.security.MessageDigest.getInstance("SHA-256").digest(payload))
+                    hash.append(String.format(java.util.Locale.ROOT, "%02x", b & 0xff));
+                require(hash.toString().equals(record.getString(2)), "persisted checksum mismatch");
+                String snapshot = record.getLong(0) + ":" + record.getString(2) + ":" +
+                    android.util.Base64.encodeToString(payload, android.util.Base64.NO_WRAP);
+                require(!record.moveToNext(), "duplicate invocation identity");
+                return snapshot;
+            }
+        }
+    }
     @Override public void onStart() {
         Bundle result = new Bundle();
         String phase = args.getString("phase");
@@ -57,11 +103,11 @@ public final class LedgerInstrumentation extends Instrumentation {
             require(mapped.isInstance(application), "mapping/APK application mismatch");
             request = mapped.getMethod("hostToolRequestForInstrumentation", String.class);
             root = getTargetContext().getNoBackupFilesDir();
-            File directory = new File(root, "host-invocations");
             File snapshot = new File(root, "acceptance-completed.json");
             if ("execute".equals(phase)) {
-                require(new File(directory, "ledger.identity").isFile(), "launcher startup ledger missing");
                 String badName = freeze("bad");
+                require(new File(root, "agent.db").isFile(), "launcher startup database missing");
+                require(new File(root, "agent.db.writer.lock").isFile(), "database owner missing");
                 JSONObject bad = prepare("bad", badName, "{\"extra\":1}").getJSONObject("record");
                 require("REJECTED".equals(bad.getString("state")) && bad.isNull("instance"), "schema must reject before execution");
                 JSONObject unknown = prepare("unknown", freeze("unknown") + "_missing", "{}").getJSONObject("record");
@@ -87,22 +133,20 @@ public final class LedgerInstrumentation extends Instrumentation {
                 JSONObject value = completed.getJSONObject("result");
                 require("NONE".equals(value.getString("effect")), "clock effect");
                 require(value.getString("text").contains("epochMillis"), "structured output missing");
-                File disk = new File(directory, callId + ".json");
-                require(disk.isFile() && read(disk).contains("SUCCEEDED"), "not persisted to noBackup");
                 write(snapshot, completed.toString());
-                write(new File(root, "acceptance-disk.json"), read(disk));
+                write(new File(root, "acceptance-disk.json"), persisted(callId));
                 result.putString("callId", callId);
             } else if ("ready-create".equals(phase)) {
                 JSONObject ready = prepare("ready-restart", freeze("ready-restart"), "{}").getJSONObject("record");
                 require("READY".equals(ready.getString("state")), "restart fixture not READY");
                 write(new File(root, "acceptance-ready.json"), ready.toString());
-                write(new File(root, "acceptance-ready-disk.json"), read(new File(directory, id(ready) + ".json")));
+                write(new File(root, "acceptance-ready-disk.json"), persisted(id(ready)));
             } else if ("ready-restart".equals(phase)) {
                 JSONObject ready = new JSONObject(read(new File(root, "acceptance-ready.json")));
                 String callId = id(ready);
                 require("blocked".equals(call(op("dispatch").put("callId", callId)).getString("kind")), "missing directory must block");
                 require(ready.toString().equals(get(callId).toString()), "missing directory mutated READY record");
-                require(read(new File(directory, callId + ".json")).equals(read(new File(root, "acceptance-ready-disk.json"))), "missing directory rewrote disk");
+                require(persisted(callId).equals(read(new File(root, "acceptance-ready-disk.json"))), "missing directory rewrote committed record");
                 freeze("ready-restart"); // explicit trusted freeze, not automatic recovery/alias reconstruction
                 require("applied".equals(call(op("dispatch").put("callId", callId)).getString("kind")), "explicit freeze did not unblock valid READY");
                 long deadline = System.nanoTime() + 15_000_000_000L;
@@ -121,28 +165,41 @@ public final class LedgerInstrumentation extends Instrumentation {
                 String callId = id(old);
                 JSONObject recovered = get(callId);
                 require(recovered.toString().equals(old.toString()), "restart changed terminal record");
-                require(read(new File(directory, callId + ".json")).equals(read(new File(root, "acceptance-disk.json"))), "restart rewrote completed record");
+                require(persisted(callId).equals(read(new File(root, "acceptance-disk.json"))), "restart rewrote completed record");
                 require("conflict".equals(call(op("dispatch").put("callId", callId)).getString("kind")), "completed invocation replayed");
             } else if ("storage".equals(phase)) {
                 String name = freeze("storage");
-                File moved = new File(root, "acceptance-ledger-held");
-                require(directory.renameTo(moved), "cannot inject path failure");
+                // Test APK only: force an actual SQLite write rejection without moving live WAL files.
+                try (SQLiteDatabase db = database(true)) {
+                    db.execSQL("CREATE TRIGGER acceptance_reject_write BEFORE INSERT ON invocations " +
+                        "BEGIN SELECT RAISE(ABORT, 'acceptance injected storage failure'); END");
+                }
                 try {
-                    write(directory, "not a directory");
                     require("storageFailure".equals(prepare("storage", name, "{}").getString("kind")), "lost write acknowledged");
                 } finally {
-                    require(directory.delete(), "cannot remove injected failure");
-                    require(moved.renameTo(directory), "cannot restore ledger");
+                    try (SQLiteDatabase db = database(true)) { db.execSQL("DROP TRIGGER acceptance_reject_write"); }
                 }
                 require("blocked".equals(prepare("storage", name, "{}").getString("kind")), "submissions reopened after failure");
-                File marker = new File(directory, "ledger.identity");
-                write(new File(root, "acceptance-marker"), read(marker));
-                write(marker, "corrupt-marker");
+                // Corrupt a logical checksum for the next cold open. Do not open/close the
+                // lifetime lock inode: on POSIX even another descriptor can release its lock.
+                String corruptId = java.util.UUID.nameUUIDFromBytes("bad".getBytes(StandardCharsets.UTF_8)).toString();
+                try (SQLiteDatabase db = database(true)) {
+                    try (Cursor row = db.rawQuery("SELECT hash FROM invocations WHERE call_id=?", new String[]{corruptId})) {
+                        require(row.moveToFirst(), "startup failure fixture missing");
+                        write(new File(root, "acceptance-corruption.json"), new JSONObject()
+                            .put("callId", corruptId).put("hash", row.getString(0)).toString());
+                    }
+                    db.execSQL("UPDATE invocations SET hash='corrupt-checksum' WHERE call_id=?", new Object[]{corruptId});
+                }
             } else if ("startup-failure".equals(phase)) {
                 boolean failed = false;
                 try { freeze("broken"); } catch (java.lang.reflect.InvocationTargetException expected) { failed = true; }
                 require(failed, "corrupt store accepted at startup");
-                write(new File(directory, "ledger.identity"), read(new File(root, "acceptance-marker")));
+                JSONObject corruption = new JSONObject(read(new File(root, "acceptance-corruption.json")));
+                try (SQLiteDatabase db = database(true)) {
+                    db.execSQL("UPDATE invocations SET hash=? WHERE call_id=?",
+                        new Object[]{corruption.getString("hash"), corruption.getString("callId")});
+                }
                 failed = false;
                 try { freeze("still-broken"); } catch (java.lang.reflect.InvocationTargetException expected) { failed = true; }
                 require(failed, "startup failure was not sticky");
