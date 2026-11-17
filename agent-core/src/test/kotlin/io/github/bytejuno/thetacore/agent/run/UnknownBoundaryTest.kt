@@ -213,14 +213,14 @@ class UnknownBoundaryTest {
             val path = Files.createTempDirectory("unknown-paired-history")
             val assistant = message(Role.ASSISTANT, toolCallPart(input.binding, input.modelName, input.argsJson))
             val identity = RunIdentity("chain", "session", input.runId)
-            FileRunHistory.create(path, "session", Durability.PROCESS_CRASH_ONLY).close()
-            FileRunHistory.open(path, Durability.PROCESS_CRASH_ONLY).use { h -> h.prepareStep(0, identity, "step", assistant) }
-            FileRunHistory.open(path, Durability.PROCESS_CRASH_ONLY) {
-                if (it.file == "head.json" && it.stage == HistoryWriteStage.AFTER_REPLACE) error("stop after commit before pending removal")
+            TestRunHistory.create(path, "session", Durability.PROCESS_CRASH_ONLY).close()
+            TestRunHistory.open(path, Durability.PROCESS_CRASH_ONLY).use { h -> h.prepareStep(0, identity, "step", assistant) }
+            TestRunHistory.open(path, Durability.PROCESS_CRASH_ONLY) {
+                if (it.file == "append" && it.stage == HistoryWriteStage.AFTER_COMMIT) error("stop after commit before pending removal")
             }.use { h -> assertFails { h.append(0, listOf(assistant, f.ledger.resultsForStep("session", input.runId, "step", listOf(a.record.callId))!!)) } }
             f.ledger.complete(a.record.callId, a.ticket.attemptId, Status.FAILED, "late unknown", Effect.UNKNOWN)
             f.reopen()
-            FileRunHistory.open(path, Durability.PROCESS_CRASH_ONLY).use { h ->
+            TestRunHistory.open(path, Durability.PROCESS_CRASH_ONLY).use { h ->
                 assertTrue(h.recoverPending(f.ledger).recovered)
                 assertEquals(1, h.revision())
                 val p = ScriptProvider(listOf(answer()))
@@ -228,7 +228,7 @@ class UnknownBoundaryTest {
                 assertReconciliationOnly(p.requests.single(), a.record.callId)
                 assertEquals(canonical, f.ledger.get(a.record.callId)!!.result)
             }
-            FileRunHistory.open(path, Durability.PROCESS_CRASH_ONLY).use { h ->
+            TestRunHistory.open(path, Durability.PROCESS_CRASH_ONLY).use { h ->
                 val p = ScriptProvider(listOf(answer()))
                 assertEquals(RunState.COMPLETED, emptyLoop(f, h, p).run().state)
                 assertReconciliationOnly(p.requests.single(), a.record.callId)
@@ -252,7 +252,7 @@ class UnknownBoundaryTest {
             val input = f.input(definition().copy(toolKey = "reader/tool"), unattended = true)
             val a = f.claim(f.ready(input))
             val path = Files.createTempDirectory("unknown-denial-history")
-            FileRunHistory.create(path, "session", Durability.PROCESS_CRASH_ONLY).use { h ->
+            TestRunHistory.create(path, "session", Durability.PROCESS_CRASH_ONLY).use { h ->
                 val assistant = message(Role.ASSISTANT, toolCallPart(input.binding, input.modelName, input.argsJson))
                 h.prepareStep(0, RunIdentity("chain", "session", input.runId, true), "step", assistant)
                 assertIs<Mutation.Blocked>(f.ledger.requestRiskUpgrade(a.record.callId, a.ticket!!.attemptId, Risk.WRITE))
@@ -261,7 +261,7 @@ class UnknownBoundaryTest {
             }
             val receipt = f.ledger.get(a.record.callId)!!.receipts.single()
             f.reopen()
-            FileRunHistory.open(path, Durability.PROCESS_CRASH_ONLY).use { h ->
+            TestRunHistory.open(path, Durability.PROCESS_CRASH_ONLY).use { h ->
                 h.recoverPending(f.ledger)
                 for (unattended in listOf(true, false)) {
                     val p = ScriptProvider(listOf(answer()))
@@ -276,7 +276,7 @@ class UnknownBoundaryTest {
                 assertEquals(RunState.COMPLETED, emptyLoop(f, h, ScriptProvider(listOf(answer()))).run().state)
             }
             f.reopen("epoch-3")
-            FileRunHistory.open(path, Durability.PROCESS_CRASH_ONLY).use { h ->
+            TestRunHistory.open(path, Durability.PROCESS_CRASH_ONLY).use { h ->
                 assertEquals(RunState.COMPLETED, emptyLoop(f, h, ScriptProvider(listOf(answer()))).run().state)
             }
             path.toFile().deleteRecursively()

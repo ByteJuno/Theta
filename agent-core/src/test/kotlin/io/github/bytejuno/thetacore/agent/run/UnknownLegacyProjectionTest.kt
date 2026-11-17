@@ -41,37 +41,37 @@ class UnknownLegacyProjectionTest {
             val pair = listOf(assistant, message(Role.TOOL, toolResultPart(id, if (mismatch) legacy + " " else legacy, true)))
             val path = Files.createTempDirectory("unknown-legacy-history")
             try {
-                FileRunHistory.create(path, "session", Durability.PROCESS_CRASH_ONLY).use { h ->
+                TestRunHistory.create(path, "session", Durability.PROCESS_CRASH_ONLY).use { h ->
                     h.prepareStep(0, RunIdentity("chain", "session", input.runId), "step", assistant)
                 }
-                FileRunHistory.open(path, Durability.PROCESS_CRASH_ONLY) {
-                    if (it.file == "head.json" && it.stage == HistoryWriteStage.AFTER_REPLACE)
+                TestRunHistory.open(path, Durability.PROCESS_CRASH_ONLY) {
+                    if (it.file == "append" && it.stage == HistoryWriteStage.AFTER_COMMIT)
                         error("crash after committed pair before pending cleanup")
                 }.use { h -> assertFailsWith<HistoryStorageException> { h.append(0, pair) } }
-                assertTrue(Files.exists(path.resolve("pending.json")))
-                val committedBytes = Files.readAllBytes(path.resolve("batches/1.json"))
+                assertTrue(TestRunHistory.exists(path, "pending"))
+                val committedBytes = TestRunHistory.bytes(path, "batches/1")
                 f.reopen()
                 assertEquals(raw, f.ledger.get(id)!!.result!!.text)
                 if (corrupt) {
-                    Files.write(path.resolve("batches/1.json"), byteArrayOf(0))
-                    assertFails { FileRunHistory.open(path, Durability.PROCESS_CRASH_ONLY) }
-                    assertTrue(Files.exists(path.resolve("pending.json")))
+                    TestRunHistory.corrupt(path, "batches/1")
+                    assertFails { TestRunHistory.open(path, Durability.PROCESS_CRASH_ONLY) }
+                    assertTrue(TestRunHistory.exists(path, "pending"))
                     return
                 }
-                FileRunHistory.open(path, Durability.PROCESS_CRASH_ONLY).use { h ->
+                TestRunHistory.open(path, Durability.PROCESS_CRASH_ONLY).use { h ->
                     if (mismatch) {
                         val failure = assertFailsWith<IllegalArgumentException> { h.recoverPending(f.ledger) }
                         assertEquals("Ledger/history disagreement", failure.message)
-                        assertTrue(Files.exists(path.resolve("pending.json")))
+                        assertTrue(TestRunHistory.exists(path, "pending"))
                         assertFails { h.snapshot() }
-                        assertContentEquals(committedBytes, Files.readAllBytes(path.resolve("batches/1.json")))
+                        assertContentEquals(committedBytes, TestRunHistory.bytes(path, "batches/1"))
                         return
                     }
                     val recovered = h.recoverPending(f.ledger)
                     assertTrue(recovered.recovered)
                     assertTrue(recovered.requiresDecision)
                     assertEquals(1, h.revision())
-                    assertFalse(Files.exists(path.resolve("pending.json")))
+                    assertFalse(TestRunHistory.exists(path, "pending"))
                     assertFalse(h.recoverPending(f.ledger).recovered)
                     assertEquals(pair.map(HistoryCodec::encodeMessage), h.snapshot().messages.map(HistoryCodec::encodeMessage))
                     val p = ScriptProvider(listOf(answer()))
@@ -80,13 +80,13 @@ class UnknownLegacyProjectionTest {
                 }
                 // Another process/loop reopen neither upgrades the legacy result nor injects messages.
                 f.reopen("epoch-3")
-                FileRunHistory.open(path, Durability.PROCESS_CRASH_ONLY).use { h ->
+                TestRunHistory.open(path, Durability.PROCESS_CRASH_ONLY).use { h ->
                     val p = ScriptProvider(listOf(answer()))
                     assertEquals(RunState.COMPLETED, loop(f, h, p).run().state)
                     assertRequest(p.requests.single(), id, legacy, pair)
                 }
                 assertEquals(canonical, f.ledger.get(id)!!.result)
-                assertContentEquals(committedBytes, Files.readAllBytes(path.resolve("batches/1.json")))
+                assertContentEquals(committedBytes, TestRunHistory.bytes(path, "batches/1"))
             } finally { path.toFile().deleteRecursively() }
         }
     }

@@ -18,7 +18,17 @@ import java.io.File
  * Unlike AndroidSQLiteDriver's default corruption handler, this callback NEVER deletes a
  * damaged ledger. Both framework auto-recovery and schema downgrade fail closed.
  */
-internal class AndroidInvocationStore private constructor(delegate: InvocationStore) : InvocationStore by delegate {
+internal class AndroidInvocationStore private constructor(
+    private val database: AgentDatabase, private val delegate: InvocationStore,
+) : InvocationStore by delegate {
+    fun createHistory(sessionId: String) = io.github.bytejuno.thetacore.agent.run.SqliteRunHistory.create(database, sessionId)
+    fun openHistory(sessionId: String) = io.github.bytejuno.thetacore.agent.run.SqliteRunHistory.open(database, sessionId)
+    override fun close() = synchronized(database) {
+        // Check pins and close the owner before mutating the borrowed ledger. Holding
+        // the database monitor excludes a new run/spool between admission and close.
+        database.close()
+        delegate.close()
+    }
     companion object {
         fun open(context: Context): AndroidInvocationStore {
             val helper = FrameworkSQLiteOpenHelperFactory().create(
@@ -34,7 +44,7 @@ internal class AndroidInvocationStore private constructor(delegate: InvocationSt
                             AgentDatabase.createSchema(SupportSQLiteConnection(db))
                         }
                         override fun onUpgrade(db: SupportSQLiteDatabase, oldVersion: Int, newVersion: Int) {
-                            throw StoreException("Unsupported agent database schema $oldVersion")
+                            AgentDatabase.upgradeSchema(SupportSQLiteConnection(db), oldVersion, newVersion)
                         }
                         override fun onDowngrade(db: SupportSQLiteDatabase, oldVersion: Int, newVersion: Int) {
                             throw StoreException("Unsupported agent database schema $oldVersion")
@@ -45,7 +55,7 @@ internal class AndroidInvocationStore private constructor(delegate: InvocationSt
                     }).build())
             try {
                 helper.setWriteAheadLoggingEnabled(true)
-                return open(context.noBackupFilesDir, SupportSQLiteDriver(helper))
+                return open(context, SupportSQLiteDriver(helper))
             } catch (error: Throwable) {
                 runCatching { helper.close() }
                 throw error
@@ -66,11 +76,21 @@ internal class AndroidInvocationStore private constructor(delegate: InvocationSt
             db.execPerConnectionSQL("PRAGMA synchronous=FULL", null)
         }
 
+        /** Resolve only Android's trusted storage anchor (e.g. /data/user/0 alias).
+         * Injected roots and all app-owned descendants still receive strict validation. */
+        internal fun open(context: Context, driver: SQLiteDriver): AndroidInvocationStore {
+            val anchor = context.noBackupFilesDir
+            require(anchor.toPath().none { it.toString() == "." || it.toString() == ".." })
+            return open(anchor.canonicalFile, driver)
+        }
+
         /** Bundled desktop driver is injected only by JVM tests. */
         internal fun open(root: File, driver: SQLiteDriver,
             fault: (SqliteWriteStage) -> Unit = {}): AndroidInvocationStore {
             require(root.isDirectory) { "No private no-backup directory" }
-            return AndroidInvocationStore(SqliteInvocationStore.open(File(root, AgentDatabase.FILE_NAME).toPath(), driver, fault))
+            val database = AgentDatabase.open(File(root, AgentDatabase.FILE_NAME).toPath(), driver)
+            try { return AndroidInvocationStore(database, SqliteInvocationStore.open(database, fault)) }
+            catch (error: Throwable) { runCatching { database.close() }; throw error }
         }
     }
 }

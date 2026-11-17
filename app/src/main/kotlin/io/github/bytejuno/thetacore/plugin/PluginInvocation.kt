@@ -12,6 +12,8 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.isActive
+import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -53,6 +55,8 @@ internal class PluginInvocation(
     private val reservation: PluginExecutionBudget.Lease? = null,
     /** Only the ledger-backed host hook can evaluate non-interactive grants. */
     private val unattendedApprovalPolicy: Boolean = false,
+    /** Last host admission check on the worker, before entering plugin code; not revocation. */
+    private val beforeExecution: suspend () -> Boolean = { true },
 ) : AutoCloseable {
     init { require(defaultTimeoutMillis > 0 && totalTimeoutMillis in 1..600_000) }
     private val completion = CompletableDeferred<PluginInvocationResult>()
@@ -93,7 +97,7 @@ internal class PluginInvocation(
         started = true
         startedNanos = System.nanoTime()
         lastProgressNanos = startedNanos
-        val action: suspend CoroutineScope.() -> Unit = {
+        val action: suspend CoroutineScope.() -> Unit = action@ {
             try {
                 // JsonObject can wrap a plugin-provided Map. Detach it on the bounded worker
                 // before publishing metadata/results for host/Main readers.
@@ -110,7 +114,15 @@ internal class PluginInvocation(
                         !completion.isCompleted
                     }
                 }
-                if (proceed) {
+                if (!proceed) return@action
+                val admitted = beforeExecution()
+                if (!admitted) {
+                    synchronized(budget.gate) {
+                        if (!expireIfDue()) finish(PluginInvocationResult(PluginInvocationStatus.REJECTED, message = "Execution admission closed"))
+                    }
+                    return@action
+                }
+                run {
                     val env = ToolEnv(request.runId, request.sessionId, request.callId, request.unattended,
                         onProgress = { text, fraction -> reportProgress(text, fraction) },
                         onApproval = { summary, risk ->
@@ -121,8 +133,21 @@ internal class PluginInvocation(
                             if (completion.isCompleted) null
                             else requestInput(prompt, schema).takeUnless { completion.isCompleted }
                         })
-                    bodyEntered = true
                     val result = coroutineScope {
+                        val executionContext = coroutineContext
+                        val enter = synchronized(budget.gate) {
+                            // Linearize body entry with timeout/cancel, AFTER the suspending
+                            // host admission callback. No database/definition lock is held here.
+                            if (expireIfDue()) false
+                            else if (!executionContext.isActive || !owner.isActive || lease?.cancelRequested == true) {
+                                finish(PluginInvocationResult(PluginInvocationStatus.CANCELLED, message = "Invocation cancelled"))
+                                false
+                            } else {
+                                bodyEntered = true
+                                true
+                            }
+                        }
+                        if (!enter) return@coroutineScope null
                         val rawResult = tool.call(args, env)
                         rawResult.copy(structured = rawResult.structured?.let {
                             Json.parseToJsonElement(it.toString())
@@ -137,7 +162,7 @@ internal class PluginInvocation(
                             capture(PluginInvocationResult(
                                 if (it.isError) PluginInvocationStatus.FAILED else PluginInvocationStatus.SUCCEEDED, it))
                         }
-                    }
+                    } ?: return@action
                     synchronized(budget.gate) {
                         // Deadline checks also arbitrate a return racing a delayed timer thread.
                         if (!expireIfDue()) finish(PluginInvocationResult(
