@@ -21,8 +21,29 @@ public final class S1PayloadProvider extends ContentProvider {
         if (!("ranchu".equals(Build.HARDWARE) || "goldfish".equals(Build.HARDWARE))
                 || !"r".equals(mode)
                 || !"io.github.bytejuno.thetacore.s1.test.payloads".equals(uri.getAuthority())
-                || !("/v1".equals(uri.getPath()) || "/v2".equals(uri.getPath()))
+                || !("/v1".equals(uri.getPath()) || "/v2".equals(uri.getPath()) || "/language-data".equals(uri.getPath())
+                    || "/language-deleted".equals(uri.getPath()) || "/language-denied".equals(uri.getPath()))
                 || uri.getQuery() != null) throw new FileNotFoundException("Fixed emulator assets only");
+        if ("/language-deleted".equals(uri.getPath())) {
+            File deleted = new File(getContext().getCacheDir(), "issue82-deleted.apk");
+            if (deleted.exists() && !deleted.delete()) throw new FileNotFoundException("Cannot delete fixture");
+            return ParcelFileDescriptor.open(deleted, ParcelFileDescriptor.MODE_READ_ONLY);
+        }
+        if ("/language-denied".equals(uri.getPath())) throw new SecurityException("issue82 provider permission revoked fixture");
+        if ("/language-data".equals(uri.getPath())) {
+            File zip = new File(getContext().getCacheDir(), "issue82-language-data.zip");
+            try (java.util.zip.ZipOutputStream out = new java.util.zip.ZipOutputStream(Files.newOutputStream(zip.toPath()))) {
+                String[] paths = {"theta-plugin.json", "skills/example/SKILL.md"};
+                String[] texts = {"{\"schema\":1,\"type\":\"data\",\"id\":\"test.issue82.data\",\"name\":\"Language fixture\",\"version\":\"1.0\",\"versionCode\":1,\"apiLevel\":1}",
+                    "Synthetic offline language fixture. No credentials or network."};
+                for (int i = 0; i < paths.length; i++) {
+                    out.putNextEntry(new java.util.zip.ZipEntry(paths[i]));
+                    out.write(texts[i].getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                    out.closeEntry();
+                }
+            } catch (java.io.IOException failure) { throw new FileNotFoundException(failure.toString()); }
+            return ParcelFileDescriptor.open(zip, ParcelFileDescriptor.MODE_READ_ONLY);
+        }
         String name = "code-" + uri.getLastPathSegment() + ".apk";
         File target = new File(getContext().getCacheDir(), name);
         File temporary = new File(getContext().getCacheDir(), name + ".preparing");

@@ -20,6 +20,7 @@
         android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:label="@string/app_name"
+        android:localeConfig="@xml/locales_config"
         android:supportsRtl="true"
         android:theme="@style/Theme.ThetaCore">
         <provider android:name="io.github.libxposed.service.XposedProvider" tools:node="remove" />

@@ -1,5 +1,9 @@
 package io.github.bytejuno.thetacore.plugin
 
+import io.github.bytejuno.thetacore.R
+import io.github.bytejuno.thetacore.UiText
+import io.github.bytejuno.thetacore.uiText
+
 import android.content.Context
 import android.net.Uri
 import androidx.compose.runtime.getValue
@@ -39,7 +43,7 @@ private const val CLOSE_TIMEOUT_MS = 5_000L
 internal class ManagedPlugin(val manifest: PluginManifest, state: PluginState) {
     var enabled by mutableStateOf(state.enabled)
         private set
-    var status by mutableStateOf(if (state.enabled) "Not running" else "Disabled")
+    var status by mutableStateOf(if (state.enabled) uiText(R.string.status_not_running) else uiText(R.string.status_disabled))
         private set
     var busy by mutableStateOf(false)
         private set
@@ -66,7 +70,7 @@ internal class ManagedPlugin(val manifest: PluginManifest, state: PluginState) {
         enabled = state.enabled
         pendingDelete = state.pendingDelete
     }
-    internal fun status(value: String) { status = value }
+    internal fun status(value: UiText) { status = value }
     internal fun busy(value: Boolean) { busy = value }
 }
 
@@ -196,14 +200,14 @@ internal class PluginManager(context: Context) {
             }
             plugins += plugin
             when {
-                id in blocked -> plugin.status(if (state.pendingDelete) "Uninstall pending; restart required" else "State unavailable; restart required")
+                id in blocked -> plugin.status(if (state.pendingDelete) uiText(R.string.status_uninstall_pending) else uiText(R.string.status_state_unavailable))
                 id in interrupted -> {
-                    plugin.status("Previous initialization interrupted; disabled")
+                    plugin.status(uiText(R.string.status_initialization_interrupted))
                     failures += "$id: previous initialization interrupted; disabled conservatively (cause unknown)"
                 }
-                id in crashSuspects -> plugin.status("Crash suspect; disabled until explicitly enabled")
-                skipLoading -> plugin.status("Safe mode; loading skipped until restart")
-                !state.enabled -> plugin.status("Disabled")
+                id in crashSuspects -> plugin.status(uiText(R.string.status_crash_suspect))
+                skipLoading -> plugin.status(uiText(R.string.status_safe_mode))
+                !state.enabled -> plugin.status(uiText(R.string.status_disabled))
                 else -> busy(plugin) { load(plugin, installedPlugin) }
             }
         }
@@ -245,14 +249,12 @@ internal class PluginManager(context: Context) {
 
     private fun openImport(uri: Uri): java.io.InputStream {
         if (uri.scheme == "file") {
-            val path = uri.path ?: throw PluginPackageException("Invalid file URI")
+            val path = uri.path ?: throw PluginPackageException("Invalid file URI", PluginFailureReason.FILE_UNAVAILABLE)
             if (File(path).canonicalFile.toPath().startsWith(app.dataDir.canonicalFile.toPath())) {
-                throw PluginPackageException("Refusing to read app data")
+                throw PluginPackageException("Refusing to read app data", PluginFailureReason.FILE_UNAVAILABLE)
             }
         }
-        return try { app.contentResolver.openInputStream(uri) } catch (e: IllegalArgumentException) {
-            throw PluginPackageException("Cannot open selected file")
-        } ?: throw PluginPackageException("Cannot open selected file")
+        return openPluginImportStream { app.contentResolver.openInputStream(uri) }
     }
 
     private suspend fun <T : Any> importSource(
@@ -260,7 +262,7 @@ internal class PluginManager(context: Context) {
         stageLocal: (File) -> T, discard: (T) -> Unit, assign: (T) -> Unit,
     ): T? = withContext(Dispatchers.Main.immediate) {
         if (session.closed) return@withContext null
-        dataRequire(!stageCleanup.hasPending, "Import cleanup pending; use Retry import cleanup")
+        dataRequire(!stageCleanup.hasPending, "Import cleanup pending; use Retry import cleanup", PluginFailureReason.IMPORT_CLEANUP_PENDING)
         session.source?.cancel()
         // Fail-fast process-wide admission BEFORE any host job/queue or provider acquisition.
         val copy = pluginImportSources.start(File(app.cacheDir, "plugin-import-sources"), maxBytes,
@@ -300,7 +302,7 @@ internal class PluginManager(context: Context) {
         stageLocal = { file -> stagePluginInput(
             open = { file.inputStream() }, stage = store::stage,
             discard = store::discard,
-            validate = { dataRequire(it.manifest.apiLevel in 1..THETA_API_LEVEL, "Unsupported API level") },
+            validate = { dataRequire(it.manifest.apiLevel in 1..THETA_API_LEVEL, "Unsupported API level", PluginFailureReason.UNSUPPORTED_API) },
         ) },
         discard = store::discard,
         assign = { session.code = it },
@@ -309,7 +311,7 @@ internal class PluginManager(context: Context) {
     suspend fun stageData(uri: Uri, session: PluginImportSession): StagedPluginData? {
         operation {
             restoreInternal()
-            dataRequire(!dataRecoveryBlocked, "Data recovery mode; resume on next cold start before importing")
+            dataRequire(!dataRecoveryBlocked, "Data recovery mode; resume on next cold start before importing", PluginFailureReason.DATA_RECOVERY)
         }
         return importSource(
             uri, session, PluginDataLimits().compressedBytes.toLong(),
@@ -323,8 +325,8 @@ internal class PluginManager(context: Context) {
 
     suspend fun installData(session: PluginImportSession, staged: StagedPluginData, digest: String, acknowledged: Boolean) = operation {
         restoreInternal()
-        dataRequire(!dataRecoveryBlocked, "Data recovery mode; importing unavailable")
-        dataRequire(!session.closed && session.source == null && session.data === staged, "Unknown data confirmation")
+        dataRequire(!dataRecoveryBlocked, "Data recovery mode; importing unavailable", PluginFailureReason.DATA_RECOVERY)
+        dataRequire(!session.closed && session.source == null && session.data === staged, "Unknown data confirmation", PluginFailureReason.CONFIRMATION_EXPIRED)
         session.data = null // ownership transfers to install, disposal cannot delete it.
         val selected = withContext(Dispatchers.IO) { dataCatalog.install(staged, digest, acknowledged) }
         if (stageCleanup.hasPending) failures += "Data installed; import cleanup pending; use Retry import cleanup"
@@ -336,7 +338,7 @@ internal class PluginManager(context: Context) {
 
     suspend fun setDataEnabled(id: String, enabled: Boolean) = operation {
         restoreInternal()
-        dataRequire(!dataRecoveryBlocked, "Data recovery mode; data selection unavailable")
+        dataRequire(!dataRecoveryBlocked, "Data recovery mode; data selection unavailable", PluginFailureReason.DATA_RECOVERY)
         val previous = dataPlugins.firstOrNull { it.selection.manifest.id == id }?.selection
         withContext(Dispatchers.IO) { dataCatalog.setEnabled(id, enabled, previous) }
         // Durable disable precedes revocation; management survives invalid or missing bytes.
@@ -368,7 +370,7 @@ internal class PluginManager(context: Context) {
     fun isDataPageActive(page: ManagedPluginData): Boolean = isManagedDataPageActive(dataPlugins, page)
 
     suspend fun readDataPage(page: ManagedPluginData, path: String?): PluginDataContent = operation {
-        dataRequire(isDataPageActive(page), "Data page revoked")
+        dataRequire(isDataPageActive(page), "Data page revoked", PluginFailureReason.DATA_PAGE_REVOKED)
         try { withContext(Dispatchers.IO) { dataCatalog.content(page.selection, path) } }
         catch (e: Exception) {
             quarantineDataPage(dataInventory, dataPlugins, page, e.message ?: "Invalid data content")
@@ -379,7 +381,7 @@ internal class PluginManager(context: Context) {
 
     suspend fun install(staged: StagedPlugin, session: PluginImportSession, allowCodeOnlyRollback: Boolean = false) = operation {
         restoreInternal()
-        dataRequire(!session.closed && session.source == null && session.code === staged, "Unknown code confirmation")
+        dataRequire(!session.closed && session.source == null && session.code === staged, "Unknown code confirmation", PluginFailureReason.CONFIRMATION_EXPIRED)
         session.code = null
         val id = staged.manifest.id
         val old = plugins.firstOrNull { it.manifest.id == id }
@@ -397,7 +399,7 @@ internal class PluginManager(context: Context) {
                     if (updateRecoveryUncertain) {
                         recoveryBlocked += id
                         deferred += id
-                        old?.status("Update publication uncertain; restart required")
+                        old?.status(uiText(R.string.status_publication_uncertain))
                         failures += "$id: update publication requires cold-start recovery"
                     }
                 }
@@ -406,12 +408,12 @@ internal class PluginManager(context: Context) {
             val (installed, state) = withContext(Dispatchers.IO) {
                 requireNoDataOwnership(app.filesDir, id)
                 val state = states.read(id)
-                if (state.pendingDelete) throw PluginPackageException("Uninstall pending; restart required")
-                if (id in deferred) throw PluginPackageException("Update or rollback pending; restart required")
+                if (state.pendingDelete) throw PluginPackageException("Uninstall pending; restart required", PluginFailureReason.UNINSTALL_PENDING)
+                if (id in deferred) throw PluginPackageException("Update or rollback pending; restart required", PluginFailureReason.RESTART_PENDING)
                 if (updates.read(id)?.phase in setOf(UpdatePhase.ROLLBACK, UpdatePhase.RECOVERED)) {
-                    throw PluginPackageException("Update or rollback pending; restart required")
+                    throw PluginPackageException("Update or rollback pending; restart required", PluginFailureReason.RESTART_PENDING)
                 }
-                if (staged.manifest.apiLevel !in 1..THETA_API_LEVEL) throw PluginPackageException("Unsupported API level")
+                if (staged.manifest.apiLevel !in 1..THETA_API_LEVEL) throw PluginPackageException("Unsupported API level", PluginFailureReason.UNSUPPORTED_API)
                 // Upgrades preserve desired state; first install defaults to enabled.
                 states.write(id, state)
                 val from = store.versions(id).lastOrNull()
@@ -447,9 +449,9 @@ internal class PluginManager(context: Context) {
             if (old == null) plugins += plugin else plugins[plugins.indexOf(old)] = plugin
             busy(plugin) {
                 when {
-                    update || gate.wasAttempted(id) -> plugin.status("Update installed; restart required")
-                    skipLoading -> plugin.status("Safe mode; loading skipped until restart")
-                    !state.enabled -> plugin.status("Disabled")
+                    update || gate.wasAttempted(id) -> plugin.status(uiText(R.string.status_update_installed))
+                    skipLoading -> plugin.status(uiText(R.string.status_safe_mode))
+                    !state.enabled -> plugin.status(uiText(R.string.status_disabled))
                     else -> load(plugin, installed)
                 }
             }
@@ -463,15 +465,15 @@ internal class PluginManager(context: Context) {
             val state = withContext(Dispatchers.IO) {
                 requireNoDataOwnership(app.filesDir, id)
                 val previous = states.read(id)
-                if (previous.pendingDelete) throw PluginPackageException("Uninstall pending; restart required")
-                if (enabled && id in recoveryBlocked) throw PluginPackageException("State unavailable; restart required")
+                if (previous.pendingDelete) throw PluginPackageException("Uninstall pending; restart required", PluginFailureReason.UNINSTALL_PENDING)
+                if (enabled && id in recoveryBlocked) throw PluginPackageException("State unavailable; restart required", PluginFailureReason.STATE_UNAVAILABLE)
                 previous.copy(enabled = enabled, resumeAfterRollback = false).also { states.write(id, it) }
             }
             plugin.state(state) // Durable BEFORE callbacks/cancellation, including acknowledgement failure.
             if (enabled && id in crashSuspects) {
                 val acknowledged = withContext(Dispatchers.IO) { crashRecovery?.acknowledgeSuspect(id) == true }
                 if (!acknowledged) {
-                    plugin.status("Crash quarantine acknowledgement failed; loading blocked until restart")
+                    plugin.status(uiText(R.string.status_quarantine_ack_failed))
                     throw IOException("Cannot acknowledge crash quarantine; restart required")
                 }
                 crashSuspects.remove(id)
@@ -479,14 +481,14 @@ internal class PluginManager(context: Context) {
             if (!enabled) {
                 close(plugin)
                 plugin.status(when {
-                    plugin.runtime?.closeFailed == true -> "Disabled; cleanup failed; restart required"
-                    gate.wasAttempted(id) -> "Disabled; restart required before loading again"
-                    else -> "Disabled"
+                    plugin.runtime?.closeFailed == true -> uiText(R.string.status_cleanup_failed)
+                    gate.wasAttempted(id) -> uiText(R.string.status_disabled_restart)
+                    else -> uiText(R.string.status_disabled)
                 })
             } else when {
-                skipLoading -> plugin.status("Safe mode; loading skipped until restart")
+                skipLoading -> plugin.status(uiText(R.string.status_safe_mode))
                 plugin.runtime?.active == true -> Unit
-                id in deferred || gate.wasAttempted(id) -> plugin.status("Enabled for next start; restart required")
+                id in deferred || gate.wasAttempted(id) -> plugin.status(uiText(R.string.status_enabled_next_start))
                 else -> {
                     val apk = withContext(Dispatchers.IO) {
                         pluginPath(pluginPath(app.filesDir.canonicalFile, "plugins"), "$id/${plugin.manifest.versionCode}/plugin.apk")
@@ -506,7 +508,7 @@ internal class PluginManager(context: Context) {
                 persistPluginUninstall(states, id, clearData)
             }
             plugin.state(state)
-            plugin.status("Uninstall pending; restart required")
+            plugin.status(uiText(R.string.status_uninstall_pending))
             close(plugin)
             if (!gate.wasAttempted(id)) {
                 deletePluginRecovery(id, recoveryBlocked) {
@@ -545,7 +547,7 @@ internal class PluginManager(context: Context) {
             requestPluginRollback(
                 request = {
                     withContext(Dispatchers.IO) {
-                        if (states.read(id).pendingDelete) throw PluginPackageException("Uninstall pending; restart required")
+                        if (states.read(id).pendingDelete) throw PluginPackageException("Uninstall pending; restart required", PluginFailureReason.UNINSTALL_PENDING)
                         updates.requestRollback(id)
                     }
                 },
@@ -557,7 +559,7 @@ internal class PluginManager(context: Context) {
                     deferred += id
                     plugin.canRollback = false
                     plugin.updateObservation = null
-                    plugin.status("Rollback scheduled; restart required")
+                    plugin.status(uiText(R.string.status_rollback_scheduled))
                 },
                 close = { close(plugin) },
             )
@@ -567,9 +569,9 @@ internal class PluginManager(context: Context) {
     /** Admission is serialized, execution and waiting never hold the manager mutation gate. */
     suspend fun invokeTool(id: String, tool: Tool, args: JsonObject): PluginInvocation = operation {
         val plugin = managed(id)
-        val runtime = plugin.runtime ?: throw PluginPackageException("Plugin is not running")
+        val runtime = plugin.runtime ?: throw PluginPackageException("Plugin is not running", PluginFailureReason.TOOL_INACTIVE)
         if (!runtime.active || runtime.context.faults.hasFault() || plugin.tools.none { it === tool }) {
-            throw PluginPackageException("Tool registration is no longer active")
+            throw PluginPackageException("Tool registration is no longer active", PluginFailureReason.TOOL_INACTIVE)
         }
         runtime.context.startTool(tool, args)
     }
@@ -600,7 +602,7 @@ internal class PluginManager(context: Context) {
         try {
             withContext(Dispatchers.IO) {
                 requireNoDataOwnership(app.filesDir, manifest.id)
-                if (manifest.apiLevel !in 1..THETA_API_LEVEL) throw PluginPackageException("Unsupported API level")
+                if (manifest.apiLevel !in 1..THETA_API_LEVEL) throw PluginPackageException("Unsupported API level", PluginFailureReason.UNSUPPORTED_API)
                 val data = pluginPath(pluginPath(app.filesDir.canonicalFile, "plugin-data"), manifest.id)
                 Files.createDirectories(data.toPath())
                 states.write(manifest.id, states.read(manifest.id).copy(initializing = true))
@@ -625,7 +627,7 @@ internal class PluginManager(context: Context) {
             }
             val runtime = PluginRuntime(context, manifest.versionCode)
             plugin.runtime = runtime
-            plugin.status("Initializing")
+            plugin.status(uiText(R.string.status_initializing))
             phase = "verify and enable callback"
             val worker = PluginWorker("theta-enable-${manifest.id}") {
                 // Covers first install, restore and re-enable, immediately before dex loading.
@@ -651,7 +653,7 @@ internal class PluginManager(context: Context) {
                 publish = {
                     runtime.active = true
                     context.activateExtensions()
-                    plugin.status("Running")
+                    plugin.status(uiText(R.string.status_running))
                 },
             )
             if (!published) handleFault(plugin, runtime)
@@ -675,7 +677,7 @@ internal class PluginManager(context: Context) {
                 false
             }
             if (rollback) plugin.canRollback = false
-            plugin.status(if (rollback) "Update failed; rollback on next start" else "Initialization failed; restart required")
+            plugin.status(if (rollback) uiText(R.string.status_update_failed) else uiText(R.string.status_initialization_failed))
             // Keep the marker after timeout/failure: next start disables conservatively.
         }
     }
@@ -714,10 +716,10 @@ internal class PluginManager(context: Context) {
             false
         }
         plugin.status(when {
-            persisted.errors.isNotEmpty() -> "Managed scope failed; disabled in process; persistence failed; restart required"
-            persisted.rollback -> "Update failed; rollback on next start"
-            runtime.closeFailed -> "Managed scope failed; disabled; cleanup failed; restart required"
-            else -> "Managed scope failed; disabled; restart required"
+            persisted.errors.isNotEmpty() -> uiText(R.string.status_scope_persistence_failed)
+            persisted.rollback -> uiText(R.string.status_update_failed)
+            runtime.closeFailed -> uiText(R.string.status_scope_cleanup_failed)
+            else -> uiText(R.string.status_scope_failed)
         })
     }
 
@@ -831,7 +833,7 @@ internal class HostPluginContext(
 
     suspend fun startTool(tool: Tool, args: JsonObject): PluginInvocation {
         if (!extensionsActive || faults.hasFault() || publicationSnapshot().none { it === tool }) {
-            throw PluginPackageException("Tool registration is no longer active")
+            throw PluginPackageException("Tool registration is no longer active", PluginFailureReason.TOOL_INACTIVE)
         }
         // Await only already-completed host terminal signals; no plugin work or waiting
         // occurs under the manager operation mutex. Count before the next admission.
@@ -843,9 +845,9 @@ internal class HostPluginContext(
         val retired = calls.keys.filter { it.actualExited.isCompleted && it in countedCalls }
         retired.forEach { calls.remove(it); countedCalls.remove(it) }
         if (toolFailures.isQuarantined(tool)) {
-            throw PluginPackageException("Tool quarantined after repeated failures or failure-tracking capacity exhaustion; restart required")
+            throw PluginPackageException("Tool quarantined after repeated failures or failure-tracking capacity exhaustion; restart required", PluginFailureReason.TOOL_QUARANTINED)
         }
-        if (calls.size >= 8) throw PluginPackageException("Tool execution capacity unavailable")
+        if (calls.size >= 8) throw PluginPackageException("Tool execution capacity unavailable", PluginFailureReason.TOOL_CAPACITY)
         val invocation = PluginInvocation(executionBudget, pluginId, scope, tool, args,
             ToolInvocationRequest(runId = "s1-direct", sessionId = "s1-direct"))
         calls[invocation] = tool

@@ -170,8 +170,8 @@ internal class PluginDataCatalog(
     }
 
     fun content(selection: SelectedPluginData, path: String?): PluginDataContent {
-        val current = states.read(selection.manifest.id) ?: throw PluginPackageException("Data page revoked")
-        dataRequire(current == selection.state && current.enabled && !current.pendingDelete, "Data page revoked")
+        val current = states.read(selection.manifest.id) ?: throw PluginPackageException("Data page revoked", PluginFailureReason.DATA_PAGE_REVOKED)
+        dataRequire(current == selection.state && current.enabled && !current.pendingDelete, "Data page revoked", PluginFailureReason.DATA_PAGE_REVOKED)
         val paths = mutableListOf<String>()
         var text: String? = null
         validateSelection(selection.manifest.id, current) { name, bytes ->
