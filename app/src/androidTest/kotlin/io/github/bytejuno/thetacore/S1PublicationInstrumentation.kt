@@ -95,11 +95,18 @@ class S1PublicationInstrumentation : Instrumentation() {
         val changed = sha(stage)
         check(original != changed)
         click("Install")
-        awaitText("Package changed while installing", contains = true, scroll = true)
+        val expected = targetContext.getString(R.string.failure_digest_mismatch)
+        awaitText(expected, scroll = true)
+        // Capture the actual rendered rejection, not a constant unrelated to the result.
+        val observed = nodes().mapNotNull { it.text?.toString() }.single { it == expected }
+        check(!isDigestRejection(targetContext.getString(R.string.operation_failed)))
+        check(!isDigestRejection(targetContext.getString(R.string.failure_signature_invalid)))
+        check(isDigestRejection(observed))
         check(store().versions(ID) == listOf(1L))
         check(!packageFile(2).exists() && counter().readText() == "1")
         complete(mapOf("originalStageSha256" to original, "changedStageSha256" to changed,
-            "rejection" to "Package changed while installing", "updatePublished" to false) + model())
+            "rejection" to observed, "rejectionResource" to "failure_digest_mismatch",
+            "unrelatedFailureRejectedByControl" to true, "updatePublished" to false) + model())
     }
 
     private fun crash() {
@@ -195,14 +202,25 @@ class S1PublicationInstrumentation : Instrumentation() {
     private fun awaitModel(version: Long, wanted: Boolean) = waitUntil {
         main { manager.plugins.singleOrNull { it.manifest.id == ID }?.let {
             it.manifest.versionCode == version && it.enabled == wanted &&
-                (if (wanted) it.status == "Running" else it.status.startsWith("Disabled"))
+                (if (wanted) it.status.key == R.string.status_running else it.status.key in setOf(
+                    R.string.status_disabled, R.string.status_disabled_restart, R.string.status_cleanup_failed))
         } == true }
     }
 
+    private fun isDigestRejection(observed: String): Boolean =
+        observed == targetContext.getString(R.string.failure_digest_mismatch)
+
     private fun model(): Map<String, Any> = main {
         val plugin = manager.plugins.single { it.manifest.id == ID }
-        mapOf("modelVersion" to plugin.manifest.versionCode, "modelEnabled" to plugin.enabled,
-            "modelStatus" to plugin.status, "runtimeVersion" to (plugin.runtime?.version ?: -1))
+        val status = targetContext.resources.getResourceEntryName(plugin.status.key)
+        val values = mapOf("modelVersion" to plugin.manifest.versionCode, "modelEnabled" to plugin.enabled,
+            "modelStatus" to status, "runtimeVersion" to (plugin.runtime?.version ?: -1))
+        // Android JSONObject(Map) silently turns arbitrary UiText objects into null.
+        // Assert the serialized value itself, not just our in-memory map.
+        val json = JSONObject(JSONObject(values).toString())
+        check(!json.isNull("modelStatus") && json.get("modelStatus") is String)
+        check(json.getString("modelStatus") == status && status.startsWith("status_"))
+        values
     }
 
     private fun packageFile(version: Int) = targetContext.filesDir.resolve("plugins/$ID/$version/plugin.apk")

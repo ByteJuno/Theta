@@ -1,5 +1,8 @@
 package io.github.bytejuno.thetacore.hook
 
+import io.github.bytejuno.thetacore.R
+import io.github.bytejuno.thetacore.uiStrings
+
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
@@ -26,6 +29,7 @@ import kotlinx.coroutines.withContext
 /** Embed in host UI. No publication or scope request occurs just by displaying this panel. */
 @Composable
 fun HookDiagnosticsPanel() {
+    val strings = uiStrings()
     val context = LocalContext.current.applicationContext
     val scope = rememberCoroutineScope()
     val status by HookHost.status.collectAsState()
@@ -50,19 +54,19 @@ fun HookDiagnosticsPanel() {
         catch (error: Throwable) { HookHost.fail(error) }
     }
     Column {
-        Text("S1 Modern Hook — dedicated ordinary target only")
-        Text(status)
-        Text("Full-trust code runs inside the target. Live disable depends on framework preference delivery; restart the target to exit Hook code. No custom target-to-Theta callback endpoint.")
+        Text(strings.get(R.string.hook_title))
+        Text(strings.get(status))
+        Text(strings.get(R.string.hook_trust_notice))
         Button(enabled = !busy, onClick = { picker.launch(arrayOf("application/vnd.android.package-archive", "application/octet-stream")) }) {
-            Text("Inspect signed Hook APK")
+            Text(strings.get(R.string.inspect_hook_apk))
         }
         Button(enabled = !busy, onClick = {
             try { systemPicker.launch(arrayOf("application/vnd.android.package-archive", "application/octet-stream")) }
             catch (error: Exception) { HookHost.fail(error) }
-        }) { Text("Use system document picker") }
+        }) { Text(strings.get(R.string.system_document_picker)) }
         reviewed?.let { value ->
-            Text("${value.descriptor.id} · ${value.descriptor.version}\nTarget: ${value.descriptor.target}\nVerified signer SHA-256: ${value.signers}")
-            Text("Confirming requests framework scope and publishes this exact payload. First signer is pinned; a different signer is rejected.")
+            Text(strings.get(R.string.hook_package_metadata, value.descriptor.id, value.descriptor.version, value.descriptor.target, value.signers))
+            Text(strings.get(R.string.hook_publish_notice))
             Button(enabled = !busy, onClick = {
                 busy = true
                 val action = HookHost.beginAction()
@@ -76,7 +80,7 @@ fun HookDiagnosticsPanel() {
                     } catch (error: Throwable) { HookHost.fail(error) }
                     finally { busy = false }
                 }
-            }) { Text("Request scope and publish reviewed APK") }
+            }) { Text(strings.get(R.string.publish_hook_apk)) }
         }
         // Disable remains available during scope wait/publication. Capture intent on Main
         // without taking the remote-IO lock; an older approval cannot re-enable afterward.
@@ -86,11 +90,11 @@ fun HookDiagnosticsPanel() {
                 try { withContext(Dispatchers.IO) { HookHost.disable(action) } }
                 catch (error: Throwable) { HookHost.fail(error) }
             }
-        }) { Text("Disable global Hook switch") }
+        }) { Text(strings.get(R.string.disable_hook)) }
         Button(onClick = {
             context.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
                 Uri.parse("package:$HOOK_TARGET")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-        }) { Text("Open target settings — force-stop, then relaunch") }
-        Text("If Theta cannot open: disable Theta or remove target scope in the framework manager, then force-stop target. Last resort: disable the framework in root manager or uninstall Theta with adb. Startup quarantine is target/version-local; clearing target data resets it.")
+        }) { Text(strings.get(R.string.target_settings)) }
+        Text(strings.get(R.string.hook_recovery_notice))
     }
 }

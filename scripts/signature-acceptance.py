@@ -192,8 +192,15 @@ class Acceptance:
     def reject(self, name, trust=False):
         self.lc.clear_logs()
         self.lc.stage(self.path(name))
-        expected = ("APK signer does not match trusted signer set for " +
-                    self.report["verified_artifacts"][name]["manifest"]["id"])
+        # The host renders typed failures through en/zh resources, not exception
+        # messages. Match ONLY the requested reason; generic import failure or a
+        # different signature reason must not turn a rejected case green.
+        key = "failure_signer_mismatch" if trust else "failure_signature_invalid"
+        resources = Path(__file__).resolve().parents[1] / "app/src/main/res"
+        expected = set()
+        for locale in ("values", "values-zh"):
+            root = ET.parse(resources / locale / "strings.xml").getroot()
+            expected.add(next(n.text for n in root if n.get("name") == key))
         attempts = 0
 
         def observation():
@@ -203,8 +210,7 @@ class Acceptance:
             art.require(not any(t.startswith("Install Fixture ") and t.endswith("?") for t in texts),
                         "Rejected APK reached confirmation; platform/trust gate bypass")
             for text in texts:
-                if (trust and text == expected) or (not trust and (
-                    text.startswith("APK signature verification failed") or text == "APK has no verified current signers")):
+                if text in expected:
                     return text
             self.scroll(attempts % 12 < 6)
             attempts += 1

@@ -45,7 +45,7 @@ class PluginDataCrashQuarantineTest {
         assertNull(held.error) // Missing bytes were not validated during quarantine.
         val card = ManagedDataRecord(held, null)
         assertTrue(card.canEnable)
-        assertTrue(card.status.contains("Crash quarantined"))
+        assertEquals(DataStatus.CRASH_QUARANTINED, card.status)
         assertTrue(records.single { it.id == "test.healthy" }.selection!!.active(false))
     }
 
@@ -138,6 +138,29 @@ class PluginDataCrashQuarantineTest {
         val pages = mutableListOf<ManagedPluginData>()
         replaceDataInventory(mutableListOf(), pages, held, false)
         assertTrue(pages.isEmpty())
+    }
+
+    @Test fun interruptedDeleteHasRetryStatusBeforeArchiveOrCrashQuarantine() = root { _, c ->
+        install(c)
+        c.beginDelete(suspect)
+        val pending = c.managementRecord(suspect, crashQuarantined = true)
+        assertNotNull(pending.error)
+        val card = ManagedDataRecord(pending, null)
+        assertEquals(DataStatus.DELETE_PENDING, card.status)
+        assertFalse(card.canEnable)
+        assertNull(card.page)
+    }
+
+    @Test fun failedColdDeleteRetainsRetryStatusAndCanFinishOnRetry() = root { dir, c ->
+        install(c)
+        c.beginDelete(suspect)
+        val failing = PluginDataCatalog(dir, 1, deletePackages = { _, _ -> throw IOException("delete blocked") })
+        val errors = mutableListOf<String>()
+        val pending = failing.restoreInventory(errors::add).single()
+        assertTrue(errors.single().contains("delete blocked"))
+        assertEquals(DataStatus.DELETE_PENDING, ManagedDataRecord(pending, null).status)
+        c.finishDelete(suspect)
+        assertTrue(c.restoreInventory { fail(it) }.isEmpty())
     }
 
     @Test fun heldManagementAfterUnacknowledgedEnableRestoresDisabledIntent() = root { dir, c ->

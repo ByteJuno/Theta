@@ -27,6 +27,7 @@ import subprocess
 import sys
 import time
 import zipfile
+import xml.etree.ElementTree as ET
 
 spec = importlib.util.spec_from_file_location("theta_emulator", Path(__file__).with_name("emulator-test.py"))
 em = importlib.util.module_from_spec(spec)
@@ -92,36 +93,112 @@ def wait(description, predicate, timeout=None):
     raise FAIL(description + ": timed out")
 
 
-def scroll(down):
-    # One card can still exceed a small screen when failure messages wrap.
-    size = re.findall(r"(\d+)x(\d+)", adb("shell", "wm", "size"))[-1]
-    width, height = map(int, size)
-    top, bottom = int(height * 0.25), int(height * 0.80)
-    adb("shell", "input", "swipe", str(width // 2), str(bottom if down else top), str(width // 2), str(top if down else bottom), "200")
+def scroll(down, nodes=None, observation=None):
+    # Use the observed scroll body, not display fractions which can fall outside
+    # a short list or on a dialog's buttons. Reuse matching()'s dump per attempt.
+    nodes = em.screen() if nodes is None else nodes
+    bodies = []
+    for node in nodes:
+        if node.get("scrollable") != "true":
+            continue
+        numbers = re.findall(r"-?\d+", node.get("bounds", ""))
+        if len(numbers) != 4:
+            continue
+        x1, y1, x2, y2 = map(int, numbers)
+        if 0 <= x1 < x2 and 0 <= y1 < y2 and y2 - y1 > 60:
+            bodies.append((x1, y1, x2, y2))
+    if not bodies:
+        return False  # No valid XML/body is not permission to swipe blindly.
+    x1, y1, x2, y2 = min(bodies, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]))
+    x = (x1 + x2) // 2
+    # A fast 60%-height swipe can fling from top straight to bottom, skipping
+    # the actions between both dumps. Use short, slow drags with overlapping
+    # viewports. The pixel cap also bounds velocity on very tall displays.
+    distance = min(400, (y2 - y1) // 4)
+    top = (y1 + y2) // 2 - distance // 2
+    bottom = top + distance
+    gesture = [x, bottom if down else top, x, top if down else bottom, 800]
+    if observation is not None:
+        observation.update(gesture=gesture, scroll_bounds=[x1, y1, x2, y2],
+                           swipe_started_at=time.monotonic())
+    try:
+        adb("shell", "input", "swipe", *(str(value) for value in gesture))
+    finally:
+        if observation is not None:
+            observation["swipe_finished_at"] = time.monotonic()
+    return True
 
 
 def matching(description, predicate, timeout=None):
-    # Sweep up to the top, then down to the bottom, flipping when a swipe no longer
-    # changes the screen. A fixed down-3/up-3 cycle returns to its start and never
-    # reaches the far end once the host list is longer than a few screens.
-    sweep = {"down": False, "last": None}
+    # Revisit offscreen content: asynchronous results may appear above the final
+    # viewport after a complete sweep. Pause between sweeps without resetting
+    # wait()'s deadline. Each direction retains the hard cap for changing XML.
+    sweep = {"down": False, "last": None, "steps": 0, "retry_at": None}
+    observations = []
+
+    def record(nodes, action):
+        observations.append({"at": time.monotonic(), "action": action,
+            "direction": "down" if sweep["down"] else "up", "steps": sweep["steps"],
+            "nodes": [{k: n.get(k, "") for k in ("text", "bounds", "scrollable", "package")}
+                      for n in nodes]})
+        del observations[:-40]  # Retain a bounded tail, only write it on failure.
 
     def locate():
+        started = time.monotonic()
         nodes = em.screen()
-        node = em.find(nodes, predicate)
-        if node is None:
-            signature = tuple((n.get("text", ""), n.get("bounds", "")) for n in nodes)
-            if nodes and signature == sweep["last"]:
-                sweep["down"] = not sweep["down"]
+        matches = [n for n in nodes if predicate(n.get("text", ""))]
+        record(nodes, "observe")
+        observations[-1]["screen_started_at"] = started
+        require(len(matches) <= 1, f"Ambiguous match for {description}: {len(matches)} nodes")
+        if matches:
+            return matches[0]  # Never use Element truthiness (leaf nodes are falsey).
+        if not nodes:
+            sweep["last"] = None  # A failed dump cannot establish a list boundary.
+            return None
+        if sweep["retry_at"] is not None:
+            if time.monotonic() < sweep["retry_at"]:
+                return None
+            sweep.update(down=False, last=None, steps=0, retry_at=None)
+        signature = tuple((n.get("text", ""), n.get("bounds", "")) for n in nodes)
+        if signature == sweep["last"]:
+            if sweep["down"]:
+                sweep["retry_at"] = time.monotonic() + 2
+                observations[-1]["action"] = "pause_before_rescan"
+                return None
+            sweep.update(down=True, steps=0)
+        require(sweep["steps"] < 30, f"Could not reach the list end while finding {description}")
+        if scroll(sweep["down"], nodes, observations[-1]):
+            observations[-1].update(action="swipe", direction="down" if sweep["down"] else "up")
             sweep["last"] = signature
-            scroll(sweep["down"])  # Bounded by wait(), never an unbounded search.
-        return node
+            sweep["steps"] += 1
+        return None
 
-    return wait(description, locate, timeout)
+    try:
+        return wait(description, locate, timeout)
+    except Exception:
+        # A final screenshot cannot show whether a swipe moved or an earlier
+        # viewport was empty. Keep the actual search tail for the reviewer.
+        try:
+            directory = OUTPUT / ("FAILED-" + CURRENT)
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / "search.json").write_text(json.dumps({"description": description,
+                "timeout": TIMEOUT if timeout is None else timeout,
+                "observations": observations}, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as error:
+            EVIDENCE_ERRORS.append(f"{CURRENT}/search.json: {error}")
+        raise
 
 
 def text(value):
     return matching(repr(value), lambda t: t == value)
+
+
+def resource_text(key):
+    """Match the exact localized diagnostic, never a generic error fallback."""
+    resources = Path(__file__).resolve().parents[1] / "app/src/main/res"
+    expected = {next(n.text for n in ET.parse(resources / locale / "strings.xml").getroot()
+                     if n.get("name") == key) for locale in ("values", "values-zh")}
+    return matching(key, lambda value: value in expected)
 
 
 def tap(value):
@@ -144,6 +221,12 @@ def absent(value):
             scroll(down)
         else:
             raise FAIL(f"Could not reach the list end while checking absence of {value!r}")
+
+
+def diagnostic(description, predicate):
+    """Technical exception details moved from UI into the host's ThetaUi log."""
+    return wait(description, lambda: any(predicate(line) for line in
+                adb("logcat", "-d", "-v", "raw", "ThetaUi:W", "*:S").splitlines()))
 
 
 def event(flavor, value, timeout=None):
@@ -263,7 +346,7 @@ def upgrade_data(host, apks):
     # Equal and lower versions must not replace the active v2 package or data.
     for flavor, version in (("normalV2", "2.0"), ("normalV1", "1.0")):
         install(apks[flavor], version)
-        text("Install requires a higher version than 2")
+        resource_text("failure_higher_version")
         page("normalV2", 3)
         back()
     clear_logs()
@@ -332,7 +415,7 @@ def init_fault(host, apks, flavor):
         require("enable:block:end" not in events(flavor), "Inconclusive: initialization timeout observed after return")
     absent("Fixture page")
     if flavor == "initBlock":
-        matching("observable initialization timeout", lambda t: "Initialization timed out" in t)
+        diagnostic("observable initialization timeout", lambda t: "Initialization timed out; restart required" in t)
         event(flavor, "late-register:rejected", timeout=90)
         event(flavor, "late-cleanup:rejected")
     event(flavor, "cleanup:first")
@@ -409,13 +492,16 @@ def rejected_packages(host, apks):
     truncated = OUTPUT / "truncated.apk"
     truncated.write_bytes(apks["normalV1"].read_bytes()[:128])
     for apk, expected in ((invalid, "Missing assets/theta-plugin.json"), (truncated, None)):
+        clear_logs()
         stage(apk)
+        resource_text("operation_failed")
         if expected:
-            text(expected)
+            diagnostic("missing manifest rejected", lambda t: expected in t)
         else:
-            # Android versions differ in ZipException wording; require a ZIP error,
-            # not just an unchanged list (which could be a dropped import intent).
-            matching("truncated ZIP rejected", lambda t: any(s in t.lower() for s in ("zip", "central directory", "end header")))
+            # A generic localized failure alone is insufficient: require the
+            # specific fresh host exception, not a UI label containing 'ZIP'.
+            diagnostic("truncated ZIP rejected", lambda t: "ZipException" in t and any(
+                s in t.lower() for s in ("zip", "central directory", "end header")))
         text("No plugins installed")
         absent("Install Fixture 1.0?")
         absent("Fixture page")
@@ -439,7 +525,7 @@ def update_to_broken(host, apks, flavor):
 
 def rolled_back(flavor):
     """The fixture wrote 99 over the counter, so 1 proves a snapshot restore, not merely v1 code."""
-    matching("rollback report", lambda t: "rolled back to version 1" in t)
+    diagnostic("rollback report", lambda t: DATA_ID + ": rolled back to version 1" == t.strip())
     page("normalV1", 1)
     require(not events(flavor), "Broken update executed after rollback")
     back()
@@ -481,7 +567,7 @@ def rollback_manual(host, apks):
     install(apks["normalV2"], "2.0")
     text("Update installed; restart required")
     install(apks["normalV2"], "2.0")  # A second update must wait for the first to activate.
-    text("Update or rollback pending; restart required")
+    resource_text("failure_restart_pending")
     restart()
     page("normalV2", 1)
     increment(2)
@@ -632,8 +718,10 @@ def data_content(body):
 
 
 def code_refused():
+    clear_logs()
     stage(next(iter(APKS.values())))
-    matching("code APK refused for data-owned ID", lambda t: "Data-owned ID; code action refused" in t)
+    resource_text("operation_failed")
+    diagnostic("code APK refused for data-owned ID", lambda t: "Data-owned ID; code action refused: " + DATA_ID in t)
     absent("Install Fixture 1.0?")
     require(not events("normalV1"), "Code fixture ran under a data-owned ID")
 
@@ -643,8 +731,10 @@ def data_zip(host, apks):
     APKS["normalV1"] = apks["normalV1"]
     fresh(host)
     text("No selected data packages")
+    clear_logs()
     stage_data(data_archive(1, "Fixture skill one", extra="classes.dex"))
-    matching("code payload rejected", lambda t: "Unsupported data ZIP payload: classes.dex" in t)
+    resource_text("operation_failed")
+    diagnostic("code payload rejected", lambda t: "Unsupported data ZIP payload: classes.dex" in t)
     text("No selected data packages")
     install_data(data_archive(1, "Fixture skill one"), 1)
     data_content("Fixture skill one")

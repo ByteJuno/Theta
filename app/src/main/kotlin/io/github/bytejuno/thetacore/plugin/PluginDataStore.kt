@@ -14,13 +14,15 @@ import java.nio.file.attribute.BasicFileAttributes
 import java.security.MessageDigest
 import java.util.UUID
 
+internal enum class DataNotice { AUTHOR_UNVERIFIED, DIGEST_ONLY }
+
 internal class StagedPluginData internal constructor(
     val manifest: PluginDataManifest,
     val sha256: String,
     val destinations: List<PluginDataDestination>,
 ) {
-    val authorNotice: String get() = "作者身份未验证 / Author identity unverified"
-    val digestNotice: String get() = "SHA-256 checks byte consistency, not author identity or update trust"
+    val authorNotice get() = DataNotice.AUTHOR_UNVERIFIED
+    val digestNotice get() = DataNotice.DIGEST_ONLY
 }
 
 internal data class PublishedPluginData(val zip: File, val manifest: PluginDataManifest, val sha256: String)
