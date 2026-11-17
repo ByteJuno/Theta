@@ -187,6 +187,99 @@ class LifecycleSearch(unittest.TestCase):
             self.assertTrue(1550 < y2 < y1 < 1850)
             self.assertEqual(1, adb.call_count, 'XML bounds avoid a wm size round trip')
 
+    def continuous_search(self, *, initial=0, target=True, duplicate=False):
+        """Model pixel displacement, including overshoot, rather than one page per swipe.
+
+        The reviewer trace alternates disjoint top/bottom viewports. The 3x gain
+        here is a stress control, not a measured emulator fling coefficient.
+        """
+        state = {'offset': initial, 'clock': 0, 'taps': [], 'swipes': [], 'views': []}
+        top, bottom, end = 136, 2208, 3000
+        target_top, target_bottom = 2400, 2448
+
+        def screen():
+            state['clock'] += 2  # A dump consumes time, unlike the page-step fixture.
+            offset = state['offset']
+            state['views'].append(offset)
+            nodes = [ET.Element('node', bounds=f'[0,{top}][1080,{bottom}]', scrollable='true')]
+            # Stable content anchors move in pixel space and establish real endpoints.
+            for y in range(180, 5200, 100):
+                if top <= y - offset and y + 40 - offset <= bottom:
+                    nodes.append(ET.Element('node', text=f'row {y}',
+                                            bounds=f'[44,{y-offset}][1036,{y+40-offset}]'))
+            if target and top <= target_top - offset and target_bottom - offset <= bottom:
+                nodes.append(ET.Element('node', text='Uninstall Fixture',
+                    bounds=f'[44,{target_top-offset}][1036,{target_bottom-offset}]'))
+                if duplicate:
+                    nodes.append(ET.Element('node', text='Uninstall Fixture',
+                        bounds=f'[44,{target_top-offset+60}][1036,{target_bottom-offset+60}]'))
+            return nodes
+
+        def adb(*args, **kwargs):
+            if args[:3] == ('shell', 'input', 'swipe'):
+                x1, y1, x2, y2, duration = map(int, args[3:])
+                self.assertTrue(0 < x1 == x2 < 1080)
+                self.assertTrue(top < min(y1, y2) < max(y1, y2) < bottom)
+                state['swipes'].append((y1, y2, duration))
+                state['clock'] += duration / 1000
+                state['offset'] = max(0, min(end, state['offset'] + 3 * (y1 - y2)))
+            elif args[:3] == ('shell', 'input', 'tap'):
+                x, y = map(int, args[3:])
+                self.assertTrue(top < y < bottom)
+                self.assertTrue(target_top <= y + state['offset'] <= target_bottom)
+                state['taps'].append((x, y))
+            else:
+                raise AssertionError(f'Unexpected adb: {args}')
+            return ''
+
+        def sleep(seconds):
+            state['clock'] += seconds
+
+        with tempfile.TemporaryDirectory() as output, patch.object(lc, 'OUTPUT', Path(output)), \
+                patch.object(lc.em, 'screen', side_effect=screen), \
+                patch.object(lc.em, 'crashed', return_value=False), \
+                patch.object(lc, 'adb', side_effect=adb), \
+                patch.object(lc.em, 'adb', side_effect=adb), \
+                patch.object(lc.time, 'monotonic', side_effect=lambda: state['clock']), \
+                patch.object(lc.time, 'sleep', side_effect=sleep), patch.object(lc, 'TIMEOUT', 30):
+            try:
+                lc.tap('Uninstall Fixture')
+            except lc.FAIL as error:
+                state['error'] = str(error)
+                state['trace'] = json.loads((Path(output) / ('FAILED-' + lc.CURRENT) / 'search.json').read_text())
+        return state
+
+    def test_continuous_scroll_finds_action_between_disjoint_endpoint_views(self):
+        for initial in (0, 3000):
+            with self.subTest(initial=initial):
+                state = self.continuous_search(initial=initial)
+                self.assertIsNone(state.get('error'))
+                self.assertEqual(1, len(state['taps']))
+                self.assertTrue(any(0 < offset < 3000 for offset in state['views']))
+                self.assertLess(state['clock'], 30)
+
+    def test_continuous_missing_target_never_taps_or_resets_deadline(self):
+        state = self.continuous_search(target=False)
+        self.assertRegex(state.get('error', ''), r': (timed out|observation exceeded deadline)$')
+        self.assertEqual([], state['taps'])
+        self.assertGreaterEqual(state['clock'], 30)
+        self.assertLess(state['clock'], 34)
+        gestures = [o for o in state['trace']['observations'] if 'gesture' in o]
+        self.assertTrue(gestures)
+        for observation in gestures:
+            self.assertEqual([0, 136, 1080, 2208], observation['scroll_bounds'])
+            x1, y1, x2, y2, duration = observation['gesture']
+            self.assertEqual((540, 540, 800), (x1, x2, duration))
+            self.assertEqual(400, abs(y1 - y2))
+            self.assertEqual(observation['direction'] == 'down', y1 > y2)
+            self.assertAlmostEqual(.8, observation['swipe_finished_at'] - observation['swipe_started_at'])
+            self.assertAlmostEqual(2, observation['at'] - observation['screen_started_at'])
+
+    def test_continuous_duplicate_target_is_rejected_before_tap(self):
+        state = self.continuous_search(duplicate=True)
+        self.assertIn('Ambiguous', state.get('error', ''))
+        self.assertEqual([], state['taps'])
+
     def test_late_observation_still_fails_existing_deadline(self):
         node = ET.Element('node', text='Uninstall Fixture', bounds='[16,400][600,448]')
         with patch.object(lc.time, 'monotonic', side_effect=[0, 0, 2]):

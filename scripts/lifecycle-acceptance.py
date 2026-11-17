@@ -93,7 +93,7 @@ def wait(description, predicate, timeout=None):
     raise FAIL(description + ": timed out")
 
 
-def scroll(down, nodes=None):
+def scroll(down, nodes=None, observation=None):
     # Use the observed scroll body, not display fractions which can fall outside
     # a short list or on a dialog's buttons. Reuse matching()'s dump per attempt.
     nodes = em.screen() if nodes is None else nodes
@@ -111,9 +111,21 @@ def scroll(down, nodes=None):
         return False  # No valid XML/body is not permission to swipe blindly.
     x1, y1, x2, y2 = min(bodies, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]))
     x = (x1 + x2) // 2
-    top, bottom = y1 + (y2 - y1) // 5, y2 - (y2 - y1) // 5
-    adb("shell", "input", "swipe", str(x), str(bottom if down else top),
-        str(x), str(top if down else bottom), "200")
+    # A fast 60%-height swipe can fling from top straight to bottom, skipping
+    # the actions between both dumps. Use short, slow drags with overlapping
+    # viewports. The pixel cap also bounds velocity on very tall displays.
+    distance = min(400, (y2 - y1) // 4)
+    top = (y1 + y2) // 2 - distance // 2
+    bottom = top + distance
+    gesture = [x, bottom if down else top, x, top if down else bottom, 800]
+    if observation is not None:
+        observation.update(gesture=gesture, scroll_bounds=[x1, y1, x2, y2],
+                           swipe_started_at=time.monotonic())
+    try:
+        adb("shell", "input", "swipe", *(str(value) for value in gesture))
+    finally:
+        if observation is not None:
+            observation["swipe_finished_at"] = time.monotonic()
     return True
 
 
@@ -132,9 +144,11 @@ def matching(description, predicate, timeout=None):
         del observations[:-40]  # Retain a bounded tail, only write it on failure.
 
     def locate():
+        started = time.monotonic()
         nodes = em.screen()
         matches = [n for n in nodes if predicate(n.get("text", ""))]
         record(nodes, "observe")
+        observations[-1]["screen_started_at"] = started
         require(len(matches) <= 1, f"Ambiguous match for {description}: {len(matches)} nodes")
         if matches:
             return matches[0]  # Never use Element truthiness (leaf nodes are falsey).
@@ -153,7 +167,7 @@ def matching(description, predicate, timeout=None):
                 return None
             sweep.update(down=True, steps=0)
         require(sweep["steps"] < 30, f"Could not reach the list end while finding {description}")
-        if scroll(sweep["down"], nodes):
+        if scroll(sweep["down"], nodes, observations[-1]):
             observations[-1].update(action="swipe", direction="down" if sweep["down"] else "up")
             sweep["last"] = signature
             sweep["steps"] += 1
