@@ -1,30 +1,59 @@
-# Invocation ledger storage and retention
+# Agent SQLite storage and retention
 
 `InvocationLedger` attaches to one exclusive writer and loads `records()` once at
 construction. It indexes snapshots by `callId`; acknowledged writes replace that
 entry under `DefinitionGate`. Policy, ordering, resource and task-chain checks
-still scan in-memory history. `JsonInvocationStore` scans and validates the files
+still scan in-memory history. `SqliteInvocationStore` validates the stored records
 once on open, caches acknowledged snapshots, and returns detached values. External
 edits while a writer is open are unsupported; close and reopen to validate them.
 
-A failed write before replacement leaves the previous snapshot visible. An
-ambiguous replacement acknowledgement poisons the writer and halts coordinator
+A failed transaction leaves the previous acknowledged snapshot visible. An
+ambiguous commit acknowledgement poisons the shared database and halts coordinator
 mutations. Reads continue to expose the last acknowledged snapshot, which may be
 older than disk. Close, reopen and cold-recover before admitting more execution.
-The existing atomic-file and durability modes remain in force; this does not add
-an Android durability adapter or a physical power-loss guarantee.
+Ledger records, result contents and session history share one `AgentDatabase`.
+SQLite WAL transactions use `synchronous=FULL` and foreign keys; the Android
+adapter configures both existing and future pooled connections before schema work.
+This is not a physical power-loss guarantee.
 
-New writes use `storageVersion: 1` alongside aggregate `formatVersion: 2`. A
+Record payloads use `storageVersion: 1` alongside aggregate `formatVersion: 2`. A
 per-record `texts` array stores each distinct result/evidence text once; the
 logical result, exit evidence and evidence outcome use integer references. Different
-late evidence keeps its own text. The whole aggregate and text table are replaced
-atomically in the same file. Deduplication is within a record, not across calls or
-arbitrary input strings. Existing inline-text v2 files remain readable and are not
-rewritten merely by opening them; their next successful mutation uses the compact
-encoding. Unknown encodings, missing/out-of-range references and malformed
-aggregates fail closed without deleting the source evidence. Older binaries do
-not understand the new encoding; downgrade requires compatible software rather
-than discarding the files.
+late evidence keeps its own text. Record metadata and bounded chunks are committed
+in one database transaction with revision CAS. Deduplication is within a record,
+not across calls or arbitrary input strings. The payload codec can read legacy
+inline-text aggregates stored inside SQLite; this does not import old JSON files.
+Unknown encodings, missing/out-of-range references and malformed aggregates fail
+closed without deleting the source evidence.
+
+## Android ownership and recovery
+
+`AndroidAgentStore` opens the system SQLite implementation through AndroidX's
+support driver. `PluginManager.initializeHostTools` opens it once through the
+process-owned bridge; application startup awaits cold recovery before admitting
+tool execution. It also creates/opens `SqliteRunHistory` handles on that same
+database. The production chat/session consumer remains part of #24.
+
+The database is `Context.noBackupFilesDir/agent.db`, with its WAL, shared-memory,
+writer/provenance and session scratch files under that private no-backup root.
+The manifest disables backup and data-extraction rules exclude cloud backup and
+device transfer. Plugin packages, preferences and plugin data are separate and
+are not changed by this storage adapter.
+
+A lifetime OS lock excludes a second owner. Active runs and summary spools pin
+the owner: a rejected close leaves ledger admission intact. A failed/uncertain
+write closes admission across ledger and history until reopen and cold recovery.
+Startup never silently deletes corruption or retries as a new installation.
+Legacy JSON/directory storage is neither imported nor automatically deleted.
+
+History appends commit whole batches, revision, call index and HEAD atomically.
+Indexed pages read bounded chunks; `snapshot()` and the current run loop still
+materialize history. A storage failure cannot undo an external tool side effect.
+
+No new R8 keep rules are required for the adapter: the driver, history and store
+are reached through direct calls. The existing explicit instrumentation/runtime
+wire boundary retains its own methods; internal store names may be obfuscated.
+Release build success alone does not prove Android restart or recovery behavior.
 
 ## Retention policy
 

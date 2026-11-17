@@ -1,7 +1,14 @@
 package io.github.bytejuno.thetacore.plugin
 
+import android.content.ContextWrapper
 import io.github.bytejuno.thetacore.agent.ledger.*
 import io.github.bytejuno.thetacore.agent.protocol.callBinding
+import io.github.bytejuno.thetacore.agent.protocol.Role
+import io.github.bytejuno.thetacore.agent.protocol.message
+import io.github.bytejuno.thetacore.agent.protocol.textPart
+import io.github.bytejuno.thetacore.agent.protocol.toolCallPart
+import io.github.bytejuno.thetacore.agent.run.RunIdentity
+import io.github.bytejuno.thetacore.agent.run.validateHistory
 import io.github.bytejuno.thetacore.plugin.tools.HostClockTool
 import io.github.bytejuno.thetacore.sdk.Tool
 import io.github.bytejuno.thetacore.sdk.ToolEnv
@@ -18,7 +25,83 @@ import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
-class AndroidInvocationStoreTest {
+class AndroidAgentStoreTest {
+    private fun context(root: File) = object : ContextWrapper(null) {
+        override fun getNoBackupFilesDir() = root
+        override fun getFilesDir(): File = error("Agent data must not use backup-eligible filesDir")
+        override fun getDatabasePath(name: String): File = error("Agent data must not use the default database directory")
+    }
+
+    @Test fun noBackupOwnerRecoversPendingHistoryFromItsLedgerWithoutReplaying() = temporary { root ->
+        val driver = androidx.sqlite.driver.bundled.BundledSQLiteDriver()
+        val legacy = File(root, "host-invocations").apply { mkdir() }
+        val evidence = File(legacy, "legacy.json").apply { writeText("old format is not imported or deleted") }
+        val binding = callBinding("test", "request", null, 0, "wire")
+        val assistant = message(Role.ASSISTANT, toolCallPart(binding, "host_test", "{}"))
+        AndroidAgentStore.open(context(root), driver).use { store ->
+            val ledger = InvocationLedger(store, DefinitionGate(), ArgumentsValidator { _, _ -> true })
+            ledger.recoverColdStart("first")
+            store.createHistory("session").use { history ->
+                history.append(0, listOf(message(Role.USER, textPart("goal"))))
+                history.prepareStep(1, RunIdentity("chain", "session", "run"), "step", assistant)
+                val input = InvocationInput(BindingValue.copyOf(binding), "chain", "session", "run", "step", 0,
+                    "{}", null, false, Risk.READ, cancelledBeforeExecution = false, modelName = "host_test")
+                assertTrue(ledger.recordInvocation(input) is Mutation.Applied)
+                assertEquals(Status.REJECTED, ledger.get(binding.callId)!!.state)
+                // Close between durable intent/ledger registration and history commit.
+            }
+        }
+        AndroidAgentStore.open(context(root), driver).use { store ->
+            val ledger = InvocationLedger(store, DefinitionGate(), ArgumentsValidator { _, _ -> true })
+            ledger.recoverColdStart("second")
+            val record = ledger.get(binding.callId)!!
+            store.openHistory("session").use { history ->
+                val recovered = history.recoverPending(ledger)
+                assertTrue(recovered.recovered)
+                assertFalse(recovered.requiresDecision)
+                assertEquals(listOf(binding.callId), recovered.callIds)
+                assertEquals(2L, history.revision())
+                assertEquals(3, history.snapshot().messages.size)
+                validateHistory(history.snapshot().messages)
+                assertFalse(history.recoverPending(ledger).recovered)
+                assertEquals(record, ledger.get(binding.callId))
+            }
+            assertNull(record.instance)
+            store.checkAdmission()
+        }
+        assertEquals("old format is not imported or deleted", evidence.readText())
+        assertEquals(listOf("agent.db"), root.listFiles()!!.filter { it.extension == "db" }.map { it.name })
+    }
+
+    @Test fun ledgerFailureClosesHistoryAdmissionOnTheSameAndroidOwner() = temporary { root ->
+        var armed = false
+        AndroidAgentStore.open(root, androidx.sqlite.driver.bundled.BundledSQLiteDriver()) {
+            if (armed && it == SqliteWriteStage.AFTER_COMMIT) throw IOException("ack lost")
+        }.use { store ->
+            val ledger = InvocationLedger(store, DefinitionGate(), ArgumentsValidator { _, _ -> true })
+            ledger.recoverColdStart("first")
+            store.createHistory("session").use { history ->
+                history.append(0, listOf(message(Role.USER, textPart("retained"))))
+                armed = true
+                val input = InvocationInput(BindingValue.copyOf(callBinding("test", "request", null, 0, "wire")),
+                    "chain", "session", "run", "step", 0, "{}", null, false, Risk.READ,
+                    cancelledBeforeExecution = false, modelName = "unknown")
+                assertTrue((ledger.recordInvocation(input) as Mutation.StorageFailure).uncertain)
+                assertThrows(io.github.bytejuno.thetacore.agent.run.HistoryStorageException::class.java) {
+                    history.append(1, listOf(message(Role.USER, textPart("must not commit"))))
+                }
+                assertThrows(StoreException::class.java) { store.checkAdmission() }
+            }
+        }
+        AndroidAgentStore.open(context(root), androidx.sqlite.driver.bundled.BundledSQLiteDriver()).use { store ->
+            val ledger = InvocationLedger(store, DefinitionGate(), ArgumentsValidator { _, _ -> true })
+            ledger.recoverColdStart("second")
+            assertEquals(1, store.records().size)
+            store.openHistory("session").use { assertEquals(1L, it.revision()); assertEquals(1, it.snapshot().messages.size) }
+            store.checkAdmission()
+        }
+    }
+
     private fun input(service: HostToolExecutionService, args: String = "{}", run: String = UUID.randomUUID().toString()): InvocationInput {
         val definition = service.catalog.freeze(run).values.single { it.toolKey == "host/clock" }
         return InvocationInput(BindingValue.copyOf(callBinding("android-test", run, null, 0, "clock")),
@@ -68,7 +151,7 @@ class AndroidInvocationStoreTest {
 
     @Test fun lostCommitAcknowledgementBlocksEveryWriteUntilReopen() = temporary { root ->
         var fail = false
-        AndroidInvocationStore.open(root, androidx.sqlite.driver.bundled.BundledSQLiteDriver()) {
+        AndroidAgentStore.open(root, androidx.sqlite.driver.bundled.BundledSQLiteDriver()) {
             if (fail && it == SqliteWriteStage.AFTER_COMMIT) throw IOException("ack lost")
         }.use { store ->
             val gate = DefinitionGate()
@@ -90,7 +173,7 @@ class AndroidInvocationStoreTest {
     }
 
     @Test fun historyBorrowsTheSameNoBackupDatabaseAndDoesNotCloseLedger() = temporary { root ->
-        AndroidInvocationStore.open(root, androidx.sqlite.driver.bundled.BundledSQLiteDriver()).use { store ->
+        AndroidAgentStore.open(root, androidx.sqlite.driver.bundled.BundledSQLiteDriver()).use { store ->
             store.createHistory("session").use { h ->
                 h.append(0, listOf(io.github.bytejuno.thetacore.agent.protocol.message(
                     io.github.bytejuno.thetacore.agent.protocol.Role.USER,
@@ -99,7 +182,7 @@ class AndroidInvocationStoreTest {
             assertTrue(store.records().isEmpty())
             store.openHistory("session").use { assertEquals(1L, it.revision()) }
         }
-        AndroidInvocationStore.open(root, androidx.sqlite.driver.bundled.BundledSQLiteDriver()).use { store ->
+        AndroidAgentStore.open(root, androidx.sqlite.driver.bundled.BundledSQLiteDriver()).use { store ->
             store.openHistory("session").use { assertEquals(1, it.snapshot().messages.size) }
         }
     }
@@ -194,12 +277,12 @@ class AndroidInvocationStoreTest {
                 return db
             }
         }
-        AndroidInvocationStore.open(root, driver).close()
+        AndroidAgentStore.open(root, driver).close()
         assertEquals(1, creates)
         for (deleted in listOf(false, true)) {
             val file = File(root, AgentDatabase.FILE_NAME)
             if (deleted) file.delete() else file.writeBytes(byteArrayOf())
-            assertThrows(StoreException::class.java) { AndroidInvocationStore.open(root, driver).close() }
+            assertThrows(StoreException::class.java) { AndroidAgentStore.open(root, driver).close() }
             assertEquals(1, opens); assertEquals(1, creates)
             assertEquals(!deleted, file.exists())
             if (!deleted) assertEquals(0L, file.length())
