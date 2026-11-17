@@ -14,11 +14,13 @@ import io.github.bytejuno.thetacore.agent.ledger.SqliteWriteStage
 import io.github.bytejuno.thetacore.agent.ledger.StoreException
 import java.io.File
 
-/** System SQLite through AndroidX's mature support driver (not Room).
+/** Process-owned ledger and session storage in one private no-backup database.
+ * History handles borrow this owner; closing one never closes the ledger.
+ * System SQLite through AndroidX's mature support driver (not Room).
  * Unlike AndroidSQLiteDriver's default corruption handler, this callback NEVER deletes a
  * damaged ledger. Both framework auto-recovery and schema downgrade fail closed.
  */
-internal class AndroidInvocationStore private constructor(
+internal class AndroidAgentStore private constructor(
     private val database: AgentDatabase, private val delegate: InvocationStore,
 ) : InvocationStore by delegate {
     fun createHistory(sessionId: String) = io.github.bytejuno.thetacore.agent.run.SqliteRunHistory.create(database, sessionId)
@@ -30,7 +32,7 @@ internal class AndroidInvocationStore private constructor(
         delegate.close()
     }
     companion object {
-        fun open(context: Context): AndroidInvocationStore {
+        fun open(context: Context): AndroidAgentStore {
             val helper = FrameworkSQLiteOpenHelperFactory().create(
                 SupportSQLiteOpenHelper.Configuration.builder(context)
                     .name(AgentDatabase.FILE_NAME)
@@ -78,7 +80,7 @@ internal class AndroidInvocationStore private constructor(
 
         /** Resolve only Android's trusted storage anchor (e.g. /data/user/0 alias).
          * Injected roots and all app-owned descendants still receive strict validation. */
-        internal fun open(context: Context, driver: SQLiteDriver): AndroidInvocationStore {
+        internal fun open(context: Context, driver: SQLiteDriver): AndroidAgentStore {
             val anchor = context.noBackupFilesDir
             require(anchor.toPath().none { it.toString() == "." || it.toString() == ".." })
             return open(anchor.canonicalFile, driver)
@@ -86,10 +88,10 @@ internal class AndroidInvocationStore private constructor(
 
         /** Bundled desktop driver is injected only by JVM tests. */
         internal fun open(root: File, driver: SQLiteDriver,
-            fault: (SqliteWriteStage) -> Unit = {}): AndroidInvocationStore {
+            fault: (SqliteWriteStage) -> Unit = {}): AndroidAgentStore {
             require(root.isDirectory) { "No private no-backup directory" }
             val database = AgentDatabase.open(File(root, AgentDatabase.FILE_NAME).toPath(), driver)
-            try { return AndroidInvocationStore(database, SqliteInvocationStore.open(database, fault)) }
+            try { return AndroidAgentStore(database, SqliteInvocationStore.open(database, fault)) }
             catch (error: Throwable) { runCatching { database.close() }; throw error }
         }
     }

@@ -9,7 +9,7 @@ import java.nio.file.Path
 import java.util.UUID
 import kotlin.test.*
 
-class FileRunHistoryTest {
+class SqliteRunHistoryTest {
     private val durability = Durability.PROCESS_CRASH_ONLY
     private fun user(text: String) = message(Role.USER, textPart(text))
     private fun pair(id: String = UUID.randomUUID().toString()): List<Message> {
