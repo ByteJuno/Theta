@@ -1,5 +1,6 @@
 package io.github.bytejuno.thetacore.plugin
 
+
 /** Management identity is a validated durable record, never a manifest guessed from bad bytes.
  * Page capability is optional and independently revoked. Quarantine cannot activate content.
  */
@@ -16,9 +17,12 @@ internal class ManagedDataRecord(val record: PluginDataRecord, val page: Managed
     // Crash-only quarantine permits an explicit validation + acknowledgement attempt;
     // archive/state errors still block enable and leave uninstall available.
     val canEnable get() = record.error == null && !state.pendingDelete
-    val status get() = record.error?.let { "Quarantined: $it" }
-        ?: if (record.crashQuarantined) "Crash quarantined; explicitly enable to validate and resume"
-        else page?.status ?: "Deletion pending; retry uninstall"
+    val status get() = when {
+        state.pendingDelete -> DataStatus.DELETE_PENDING
+        record.error != null -> DataStatus.QUARANTINED
+        record.crashQuarantined -> DataStatus.CRASH_QUARANTINED
+        else -> page?.status ?: DataStatus.DELETE_PENDING
+    }
 }
 internal fun replaceDataInventory(
     inventory: MutableList<ManagedDataRecord>, pages: MutableList<ManagedPluginData>,

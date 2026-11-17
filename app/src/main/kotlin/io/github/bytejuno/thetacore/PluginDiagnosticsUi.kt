@@ -41,34 +41,40 @@ internal class HostToolSelection(val pluginId: String, val index: Int, val tool:
 
 @Composable
 internal fun HostEntryState(entry: PluginEntryRuntime, index: Int) {
+    val strings = uiStrings()
     val state by entry.state.collectAsState()
-    Text("Entry ${index + 1}: ${state.displayName ?: "Waiting for worker metadata"}")
-    Text(state.status.name)
-    state.message?.let { Text(it) }
+    Text(strings.get(R.string.entry_metadata, index + 1, state.displayName ?: strings.get(R.string.worker_metadata_waiting)))
+    Text(strings.label(state.status))
+    state.message?.let { message ->
+        LaunchedEffect(message) { logUiDiagnostic(message) }
+        Text(strings.get(R.string.entry_diagnostic_notice))
+    }
 }
 
 @Composable
 internal fun HostUpdateObservation(update: PluginUpdate) {
-    Text("Update ${update.from} → ${update.to} · ${update.phase.name}")
-    Text(if (update.dataRestorable) "Rollback includes plugin private data, preferences and secrets."
-        else "Code-only rollback: NO data, preferences or secrets rollback.")
+    val strings = uiStrings()
+    Text(strings.get(R.string.update_metadata, update.from, update.to, strings.label(update.phase)))
+    Text(if (update.dataRestorable) strings.get(R.string.rollback_includes_data)
+        else strings.get(R.string.rollback_excludes_data))
     val start = update.startedAt
-    Text(if (start == null) "24-hour observation starts only after this version first starts successfully."
-        else "24-hour observation began at ${DateFormat.getDateTimeInstance().format(Date(start))}. " +
-            "Restarting or reopening this screen does not reset it.")
-    Text("Rollback availability is decided by the manager, not a UI countdown.")
+    Text(if (start == null) strings.get(R.string.observation_pending)
+        else strings.get(R.string.observation_started, strings.dateTime(start)) +
+            strings.get(R.string.observation_not_reset))
+    Text(strings.get(R.string.rollback_manager_decision))
 }
 
 /** Host diagnostics only; no chat backend, approval ledger or fabricated agent session. */
 @Composable
 internal fun HostToolDialog(manager: PluginManager, selection: HostToolSelection, onClose: () -> Unit) {
+    val strings = uiStrings()
     val scope = rememberCoroutineScope()
     val lifetime = remember(selection) { HostInvocationLifetime() }
     // This effect is installed by the first composition, before any button can admit work.
     // Disposal reads the current holder rather than the previous composition's null call.
     DisposableEffect(lifetime) { onDispose { lifetime.dispose() } }
     var argsText by remember(selection) { mutableStateOf("{}") }
-    var error by remember(selection) { mutableStateOf<String?>(null) }
+    var error by remember(selection) { mutableStateOf<UiText?>(null) }
     var submitting by remember(selection) { mutableStateOf(false) }
     var invocation by remember(selection) { mutableStateOf<PluginInvocation?>(null) }
     var terminal by remember(selection) { mutableStateOf<PluginInvocationResult?>(null) }
@@ -89,42 +95,45 @@ internal fun HostToolDialog(manager: PluginManager, selection: HostToolSelection
     }
     AlertDialog(
         onDismissRequest = ::dismiss,
-        title = { Text("Tool ${selection.index + 1} diagnostics") },
+        title = { Text(strings.get(R.string.tool_diagnostics_title, selection.index + 1)) },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
                 Text(selection.pluginId)
-                Text("Direct full-trust plugin call, not an agent run. Approval requests are denied; input requests return unavailable. Cancellation does not undo effects.")
-                if (!registered) Text("Tool registration is no longer available for a new call.")
+                Text(strings.get(R.string.tool_diagnostics_notice))
+                if (!registered) Text(strings.get(R.string.tool_unregistered))
                 OutlinedTextField(
                     value = argsText,
                     onValueChange = {
                         if (it.length <= MAX_TOOL_JSON_CHARS) { argsText = it; error = null }
-                        else error = "Arguments exceed $MAX_TOOL_JSON_CHARS characters; edit or shorten them."
+                        else error = uiText(R.string.arguments_too_long, MAX_TOOL_JSON_CHARS)
                     },
                     enabled = call == null && !submitting,
-                    label = { Text("Arguments (JSON object)") },
+                    label = { Text(strings.get(R.string.arguments_label)) },
                     modifier = Modifier.fillMaxWidth(),
                     minLines = 3,
                     maxLines = 8,
                 )
-                Text("Limit: $MAX_TOOL_JSON_CHARS characters, $MAX_TOOL_JSON_DEPTH nesting levels. S1 does not validate against the tool schema.")
-                error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-                if (submitting) Text("Validating arguments / requesting admission…")
-                if (call == null) Text("Tool name and spec are read only by the admitted worker after invocation.")
+                Text(strings.get(R.string.arguments_limits, MAX_TOOL_JSON_CHARS, MAX_TOOL_JSON_DEPTH))
+                error?.let { Text(strings.get(it), color = MaterialTheme.colorScheme.error) }
+                if (submitting) Text(strings.get(R.string.tool_admitting))
+                if (call == null) Text(strings.get(R.string.tool_metadata_notice))
                 else {
                     HostInvocationMetadata(call)
-                    Text("Run: ${call.request.runId}\nSession: ${call.request.sessionId}\nCall: ${call.request.callId}")
-                    Text("Logical terminal: ${terminal?.status?.name ?: "RUNNING"}")
-                    terminal?.message?.let { Text(it.take(4096)) }
+                    Text(strings.get(R.string.invocation_identifiers, call.request.runId, call.request.sessionId, call.request.callId))
+                    Text(strings.get(R.string.invocation_terminal, terminal?.status?.let(strings::label) ?: strings.get(R.string.running)))
+                    terminal?.message?.let { message ->
+                        LaunchedEffect(message) { logUiDiagnostic(message) }
+                        Text(strings.get(R.string.invocation_diagnostic_notice))
+                    }
                     terminal?.result?.let { result ->
-                        Text("Error: ${result.isError} · Effect: ${result.effect?.name ?: "unspecified"}")
+                        Text(strings.get(R.string.invocation_effect, strings.label(result.isError), result.effect?.let(strings::label) ?: strings.get(R.string.unspecified)))
                         Text(result.text.take(4096))
-                        if (result.text.length > 4096) Text("Result text display truncated to 4096 characters.")
+                        if (result.text.length > 4096) Text(strings.get(R.string.result_truncated))
                     }
                     HostStructuredResult(terminal)
-                    Text(if (actuallyExited) "Actual execution exited; worker capacity has been released."
-                        else "Actual execution has NOT exited. A terminal result, timeout or cancellation is not proof of exit; capacity may remain occupied.")
-                    if (!actuallyExited) Text("Closing requests cancellation but does not release an occupied worker slot. The manager continues tracking actual exit. Uncooperative full-trust code may require a process restart.")
+                    Text(if (actuallyExited) strings.get(R.string.execution_exited)
+                        else strings.get(R.string.execution_not_exited))
+                    if (!actuallyExited) Text(strings.get(R.string.close_invocation_notice))
                 }
             }
         },
@@ -147,54 +156,56 @@ internal fun HostToolDialog(manager: PluginManager, selection: HostToolSelection
                         invocation = accepted
                         published = true
                     } catch (cancelled: CancellationException) { throw cancelled }
-                    catch (failure: Exception) { error = failure.message?.take(1024) ?: "Tool invocation failed" }
+                    catch (failure: Exception) { error = if (failure is IllegalArgumentException) uiText(R.string.invalid_arguments) else uiFailure(failure) }
                     finally { if (!published) admitted?.cancel(); submitting = false }
                 }
-            }) { Text("Invoke once") }
+            }) { Text(strings.get(R.string.invoke_once)) }
             else if (!actuallyExited) TextButton(enabled = terminal == null, onClick = { call.cancel() }) {
-                Text(if (terminal == null) "Cancel invocation" else "Waiting for actual exit")
+                Text(if (terminal == null) strings.get(R.string.cancel_invocation) else strings.get(R.string.awaiting_exit))
             }
         },
-        dismissButton = { TextButton(enabled = !submitting, onClick = ::dismiss) { Text("Close") } },
+        dismissButton = { TextButton(enabled = !submitting, onClick = ::dismiss) { Text(strings.get(R.string.close)) } },
     )
 }
 
 @Composable
 private fun HostInvocationMetadata(call: PluginInvocation) {
+    val strings = uiStrings()
     val spec by call.spec.collectAsState()
     val progress by call.progress.collectAsState()
     val definition = spec
     var schemas by remember(call) { mutableStateOf<String?>(null) }
-    LaunchedEffect(definition) {
+    LaunchedEffect(definition, strings) {
         schemas = withContext(Dispatchers.Default) {
             definition?.let {
-                "Input schema (up to 4096 characters):\n${it.inputSchema.toString().take(4096)}\n" +
-                    "Output schema (up to 4096 characters):\n${it.outputSchema?.toString()?.take(4096) ?: "unspecified"}"
+                strings.get(R.string.input_schema, it.inputSchema.toString().take(4096)) +
+                    strings.get(R.string.output_schema, it.outputSchema?.toString()?.take(4096) ?: strings.get(R.string.unspecified))
             }
         }
     }
-    if (definition == null) Text("Spec: waiting for bounded worker")
+    if (definition == null) Text(strings.get(R.string.spec_waiting))
     else {
-        Text("Tool: ${definition.name.take(256)}")
+        Text(strings.get(R.string.tool_name, definition.name.take(256)))
         Text(definition.description.take(2048))
-        Text("Declared risk: ${definition.risk.name} · Idempotent: ${definition.idempotent} · Parallel-safe: ${definition.parallelSafe}")
-        Text("Declared timeout: ${definition.timeoutMs?.toString() ?: "host default"} ms\nExclusive resource: ${definition.exclusiveResource?.take(256) ?: "none"}")
-        Text("Declarations are metadata, not a permission sandbox or approval.")
+        Text(strings.get(R.string.tool_declarations, strings.label(definition.risk), strings.label(definition.idempotent), strings.label(definition.parallelSafe)))
+        Text(strings.get(R.string.tool_timeout_resource, definition.timeoutMs?.toString() ?: strings.get(R.string.host_default), definition.exclusiveResource?.take(256) ?: strings.get(R.string.none)))
+        Text(strings.get(R.string.declarations_notice))
     }
     schemas?.let { Text(it) }
     progress?.let { value ->
-        Text("Progress: ${value.text}")
-        value.fraction?.let { Text("${(it * 100).toInt()}%") }
+        Text(strings.get(R.string.tool_progress, value.text))
+        value.fraction?.let { Text(strings.get(R.string.progress_percent, (it * 100).toInt())) }
     }
 }
 
 @Composable
 private fun HostStructuredResult(terminal: PluginInvocationResult?) {
+    val strings = uiStrings()
     var rendered by remember(terminal) { mutableStateOf<String?>(null) }
-    LaunchedEffect(terminal) {
+    LaunchedEffect(terminal, strings) {
         rendered = withContext(Dispatchers.Default) {
             terminal?.result?.structured?.toString()?.let {
-                it.take(4096) + if (it.length > 4096) "\nStructured result display truncated." else ""
+                it.take(4096) + if (it.length > 4096) strings.get(R.string.structured_truncated) else ""
             }
         }
     }

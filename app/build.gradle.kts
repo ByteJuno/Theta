@@ -56,6 +56,17 @@ android {
     }
 }
 
+// Both lintDebug (PR CI) and preBuild enforce host-owned bilingual text.
+val uiResourceParser by configurations.creating
+ dependencies { uiResourceParser("org.jetbrains.kotlin:kotlin-compiler-embeddable:2.2.21") }
+val verifyUiResources = tasks.register<io.github.bytejuno.thetacore.gradle.VerifyUiResources>("verifyUiResources") {
+    sourceDirectory.set(layout.projectDirectory.dir("src/main"))
+    parserClasspath.from(uiResourceParser)
+}
+tasks.matching { it.name == "lintDebug" || it.name == "preBuild" }.configureEach {
+    dependsOn(verifyUiResources)
+}
+
 // Test APK only. Signed payloads exercise the actual host UI and platform verifier.
 val s1PublicationAssets = layout.buildDirectory.dir("generated/s1-publication-test-assets")
 val stageS1PublicationAssets = tasks.register<StageS1PublicationAssets>("stageS1PublicationTestAssets") {

@@ -7,6 +7,9 @@
     <instrumentation
         android:name="io.github.bytejuno.thetacore.provider.ProviderStorageInstrumentation"
         android:targetPackage="io.github.bytejuno.thetacore" />
+    <instrumentation
+        android:name="io.github.bytejuno.thetacore.LanguageInstrumentation"
+        android:targetPackage="io.github.bytejuno.thetacore" />
     <application>
         <!-- Test APK only; serves two fixed inert fixture assets, never caller paths. -->
         <provider android:name="io.github.bytejuno.thetacore.S1PayloadProvider"

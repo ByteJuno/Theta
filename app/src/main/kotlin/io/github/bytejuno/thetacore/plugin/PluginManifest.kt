@@ -8,7 +8,20 @@ import org.json.JSONObject
 private const val MANIFEST_PATH = "assets/theta-plugin.json"
 private const val MANIFEST_MAX_BYTES = 64 * 1024L
 
-internal class PluginPackageException(message: String) : Exception(message)
+/** Stable business reasons assigned at the failing invariant, never inferred from messages. */
+internal enum class PluginFailureReason {
+    UNKNOWN, IMPORT_CLEANUP_PENDING, PACKAGE_DIGEST_MISMATCH, SIGNER_MISMATCH,
+    SIGNATURE_INVALID, SIGNER_BINDING_MISSING, HIGHER_VERSION_REQUIRED,
+    UNINSTALL_PENDING, RESTART_PENDING, STATE_UNAVAILABLE, UNSUPPORTED_API,
+    CONFIRMATION_EXPIRED, DATA_RECOVERY, DATA_PAGE_REVOKED, FILE_UNAVAILABLE,
+    TOOL_INACTIVE, TOOL_QUARANTINED, TOOL_CAPACITY,
+}
+
+internal class PluginPackageException(
+    message: String,
+    val reason: PluginFailureReason = PluginFailureReason.UNKNOWN,
+    cause: Throwable? = null,
+) : Exception(message, cause)
 
 internal data class PluginManifest(
     val id: String,
