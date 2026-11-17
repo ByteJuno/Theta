@@ -4,6 +4,19 @@
 - release APK SHA-256：未生成／待审核；没有用旧 APK 哈希代表本提交。
 - 正式验收：待审核流水线在最终提交上运行模拟器回归。本地结果不是正式验收结论。
 
+## 2026-11-17：主线冲突整合复测
+
+- 验证代码提交：`d22dfce93c55c4c88a4f8db84b3b31b54ca75a38`，父提交为 PR 原 head `d1e3918` 和 main `2d7cdc0`。后续仅更新本摘要；没有合并 GitHub PR。
+- 将主线 #86 的摘要工作区与 #87 的历史/账本一致性校验接入 SQLite。摘要路径按数据库和会话隔离，活动 run/spool 保持 owner；拒绝关闭时不丢失账本绑定。保留异常打开时的锁释放、Android 可信存储根解析以及不安全路径拒绝测试。
+- 本轮两组定向测试共 **256 项：255 通过、1 跳过、0 failures/errors**。不是历史测试累计，也不是全项目回归。
+  - 核心整合组：`SummaryWorkspaceTest`、`HistoryLedgerConsistencyTest`、`ContextPolicyTest`、`FileRunAccountingTest`、`SqliteOwnerCloseTest`、`SqliteOpenFailureTest`、`SharedHistoryDatabaseTest`、`StepCallIndexTest`，119 项中 118 通过、1 跳过。
+  - 历史/宿主组：`FileRunHistoryTest`（SQLite 测试适配器）、`HistoryStorageRegressionTest`、`HistoryProcessTest`、`HistoryPerformanceTest`、`SqliteInvocationStoreTest`、`RunRecoveryTest`、`AndroidInvocationOwnershipTest`、`AndroidInvocationStoreTest`、`HostToolExecutionServiceTest`，137/137 通过。
+- 两组均通过 `:agent-core:test` / `:app:testDebugUnitTest` 的 `--tests` 过滤执行，使用 `--configuration-cache --configuration-cache-problems=fail --no-build-cache --rerun-tasks -Pkotlin.compiler.execution.strategy=in-process`。严格配置缓存均成功保存。首次命令因 PowerShell 拆分未加引号的 `-P` 参数而在选任务阶段失败，无测试执行；修正参数引号后完成以上两组。
+- 唯一跳过为 `link plus parent traversal cannot clean a different active session`：Windows 在符号链接之前解析 `..`，不支持该 POSIX 路径身份场景；其余路径拒绝及 Android 入口 JVM 测试通过。
+- `HistoryProcessTest` 实际强杀 15 个 JVM 子进程，覆盖 create/pending/append 的五个写入切点；包含重试前提交可见性检查。不是物理断电测试。
+- Windows 11 / JDK 25.0.4、SQLite WAL FULL、未清 OS 缓存：10,000 条独立追加共 10,324.08 ms（均值 1.032 ms），重开 3.402 ms，最近/更早 50 条分别 3.560/3.481 ms；追加不解码旧消息，重开解码 1 条，每页解码 50 条。数据是本机微基准，不代表 Android 延迟或整个运行循环的有界内存。
+- 本轮未生成或安装 APK，未运行模拟器/真机/API33/R8 验收；不沿用旧 APK 的结果。正式最终提交验收仍交审核流水线。原始日志、XML 和暂停前改动备份仅留本地，未提交。
+
 ## 本地相关测试
 
 PR92 2026-11-11 退回修正：仅修改 siblingStorageFailureInterruptsWaitingForSlowFirstCall 的测试前置同步。fast 有界等待 slow 已进入后才返回；fast 夹具 deadline 为10秒，等待上限5秒，原有2秒 step 结束断言、slow RUNNING、fast UNCONFIRMED及entered断言均保留。生产代码不变。
