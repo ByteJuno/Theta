@@ -23,7 +23,12 @@ internal class AndroidInvocationStore private constructor(
 ) : InvocationStore by delegate {
     fun createHistory(sessionId: String) = io.github.bytejuno.thetacore.agent.run.SqliteRunHistory.create(database, sessionId)
     fun openHistory(sessionId: String) = io.github.bytejuno.thetacore.agent.run.SqliteRunHistory.open(database, sessionId)
-    override fun close() { try { delegate.close() } finally { database.close() } }
+    override fun close() = synchronized(database) {
+        // Check pins and close the owner before mutating the borrowed ledger. Holding
+        // the database monitor excludes a new run/spool between admission and close.
+        database.close()
+        delegate.close()
+    }
     companion object {
         fun open(context: Context): AndroidInvocationStore {
             val helper = FrameworkSQLiteOpenHelperFactory().create(
@@ -50,7 +55,7 @@ internal class AndroidInvocationStore private constructor(
                     }).build())
             try {
                 helper.setWriteAheadLoggingEnabled(true)
-                return open(context.noBackupFilesDir, SupportSQLiteDriver(helper))
+                return open(context, SupportSQLiteDriver(helper))
             } catch (error: Throwable) {
                 runCatching { helper.close() }
                 throw error
@@ -71,13 +76,21 @@ internal class AndroidInvocationStore private constructor(
             db.execPerConnectionSQL("PRAGMA synchronous=FULL", null)
         }
 
+        /** Resolve only Android's trusted storage anchor (e.g. /data/user/0 alias).
+         * Injected roots and all app-owned descendants still receive strict validation. */
+        internal fun open(context: Context, driver: SQLiteDriver): AndroidInvocationStore {
+            val anchor = context.noBackupFilesDir
+            require(anchor.toPath().none { it.toString() == "." || it.toString() == ".." })
+            return open(anchor.canonicalFile, driver)
+        }
+
         /** Bundled desktop driver is injected only by JVM tests. */
         internal fun open(root: File, driver: SQLiteDriver,
             fault: (SqliteWriteStage) -> Unit = {}): AndroidInvocationStore {
             require(root.isDirectory) { "No private no-backup directory" }
             val database = AgentDatabase.open(File(root, AgentDatabase.FILE_NAME).toPath(), driver)
             try { return AndroidInvocationStore(database, SqliteInvocationStore.open(database, fault)) }
-            catch (error: Throwable) { database.close(); throw error }
+            catch (error: Throwable) { runCatching { database.close() }; throw error }
         }
     }
 }

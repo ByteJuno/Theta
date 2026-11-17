@@ -11,6 +11,7 @@ import java.io.InputStream
 import java.io.ByteArrayInputStream
 import java.security.MessageDigest
 import java.util.UUID
+import java.nio.file.Path
 
 /** A cursor is a snapshot boundary, not an offset into a changing message list. */
 data class HistoryCursor internal constructor(val sessionId: String, val revision: Long,
@@ -62,6 +63,25 @@ open class SqliteRunHistory internal constructor(
             it.bindText(1, sessionId); it.bindText(2, name); it.step()
         }
     }
+    // Both the session binding and the database writer lock are held before cleanup.
+    private val summaryWorkspace = database.access { SummaryWorkspace(database.summaryDirectory(sessionId)) }
+    private var summarySpools = 0
+
+    @Synchronized internal fun createSummarySpool(): SummarySpool {
+        ready()
+        database.retainOwner()
+        try {
+            val path = summaryWorkspace.create()
+            summarySpools++
+            return SummarySpool(path) { releaseSummarySpool(path) }
+        } catch (error: Throwable) { database.releaseOwner(); throw error }
+    }
+
+    @Synchronized private fun releaseSummarySpool(path: Path) {
+        try { summaryWorkspace.delete(path) }
+        finally { summarySpools--; database.releaseOwner() }
+    }
+
     @Synchronized fun io() = HistoryIo(bytesRead, bytesWritten, filesRead, filesWritten, messagesDecoded)
     private fun ready() {
         check(!closed && !poisoned) { "History closed or write uncertain; reopen and recover" }
@@ -100,9 +120,12 @@ open class SqliteRunHistory internal constructor(
 
     private var runActive = false
     @Synchronized internal fun beginRun() {
-        ready(); check(!runActive) { "Session already has an active run" }; runActive = true
+        ready(); check(!runActive) { "Session already has an active run" }
+        database.retainOwner(); runActive = true
     }
-    @Synchronized internal fun endRun() { runActive = false }
+    @Synchronized internal fun endRun() {
+        if (runActive) { runActive = false; database.releaseOwner() }
+    }
 
     private fun receiptKey(value: Any): String {
         val digest = MessageDigest.getInstance("SHA-256")
@@ -503,7 +526,10 @@ open class SqliteRunHistory internal constructor(
     }
     private fun point(name: String, stage: HistoryWriteStage) = fault(HistoryWritePoint(name, stage))
     @Synchronized override fun close() {
-        if (!closed) { closed = true; database.releaseSession(sessionId) }
+        if (!closed) {
+            check(!runActive && summarySpools == 0) { "Cannot close history with an active run or summary spool" }
+            closed = true; database.releaseSession(sessionId)
+        }
     }
     companion object {
         private const val EMPTY_HASH = "ROOT"
@@ -526,6 +552,7 @@ open class SqliteRunHistory internal constructor(
             database.bindSession(sessionId)
             try {
                 database.access {
+                    database.summaryDirectory(sessionId) // reject unsafe scratch paths before bootstrap writes
                     val exists = database.connection.prepare("SELECT 1 FROM sessions WHERE session_id=?").use {
                         it.bindText(1, sessionId); it.step()
                     }

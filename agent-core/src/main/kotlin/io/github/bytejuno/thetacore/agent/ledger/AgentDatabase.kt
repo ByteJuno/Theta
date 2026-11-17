@@ -2,6 +2,9 @@ package io.github.bytejuno.thetacore.agent.ledger
 
 import androidx.sqlite.SQLiteConnection
 import androidx.sqlite.SQLiteDriver
+import io.github.bytejuno.thetacore.agent.run.checkedSessionDirectory
+import java.nio.file.LinkOption.NOFOLLOW_LINKS
+import java.security.MessageDigest
 import java.io.Closeable
 import java.nio.channels.FileChannel
 import java.nio.channels.FileLock
@@ -28,6 +31,21 @@ class AgentDatabase private constructor(
     @Volatile private var uncertain = false
     private val sessions = mutableSetOf<String>()
     private var ledgerBound = false
+    private var ownerPins = 0
+    @Synchronized internal fun retainOwner() { ready(); ownerPins++ }
+    @Synchronized internal fun releaseOwner() { check(ownerPins > 0); ownerPins-- }
+
+    /** Scratch namespaces are database-local and keyed by encoded identity, never raw session IDs. */
+    @Synchronized internal fun summaryDirectory(sessionId: String): Path {
+        ready(); check(sessionId in sessions)
+        val root = summaryRoot(identity)
+        val key = MessageDigest.getInstance("SHA-256").digest(sessionId.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+        val directory = root.resolve(key)
+        checkedSessionDirectory(directory.resolve("summary-tmp"), allowMissing = true)
+        Files.createDirectories(directory)
+        return checkedSessionDirectory(directory)
+    }
     internal fun ready() { if (closed || uncertain) throw StoreException("Database closed or uncertain; reopen and cold recover", uncertain) }
     @Synchronized internal fun bindLedger() { ready(); check(!ledgerBound); ledgerBound = true }
     @Synchronized internal fun releaseLedger() { ledgerBound = false }
@@ -52,6 +70,7 @@ class AgentDatabase private constructor(
     }
     @Synchronized override fun close() {
         if (closed) return
+        check(ownerPins == 0) { "Cannot close database with an active run or summary spool" }
         closed = true
         try { connection.close() } finally {
             try { lock.release() } finally {
@@ -103,19 +122,41 @@ class AgentDatabase private constructor(
             connection.execute("PRAGMA user_version=$SCHEMA_VERSION")
         }
 
+        private fun Path.toRealPathParent(): Path = parent.toRealPath().resolve(fileName)
+        private fun summaryRoot(file: Path) = file.resolveSibling("${file.fileName}.summaries")
+        private fun validateSummaryDirectories(file: Path) {
+            val root = checkedSessionDirectory(summaryRoot(file), allowMissing = true)
+            if (Files.exists(root, NOFOLLOW_LINKS)) Files.newDirectoryStream(root).use { paths ->
+                for (path in paths) if (path.fileName.toString().matches(Regex("[0-9a-f]{64}"))) {
+                    checkedSessionDirectory(path.resolve("summary-tmp"), allowMissing = true)
+                }
+            }
+        }
+
         fun open(file: Path, driver: SQLiteDriver): AgentDatabase = openForInitialization(file, driver)
 
         internal fun openForInitialization(file: Path, driver: SQLiteDriver, fault: (SqliteInitStage) -> Unit = {}): AgentDatabase {
-            // Canonical parent means aliases cannot acquire different writer locks.
-            val canonical = file.toFile().canonicalFile.toPath()
-            require(Files.isDirectory(canonical.parent)) { "Missing database parent" }
+            // Reject raw traversal and links BEFORE canonicalization, lock/provenance creation,
+            // SQLite WAL recovery or schema writes. Validate scratch roots without cleaning them.
+            val canonical = try {
+                require(file.none { it.toString() == "." || it.toString() == ".." })
+                val absolute = file.toAbsolutePath()
+                checkedSessionDirectory(absolute.parent)
+                for (suffix in listOf("", ".writer.lock", "-wal", "-shm", "-journal")) {
+                    val path = absolute.resolveSibling("${absolute.fileName}$suffix")
+                    require(!Files.exists(path, NOFOLLOW_LINKS) || Files.isRegularFile(path, NOFOLLOW_LINKS))
+                }
+                validateSummaryDirectories(absolute)
+                absolute.toRealPathParent()
+            } catch (error: Exception) { throw StoreException("Invalid database or summary path", cause = error) }
             synchronized(writers) {
                 if (!writers.add(canonical)) throw StoreException("Agent database already has a writer")
             }
             val channel = try {
                 FileChannel.open(canonical.resolveSibling("${canonical.fileName}.writer.lock"), CREATE, READ, WRITE)
-            } catch (error: Exception) {
+            } catch (error: Throwable) {
                 synchronized(writers) { writers.remove(canonical) }
+                if (error !is Exception) throw error
                 throw StoreException("Cannot acquire agent database writer lock", cause = error)
             }
             var lock: FileLock? = null
@@ -152,7 +193,7 @@ class AgentDatabase private constructor(
                     fault(SqliteInitStage.BEFORE_SCHEMA_COMMIT)
                     connection.execute("COMMIT")
                     fault(SqliteInitStage.AFTER_SCHEMA_COMMIT)
-                } catch (error: Exception) {
+                } catch (error: Throwable) {
                     runCatching { connection.execute("ROLLBACK") }
                     throw error
                 }
@@ -163,10 +204,12 @@ class AgentDatabase private constructor(
                 provenance.establish()
                 fault(SqliteInitStage.AFTER_ESTABLISHED)
                 return AgentDatabase(connection, channel, lock, canonical)
-            } catch (error: Exception) {
+            } catch (error: Throwable) {
                 runCatching { connection?.close() }
                 runCatching { lock?.release() }
-                try { channel.close() } finally { synchronized(writers) { writers.remove(canonical) } }
+                try { runCatching { channel.close() } }
+                finally { synchronized(writers) { writers.remove(canonical) } }
+                if (error !is Exception) throw error
                 throw StoreException("Cannot open agent database: ${error.message}", cause = error)
             }
         }

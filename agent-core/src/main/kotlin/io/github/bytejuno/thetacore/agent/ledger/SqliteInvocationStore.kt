@@ -262,7 +262,13 @@ class SqliteInvocationStore private constructor(
     } }
 
     override fun close() = synchronized(database) {
-        if (!closed) { closed = true; database.releaseLedger(); if (ownsDatabase) database.close() }
+        if (!closed) {
+            // Admission and owner teardown share the pin monitor. A rejected close must
+            // leave this handle and its ledger binding intact, including after poison.
+            if (ownsDatabase) database.close()
+            closed = true
+            database.releaseLedger()
+        }
     }
     companion object {
         fun open(database: AgentDatabase, fault: (SqliteWriteStage) -> Unit = {}): SqliteInvocationStore =
@@ -276,9 +282,9 @@ class SqliteInvocationStore private constructor(
         fun open(file: Path, driver: SQLiteDriver, fault: (SqliteWriteStage) -> Unit = {}): SqliteInvocationStore {
             val database = AgentDatabase.open(file, driver)
             try { return attach(database, fault, true) }
-            catch (error: Exception) {
+            catch (error: Throwable) {
                 runCatching { database.close() }
-                if (error is StoreException) throw error
+                if (error !is Exception || error is StoreException) throw error
                 throw StoreException("Cannot open invocation ledger", cause = error)
             }
         }

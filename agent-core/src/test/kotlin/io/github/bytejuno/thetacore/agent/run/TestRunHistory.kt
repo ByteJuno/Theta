@@ -8,10 +8,11 @@ import java.nio.file.Path
 /** Test-only owner adapter. Production borrows one AgentDatabase for ledger and all sessions. */
 internal class TestRunHistory private constructor(private val owner: AgentDatabase, id: String,
     fault: (HistoryWritePoint) -> Unit) : SqliteRunHistory(owner, id, fault) {
-    override fun close() { try { super.close() } finally { owner.close() } }
+    override fun close() { super.close(); owner.close() }
     companion object {
         fun create(path: Path, sessionId: String = "session", durability: Durability,
             fault: (HistoryWritePoint) -> Unit = {}): TestRunHistory {
+            checkedSessionDirectory(path, allowMissing = true)
             Files.createDirectories(path)
             val db = AgentDatabase.open(path.resolve(AgentDatabase.FILE_NAME), BundledSQLiteDriver())
             try {
@@ -21,7 +22,8 @@ internal class TestRunHistory private constructor(private val owner: AgentDataba
             } catch (error: Throwable) { db.close(); throw error }
         }
         fun open(path: Path, durability: Durability, fault: (HistoryWritePoint) -> Unit = {}): TestRunHistory {
-            val db = AgentDatabase.open(path.resolve(AgentDatabase.FILE_NAME), BundledSQLiteDriver())
+            val db = try { AgentDatabase.open(path.resolve(AgentDatabase.FILE_NAME), BundledSQLiteDriver()) }
+            catch (error: Exception) { throw HistoryStorageException("Open failed", error) }
             try {
                 val id = db.connection.textValue("SELECT session_id FROM sessions")
                 db.bindSession(id)

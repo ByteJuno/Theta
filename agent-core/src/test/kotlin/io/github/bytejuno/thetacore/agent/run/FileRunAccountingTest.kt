@@ -27,6 +27,34 @@ class FileRunAccountingTest {
             assertFails { h.saveAccounting(value("A").copy(sessionId = "other")) }
         }
     }
+    @Test fun validWrongChainValueCannotBeReadOrOverwritten() {
+        val dir = Files.createTempDirectory("sqlite-accounting-substitution")
+        try {
+            TestRunHistory.create(dir, "session", durability).use { h ->
+                h.saveAccounting(value("A")); h.saveAccounting(value("B", 7, 6))
+            }
+            // Copy the complete valid framed value, not a malformed/checksum failure.
+            // SQLite owns the framing; only the logical chain binding is now wrong.
+            androidx.sqlite.driver.bundled.BundledSQLiteDriver().open(
+                dir.resolve(io.github.bytejuno.thetacore.agent.ledger.AgentDatabase.FILE_NAME).toString()).use { db ->
+                db.prepare("DELETE FROM history_chunks WHERE session_id='session' AND name=?").use {
+                    it.bindText(1, key("A")); it.step()
+                }
+                db.prepare("INSERT INTO history_chunks SELECT session_id,?,ordinal,bytes FROM history_chunks WHERE session_id='session' AND name=?").use {
+                    it.bindText(1, key("A")); it.bindText(2, key("B")); it.step()
+                }
+            }
+            val evidence = TestRunHistory.bytes(dir, key("A"))
+            assertContentEquals(TestRunHistory.bytes(dir, key("B")), evidence)
+            TestRunHistory.open(dir, durability).use { h ->
+                assertFailsWith<IllegalArgumentException> { h.loadAccounting("A") }
+                assertFailsWith<IllegalArgumentException> { h.saveAccounting(value("A", 20, 20)) }
+                assertEquals(value("B", 7, 6), h.loadAccounting("B"))
+                assertContentEquals(evidence, TestRunHistory.bytes(dir, key("A")))
+            }
+        } finally { dir.toFile().deleteRecursively() }
+    }
+
     @Test fun counterTransactionFaultsPreserveOtherChainsAndMonotonicity() {
         for (stage in HistoryWriteStage.entries) {
             val dir = Files.createTempDirectory("sqlite-accounting-fault")
