@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Regression controls for list scrolling and localized signature diagnostics."""
 import importlib.util
+import json
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 from unittest.mock import Mock, patch
 import xml.etree.ElementTree as ET
@@ -27,9 +29,9 @@ def resource(locale, key):
 class LifecycleSearch(unittest.TestCase):
     def search(self, *, target=True, duplicate=False, end=7, initial=0,
                bounds='[0,72][1080,1850]', empty=False, changing=False,
-               timeout=12, delayed=False, target_position=None):
+               timeout=12, delayed=False, target_position=None, appear_at=None):
         """Exercise the real wait/matching/scroll/tap chain, with no adb or clock IO."""
-        state = {'position': initial, 'clock': 0, 'swipes': [], 'taps': [], 'screens': 0}
+        state = {'position': initial, 'clock': 0, 'swipes': [], 'swipe_times': [], 'taps': [], 'screens': 0}
 
         def screen():
             state['screens'] += 1
@@ -41,7 +43,8 @@ class LifecycleSearch(unittest.TestCase):
                      ET.Element('node', text='Uninstall Fixture other', bounds='[16,250][600,290]'),
                      ET.Element('node', text='Uninstall data', bounds='[16,300][600,340]')]
             target_at = end if target_position is None else target_position
-            if target and state['position'] == target_at and (not delayed or state['clock'] >= 3):
+            ready_at = appear_at if appear_at is not None else (3 if delayed else 0)
+            if target and state['position'] == target_at and state['clock'] >= ready_at:
                 nodes.append(ET.Element('node', text='Uninstall Fixture', bounds='[16,400][600,448]'))
                 if duplicate:
                     nodes.append(ET.Element('node', text='Uninstall Fixture', bounds='[16,500][600,548]'))
@@ -56,6 +59,7 @@ class LifecycleSearch(unittest.TestCase):
                 x1, y1, x2, y2 = map(int, args[3:7])
                 down = y1 > y2
                 state['swipes'].append((x1, y1, x2, y2))
+                state['swipe_times'].append(state['clock'])
                 bx1, by1, bx2, by2 = lc.rect(ET.Element('node', bounds=bounds))
                 if bx1 < x1 == x2 < bx2 and by1 < min(y1, y2) < max(y1, y2) < by2:
                     if changing:
@@ -71,7 +75,8 @@ class LifecycleSearch(unittest.TestCase):
         def sleep(seconds):
             state['clock'] += seconds
 
-        with patch.object(lc.em, 'screen', side_effect=screen), \
+        with tempfile.TemporaryDirectory() as output, patch.object(lc, 'OUTPUT', Path(output)), \
+                patch.object(lc.em, 'screen', side_effect=screen), \
                 patch.object(lc.em, 'crashed', return_value=False), \
                 patch.object(lc, 'adb', side_effect=adb), \
                 patch.object(lc.em, 'adb', side_effect=adb), \
@@ -81,6 +86,7 @@ class LifecycleSearch(unittest.TestCase):
                 lc.tap('Uninstall Fixture')
             except lc.FAIL as error:
                 state['error'] = str(error)
+                state['failure_trace'] = json.loads((Path(output) / ('FAILED-' + lc.CURRENT) / 'search.json').read_text(encoding='utf-8'))
         return state
 
     def test_exact_uninstall_below_visible_header(self):
@@ -117,17 +123,37 @@ class LifecycleSearch(unittest.TestCase):
         self.assertEqual([], state['swipes'])
         self.assertEqual([(308, 424)], state['taps'])
 
-    def test_missing_target_exhausts_both_ends_without_oscillation(self):
+    def test_missing_target_rechecks_list_with_a_pause_under_original_deadline(self):
         state = self.search(target=False, initial=3)
         self.assertIn('timed out', state.get('error', ''))
         self.assertEqual([], state['taps'])
-        self.assertEqual(12, len(state['swipes']))  # four up + eight down, then observe only
+        self.assertGreater(len(state['swipes']), 12)  # complete sweep, then a later rescan
+        pauses = [b - a for a, b in zip(state['swipe_times'], state['swipe_times'][1:])]
+        self.assertTrue(any(pause >= 2 for pause in pauses), 'Do not continuously flip between ends')
         self.assertLessEqual(state['clock'], 12.3)
+        self.assertLessEqual(len(state['failure_trace']['observations']), 40)
+        self.assertEqual(12, state['failure_trace']['timeout'])
+        self.assertTrue(any(o['action'] == 'swipe' for o in state['failure_trace']['observations']))
 
-    def test_unchanged_short_list_stops_swiping_but_can_observe_late_target(self):
+    def test_async_target_above_finished_sweep_is_found(self):
+        state = self.search(end=3, target_position=0, appear_at=10, timeout=30)
+        self.assertNotIn('error', state)
+        self.assertEqual([(308, 424)], state['taps'])
+        self.assertGreaterEqual(state['clock'], 10)
+        self.assertLess(state['clock'], 30)
+
+    def test_async_target_below_restarted_sweep_is_found(self):
+        state = self.search(end=3, target_position=3, appear_at=10, timeout=30)
+        self.assertNotIn('error', state)
+        self.assertEqual([(308, 424)], state['taps'])
+        self.assertGreaterEqual(state['clock'], 10)
+        self.assertLess(state['clock'], 30)
+
+    def test_unchanged_short_list_pauses_and_observes_late_target(self):
         state = self.search(end=0, delayed=True)
         self.assertNotIn('error', state)
-        self.assertEqual(2, len(state['swipes']))
+        self.assertEqual(4, len(state['swipes']))  # second sweep only after the pause
+        self.assertGreaterEqual(state['swipe_times'][2] - state['swipe_times'][1], 2)
         self.assertEqual([(308, 424)], state['taps'])
 
     def test_duplicate_exact_target_never_taps_either(self):
@@ -166,6 +192,18 @@ class LifecycleSearch(unittest.TestCase):
         with patch.object(lc.time, 'monotonic', side_effect=[0, 0, 2]):
             with self.assertRaisesRegex(lc.FAIL, 'observation exceeded deadline'):
                 lc.wait('uninstall', lambda: node, timeout=1)
+
+    def test_trace_write_failure_preserves_the_observation_error(self):
+        nodes = [ET.Element('node', text='Uninstall Fixture'),
+                 ET.Element('node', text='Uninstall Fixture')]
+        errors = []
+        with patch.object(lc.em, 'screen', return_value=nodes), \
+                patch.object(lc, 'EVIDENCE_ERRORS', errors), \
+                patch.object(Path, 'mkdir', side_effect=OSError('disk unavailable')):
+            with self.assertRaisesRegex(lc.FAIL, 'Ambiguous'):
+                lc.text('Uninstall Fixture')
+        self.assertEqual(1, len(errors))
+        self.assertIn('disk unavailable', errors[0])
 
 
 class Observations(unittest.TestCase):

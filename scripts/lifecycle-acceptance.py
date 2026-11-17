@@ -118,35 +118,61 @@ def scroll(down, nodes=None):
 
 
 def matching(description, predicate, timeout=None):
-    # One top-to-bottom sweep, not endless flips between both ends. After both
-    # ends, keep observing for an asynchronous result under the ORIGINAL deadline.
-    # Each direction also has a hard cap, as in absent(), for changing/stuck XML.
-    sweep = {"down": False, "last": None, "steps": 0, "finished": False}
+    # Revisit offscreen content: asynchronous results may appear above the final
+    # viewport after a complete sweep. Pause between sweeps without resetting
+    # wait()'s deadline. Each direction retains the hard cap for changing XML.
+    sweep = {"down": False, "last": None, "steps": 0, "retry_at": None}
+    observations = []
+
+    def record(nodes, action):
+        observations.append({"at": time.monotonic(), "action": action,
+            "direction": "down" if sweep["down"] else "up", "steps": sweep["steps"],
+            "nodes": [{k: n.get(k, "") for k in ("text", "bounds", "scrollable", "package")}
+                      for n in nodes]})
+        del observations[:-40]  # Retain a bounded tail, only write it on failure.
 
     def locate():
         nodes = em.screen()
         matches = [n for n in nodes if predicate(n.get("text", ""))]
+        record(nodes, "observe")
         require(len(matches) <= 1, f"Ambiguous match for {description}: {len(matches)} nodes")
         if matches:
             return matches[0]  # Never use Element truthiness (leaf nodes are falsey).
         if not nodes:
             sweep["last"] = None  # A failed dump cannot establish a list boundary.
             return None
-        if sweep["finished"]:
-            return None
+        if sweep["retry_at"] is not None:
+            if time.monotonic() < sweep["retry_at"]:
+                return None
+            sweep.update(down=False, last=None, steps=0, retry_at=None)
         signature = tuple((n.get("text", ""), n.get("bounds", "")) for n in nodes)
         if signature == sweep["last"]:
             if sweep["down"]:
-                sweep["finished"] = True
+                sweep["retry_at"] = time.monotonic() + 2
+                observations[-1]["action"] = "pause_before_rescan"
                 return None
             sweep.update(down=True, steps=0)
         require(sweep["steps"] < 30, f"Could not reach the list end while finding {description}")
         if scroll(sweep["down"], nodes):
+            observations[-1].update(action="swipe", direction="down" if sweep["down"] else "up")
             sweep["last"] = signature
             sweep["steps"] += 1
         return None
 
-    return wait(description, locate, timeout)
+    try:
+        return wait(description, locate, timeout)
+    except Exception:
+        # A final screenshot cannot show whether a swipe moved or an earlier
+        # viewport was empty. Keep the actual search tail for the reviewer.
+        try:
+            directory = OUTPUT / ("FAILED-" + CURRENT)
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / "search.json").write_text(json.dumps({"description": description,
+                "timeout": TIMEOUT if timeout is None else timeout,
+                "observations": observations}, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as error:
+            EVIDENCE_ERRORS.append(f"{CURRENT}/search.json: {error}")
+        raise
 
 
 def text(value):
