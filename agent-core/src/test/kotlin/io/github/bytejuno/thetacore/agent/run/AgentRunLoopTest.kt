@@ -116,7 +116,12 @@ class AgentRunLoopTest {
                 assertEquals(RunState.PAUSED, f.loop(p).run().state)
                 assertTrue(f.submitted.isEmpty())
                 assertEquals(if (args == "{}") 3 else 1, f.history.snapshot().messages.size)
-                if (args == "{}") assertEquals(Effect.NONE, f.store.records().single().result!!.effect)
+                if (args == "{}") {
+                    val result = f.store.records().single().result!!
+                    assertEquals(Effect.NONE, result.effect)
+                    assertEquals(Status.CANCELLED, result.status)
+                    assertEquals("Truncated model turn: not executed", result.text)
+                }
             }
         }
     }
