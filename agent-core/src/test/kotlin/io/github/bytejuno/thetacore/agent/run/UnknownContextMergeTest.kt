@@ -24,13 +24,13 @@ class UnknownContextMergeTest {
         maxOutputTokens = 100
         tools = listOf(modelTool(d.modelName, d.description, Json.parseToJsonElement(d.inputSchema) as JsonObject))
     }
-    private fun append(h: FileRunHistory, f: Fixture, input: InvocationInput) {
+    private fun append(h: TestRunHistory, f: Fixture, input: InvocationInput) {
         val assistant = message(Role.ASSISTANT, toolCallPart(input.binding, input.modelName, input.argsJson))
         h.prepareStep(h.revision(), RunIdentity(input.taskChainId, input.sessionId, input.runId, input.unattended), input.stepId, assistant)
         h.append(h.revision(), listOf(assistant,
             assertNotNull(f.ledger.resultsForStep(input.sessionId, input.runId, input.stepId, listOf(input.binding.callId)))))
     }
-    private fun checkpoint(h: FileRunHistory, f: Fixture, d: FrozenDefinition, kind: String): ContextCheckpoint {
+    private fun checkpoint(h: TestRunHistory, f: Fixture, d: FrozenDefinition, kind: String): ContextCheckpoint {
         val source = h.snapshot()
         val executor = LedgerToolExecutor(f.ledger, f.gate, listOf(d), bridge)
         return ContextCheckpoint(id = "checkpoint", sessionId = "session", taskChainId = "chain", runId = "previous",
@@ -40,7 +40,7 @@ class UnknownContextMergeTest {
             kind = kind, summary = "completed work", reason = "test", serverUnresolved = false,
             ledger = executor.checkpointRecords(source.messages), catalog = listOf(d))
     }
-    private suspend fun run(h: FileRunHistory, f: Fixture, d: FrozenDefinition, p: ScriptProvider,
+    private suspend fun run(h: TestRunHistory, f: Fixture, d: FrozenDefinition, p: ScriptProvider,
                             policy: ContextPolicy, id: RunIdentity = identity): RunResult = AgentRunLoop(
         id, ModelTarget("provider", p, Credentials { "test" }), request(d), h,
         LedgerToolExecutor(f.ledger, f.gate, listOf(d), bridge), contextPolicy = policy).run()
@@ -55,7 +55,7 @@ class UnknownContextMergeTest {
             val path = temporary.root.toPath().resolve("view")
             lateinit var original: List<StoredMessage>
             lateinit var saved: ContextCheckpoint
-            FileRunHistory.create(path, "session", durability).use { h ->
+            TestRunHistory.create(path, "session", durability).use { h ->
                 append(h, f, input)
                 val result = h.snapshot().messages.last().parts.single() as ContentPart.ToolResult
                 assertTrue(result.text.contains("Side effects are unknown"))
@@ -66,7 +66,7 @@ class UnknownContextMergeTest {
             }
             repeat(2) { n ->
                 f.reopen("epoch-$n-next")
-                FileRunHistory.open(path, durability).use { h ->
+                TestRunHistory.open(path, durability).use { h ->
                     val p = ScriptProvider(listOf(answer()))
                     assertEquals(RunState.COMPLETED, run(h, f, d, p,
                         ContextPolicy("goal", saved.sourceCount), identity.copy(runId = "run-$n")).state)
@@ -104,13 +104,13 @@ class UnknownContextMergeTest {
             assertTrue(executor.localExecutionBlocked(listOf(denied)))
             assertTrue(executor.checkpointBlocked(listOf(denied)))
             val path = temporary.root.toPath().resolve("receipt")
-            FileRunHistory.create(path, "session", durability).use { h ->
+            TestRunHistory.create(path, "session", durability).use { h ->
                 append(h, f, input)
                 val pending = checkpoint(h, f, d, "PAUSED").copy(summary = null, pauseClass = "LOCAL_WAIT")
                 h.saveCheckpoint(pending)
             }
             f.reopen()
-            FileRunHistory.open(path, durability).use { h ->
+            TestRunHistory.open(path, durability).use { h ->
                 assertEquals(denied.atLedgerPrecision(), h.loadCheckpoint()!!.ledger.single().atLedgerPrecision())
                 val p = ScriptProvider(listOf(answer()))
                 assertEquals(RunState.PAUSED, run(h, f, d, p, ContextPolicy("goal")).state)
@@ -123,7 +123,7 @@ class UnknownContextMergeTest {
                 h.saveCheckpoint(checkpoint(h, f, d, "CONTINUATION"))
             }
             f.reopen("third")
-            FileRunHistory.open(path, durability).use { h ->
+            TestRunHistory.open(path, durability).use { h ->
                 val saved = assertNotNull(h.loadCheckpoint())
                 val record = saved.ledger.single()
                 assertEquals(ApprovalDenialReason.UNATTENDED_UNKNOWN, record.receipts.single().reason)
@@ -150,7 +150,7 @@ class UnknownContextMergeTest {
             assertEquals(resource != null, executor.localExecutionBlocked(listOf(record)))
             assertTrue(executor.checkpointBlocked(listOf(record)))
             val path = temporary.root.toPath().resolve("isolation-${resource ?: "none"}")
-            FileRunHistory.create(path, "session", durability).use { h ->
+            TestRunHistory.create(path, "session", durability).use { h ->
                 append(h, f, input)
                 val p = ScriptProvider(listOf(answer()))
                 assertEquals(if (resource == null) RunState.COMPLETED else RunState.PAUSED,

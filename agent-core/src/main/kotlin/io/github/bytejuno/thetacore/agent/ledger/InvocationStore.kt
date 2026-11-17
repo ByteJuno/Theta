@@ -8,6 +8,9 @@ import java.io.Closeable
 interface InvocationStore : Closeable {
     /** Exactly one coordinator may attach for the lifetime of this open writer. */
     fun bindCoordinator()
+    /** Admission health, independent of cached projections and SQL writes. Throw StoreException
+     * when the shared owner is closed/uncertain. This does not revoke already executing effects. */
+    fun checkAdmission() {}
     fun records(): List<InvocationRecord>
     fun save(record: InvocationRecord, expectedRevision: Long?)
     /** Atomically commit full contents and their record references under the same writer ownership. */

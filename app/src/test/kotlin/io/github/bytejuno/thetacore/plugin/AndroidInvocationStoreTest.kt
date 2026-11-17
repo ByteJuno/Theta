@@ -89,6 +89,21 @@ class AndroidInvocationStoreTest {
         openTestStore(root).use { assertEquals(1, it.records().size); assertNull(it.records().single().instance) }
     }
 
+    @Test fun historyBorrowsTheSameNoBackupDatabaseAndDoesNotCloseLedger() = temporary { root ->
+        AndroidInvocationStore.open(root, androidx.sqlite.driver.bundled.BundledSQLiteDriver()).use { store ->
+            store.createHistory("session").use { h ->
+                h.append(0, listOf(io.github.bytejuno.thetacore.agent.protocol.message(
+                    io.github.bytejuno.thetacore.agent.protocol.Role.USER,
+                    io.github.bytejuno.thetacore.agent.protocol.textPart("goal"))))
+            }
+            assertTrue(store.records().isEmpty())
+            store.openHistory("session").use { assertEquals(1L, it.revision()) }
+        }
+        AndroidInvocationStore.open(root, androidx.sqlite.driver.bundled.BundledSQLiteDriver()).use { store ->
+            store.openHistory("session").use { assertEquals(1, it.snapshot().messages.size) }
+        }
+    }
+
     @Test fun databaseLivesInNoBackupRootAndReopens() = temporary { root ->
         // The schema is a SQLite transaction, not a published directory marker.
         openTestStore(root).close()

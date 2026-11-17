@@ -99,19 +99,25 @@ class HistoryLedgerConsistencyTest {
         }
     }
 
-    // Byte snapshots of committed/pending history artifacts; no hashes or build-artifact audit.
-    private fun files(path: Path): Map<String, List<Byte>> = Files.walk(path).use { paths ->
-        paths.filter { Files.isRegularFile(it) && it.fileName.toString() != "writer.lock" }
-            .toList().associate { path.relativize(it).toString() to Files.readAllBytes(it).toList() }
+    // Snapshot logical committed values rather than SQLite WAL/checkpoint housekeeping bytes.
+    private fun files(path: Path): Map<String, List<Byte>> = sql(path) { db ->
+        val values = linkedMapOf<String, List<Byte>>()
+        db.prepare("SELECT name, ordinal, bytes FROM history_chunks ORDER BY name, ordinal").use {
+            while (it.step()) values["${it.getText(0)}/${it.getLong(1)}"] = it.getBlob(2).toList()
+        }
+        db.prepare("SELECT session_id, revision FROM sessions ORDER BY session_id").use {
+            while (it.step()) values["session/${it.getText(0)}"] = it.getLong(1).toString().toByteArray().toList()
+        }
+        values
     }
 
     @Test fun persistedHistoryReopenWithEmptyLedgerStillFailsWithoutChangingEitherStore() = runTest {
         val path = Files.createTempDirectory("history-ledger-consistency")
         try {
-            FileRunHistory.create(path, "session", durability).use { it.append(0, pair(assistant())) }
+            TestRunHistory.create(path, "session", durability).use { it.append(0, pair(assistant())) }
             val before = files(path)
             repeat(2) {
-                FileRunHistory.open(path, durability).use { h ->
+                TestRunHistory.open(path, durability).use { h ->
                     val f = RunFixture() // deliberately pair a valid persisted history with a different empty ledger
                     assertRejected(f, h, "Checkpoint missing ledger record")
                 }
@@ -124,21 +130,21 @@ class HistoryLedgerConsistencyTest {
         val path = Files.createTempDirectory("history-committed-missing-row")
         val a = assistant()
         try {
-            FileRunHistory.create(path, "session", durability).use { h ->
+            TestRunHistory.create(path, "session", durability).use { h ->
                 h.prepareStep(0, RunIdentity("chain", "session", "old-run"), "step", a)
             }
-            FileRunHistory.open(path, durability) {
-                if (it.file == "head.json" && it.stage == HistoryWriteStage.AFTER_REPLACE) error("lost acknowledgement")
+            TestRunHistory.open(path, durability) {
+                if (it.file == "append" && it.stage == HistoryWriteStage.AFTER_COMMIT) error("lost acknowledgement")
             }.use { h -> assertFailsWith<HistoryStorageException> { h.append(0, pair(a)) } }
             val before = files(path)
             repeat(2) {
                 val f = RunFixture()
-                FileRunHistory.open(path, durability).use { h ->
+                TestRunHistory.open(path, durability).use { h ->
                     assertEquals(1L, h.revision())
                     val failure = assertFailsWith<IllegalStateException> { h.recoverPending(f.ledger) }
                     assertEquals("Committed step missing ledger record", failure.message)
                     assertTrue(f.store.records().isEmpty())
-                    assertTrue(Files.exists(path.resolve("pending.json")))
+                    assertTrue(TestRunHistory.exists(path, "pending"))
                     assertFails { h.snapshot() }
                     assertEquals(1L, h.revision())
                 }
@@ -152,10 +158,10 @@ class HistoryLedgerConsistencyTest {
         val a = assistant(2)
         val f = RunFixture()
         try {
-            FileRunHistory.create(path, "session", durability).use { h ->
+            TestRunHistory.create(path, "session", durability).use { h ->
                 h.prepareStep(0, RunIdentity("chain", "session", "old-run"), "step", a)
             }
-            FileRunHistory.open(path, durability).use { h ->
+            TestRunHistory.open(path, durability).use { h ->
                 val recovery = h.recoverPending(f.ledger)
                 assertTrue(recovery.recovered)
                 assertFalse(recovery.requiresDecision)
@@ -167,9 +173,9 @@ class HistoryLedgerConsistencyTest {
                     assertEquals(Effect.NONE, it.result!!.effect)
                     assertNull(it.instance)
                 }
-                assertFalse(Files.exists(path.resolve("pending.json")))
+                assertFalse(TestRunHistory.exists(path, "pending"))
             }
-            FileRunHistory.open(path, durability).use { h ->
+            TestRunHistory.open(path, durability).use { h ->
                 val before = f.store.records()
                 assertFalse(h.recoverPending(f.ledger).recovered)
                 val provider = ScriptProvider(listOf(answer()))
