@@ -190,6 +190,19 @@ class S1PublicationInstrumentation : Instrumentation() {
         // startActivitySync would wait forever for a new Activity monitor event.
         runOnMainSync { targetContext.startActivity(intent) }
         waitForIdleSync()
+        if (uri == null) {
+            // Navigate through the production entry; preserve all publication assertions.
+            val label = targetContext.getString(R.string.chat_plugins)
+            awaitTextEitherChatOrPlugins(label)
+        }
+    }
+
+    private fun awaitTextEitherChatOrPlugins(label: String) {
+        waitUntil {
+            val visible = nodes()
+            if (visible.any { it.text?.toString() == label }) { click(label); false }
+            else visible.any { it.text?.toString() == "Import code APK" }
+        }
     }
 
     private fun importPayload(version: Int) {

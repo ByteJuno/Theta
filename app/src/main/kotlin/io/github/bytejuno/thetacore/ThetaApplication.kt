@@ -28,6 +28,13 @@ import kotlinx.coroutines.async
 
 class ThetaApplication : Application() {
     internal val plugins by lazy { PluginManager(this) }
+    internal val providerSettings by lazy { io.github.bytejuno.thetacore.provider.OpenAiSettingsStore.android(this) }
+    internal val chat by lazy {
+        io.github.bytejuno.thetacore.chat.ChatSessionOwner(hostToolsOwner, ::hostTools,
+            providerSettings::snapshotForNewRun, diagnostic = { error ->
+            Log.e("ThetaChat", "Chat operation failed: ${error.javaClass.simpleName}")
+        })
+    }
     private val hostToolsOwner = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private lateinit var hostToolsStartup: Deferred<HostToolExecutionService>
 
@@ -38,7 +45,7 @@ class ThetaApplication : Application() {
         io.github.bytejuno.thetacore.plugin.HostToolRuntimeApi(hostTools()).request(request)
     }
 
-    /** Suspending, trusted in-process contract, not IPC. No UI/model consumer exists yet. */
+    /** Suspending, trusted in-process contract, not IPC. Chat and instrumentation share the same durable owner. */
     suspend fun hostToolRequest(request: String): String = hostToolBoundary.request(request)
 
     /** Only Android's dedicated Instrumentation.onStart thread may block. Never coroutine pools. */

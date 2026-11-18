@@ -46,6 +46,7 @@ class AgentRunLoop(
     initialSteps: Int = 0,
     initialRetries: Int = 0,
     private val contextPolicy: ContextPolicy? = null,
+    private val onEvent: (String, ModelEvent) -> Unit = { _, _ -> },
 ) {
     private var target = target.copy()
     private var config = copyRequest(request, emptyList())
@@ -377,7 +378,7 @@ class AgentRunLoop(
             try {
                 // Wrap creation as well as collection: synchronous chat() failures obey 2.8 too.
                 evidence.observe(flow { emitAll(target.provider.chat(request, target.credentials)) })
-                    .validated(target.id, request.requestId, timeouts).collect { reducer.accept(it) }
+                    .validated(target.id, request.requestId, timeouts).collect { reducer.accept(it); onEvent(request.requestId, it) }
             } catch (e: CancellationException) {
                 cancelled = true
                 throw e

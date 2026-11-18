@@ -79,6 +79,17 @@ class AgentDatabase private constructor(
         }
     }
 
+    /** Bounded host session index; contents stay in the existing shared history tables. */
+    fun sessionIds(before: String? = null, limit: Int = 50): List<String> = access {
+        require(limit in 1..100)
+        connection.prepare("SELECT session_id FROM sessions WHERE (? IS NULL OR session_id < ?) ORDER BY session_id DESC LIMIT ?").use { q ->
+            if (before == null) { q.bindNull(1); q.bindNull(2) }
+            else { q.bindText(1, before); q.bindText(2, before) }
+            q.bindLong(3, limit.toLong())
+            buildList { while (q.step()) add(q.getText(0)) }
+        }
+    }
+
     companion object {
         const val FILE_NAME = "agent.db"
         const val SCHEMA_VERSION = 2

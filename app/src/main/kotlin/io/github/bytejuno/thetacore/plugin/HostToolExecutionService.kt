@@ -22,6 +22,7 @@ internal class HostToolExecutionService(
     private val exitGraceMillis: Long = 2_000,
     /** Test scheduling seam outside the gate; never supplies authorization or executes plugin code. */
     private val afterRuntimeApprovalStart: suspend () -> Unit = {},
+    val sessionStore: AndroidAgentStore? = null,
 ) {
     private val gate get() = catalog.gate
     private val control = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -145,34 +146,45 @@ internal class HostToolExecutionService(
     }
 
     /** Reserving capacity runs no tool code. Claim must be acknowledged before commit. */
-    suspend fun dispatch(callId: String): Mutation = withContext(Dispatchers.IO) {
-        gate.withGate {
-            if (storageFailed) return@withGate Mutation.Blocked("Storage failed; submissions closed")
-            val existing = ledger.get(callId) ?: return@withGate Mutation.Conflict("Unknown call")
-            if (existing.state != Status.READY) return@withGate Mutation.Conflict("Not READY")
-            // Missing process-local run metadata is not evidence of a stale definition. Do not
-            // reconstruct aliases from durable records; a trusted caller must explicitly freeze.
-            if (catalog.frozen(existing.input.runId) == null) return@withGate Mutation.Blocked("Run catalog not frozen")
-            // With a known run directory, persist genuinely stale READY calls as REJECTED.
-            val checked = observe(ledger.validateAndPrepare(callId))
-            val record = when (checked) {
-                is Mutation.Applied -> checked.record
-                is Mutation.AlreadyApplied -> checked.record
-                else -> return@withGate checked
-            }
-            if (record.state != Status.READY) return@withGate checked
-            val entry = catalog.current(requireNotNull(record.input.definition)) ?: return@withGate Mutation.Blocked("Definition unavailable")
-            var invocation: PluginInvocation? = null
-            val reservation = budget.reserve(entry.definition.owner, owner,
-                onCancel = { invocation?.cancel() }, onExit = {})
-                ?: return@withGate Mutation.Blocked("Execution capacity unavailable")
-            val claimed = try { observe(ledger.claimExecution(callId, record.revision)) }
-                catch (error: Throwable) { reservation.abandon(); closeSubmissions(); throw error }
-            val ticket = (claimed as? Mutation.Applied)?.ticket
-            if (ticket == null) { reservation.abandon(); return@withGate claimed }
-            invocation = PluginInvocation(budget, entry.definition.owner, owner, entry.tool,
+    suspend fun dispatch(callId: String): Mutation = withContext(Dispatchers.IO) { dispatchLocked(callId) }
+
+    private fun dispatchLocked(callId: String, expectedRevision: Long? = null): Mutation = gate.withGate {
+        if (expectedRevision != null && ledger.get(callId)?.revision != expectedRevision)
+            return@withGate Mutation.Conflict("Claim revision changed")
+
+        if (storageFailed) return@withGate Mutation.Blocked("Storage failed; submissions closed")
+        val existing = ledger.get(callId) ?: return@withGate Mutation.Conflict("Unknown call")
+        if (existing.state != Status.READY) return@withGate Mutation.Conflict("Not READY")
+        // Missing process-local run metadata is not evidence of a stale definition. Do not
+        // reconstruct aliases from durable records; a trusted caller must explicitly freeze.
+        if (catalog.frozen(existing.input.runId) == null) return@withGate Mutation.Blocked("Run catalog not frozen")
+        // With a known run directory, persist genuinely stale READY calls as REJECTED.
+        val checked = observe(ledger.validateAndPrepare(callId))
+        val record = when (checked) {
+            is Mutation.Applied -> checked.record
+            is Mutation.AlreadyApplied -> checked.record
+            else -> return@withGate checked
+        }
+        if (record.state != Status.READY) return@withGate checked
+        val entry = catalog.current(requireNotNull(record.input.definition)) ?: return@withGate Mutation.Blocked("Definition unavailable")
+        var invocation: PluginInvocation? = null
+        val reservation = budget.reserve(entry.definition.owner, owner,
+            onCancel = { invocation?.cancel() }, onExit = {})
+            ?: return@withGate Mutation.Blocked("Execution capacity unavailable")
+        val claimed = try { observe(ledger.claimExecution(callId, record.revision)) }
+            catch (error: Throwable) { reservation.abandon(); closeSubmissions(); throw error }
+        val ticket = (claimed as? Mutation.Applied)?.ticket
+        if (ticket == null) { reservation.abandon(); return@withGate claimed }
+        invocation = startClaimed(ticket, record, entry, reservation)
+        claimed
+    }
+
+
+    private fun startClaimed(ticket: ExecutionTicket, record: InvocationRecord,
+        entry: FrozenToolCatalog.Entry, reservation: PluginExecutionBudget.Lease): PluginInvocation {
+        val invocation = PluginInvocation(budget, entry.definition.owner, owner, entry.tool,
                 Json.parseToJsonElement(ticket.argsJson).jsonObject,
-                ToolInvocationRequest(record.input.runId, record.input.sessionId, callId, record.input.unattended),
+                ToolInvocationRequest(record.input.runId, record.input.sessionId, ticket.callId, record.input.unattended),
                 requestApproval = { summary, risk -> requestRuntimeApproval(ticket, summary, Risk.valueOf(risk.name)) },
                 frozenSpec = entry.spec, reservation = reservation, unattendedApprovalPolicy = true,
                 beforeExecution = {
@@ -183,14 +195,32 @@ internal class HostToolExecutionService(
                     }
                 })
             val call = invocation
-            active[callId] = call
-            logicalResults[callId] = CompletableDeferred()
+            active[ticket.callId] = call
+            logicalResults[ticket.callId] = CompletableDeferred()
             // Observer lifetime is independent of run cancellation; no plugin callbacks on IO.
-            observations[callId] = control.async { monitor(ticket, call) }
+            observations[ticket.callId] = control.async { monitor(ticket, call) }
             call.start()
-            claimed
-        }
+        return invocation
     }
+
+    /** AgentRunLoop delegates atomic reservation, claim and submission to this host. */
+    fun runBridge(): io.github.bytejuno.thetacore.agent.run.ToolExecutionBridge =
+        object : io.github.bytejuno.thetacore.agent.run.ToolExecutionBridge {
+            override fun claimAndSubmit(callId: String, expectedRevision: Long): Mutation =
+                dispatchLocked(callId, expectedRevision)
+            override fun submit(ticket: ExecutionTicket) { error("Host bridge reserves before claim") }
+            override suspend fun awaitTerminal(callId: String) {
+                val completion = gate.withGate { logicalResults[callId] }
+                if (completion != null) select<Unit> {
+                    completion.onAwait { }
+                    storageFailure.onAwait { error("Storage failed") }
+                }
+                val record = requireNotNull(ledger.get(callId))
+                check(record.state.terminal)
+                if (record.state in setOf(Status.SUCCEEDED, Status.FAILED)) awaitObservedExit(callId)
+            }
+            override fun requestCancel(callId: String) { gate.withGate { active[callId]?.cancel(); wakeApproval(callId) } }
+        }
 
     internal var normalizationCount = 0L
         private set

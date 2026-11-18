@@ -305,6 +305,13 @@ class LanguageInstrumentation : Instrumentation() {
         val intent = Intent(targetContext, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
         if (uri != null) { intent.action = Intent.ACTION_VIEW; intent.data = uri }
         runOnMainSync { targetContext.startActivity(intent) }; waitForIdleSync()
+        if (uri == null) {
+            val label = targetContext.getString(R.string.chat_plugins)
+            await {
+                if (nodes().any { it.text?.toString() == label }) { click(label); false }
+                else nodes().any { it.text?.toString() == targetContext.getString(R.string.language_title) }
+            }
+        }
     }
     private fun <T> main(block: () -> T): T { var result: T? = null; runOnMainSync { result = block() }; @Suppress("UNCHECKED_CAST") return result as T }
     private fun await(block: () -> Boolean) {

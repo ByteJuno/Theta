@@ -309,7 +309,7 @@ class Observations(unittest.TestCase):
                 self.assertFalse(matches('Theta'))
                 self.assertTrue(kwargs.get('sweep', False), 'Hello card is below language controls')
                 raise ReachedReturn()
-        with patch.object(em, 'adb'), patch.object(em, 'install_plugin'), patch.object(em, 'tap_card'), patch.object(em, 'wait_for', side_effect=waiting):
+        with patch.object(em, 'adb'), patch.object(em, 'install_plugin'), patch.object(em, 'tap_card'), patch.object(em, 'tap_text'), patch.object(em, 'wait_for', side_effect=waiting):
             with self.assertRaises(ReachedReturn):
                 em.run('host.apk', 'probe.apk', 'hello.apk')
 
@@ -397,6 +397,33 @@ class Observations(unittest.TestCase):
     def test_confirmation_is_never_rejection(self):
         with self.assertRaisesRegex(RuntimeError, 'gate bypass'):
             self.rejection('Install Fixture 2.0?', trust=True)
+
+class ChatNavigation(unittest.TestCase):
+    def test_start_opens_plugins_from_observed_chat_entry(self):
+        entry = ET.Element('node', text='Plugins and diagnostics', bounds='[0,0][200,60]')
+        ready = ET.Element('node', text='Import code APK', bounds='[0,80][200,140]')
+        def immediate_wait(label, predicate, **kwargs):
+            self.assertFalse(predicate())
+            self.assertTrue(predicate())
+        with patch.object(lc, 'adb'), patch.object(lc, 'wait', side_effect=immediate_wait), \
+                patch.object(lc.em, 'screen', side_effect=[[entry], [ready]]), patch.object(lc.em, 'tap') as tap:
+            lc.start()
+        tap.assert_called_once_with(entry)
+
+    def test_start_keeps_existing_plugins_and_recovery_navigation(self):
+        ready = ET.Element('node', text='Import code APK')
+        with patch.object(lc, 'adb'), patch.object(lc, 'wait', side_effect=lambda label, predicate: self.assertTrue(predicate())), \
+                patch.object(lc.em, 'screen', return_value=[ready]), patch.object(lc.em, 'tap') as tap:
+            lc.start()
+            lc.start(recovery=True)
+        tap.assert_not_called()
+
+    def test_duplicate_chat_entry_remains_a_failure(self):
+        nodes = [ET.Element('node', text='Plugins and diagnostics') for _ in range(2)]
+        with patch.object(lc, 'adb'), patch.object(lc, 'wait', side_effect=lambda label, predicate: predicate()), \
+                patch.object(lc.em, 'screen', return_value=nodes), patch.object(lc.em, 'tap') as tap:
+            with self.assertRaises(Exception): lc.start()
+        tap.assert_not_called()
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

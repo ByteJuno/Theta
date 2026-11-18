@@ -24,6 +24,8 @@ data class HistoryIo(val bytesRead: Long, val bytesWritten: Long, val filesRead:
 enum class HistoryWriteStage { AFTER_BEGIN, AFTER_CHUNK, AFTER_VALUE, BEFORE_COMMIT, AFTER_COMMIT }
 data class HistoryWritePoint(val file: String, val stage: HistoryWriteStage)
 class HistoryStorageException(message: String, cause: Throwable? = null) : IllegalStateException(message, cause)
+data class PendingHistoryStep(val identity: RunIdentity, val stepId: String, val assistant: Message,
+    val records: List<InvocationRecord>)
 data class HistoryRecovery(val recovered: Boolean, val requiresDecision: Boolean, val callIds: List<String>)
 
 /** Session handle borrowing the host's single AgentDatabase. Close releases only this session.
@@ -415,6 +417,26 @@ open class SqliteRunHistory internal constructor(
      * step before execution. Existing terminal truth wins, including UNKNOWN and late-exit evidence.
      * A stale pending value after HEAD commit is verified and removed without a second history append.
      */
+    /** Read-only host inspection. Missing rows still require ordinary cold reconciliation.
+     * Does not grant approval, freeze aliases, submit workers or clear the pending transaction. */
+    @Synchronized fun pendingStep(ledger: InvocationLedger): PendingHistoryStep? {
+        ready()
+        if (!hasValue(pendingPath())) return null
+        val p = read<StoredPending>(pendingPath())
+        val assistant = validatePending(p)
+        if (p.revision != head.revision) return null // committed stale pending uses recoverPending
+        val records = assistant.parts.filterIsInstance<ContentPart.ToolCall>().mapIndexed { order, call ->
+            val record = ledger.get(call.binding.callId) ?: return null
+            require(record.input.binding == BindingValue.copyOf(call.binding) &&
+                record.input.sessionId == sessionId && record.input.taskChainId == p.taskChainId &&
+                record.input.runId == p.runId && record.input.stepId == p.stepId &&
+                record.input.callOrder == order && record.input.argsJson == call.argsJson &&
+                record.input.modelName == call.name && record.input.unattended == p.unattended)
+            record
+        }
+        return PendingHistoryStep(RunIdentity(p.taskChainId, sessionId, p.runId, p.unattended), p.stepId, assistant, records)
+    }
+
     @Synchronized fun recoverPending(ledger: InvocationLedger): HistoryRecovery {
         ready()
         if (!hasValue(pendingPath())) return HistoryRecovery(false, false, emptyList())

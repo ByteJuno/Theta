@@ -67,6 +67,17 @@ internal class FrozenToolCatalog(val gate: DefinitionGate, private val budget: P
         runs[runId] = snapshot
         snapshot.mapValues { it.value.definition }
     }
+    /** Recover only already-persisted calls, never allocate aliases from today's directory.
+     * This snapshot cannot be used for a new model request; full run catalog recovery is #31. */
+    fun restorePending(runId: String, definitions: List<FrozenDefinition>) = gate.withGate {
+        check(runs[runId] == null)
+        require(definitions.map { it.modelName }.distinct().size == definitions.size)
+        val restored = definitions.mapNotNull { d ->
+            entries[d.toolKey]?.takeIf { it.definition.sameRegistrationAs(d) }?.copy(definition = d)
+        }.associateBy { it.definition.modelName }
+        gate.freezeRun(runId, definitions)
+        runs[runId] = restored
+    }
     fun definition(runId: String, name: String): FrozenDefinition? = gate.withGate { runs[runId]?.get(name)?.definition }
     /** Null means this run has no frozen catalog here, which says nothing about whether a name is unknown. */
     fun frozen(runId: String): Map<String, FrozenDefinition>? = gate.withGate { runs[runId]?.mapValues { it.value.definition } }
