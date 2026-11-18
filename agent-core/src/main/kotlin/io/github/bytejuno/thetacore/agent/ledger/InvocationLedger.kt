@@ -26,7 +26,8 @@ class InvocationLedger(
 ) {
     init { require(maxClaimsPerTaskChain > 0); store.bindCoordinator() }
     private val recordsById = store.records().associateByTo(linkedMapOf()) { it.callId }
-    private val blobRoots = BlobReferenceIndex(recordsById.values)
+    private val deletedSessions = store.deletedSessions().toMutableSet()
+    private var blobRoots = BlobReferenceIndex(recordsById.values.filter { it.input.sessionId !in deletedSessions })
     private val stepCalls = StepCallIndex(recordsById.values)
     internal val stepCallVisits get() = stepCalls.callVisits
     internal val blobRootVisits get() = blobRoots.rootVisits
@@ -48,11 +49,13 @@ class InvocationLedger(
     private fun persist(previous: InvocationRecord?, next: InvocationRecord, ticket: ExecutionTicket? = null,
         blobs: List<BlobWrite> = emptyList()): Mutation {
         if (halted) return Mutation.Blocked("Storage acknowledgement uncertain; reopen and cold-recover")
+        if (next.input.sessionId in deletedSessions && (previous == null || blobs.isNotEmpty()))
+            return Mutation.Blocked("Session has been deleted")
         return try {
             val snapshot = next.detached()
             if (blobs.isEmpty()) store.save(snapshot, previous?.revision)
             else store.saveWithBlobs(snapshot, previous?.revision, blobs)
-            blobRoots.replace(previous, snapshot)
+            if (snapshot.input.sessionId !in deletedSessions) blobRoots.replace(previous, snapshot)
             recordsById[next.callId] = snapshot.detached()
             if (previous == null) stepCalls.add(snapshot, recordsById)
             Mutation.Applied(next.detached(), ticket)
@@ -74,6 +77,7 @@ class InvocationLedger(
     }
 
     private fun recordInvocation(input: InvocationInput, cancelledText: String): Mutation = gate.withGate {
+        if (input.sessionId in deletedSessions) return@withGate Mutation.Blocked("Session has been deleted")
         val old = get(input.binding.callId)
         if (old != null) return@withGate if (old.input == input) Mutation.AlreadyApplied(old) else Mutation.Conflict("Immutable binding differs")
         val step = all().filter { sameStep(it.input, input) }
@@ -409,6 +413,31 @@ class InvocationLedger(
             isolation = if (outcome.effect == Effect.UNKNOWN)
                 Isolation("Return evidence reports unknown effect", r.input.definition?.exclusiveResource, null) else next.isolation),
             blobs = output.writes)
+    }
+
+    /** Session identity comes from the trusted host ToolEnv, never from model arguments. */
+    fun readSessionBlob(sessionId: String, id: String, offset: Long, limit: Int = 8192): Pair<BlobRef, ByteArray> = gate.withGate {
+        // Authorize first: foreign and unknown IDs must have the same response, including bad offsets.
+        val matches = if (sessionId in deletedSessions) emptySet() else blobRoots.sessionMatches(sessionId, id)
+        if (matches.isEmpty()) throw BlobReadException("Result content is unavailable in this session.")
+        if (matches.size != 1) throw BlobReadException("Result content has an ambiguous legacy reference.")
+        val ref = matches.single()
+        if (offset !in 0..ref.sizeBytes || limit !in 1..8192)
+            throw BlobReadException("Invalid result range: offset must be within the content and limit must be 1..8192 bytes.")
+        if (halted) throw BlobReadException("Result storage must be reopened before reading.")
+        try { store.checkAdmission(); ref to store.readBlob(ref, offset, limit) }
+        catch (_: StoreException) { throw BlobReadException("Result content is unavailable: missing or corrupt.") }
+    }
+
+    /** Caller must first stop the session and close its history handles. Safety records remain. */
+    fun deleteSession(sessionId: String) = gate.withGate {
+        require(sessionId.isNotBlank())
+        check(!halted) { "Reopen storage required" }
+        try {
+            store.deleteSession(sessionId)
+            deletedSessions.add(sessionId)
+            blobRoots = BlobReferenceIndex(recordsById.values.filter { it.input.sessionId !in deletedSessions })
+        } catch (error: StoreException) { if (error.uncertain) halted = true; throw error }
     }
 
     /** Retrieval is scoped to the frozen run's own results/evidence, never arbitrary store paths. */

@@ -11,6 +11,9 @@ interface InvocationStore : Closeable {
     /** Admission health, independent of cached projections and SQL writes. Throw StoreException
      * when the shared owner is closed/uncertain. This does not revoke already executing effects. */
     fun checkAdmission() {}
+    fun deletedSessions(): Set<String> = emptySet()
+    /** Trusted host operation, never exposed as a model tool. Retain ledger safety evidence. */
+    fun deleteSession(sessionId: String) { throw StoreException("Session deletion is not supported") }
     fun records(): List<InvocationRecord>
     fun save(record: InvocationRecord, expectedRevision: Long?)
     /** Atomically commit full contents and their record references under the same writer ownership. */

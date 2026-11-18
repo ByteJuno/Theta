@@ -49,7 +49,17 @@ class AgentDatabase private constructor(
     internal fun ready() { if (closed || uncertain) throw StoreException("Database closed or uncertain; reopen and cold recover", uncertain) }
     @Synchronized internal fun bindLedger() { ready(); check(!ledgerBound); ledgerBound = true }
     @Synchronized internal fun releaseLedger() { ledgerBound = false }
-    @Synchronized internal fun bindSession(id: String) { ready(); check(sessions.add(id)) { "Session already open" } }
+    @Synchronized internal fun bindSession(id: String) {
+        ready()
+        connection.prepare("SELECT 1 FROM deleted_sessions WHERE session_id=?").use {
+            it.bindText(1, id); check(!it.step()) { "Session has been deleted" }
+        }
+        check(sessions.add(id)) { "Session already open" }
+    }
+    @Synchronized internal fun checkSessionDeletion(id: String) {
+        ready()
+        check(id !in sessions && ownerPins == 0) { "Close session handles and active runs before deletion" }
+    }
     @Synchronized internal fun releaseSession(id: String) { sessions.remove(id) }
     @Synchronized internal fun <T> access(block: () -> T): T { ready(); return block() }
     @Synchronized internal fun poison() { uncertain = true }
@@ -81,7 +91,7 @@ class AgentDatabase private constructor(
 
     companion object {
         const val FILE_NAME = "agent.db"
-        const val SCHEMA_VERSION = 2
+        const val SCHEMA_VERSION = 3
         private const val APPLICATION_ID = 0x54485441
         // On POSIX, closing ANY descriptor of a locked file can drop this process's lock.
         // Reject duplicate instances before even opening a second descriptor.
@@ -104,6 +114,7 @@ class AgentDatabase private constructor(
             connection.execute("CREATE TABLE invocation_contents (call_id TEXT NOT NULL REFERENCES invocations(call_id) ON DELETE CASCADE, hash TEXT NOT NULL, PRIMARY KEY(call_id, hash)) WITHOUT ROWID")
             connection.execute("CREATE INDEX content_owners ON invocation_contents(hash)")
             createHistorySchema(connection)
+            createDeletionSchema(connection)
             connection.execute("PRAGMA application_id=$APPLICATION_ID")
             connection.execute("PRAGMA user_version=$SCHEMA_VERSION")
         }
@@ -113,12 +124,16 @@ class AgentDatabase private constructor(
             connection.execute("CREATE TABLE history_values (session_id TEXT NOT NULL REFERENCES sessions(session_id), name TEXT NOT NULL, PRIMARY KEY(session_id,name)) WITHOUT ROWID")
             connection.execute("CREATE TABLE history_chunks (session_id TEXT NOT NULL, name TEXT NOT NULL, ordinal INTEGER NOT NULL, bytes BLOB NOT NULL, PRIMARY KEY(session_id,name,ordinal), FOREIGN KEY(session_id,name) REFERENCES history_values(session_id,name) ON DELETE CASCADE) WITHOUT ROWID")
         }
-        /** Only the recognized SQLite v1 schema is upgraded; legacy files are never imported. */
+        private fun createDeletionSchema(connection: SQLiteConnection) {
+            connection.execute("CREATE TABLE deleted_sessions (session_id TEXT PRIMARY KEY NOT NULL) WITHOUT ROWID")
+        }
+        /** Only recognized SQLite schemas are upgraded; legacy files are never imported. */
         fun upgradeSchema(connection: SQLiteConnection, oldVersion: Int, newVersion: Int) {
             connection.verifyWriteConfiguration()
-            require(oldVersion == 1 && newVersion == SCHEMA_VERSION &&
+            require(oldVersion in 1..2 && newVersion == SCHEMA_VERSION &&
                 connection.longValue("PRAGMA application_id") == APPLICATION_ID.toLong())
-            createHistorySchema(connection)
+            if (oldVersion == 1) createHistorySchema(connection)
+            createDeletionSchema(connection)
             connection.execute("PRAGMA user_version=$SCHEMA_VERSION")
         }
 
@@ -189,7 +204,7 @@ class AgentDatabase private constructor(
                 try {
                     connection.verifyWriteConfiguration()
                     if (version == 0L) createSchema(connection)
-                    else if (version == 1L) upgradeSchema(connection, 1, SCHEMA_VERSION)
+                    else if (version < SCHEMA_VERSION) upgradeSchema(connection, version.toInt(), SCHEMA_VERSION)
                     fault(SqliteInitStage.BEFORE_SCHEMA_COMMIT)
                     connection.execute("COMMIT")
                     fault(SqliteInitStage.AFTER_SCHEMA_COMMIT)
