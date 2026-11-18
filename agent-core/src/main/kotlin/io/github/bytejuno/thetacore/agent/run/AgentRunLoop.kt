@@ -89,7 +89,7 @@ class AgentRunLoop(
     }
 
     private fun budgetKey(): String = listOf(budget.limit(config.model), requestViewLimit, contextPolicy?.summaryModel?.let {
-            settingsKey(it.target.id, it.request, it.target.provider.contextConfigurationKey()) + ":" + it.budget.limit(it.request.model)
+            settingsKey(it.target.id, it.request, it.target.provider.contextConfigurationKey()) + ":" + it.budget.limit(it.request.model) + ":" + it.memoryLimit
         }).joinToString("|")
 
     private fun restoreContext(source: HistorySnapshot) {

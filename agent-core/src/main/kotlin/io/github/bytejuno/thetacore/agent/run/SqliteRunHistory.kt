@@ -53,7 +53,8 @@ open class SqliteRunHistory internal constructor(
         require(head.version == 1 && head.sessionId == sessionId && head.revision >= 0 && head.messageCount >= 0)
         require(head.revision == databaseRevision())
         if (head.revision == 0L) require(head.messageCount == 0L && head.hash == EMPTY_HASH)
-        else batch(cursor())
+        else if (runtimeBatchBytes(head.revision) <= MAX_RUNTIME_BATCH_BYTES) batch(cursor())
+        else verifyEncodedHead()
     }
     private fun databaseRevision(): Long = database.access { db.prepare("SELECT ${integerColumn("revision")} FROM sessions WHERE session_id=?").use {
         it.bindText(1, sessionId); require(it.step()); it.getLong(0)
@@ -378,10 +379,32 @@ open class SqliteRunHistory internal constructor(
 
     /** Reject a huge legacy atomic value before JSON decoding, retaining it for ordinary paging
      * and host recovery. This is a runtime memory limit, not a provider token estimate. */
-    private fun checkRuntimeBatchSize(revision: Long) = database.access {
+    // Oversized legacy heads can be opened for inspection without allocating their JSON strings.
+    // Verify every frame and bind the encoded value to HEAD; semantic/call-index validation still
+    // runs on explicit paging, while runtime admission refuses the value before decoding it.
+    private fun verifyEncodedHead() {
+        try {
+            val digest = MessageDigest.getInstance("SHA-256")
+            valueInput(batchPath(head.revision)).use { input ->
+                val framed = HistoryFrameInput(input)
+                val buffer = ByteArray(HISTORY_FRAME_BYTES)
+                while (true) {
+                    val n = framed.read(buffer)
+                    if (n < 0) break
+                    digest.update(buffer, 0, n)
+                }
+            }
+            require(digest.digest().joinToString("") { "%02x".format(it) } == head.hash) { "History chain mismatch" }
+        } catch (error: Exception) { throw HistoryStorageException("Invalid encoded history head", error) }
+    }
+
+    private fun checkRuntimeBatchSize(revision: Long) {
+        if (runtimeBatchBytes(revision) > MAX_RUNTIME_BATCH_BYTES) throw HistoryViewLimitException()
+    }
+    private fun runtimeBatchBytes(revision: Long): Long = database.access {
         db.prepare("SELECT COALESCE(SUM(length(bytes)),0) FROM history_chunks WHERE session_id=? AND name=?").use {
             it.bindText(1, sessionId); it.bindText(2, batchPath(revision)); require(it.step())
-            if (it.getLong(0) > MAX_RUNTIME_BATCH_BYTES) throw HistoryViewLimitException()
+            it.getLong(0)
         }
     }
 
