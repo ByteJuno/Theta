@@ -88,9 +88,16 @@ internal data class ContextCheckpoint(
     fun messages(source: List<Message>): List<Message> {
         require(summary != null)
         // A summary remains untrusted conversation data, never system instructions.
-        return listOf(message(Role.USER, textPart("Summary continuation (details may be lost). " +
+        val prefix = message(Role.USER, textPart("Summary continuation (details may be lost). " +
             "Original records: $sessionId/$runId@$sourceRevision. Do not repeat completed operations.\n" +
-            "Unfinished goal: $goal\nSummary data:\n$summary"))) + source.drop(sourceCount)
+            "Unfinished goal: $goal\nSummary data:\n$summary"))
+        return object : AbstractList<Message>() {
+            override val size = 1 + source.size - sourceCount
+            override fun get(index: Int): Message {
+                if (index !in 0 until size) throw IndexOutOfBoundsException(index.toString())
+                return if (index == 0) prefix else source[sourceCount + index - 1]
+            }
+        }
     }
 }
 
@@ -136,14 +143,14 @@ internal fun sourceDigest(messages: List<Message>): String {
         override fun write(b: Int) { digest.update(b.toByte()) }
         override fun write(b: ByteArray, off: Int, len: Int) { digest.update(b, off, len) }
     }
-    HistoryCodec.writeValue(messages.map { HistoryCodec.atLedgerPrecision(HistoryCodec.encodeMessage(it)) }, sink)
+    HistoryCodec.writeValue(messages.asSequence().map { HistoryCodec.atLedgerPrecision(HistoryCodec.encodeMessage(it)) }.asIterable(), sink)
     return digest.digest().joinToString("") { "%02x".format(it) }
 }
 
 internal fun ContextCheckpoint.matches(source: HistorySnapshot, key: String): Boolean =
     version == 1 && settingsKey == key && sourceRevision <= source.revision && sourceCount in 0..source.messages.size &&
         (kind == "VIEW" || sourceRevision == source.revision && sourceCount == source.messages.size) &&
-        sourceDigest == sourceDigest(source.messages.take(sourceCount))
+        sourceDigest == sourceDigest(source.messages.subList(0, sourceCount))
 
 /** Deterministic request-view markers. Never write a marker into the durable source history.
  * An assistant plus all its results is one cache unit; new user content is outside the prefix. */
@@ -200,15 +207,24 @@ internal class ContextSummarizer(
     private val sourceReadChars = 8192
 
     suspend fun compact(source: List<Message>, reference: String): String? {
-        validateHistory(source)
+        // Called only with the durable source whose unique call index has been checked.
+        validateHistorySequence(source, false)
         if (source.isEmpty()) return null
         val summaries = mutableListOf<String>()
         var index = 0
         var packed = ""
+        var summaryChars = 0L
+        fun retain(value: String): Boolean {
+            summaryChars += value.length
+            if (summaryChars > 2L * 1024 * 1024 || summaries.size >= 4096) return false
+            summaries += value
+            return true
+        }
         suspend fun flush(): Boolean {
             if (packed.isEmpty()) return true
             val result = summarize(packed) ?: return false
-            summaries += result; packed = ""; return true
+            if (!retain(result)) return false
+            packed = ""; return true
         }
         while (index < source.size) {
             currentCoroutineContext().ensureActive()
@@ -254,7 +270,7 @@ internal class ContextSummarizer(
                             }
                             if (low > 0 && Character.isHighSurrogate(pending[low - 1])) low--
                             if (low == 0) return null
-                            summaries += summarize(prefix + pending.substring(0, low)) ?: return null
+                            if (!retain(summarize(prefix + pending.substring(0, low)) ?: return null)) return null
                             pending = pending.substring(low); offset += low
                         }
                     }

@@ -46,6 +46,7 @@ class AgentRunLoop(
     initialSteps: Int = 0,
     initialRetries: Int = 0,
     private val contextPolicy: ContextPolicy? = null,
+    private val requestViewLimit: RequestViewLimit = RequestViewLimit(),
 ) {
     private var target = target.copy()
     private var config = copyRequest(request, emptyList())
@@ -76,18 +77,18 @@ class AgentRunLoop(
         val capacity = budget.limit(config.model) ?: return false
         val base = copyRequest(config, emptyList())
         if ((budget.tokens(base) ?: 0) > capacity) return true
-        return source.messages.take(activeInputCount).drop(contextPolicy?.priorMessageCount ?: 0)
-            .filter { it.role == Role.USER }.any { (budget.tokens(copyRequest(config, listOf(it))) ?: 0) > capacity }
+        return source.messages.subList(contextPolicy?.priorMessageCount ?: 0, activeInputCount)
+            .asSequence().filter { it.role == Role.USER }.any { (budget.tokens(copyRequest(config, listOf(it))) ?: 0) > capacity }
     }
 
     private fun requestMessages(source: HistorySnapshot): List<Message> {
         val view = contextView
         if (view != null) require(view.matches(source, view.settingsKey)) { "Active context source changed" }
         // Accepted recovery may change output reserve/model; never silently restore omitted raw pairs.
-        return cachedView(view?.messages(source.messages) ?: source.messages)
+        return view?.messages(source.messages) ?: source.messages
     }
 
-    private fun budgetKey(): String = listOf(budget.limit(config.model), contextPolicy?.summaryModel?.let {
+    private fun budgetKey(): String = listOf(budget.limit(config.model), requestViewLimit, contextPolicy?.summaryModel?.let {
             settingsKey(it.target.id, it.request, it.target.provider.contextConfigurationKey()) + ":" + it.budget.limit(it.request.model)
         }).joinToString("|")
 
@@ -140,8 +141,8 @@ class AgentRunLoop(
         if (reconciled && saved?.pauseClass in setOf("ADMITTED", "SUMMARY_RESERVED", "REVIEW")) admissionPending = true
         val policy = contextPolicy ?: return
         require(policy.priorMessageCount <= source.messages.size)
-        validateHistory(source.messages.take(policy.priorMessageCount))
-        validateHistory(source.messages.drop(policy.priorMessageCount))
+        validateHistorySequence(source.messages.subList(0, policy.priorMessageCount), history !is SqliteRunHistory)
+        validateHistorySequence(source.messages.subList(policy.priorMessageCount, source.messages.size), history !is SqliteRunHistory)
         require(policy.resumeCheckpointId == null && policy.readmitBudgetCheckpointId == null || disk != null) { "Continuation requires persistent history" }
         if (disk == null) return
         if (policy.readmitBudgetCheckpointId != null) {
@@ -197,7 +198,7 @@ class AgentRunLoop(
             else {
                 steps++; retries++
                 persistAccounting()
-                val snapshot = history.snapshot()
+                val snapshot = history.runSnapshot()
                 (history as? SqliteRunHistory)?.saveCheckpoint(checkpoint(snapshot, snapshot.messages.size,
                     null, "PAUSED", "Summary attempt reserved; interrupted work requires review", false)
                     .copy(pauseClass = "SUMMARY_RESERVED"))
@@ -213,7 +214,7 @@ class AgentRunLoop(
             taskChainId = identity.taskChainId, runId = identity.runId,
             nextRunId = if (kind == "CONTINUATION") UUID.randomUUID().toString() else null,
             unattended = identity.unattended, sourceRevision = source.revision, sourceCount = count,
-            sourceDigest = sourceDigest(source.messages.take(count)), settingsKey = settingsKey(target.id, config, target.provider.contextConfigurationKey()),
+            sourceDigest = sourceDigest(source.messages.subList(0, count)), settingsKey = settingsKey(target.id, config, target.provider.contextConfigurationKey()),
             goal = policy.goal, steps = steps, retries = retries, kind = kind, summary = summary,
             reason = reason, serverUnresolved = blocked, ledger = tools.checkpointRecords(source.messages),
             catalog = tools.definitions.sortedBy { it.modelName }, budgetKey = budgetKey())
@@ -228,12 +229,16 @@ class AgentRunLoop(
         // Only live/undecided local execution blocks ordinary compaction; accepted UNKNOWN effects
         // stay in the ledger and still gate later writes. Checkpoint continuation remains stricter.
         if (tools.compactionBlocked(records)) return false
-        val summary = summarize(source.messages.take(policy.priorMessageCount),
+        val summary = summarize(source.messages.subList(0, policy.priorMessageCount),
             "${identity.sessionId}@${source.revision}") ?: return false
         val saved = checkpoint(source, policy.priorMessageCount, summary, "VIEW", "Prior history summary", false)
-        val before = budget.tokens(copyRequest(config, source.messages)) ?: return false
-        val after = budget.tokens(copyRequest(config, saved.messages(source.messages))) ?: return false
-        if (after >= before) return false
+        val summarized = saved.messages(source.messages)
+        if (!requestViewLimit.admits(summarized)) return false
+        val after = budget.tokens(copyRequest(config, summarized))
+        if (requestViewLimit.admits(source.messages)) {
+            val before = budget.tokens(copyRequest(config, source.messages)) ?: return false
+            if (after == null || after >= before) return false
+        }
         disk.saveCheckpoint(saved)
         contextView = saved
         return true
@@ -296,7 +301,7 @@ class AgentRunLoop(
         val disk = history as? SqliteRunHistory
         if (!unresolved && persistedPause == null && disk != null) {
             val saved = disk.loadCheckpoint()
-            val source = history.snapshot()
+            val source = history.runSnapshot()
             val localBlocked = tools.localExecutionBlocked(tools.checkpointRecords(source.messages))
             val settled = saved == null || saved.kind in setOf("VIEW", "COMPLETE") || disk.checkpointReconciled(saved) ||
                 saved.pauseClass == "ADMITTED" && (!admissionPending || confirmedGenerationResponse) ||
@@ -318,6 +323,10 @@ class AgentRunLoop(
         var failure: Throwable? = null
         try {
             return runStarted()
+        } catch (e: HistoryViewLimitException) {
+            // Do not materialize the rejected transaction merely to construct another checkpoint.
+            return RunResult(RunState.PAUSED, e.message!!, steps, retries,
+                serverUnknown || serverLoopOpen || disk?.loadBarrier() != null || disk?.loadCheckpoint()?.serverUnresolved == true)
         } catch (e: UncertainSummaryResponse) {
             return result(RunState.PAUSED, "Summary response uncertain; host reconciliation required")
         } catch (e: Throwable) {
@@ -334,8 +343,8 @@ class AgentRunLoop(
 
     private suspend fun runStarted(): RunResult {
         tools.freeze(identity)
-        var view = history.snapshot()
-        validateHistory(view.messages)
+        var view = history.runSnapshot()
+        if (history !is SqliteRunHistory) validateHistory(view.messages)
         activeInputCount = view.messages.size
         restoreContext(view)
         persistedPause?.let { return result(RunState.PAUSED, it, serverUnknown) }
@@ -349,7 +358,12 @@ class AgentRunLoop(
             if (tools.continuationBlocked(identity))
                 return result(RunState.PAUSED, "Tool execution or resource recovery unresolved")
             check(history.revision() == view.revision) { "History changed during active run" }
-            val messages = requestMessages(view).map { m ->
+            val rawMessages = requestMessages(view)
+            if (!requestViewLimit.admits(rawMessages)) {
+                if (compactPrior(view)) continue
+                return pauseContext(view, "Request memory budget exceeded; checkpoint required")
+            }
+            val messages = cachedView(rawMessages).map { m ->
                 if (cacheDisabled) message(m.role, *m.parts.toTypedArray()) else m
             }
             val request = copyRequest(config, messages, requestId = UUID.randomUUID().toString())
@@ -499,7 +513,7 @@ class AgentRunLoop(
                     val batch = if (calls.isEmpty()) listOf(assistant)
                         else listOf(assistant, tools.results(identity, step, calls))
                     history.append(view.revision, batch)
-                    view = HistorySnapshot(history.revision(), freezeMessages(view.messages + batch))
+                    view = history.runSnapshot()
                     admissionPending = false
                 }
             } catch (e: Exception) {

@@ -159,7 +159,7 @@ internal object HistoryCodec {
             is String -> quoted(v)
             is Number, is Boolean -> writer.write(v.toString())
             is Role -> quoted(v.name)
-            is List<*> -> {
+            is Iterable<*> -> {
                 writer.write("["); v.forEachIndexed { i, item -> if (i > 0) writer.write(","); emit(item) }; writer.write("]")
             }
             is HistoryHead -> fields("version" to v.version, "sessionId" to v.sessionId, "revision" to v.revision,

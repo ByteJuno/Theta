@@ -10,6 +10,8 @@ import kotlinx.serialization.json.JsonObject
  */
 interface RunHistory {
     fun snapshot(): HistorySnapshot
+    /** Runtime view; durable implementations may load immutable transactions on demand. */
+    fun runSnapshot(): HistorySnapshot = snapshot()
     /** Cheap CAS check; disk implementations must not load messages here. */
     fun revision(): Long = snapshot().revision
     /** Durable intent before ANY tool registration/submission. Not replayable until append commits. */
@@ -32,7 +34,10 @@ class MemoryRunHistory(initial: List<Message> = emptyList()) : RunHistory {
 }
 
 /** Reject orphan, duplicated, reordered results and user interleaving before any provider sees them. */
-fun validateHistory(messages: List<Message>) {
+fun validateHistory(messages: List<Message>) = validateHistorySequence(messages, true)
+
+/** Durable batches already verify each call against its unique indexed location. */
+internal fun validateHistorySequence(messages: List<Message>, checkDuplicates: Boolean) {
     val seen = mutableSetOf<String>()
     var pending = emptyList<String>()
     for (m in messages) {
@@ -45,7 +50,7 @@ fun validateHistory(messages: List<Message>) {
             val calls = m.parts.filterIsInstance<ContentPart.ToolCall>()
             require(calls.isEmpty() || m.role == Role.ASSISTANT)
             pending = calls.map { it.binding.callId }
-            require(pending.all { seen.add(it) }) { "Duplicate call identity" }
+            require(!checkDuplicates || pending.all { seen.add(it) }) { "Duplicate call identity" }
         }
     }
     require(pending.isEmpty()) { "Unpaired calls" }
