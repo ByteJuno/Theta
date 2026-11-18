@@ -47,7 +47,7 @@ class HostToolExecutionServiceTest {
     }
     private class Fixture(policy: ApprovalPolicy = ApprovalPolicy(), maxClaims: Int = Int.MAX_VALUE,
         slots: Int = 2, exitGraceMillis: Long = 2_000,
-        afterRuntimeApprovalStart: suspend () -> Unit = {}) : AutoCloseable {
+        afterRuntimeApprovalStart: suspend () -> Unit = {}, clock: InvocationClock? = null) : AutoCloseable {
         val budget = PluginExecutionBudget(slots, slots)
         val owner = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val store = MemoryStore()
@@ -55,7 +55,8 @@ class HostToolExecutionServiceTest {
         val validator = Schema202012Validator()
         val ledger = InvocationLedger(store, gate, validator, policy, maxClaims)
         val catalog = FrozenToolCatalog(gate, budget, owner, validator)
-        val service = HostToolExecutionService(budget, owner, catalog, ledger, validator, exitGraceMillis, afterRuntimeApprovalStart)
+        val service = HostToolExecutionService(budget, owner, catalog, ledger, validator, exitGraceMillis,
+            afterRuntimeApprovalStart, clock ?: budget)
         init { ledger.recoverColdStart(UUID.randomUUID().toString()) }
         suspend fun register(tool: Tool = HostClockTool { 42 }): FrozenDefinition {
             val d = catalog.registerHost("host/test", "1", tool)
@@ -1865,8 +1866,86 @@ class HostToolExecutionServiceTest {
         }
     }
 
+    private class ManualClock : InvocationClock {
+        private var millis = 0L
+        private data class Alarm(val due: Long, val action: () -> Unit)
+        private val alarms = mutableListOf<Alarm>()
+        @Synchronized override fun nowNanos(): Long = TimeUnit.MILLISECONDS.toNanos(millis)
+        @Synchronized override fun arm(delayMillis: Long, action: () -> Unit): () -> Unit {
+            val alarm = Alarm(millis + delayMillis, action)
+            alarms.add(alarm)
+            return { synchronized(this) { alarms.remove(alarm) } }
+        }
+        fun advance(delta: Long, deliver: Boolean = true) {
+            val due = synchronized(this) {
+                millis += delta
+                if (deliver) alarms.filter { it.due <= millis }.also { alarms.removeAll(it) } else emptyList()
+            }
+            due.forEach { it.action() }
+        }
+    }
+
+    @Test fun approvalRestoresOnlyRemainingIdleOrTotalBudget() = runBlocking {
+        for (totalLimited in listOf(false, true)) {
+            val clock = ManualClock()
+            Fixture(clock = clock).use { f ->
+                val approved = CompletableDeferred<Boolean>()
+                val input = f.input(f.register(tool(timeout = if (totalLimited) 600_000 else 100) { env ->
+                    clock.advance(if (totalLimited) 599_960 else 60)
+                    if (totalLimited) env.progress("working")
+                    approved.complete(env.requestApproval("confirm", ToolRisk.WRITE))
+                    awaitCancellation()
+                }))
+                val id = input.binding.callId
+                f.service.prepare(input); f.service.dispatch(id)
+                val request = pendingUpgrade(f, id)
+                f.gate.withGate { clock.advance(30_000) }
+                assertEquals(Status.RUNNING, f.ledger.get(id)!!.state)
+                assertTrue(f.service.decide(id, request.id, Decision.ALLOW_ONCE) is Mutation.Applied)
+                assertTrue(withTimeout(5_000) { approved.await() })
+                clock.advance(39)
+                assertEquals(Status.RUNNING, f.ledger.get(id)!!.state)
+                clock.advance(1)
+                withTimeout(5_000) { f.service.awaitObservedExit(id) }
+                assertEquals(Status.TIMED_OUT, f.ledger.get(id)!!.state)
+            }
+        }
+    }
+
+    @Test fun consecutivePromptsShareDeadlineEvenWhenAlarmDeliveryIsLate() = runBlocking {
+        for (cancelFirst in listOf(false, true)) {
+            val clock = ManualClock()
+            Fixture(clock = clock).use { f ->
+                val effects = AtomicInteger()
+                val input = f.input(f.register(tool { env ->
+                    if (env.requestApproval("first", ToolRisk.WRITE)) effects.incrementAndGet()
+                    if (env.requestApproval("second", ToolRisk.ROOT)) effects.incrementAndGet()
+                    ToolResult("done")
+                }))
+                val id = input.binding.callId
+                f.service.prepare(input); f.service.dispatch(id)
+                val first = pendingUpgrade(f, id)
+                f.gate.withGate { clock.advance(350_000) }
+                assertTrue(f.service.decide(id, first.id, Decision.ALLOW_ONCE) is Mutation.Applied)
+                val second = pendingUpgrade(f, id)
+                assertNotEquals(first.id, second.id)
+                f.gate.withGate { clock.advance(250_000, deliver = false) }
+                if (cancelFirst) f.service.cancel(id)
+                assertTrue(f.service.decide(id, second.id, Decision.ALLOW_ONCE) is Mutation.Conflict)
+                if (!cancelFirst) f.service.cancel(id)
+                withTimeout(5_000) { f.service.awaitObservedExit(id) }
+                val record = f.ledger.get(id)!!
+                assertEquals(Status.TIMED_OUT, record.state)
+                assertNull(record.pending)
+                assertFalse(record.receipts.any { it.request.id == second.id && it.decision != Decision.DENY })
+                assertEquals(1, effects.get())
+            }
+        }
+    }
+
     @Test fun timeoutDuringPendingUpgradeRetainsPriorRiskAndRejectsLateDecision() = runBlocking {
-        Fixture().use { f ->
+        val clock = ManualClock()
+        Fixture(clock = clock).use { f ->
             val release = CountDownLatch(1); val handler = CountDownLatch(1)
             try {
                 val i = f.input(f.register(tool(risk = ToolRisk.WRITE, timeout = 1_000) { env ->
@@ -1877,6 +1956,9 @@ class HostToolExecutionServiceTest {
                 val id = i.binding.callId
                 f.service.prepare(i); approve(f, id); f.service.dispatch(id)
                 val pending = pendingUpgrade(f, id)
+                f.gate.withGate { clock.advance(599_999) }
+                assertEquals(Status.RUNNING, f.ledger.get(id)!!.state)
+                clock.advance(1)
                 withTimeout(5_000) {
                     var r = f.store.writes.receive()
                     while (r.callId != id || r.state != Status.TIMED_OUT) r = f.store.writes.receive()

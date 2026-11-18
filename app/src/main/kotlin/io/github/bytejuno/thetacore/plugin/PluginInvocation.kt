@@ -6,7 +6,6 @@ import io.github.bytejuno.thetacore.sdk.ToolResult
 import io.github.bytejuno.thetacore.sdk.ToolRisk
 import io.github.bytejuno.thetacore.sdk.ToolSpec
 import java.util.UUID
-import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -35,6 +34,11 @@ internal data class PluginInvocationResult(
 )
 internal data class PluginToolProgress(val text: String, val fraction: Float?)
 
+internal interface InvocationClock {
+    fun nowNanos(): Long
+    fun arm(delayMillis: Long, action: () -> Unit): () -> Unit
+}
+
 /**
  * First S1 direct invocation, NOT an agent scheduler or approval/resource ledger. The caller
  * validates registration/admission before start, and must not hold its operation mutex while
@@ -55,6 +59,7 @@ internal class PluginInvocation(
     private val reservation: PluginExecutionBudget.Lease? = null,
     /** Only the ledger-backed host hook can evaluate non-interactive grants. */
     private val unattendedApprovalPolicy: Boolean = false,
+    private val clock: InvocationClock = budget,
     /** Last host admission check on the worker, before entering plugin code; not revocation. */
     private val beforeExecution: suspend () -> Boolean = { true },
 ) : AutoCloseable {
@@ -68,7 +73,10 @@ internal class PluginInvocation(
     private val mutableProgress = MutableStateFlow<PluginToolProgress?>(null)
     val progress: StateFlow<PluginToolProgress?> = mutableProgress.asStateFlow()
     private var lease: PluginExecutionBudget.Lease? = reservation
-    private var timer: ScheduledFuture<*>? = null
+    private var disarm: (() -> Unit)? = null
+    private var terminalStatus: PluginInvocationStatus? = null
+    private var waitingSince: Long? = null
+    private var approvalRemainingNanos = TimeUnit.MINUTES.toNanos(10)
     private var started = false
     private var startedNanos = 0L
     private var lastProgressNanos = 0L
@@ -95,7 +103,7 @@ internal class PluginInvocation(
             return this
         }
         started = true
-        startedNanos = System.nanoTime()
+        startedNanos = clock.nowNanos()
         lastProgressNanos = startedNanos
         val action: suspend CoroutineScope.() -> Unit = action@ {
             try {
@@ -127,7 +135,7 @@ internal class PluginInvocation(
                         onProgress = { text, fraction -> reportProgress(text, fraction) },
                         onApproval = { summary, risk ->
                             if (completion.isCompleted || (request.unattended && !unattendedApprovalPolicy)) false
-                            else requestApproval(summary, risk) && !completion.isCompleted
+                            else requestApproval(summary, risk) && synchronized(budget.gate) { !expireIfDue() }
                         },
                         onInput = { prompt, schema ->
                             if (completion.isCompleted) null
@@ -195,47 +203,67 @@ internal class PluginInvocation(
 
     private fun reportProgress(text: String, fraction: Float?) = synchronized(budget.gate) {
         if (completion.isCompleted || expireIfDue()) return
-        lastProgressNanos = System.nanoTime()
+        if (waitingSince == null) lastProgressNanos = clock.nowNanos()
         mutableProgress.value = PluginToolProgress(text.take(1024), fraction?.takeIf { it.isFinite() }?.coerceIn(0f, 1f))
         armDeadline()
     }
 
-    private fun remainingNanos(): Long {
-        val now = System.nanoTime()
+    fun setHumanApprovalWaiting(waiting: Boolean): Boolean = synchronized(budget.gate) {
+        val now = clock.nowNanos()
+        if (expireIfDue(now)) return false
+        val since = waitingSince
+        if (waiting == (since != null)) return true
+        if (since == null) waitingSince = now else {
+            val elapsed = now - since
+            approvalRemainingNanos -= elapsed
+            startedNanos += elapsed
+            lastProgressNanos += elapsed
+            waitingSince = null
+        }
+        armDeadline()
+        !completion.isCompleted
+    }
+
+    private fun remainingNanos(now: Long): Long {
+        waitingSince?.let { return approvalRemainingNanos - (now - it) }
         return minOf(TimeUnit.MILLISECONDS.toNanos(totalTimeoutMillis) - (now - startedNanos),
             TimeUnit.MILLISECONDS.toNanos(idleMillis) - (now - lastProgressNanos))
     }
 
-    private fun expireIfDue(): Boolean {
+    private fun expireIfDue(now: Long = clock.nowNanos()): Boolean {
         if (completion.isCompleted) return true
-        if (remainingNanos() > 0) return false
+        if (remainingNanos(now) > 0) return false
         finish(PluginInvocationResult(PluginInvocationStatus.TIMED_OUT, message = "Tool execution timed out; actual exit is tracked separately"))
         lease?.cancel()
         return true
     }
 
     private fun armDeadline() {
-        timer?.cancel(false)
-        timer = null
+        disarm?.invoke()
+        disarm = null
         if (completion.isCompleted || expireIfDue()) return
         // Round up; a sub-millisecond remainder must not become a tight timer loop.
-        val millis = (remainingNanos().coerceAtLeast(1) + 999_999) / 1_000_000
-        timer = budget.schedule(millis) {
+        val millis = (remainingNanos(clock.nowNanos()).coerceAtLeast(1) + 999_999) / 1_000_000
+        disarm = clock.arm(millis) {
             synchronized(budget.gate) { if (!expireIfDue()) armDeadline() }
         }
     }
 
     private fun finish(value: PluginInvocationResult) {
-        if (!completion.complete(value)) return
-        timer?.cancel(false)
-        timer = null
+        if (terminalStatus != null) return
+        terminalStatus = value.status
+        waitingSince = null
+        disarm?.invoke()
+        disarm = null
+        completion.complete(value)
     }
 
     /** Unique logical terminal; cancellation delivery and actual exit are separate. */
-    fun cancel() = synchronized(budget.gate) {
-        finish(PluginInvocationResult(PluginInvocationStatus.CANCELLED, message = "Invocation cancelled"))
+    fun cancel(): PluginInvocationStatus = synchronized(budget.gate) {
+        if (!started || !expireIfDue()) finish(PluginInvocationResult(PluginInvocationStatus.CANCELLED, message = "Invocation cancelled"))
         lease?.cancel()
         if (lease == null && (reservation == null || reservation.actualExited.isCompleted)) exited.complete(Unit)
+        requireNotNull(terminalStatus)
     }
-    override fun close() = cancel()
+    override fun close() { cancel() }
 }
