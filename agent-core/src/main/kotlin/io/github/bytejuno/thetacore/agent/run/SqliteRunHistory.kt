@@ -450,7 +450,7 @@ open class SqliteRunHistory internal constructor(
             var r = ledger.get(call.binding.callId)
             if (r == null) {
                 check(!alreadyCommitted) { "Committed step missing ledger record" }
-                applyRecovery(ledger.recordInvocation(InvocationInput(BindingValue.copyOf(call.binding),
+                applyRecovery(ledger.recordUnsubmittedRecovery(InvocationInput(BindingValue.copyOf(call.binding),
                     p.taskChainId, sessionId, p.runId, p.stepId, order, call.argsJson, null, p.unattended,
                     Risk.READ, true, call.name)))
                 r = requireNotNull(ledger.get(call.binding.callId))

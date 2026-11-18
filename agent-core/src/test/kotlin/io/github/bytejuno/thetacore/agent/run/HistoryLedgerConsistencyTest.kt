@@ -20,9 +20,9 @@ class HistoryLedgerConsistencyTest {
     private fun input(call: ContentPart.ToolCall, order: Int) = InvocationInput(
         BindingValue.copyOf(call.binding), "chain", "session", "old-run", "step", order,
         call.argsJson, null, false, Risk.READ, true, call.name)
-    private fun result(call: ContentPart.ToolCall) = toolResultPart(call.binding.callId,
-        ModelResultText.project(LogicalResult(Status.CANCELLED, Effect.NONE, "Truncated model turn: not executed", false)), true)
-    private fun pair(assistant: Message) = listOf(assistant, message(Role.TOOL, *calls(assistant).map(::result).toTypedArray()))
+    private fun pair(assistant: Message, text: String = "Truncated model turn: not executed") = listOf(assistant,
+        message(Role.TOOL, *calls(assistant).map { call -> toolResultPart(call.binding.callId,
+            ModelResultText.project(LogicalResult(Status.CANCELLED, Effect.NONE, text, false)), true) }.toTypedArray()))
     private fun canonical(h: RunHistory) = h.snapshot().messages.map(HistoryCodec::encodeMessage)
 
     private suspend fun assertRejected(f: RunFixture, h: RunHistory, reason: String, partial: Boolean = false) {
@@ -165,7 +165,8 @@ class HistoryLedgerConsistencyTest {
                 val recovery = h.recoverPending(f.ledger)
                 assertTrue(recovery.recovered)
                 assertFalse(recovery.requiresDecision)
-                assertEquals(pair(a).map(HistoryCodec::encodeMessage), canonical(h))
+                assertEquals(pair(a, "Process interrupted before tool submission: not executed")
+                    .map(HistoryCodec::encodeMessage), canonical(h))
                 assertEquals(1L, h.revision())
                 assertEquals(2, f.store.records().size)
                 f.store.records().forEach {

@@ -64,7 +64,16 @@ class InvocationLedger(
     private fun update(r: InvocationRecord, next: InvocationRecord, ticket: ExecutionTicket? = null) =
         persist(r, next.copy(revision = r.revision + 1), ticket)
 
-    fun recordInvocation(input: InvocationInput): Mutation = gate.withGate {
+    fun recordInvocation(input: InvocationInput): Mutation =
+        recordInvocation(input, "Truncated model turn: not executed")
+
+    /** Only for missing registrations in a durable pending step; existing ledger truth wins. */
+    internal fun recordUnsubmittedRecovery(input: InvocationInput): Mutation {
+        require(input.cancelledBeforeExecution && input.definition == null)
+        return recordInvocation(input, "Process interrupted before tool submission: not executed")
+    }
+
+    private fun recordInvocation(input: InvocationInput, cancelledText: String): Mutation = gate.withGate {
         val old = get(input.binding.callId)
         if (old != null) return@withGate if (old.input == input) Mutation.AlreadyApplied(old) else Mutation.Conflict("Immutable binding differs")
         val step = all().filter { sameStep(it.input, input) }
@@ -75,7 +84,7 @@ class InvocationLedger(
         // Unknown calls are terminal in their first durable write: they can never be claimed,
         // including after a crash before the rest of the step was registered.
         persist(null, when {
-            input.cancelledBeforeExecution -> terminal(record, Status.CANCELLED, null, "Truncated model turn: not executed")
+            input.cancelledBeforeExecution -> terminal(record, Status.CANCELLED, null, cancelledText)
             input.definition == null -> terminal(record, Status.REJECTED, null, "Unknown tool: ${input.modelName}")
             else -> record
         })
