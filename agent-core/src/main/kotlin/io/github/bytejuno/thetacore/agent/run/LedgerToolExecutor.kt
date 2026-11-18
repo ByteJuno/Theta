@@ -39,21 +39,35 @@ class LedgerToolExecutor(
     fun freeze(identity: RunIdentity) = gate.freezeRun(identity.runId, definitions)
 
     /** Checkpoints retain full ledger truth, including late-exit evidence and resource isolation. */
-    internal fun checkpointRecords(messages: List<Message>): List<InvocationRecord> = messages.flatMapIndexed { index, m ->
-        val calls = m.parts.filterIsInstance<ContentPart.ToolCall>()
-        if (calls.isNotEmpty()) {
-            val first = ledger.get(calls.first().binding.callId) ?: throw ToolStepBlocked("Checkpoint missing ledger record")
-            val expected = ledger.resultsForStep(first.input.sessionId, first.input.runId, first.input.stepId,
-                calls.map { it.binding.callId }) ?: throw ToolStepBlocked("Incomplete checkpoint step")
-            require(HistoryCodec.atLedgerPrecision(HistoryCodec.encodeMessage(expected)) ==
-                HistoryCodec.atLedgerPrecision(HistoryCodec.encodeMessage(messages[index + 1]))) { "Checkpoint result disagrees with ledger" }
+    internal fun checkpointRecords(messages: List<Message>): List<InvocationRecord> {
+        val records = mutableListOf<InvocationRecord>()
+        var bytes = 0L
+        messages.forEachIndexed { index, m ->
+            val calls = m.parts.filterIsInstance<ContentPart.ToolCall>()
+            if (calls.isNotEmpty()) {
+                val first = ledger.get(calls.first().binding.callId) ?: throw ToolStepBlocked("Checkpoint missing ledger record")
+                val expected = ledger.resultsForStep(first.input.sessionId, first.input.runId, first.input.stepId,
+                    calls.map { it.binding.callId }) ?: throw ToolStepBlocked("Incomplete checkpoint step")
+                require(HistoryCodec.atLedgerPrecision(HistoryCodec.encodeMessage(expected)) ==
+                    HistoryCodec.atLedgerPrecision(HistoryCodec.encodeMessage(messages[index + 1]))) { "Checkpoint result disagrees with ledger" }
+            }
+            for (call in calls) {
+                val r = ledger.get(call.binding.callId) ?: throw ToolStepBlocked("Checkpoint missing ledger record")
+                require(r.input.binding == BindingValue.copyOf(call.binding) && r.input.argsJson == call.argsJson &&
+                    r.input.modelName == call.name) { "Checkpoint source disagrees with ledger" }
+                HistoryCodec.writeValue(r, object : java.io.OutputStream() {
+                    override fun write(b: Int) { account(1) }
+                    override fun write(b: ByteArray, off: Int, len: Int) { account(len) }
+                    private fun account(n: Int) {
+                        bytes += n
+                        if (bytes > MAX_RUNTIME_BATCH_BYTES) throw HistoryViewLimitException()
+                    }
+                })
+                if (records.size >= 4096) throw HistoryViewLimitException()
+                records += r
+            }
         }
-        calls.map { call ->
-            val r = ledger.get(call.binding.callId) ?: throw ToolStepBlocked("Checkpoint missing ledger record")
-            require(r.input.binding == BindingValue.copyOf(call.binding) && r.input.argsJson == call.argsJson &&
-                r.input.modelName == call.name) { "Checkpoint source disagrees with ledger" }
-            r
-        }
+        return records
     }
 
     internal fun currentCheckpointRecords(saved: List<InvocationRecord>): List<InvocationRecord> = saved.map { old ->

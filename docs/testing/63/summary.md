@@ -1,0 +1,31 @@
+# Issue 63 — bounded runtime history
+
+Implementation source: `a21c20f26b62eaab3b331ebc43771a4088487953`; base main `0c8e97cd89dec865b6166bf2c207bef8bbf95a7c`.
+APK: not generated; SHA-256: not applicable.
+
+The SQLite runtime snapshot checks the immutable hash chain and unique call index one transaction at a time, then exposes an on-demand list. AgentRunLoop, checkpoint matching and source digests no longer materialize the entire conversation. UI `page`/`recent` and explicit full-export `snapshot` keep their existing contracts. A request view admits at most 4096 messages / 2,097,152 charged UTF-16 characters (including structure, bindings and opaque replay) by default, independently of token admission. Ordinary prior-history summarization uses the existing opt-in model; without it, exceeding the view budget saves a budget pause, never silently truncates input. Active tool pairs and raw history remain intact.
+
+Legacy atomic batches above 8 MiB serialized size are refused before runtime JSON decoding and yield an explicit pause; raw paging/export remains available. Checkpoint record aggregation is limited to 4096 records / 8 MiB serialized data, and intermediate summary retention to 4096 items / 2 Mi characters. These limits do not erase source/ledger records. This is not a general bound on all application memory: the existing invocation ledger, provider response buffers, explicit full exports and UI page retention have their own costs. Runtime chain verification is linear I/O; random backward list access restarts a scan. No schema migration, protected-document edit or current PR98 chat change.
+
+## Validation
+
+Current repair validated through the existing `/opt/homelab-report/theta-gpu-test` GPU scratch entry, `:agent-core:test` with strict `--configuration-cache --configuration-cache-problems=fail`. 135 successful cases across two test invocations: 126 unchanged related cases passed in the broad run; the corrected BoundedHistoryTest passed 9/9 in the focused rerun. The first broad run had one JUnit class-initialization error (new Kotlin expression returned an exception object rather than Unit), not a passing run; no production code changed between these two runs. Source manifests bind both invocations. The GPU entry reports aggregate counts and removes its scratch XML/logs; raw entry stdout and exit codes are retained locally. Strict flags succeeded; cache store/reuse is not separately exposed by this entry.
+
+Coverage: AgentRunLoopTest, BoundedHistoryTest, ContextPolicyTest, HistoryChunkBoundsTest, HistoryLedgerConsistencyTest, RunRecoveryTest, SqliteRunHistoryTest, UnknownContextMergeTest. New formal regressions close and reopen the latest >8 MiB transaction, assert zero decoded messages before/during a budget pause and exact explicit raw readback, and verify corruption still fails closed. Four separately appended 700,000-character old messages with a 20-million-token window complete map/reduce below the independent summary request ceiling while preserving originals. A small-budget fragment test charges system text, prompt, source references, message/part structure and reduction requests while also enforcing token admission.
+
+Oversized session opening now streams all frame checksums and binds the encoded head hash without JSON allocation; semantic/call-index validation remains on explicit raw reads and on admitted runtime batches. SummaryModel has an independent default 4096-item / 2 Mi-character ceiling. DATA pieces are admitted before packing/concatenation, including prompt, source labels, system/model/stop/schema strings and message structure. Response concatenation and retained map/reduce levels are also checked. This does not bound provider transport/reducer response buffering. Budget identity includes the summary memory limit. No protected files changed; `git diff --check` passed.
+
+Historical memory measurements below belong to `edb228deaa4e719bd320cf5b94cd49038b68e2bf`, not the current repair, and were not rerun or promoted to current-head measurements. Current validation is the GPU regression above.
+
+Separate Java 25 Windows processes with `-Xmx96m`, one 4096-ASCII-character message per transaction, SQLite WAL FULL, no OS-cache flush. Each opens the stored session, runs the production loop without a summary model, verifies durable BUDGET pause and zero model requests, then reads all raw pages. Heap sampled through MemoryMXBean after SQL chunk reads; not continuous peak/RSS, Android, external API, or device evidence.
+
+| Messages | Raw text chars | JVM max heap bytes | Baseline heap bytes | Sampled peak heap bytes | Post-GC retained bytes | Raw messages recovered | End-to-end seconds |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1000 | 4096000 | 100663296 | 2506664 | 33418008 | 2922640 | 1000 | 4.053 |
+| 10000 | 40960000 | 100663296 | 2508000 | 33574144 | 2918248 | 10000 | 37.157 |
+
+Timing includes fixture creation, run and paging. Measurements establish bounded growth for this tested no-tool/no-summary pause scenario; successful summary continuation is a separate small deterministic test, not a measured 10k-message remote-model run. Limits for oversized batches or ledger aggregates conservatively pause and may require host action. No UI change/visual test, APK, API33 runtime, R8, Android process-kill, physical power-loss or personal-device test. Final-head independent review, prescribed regression and CI remain pending. Writer does not merge.
+
+Historical raw logs/XML/hashes and measurements remain outside Git under `event-runs/30ed77f0-966c-4934-a5df-1daf1acdfebf` and `validation-issue11/issue63-30ed77f0-*`. Initial terminal encoding/truncation, unavailable rg and one missing source-filename lookup are preserved in the worker log; Gradle validation attempts all passed.
+
+Current repair evidence: `event-runs/7dd00476-1fb6-44dd-9266-ec99d5aab73c`. Preserved failures: local GPU alias unavailable, initial Linux archive wrapper CRLF exit 127, and JUnit return-type failure. The remote scratch wrapper was restored to its exact Git blob; repository wrapper files were unchanged. No APK or device operations. Independent final-head review, prescribed regression and CI remain pending.
