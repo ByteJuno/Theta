@@ -11,7 +11,18 @@ Base main: `0c8e97cd89dec865b6166bf2c207bef8bbf95a7c`.
 - Shared host reservation precedes durable claims. Unavailable capacity cannot invent a worker. Existing actual-exit, unknown-effect, cancellation and stale-definition gates remain in force.
 - Chinese and English strings use the existing resource checker/theme. Final history refresh now precedes publication of idle state, fixing the observed cold-approval UI race.
 
-## Actual verification
+## Current main-integration repair — 2026-11-18
+
+Validated implementation: `0a344f1ee2cabacfd8c668d92ff6eb323d9feed5`; integrated main: `500b49f7` (exact merge parent in Git).
+The sole content conflict joined the chat streaming callback and the bounded-history request limit in the AgentRunLoop constructor. Both behaviors are retained; other history/ledger changes came from reviewed main. No layout or navigation changes in this repair.
+
+**134/134 JVM tests passed**, zero failures/skips: ChatSessionOwnerTest 7, AgentRunLoopTest 24, BoundedHistoryTest 9, ContextPolicyTest 64, RunRecoveryTest 16, SqliteRunHistoryTest 9, SurrogateToolRoundTest 5. This covers streaming before completion, live/cold approvals and persisted sessions alongside bounded request/summarization and recovery. `:app:assembleDebug` and `:app:compileDebugAndroidTestKotlin` succeeded; the build also ran `verifyUiResources`. Strict configuration-cache errors were fatal and the cache was stored. Elapsed: 64.29 s. `git diff --check` passed; no protected files changed.
+
+Current Debug APK SHA-256: `63eadcc0ade7066ea275db16eb3663b4192a6d92e83032f206dda4c3854517c5`. Production/test bytes are recorded in the local source manifest; the following summary-only commit does not change them. Earlier APK/test results below retain their original source binding. No device operations or current visual verification: chat launch, bilingual small screen/large font/light-dark, keyboard/streaming, visible approval actions and Android restart remain reviewer simulator checks. No API33 runtime/R8 acceptance claimed.
+
+Evidence: `validation-issue11/issue24-0a1d7756-main` and `event-runs/0a1d7756-85f5-4e06-aad7-bf236fabf1e2`. GitHub EOF query failures and the initial merge identity error remain in worker evidence; retries used explicit per-command author identity and preserved the worktree. Independent final-head review, prescribed regression and CI remain pending.
+
+## Earlier verification (historical source binding)
 
 - Final source `47fff50977ede06d10b2330eb018588ef00076ff`: **65/65 JVM tests passed**, zero failures/skips: ChatSessionOwnerTest 7, AgentRunLoopTest 24, HistoryLedgerConsistencyTest 7, RecoveryCancellationTextTest 2, RunRecoveryTest 16, SqliteRunHistoryTest 9. Strict configuration cache stored; elapsed 40.29 s.
 - Before main integration: **143/143 passed**, including HostToolExecutionServiceTest 80. This evidence remains bound to that worktree; main changed the ledger, so it is not labeled a final-head rerun of all 80 host tests. The final-head chat integration exercises the host bridge and approval paths.
