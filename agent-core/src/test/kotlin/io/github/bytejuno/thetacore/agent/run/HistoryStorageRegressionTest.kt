@@ -46,7 +46,8 @@ class HistoryStorageRegressionTest {
             identity to assistant(call(args = "{\"x\":\"\uD800\"}")),
             identity to assistant(call(name = "tool\uDC00")),
             identity.copy(runId = "run\uD800") to assistant(good),
-            identity to assistant(good, textPart("text", replayData("p", "m", "bad\uD800"))),
+            identity to assistant(call(wire = "wire\uD800")),
+            identity to assistant(toolCallPart(BindingValue.copyOf(good.binding).copy(requestId = "request\uD800"), "tool", "{}")),
         )
         for ((run, message) in cases) {
             val path = Files.createTempDirectory("history-bad-intent")

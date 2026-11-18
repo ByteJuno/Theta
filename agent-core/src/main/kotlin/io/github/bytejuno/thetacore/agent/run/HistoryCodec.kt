@@ -234,29 +234,32 @@ internal object HistoryCodec {
             is ContentPart.ToolResult -> StoredPart("result", text = p.text, callId = p.callId, error = p.isError, replay = replay)
         }
     })
-    /** UTF-8 cannot round-trip lone UTF-16 surrogates. Reject them before durable intent rather
-     * than writing a different binding/argument/replay value which recovery cannot match. */
-    fun requireUtf8(value: String) {
+    /** Keep the tool admission boundary strict even when a storage codec can escape code units. */
+    fun isUtf8(value: String): Boolean {
         var i = 0
         while (i < value.length) {
             val c = value[i++]
             if (Character.isHighSurrogate(c)) {
-                require(i < value.length && Character.isLowSurrogate(value[i])) { "Unpaired surrogate in history input" }
+                if (i == value.length || !Character.isLowSurrogate(value[i])) return false
                 i++
-            } else require(!Character.isLowSurrogate(c)) { "Unpaired surrogate in history input" }
+            } else if (Character.isLowSurrogate(c)) return false
         }
+        return true
+    }
+    fun requireUtf8(value: String) {
+        require(isUtf8(value)) { "Unpaired surrogate in history input" }
     }
     /** InvocationRecordCodec stores text as UTF-8, turning a lone surrogate into '?' after a restart.
      * History keeps the original, so comparing the two needs this same reduction on both sides. */
     fun atLedgerPrecision(m: StoredMessage) = m.copy(parts = m.parts.map { p ->
         if (p.kind == "result") p.copy(text = p.text?.atLedgerPrecision()) else p
     })
-    fun requireUtf8(m: StoredMessage) {
-        for (p in m.parts) {
-            listOfNotNull(p.text, p.name, p.args, p.callId).forEach(::requireUtf8)
-            p.binding?.let { b -> listOfNotNull(b.provider, b.requestId, b.responseId, b.wireId, b.callId).forEach(::requireUtf8) }
-            p.replay?.let { r -> listOf(r.protocol, r.model, r.payload).forEach(::requireUtf8) }
-        }
+    /** Text, reasoning and opaque replay are history-only and the framed writer escapes them
+     * losslessly. Validate only the source fields used for invocation identity/admission. */
+    fun toolInputsAreUtf8(m: StoredMessage): Boolean = m.parts.filter { it.kind == "call" }.all { p ->
+        listOfNotNull(p.name, p.args).all(::isUtf8) && p.binding?.let { b ->
+            listOfNotNull(b.provider, b.requestId, b.responseId, b.wireId, b.callId).all(::isUtf8)
+        } != false
     }
     fun decodeMessage(m: StoredMessage): Message = message(m.role, *m.parts.map { p ->
         val replay = p.replay?.let { replayData(it.protocol, it.model, it.payload) }

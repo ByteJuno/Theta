@@ -492,6 +492,13 @@ class AgentRunLoop(
             val step = request.requestId
             var executionFailure: Exception? = null
             if (calls.isNotEmpty()) {
+                // Validate the whole batch before intent or registration, including with memory
+                // history. Do not replace code units, partially register siblings or fabricate results.
+                if (!HistoryCodec.toolInputsAreUtf8(HistoryCodec.encodeMessage(assistant))) {
+                    serverUnknown = serverUnknown || mode != ModelExecutionMode.GENERATION_ONLY
+                    return result(RunState.PAUSED,
+                        "Tool step contains an unpaired Unicode surrogate in arguments, name or binding; no local tools registered")
+                }
                 // Persist the complete assistant before registration, so a process loss during
                 // registration/execution can reconcile the entire ordered step from ledger truth.
                 history.prepareStep(view.revision, identity, step, assistant)
