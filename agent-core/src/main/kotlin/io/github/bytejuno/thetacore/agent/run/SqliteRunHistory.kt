@@ -346,7 +346,7 @@ open class SqliteRunHistory internal constructor(
         check(!hasValue(pendingPath())) { "Pending tool step must be recovered first" }
         // Freeze and round-trip the exact value that recovery will read BEFORE persisting intent.
         val stored = HistoryCodec.encodeMessage(assistant)
-        HistoryCodec.requireUtf8(stored)
+        require(HistoryCodec.toolInputsAreUtf8(stored)) { "Unpaired surrogate in tool input" }
         listOf(identity.taskChainId, identity.sessionId, identity.runId, stepId).forEach(HistoryCodec::requireUtf8)
         val value = StoredPending(revision = expectedRevision, taskChainId = identity.taskChainId,
             sessionId = sessionId, runId = identity.runId, unattended = identity.unattended, stepId = stepId,
