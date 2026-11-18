@@ -55,7 +55,8 @@ open class SqliteRunHistory internal constructor(
         require(head.version == 1 && head.sessionId == sessionId && head.revision >= 0 && head.messageCount >= 0)
         require(head.revision == databaseRevision())
         if (head.revision == 0L) require(head.messageCount == 0L && head.hash == EMPTY_HASH)
-        else batch(cursor())
+        else if (runtimeBatchBytes(head.revision) <= MAX_RUNTIME_BATCH_BYTES) batch(cursor())
+        else verifyEncodedHead()
     }
     private fun databaseRevision(): Long = database.access { db.prepare("SELECT ${integerColumn("revision")} FROM sessions WHERE session_id=?").use {
         it.bindText(1, sessionId); require(it.step()); it.getLong(0)
@@ -220,7 +221,7 @@ open class SqliteRunHistory internal constructor(
      * A stale checkpoint is not replayed; corrupt committed data fails closed and is retained. */
     @Synchronized internal fun saveCheckpoint(value: ContextCheckpoint) {
         ready()
-        val source = snapshot() // validates the complete source chain and refuses pending intent
+        val source = runSnapshot() // validates the chain without retaining the complete history
         require(value.sessionId == sessionId && value.sourceRevision == source.revision)
         require(value.matches(source, value.settingsKey))
         require(value.steps >= 0 && value.retries >= 0 && value.goal.isNotBlank())
@@ -247,7 +248,7 @@ open class SqliteRunHistory internal constructor(
 
     /** Null means absent/stale, not that an uncertain checkpoint can be safely resumed. */
     @Synchronized fun checkpointInfo(): CheckpointInfo? = loadCheckpoint()?.takeIf {
-        it.matches(snapshot(), it.settingsKey)
+        it.matches(runSnapshot(), it.settingsKey)
     }?.info()
 
     private inline fun <reified T> read(name: String): T {
@@ -294,9 +295,9 @@ open class SqliteRunHistory internal constructor(
             override fun read(b: ByteArray, off: Int, len: Int): Int = if (len == 0) 0 else if (next()) chunk.read(b, off, len) else -1
         }
     }
-    private fun batch(c: HistoryCursor): Pair<HistoryBatch, List<Message>> {
+    private fun batch(c: HistoryCursor, supplied: HistoryBatch? = null): Pair<HistoryBatch, List<Message>> {
         require(c.sessionId == sessionId && c.revision in 1..head.revision && c.messageCount > 0)
-        val value = read<HistoryBatch>(batchPath(c.revision))
+        val value = supplied ?: read<HistoryBatch>(batchPath(c.revision))
         require(value.version == 1 && value.sessionId == sessionId && value.revision == c.revision)
         require(hash(value) == c.hash) { "History chain mismatch" }
         val messages = freezeMessages(value.messages.map(HistoryCodec::decodeMessage))
@@ -328,6 +329,87 @@ open class SqliteRunHistory internal constructor(
         }
         return HistoryPage(revision, total, frozen(chunks.asReversed().flatten()), c.takeIf { it.revision > 0 })
     }
+    /** Validate the immutable chain with one transaction resident, then expose a read-through list.
+     * No per-message index or full-history copy is retained. Random backwards reads restart the
+     * forward cursor; sequential scans decode each transaction once. Existing UI paging is unchanged.
+     */
+    @Synchronized override fun runSnapshot(): HistorySnapshot {
+        ready()
+        check(!hasValue(pendingPath())) { "Pending tool step requires cold reconciliation before model replay" }
+        val boundary = cursor()
+        if (boundary.messageCount > Int.MAX_VALUE) throw HistoryViewLimitException()
+        fun checkedBatch(c: HistoryCursor): Pair<HistoryBatch, List<Message>> {
+            checkRuntimeBatchSize(c.revision)
+            return batch(c)
+        }
+        var c = boundary
+        while (c.revision > 0) {
+            val (value, _) = checkedBatch(c)
+            c = HistoryCursor(sessionId, c.revision - 1, value.previousHash, value.previousCount)
+        }
+        val messages = object : AbstractList<Message>() {
+            override val size = boundary.messageCount.toInt()
+            private var nextRevision = 1L
+            private var nextHash = EMPTY_HASH
+            private var nextCount = 0L
+            private var start = 0
+            private var loaded: List<Message> = emptyList()
+            override fun get(index: Int): Message = synchronized(this@SqliteRunHistory) {
+                ready()
+                if (index !in 0 until size) throw IndexOutOfBoundsException(index.toString())
+                if (index < start) {
+                    nextRevision = 1; nextHash = EMPTY_HASH; nextCount = 0
+                    start = 0; loaded = emptyList()
+                }
+                while (index >= start + loaded.size) {
+                    checkRuntimeBatchSize(nextRevision)
+                    val value = read<HistoryBatch>(batchPath(nextRevision))
+                    require(value.previousHash == nextHash && value.previousCount == nextCount) { "History chain mismatch" }
+                    val hash = hash(value)
+                    val count = Math.addExact(nextCount, value.messages.size.toLong())
+                    val cursor = HistoryCursor(sessionId, nextRevision, hash, count)
+                    loaded = batch(cursor, value).second
+                    start = nextCount.toInt()
+                    nextCount = count; nextHash = hash; nextRevision++
+                    if (nextRevision > boundary.revision) require(cursor == boundary) { "History boundary changed" }
+                }
+                loaded[index - start]
+            }
+        }
+        return HistorySnapshot(boundary.revision, messages)
+    }
+
+    /** Reject a huge legacy atomic value before JSON decoding, retaining it for ordinary paging
+     * and host recovery. This is a runtime memory limit, not a provider token estimate. */
+    // Oversized legacy heads can be opened for inspection without allocating their JSON strings.
+    // Verify every frame and bind the encoded value to HEAD; semantic/call-index validation still
+    // runs on explicit paging, while runtime admission refuses the value before decoding it.
+    private fun verifyEncodedHead() {
+        try {
+            val digest = MessageDigest.getInstance("SHA-256")
+            valueInput(batchPath(head.revision)).use { input ->
+                val framed = HistoryFrameInput(input)
+                val buffer = ByteArray(HISTORY_FRAME_BYTES)
+                while (true) {
+                    val n = framed.read(buffer)
+                    if (n < 0) break
+                    digest.update(buffer, 0, n)
+                }
+            }
+            require(digest.digest().joinToString("") { "%02x".format(it) } == head.hash) { "History chain mismatch" }
+        } catch (error: Exception) { throw HistoryStorageException("Invalid encoded history head", error) }
+    }
+
+    private fun checkRuntimeBatchSize(revision: Long) {
+        if (runtimeBatchBytes(revision) > MAX_RUNTIME_BATCH_BYTES) throw HistoryViewLimitException()
+    }
+    private fun runtimeBatchBytes(revision: Long): Long = database.access {
+        db.prepare("SELECT COALESCE(SUM(length(bytes)),0) FROM history_chunks WHERE session_id=? AND name=?").use {
+            it.bindText(1, sessionId); it.bindText(2, batchPath(revision)); require(it.step())
+            it.getLong(0)
+        }
+    }
+
     @Synchronized override fun snapshot(): HistorySnapshot {
         ready()
         check(!hasValue(pendingPath())) { "Pending tool step requires cold reconciliation before model replay" }
