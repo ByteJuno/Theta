@@ -105,6 +105,7 @@ internal class ChatSessionOwner(
         val disk = if (id == null) store.createHistory(key) else store.openHistory(key)
         history = disk
         // Preserve fully registered unsubmitted approvals. Never recoverPending over a live run.
+        disk.chatTaskChainId() // Keep the saved chain before cold reconciliation consumes its step.
         val pending = disk.pendingStep(host.ledger)
         if (pending == null) disk.recoverPending(host.ledger)
         else {
@@ -149,9 +150,10 @@ internal class ChatSessionOwner(
         val disk = requireNotNull(history)
         check(disk.pendingStep(tools!!.ledger) == null)
         val snapshot = configuration() // validate/decrypt before acknowledging a new message
+        val chain = disk.chatTaskChainId() // Capture checkpoint identity before the history revision advances.
         disk.append(disk.revision(), listOf(message(Role.USER, textPart(text))))
         mutable.update { it.copy(acceptedMessages = it.acceptedMessages + 1) }
-        start(snapshot, null)
+        start(snapshot, null, RunIdentity(chain, disk.sessionId, UUID.randomUUID().toString()))
     }
     fun decide(callId: String, requestId: String, decision: Decision) = launchOperation {
         require(decision == Decision.ALLOW_ONCE || decision == Decision.DENY)
@@ -201,7 +203,7 @@ internal class ChatSessionOwner(
     private fun executor(definitions: List<FrozenDefinition>) = LedgerToolExecutor(tools!!.ledger,
         tools!!.catalog.gate, definitions, tools!!.runBridge(), RunApprovals(::approval))
 
-    private fun start(snapshot: OpenAiRunSnapshot?, pending: PendingHistoryStep?) {
+    private fun start(snapshot: OpenAiRunSnapshot?, pending: PendingHistoryStep?, identity: RunIdentity? = null) {
         check(active == null)
         mutable.update { it.copy(active = true, error = null, notice = null, draft = "") }
         active = scope.launch(Dispatchers.IO, start = CoroutineStart.LAZY) {
@@ -236,7 +238,7 @@ internal class ChatSessionOwner(
                     notice = R.string.chat_recovered_step
                 } else {
                     val config = requireNotNull(snapshot)
-                    val id = RunIdentity(disk.sessionId, disk.sessionId, UUID.randomUUID().toString())
+                    val id = requireNotNull(identity)
                     val definitions = tools!!.catalog.freeze(id.runId).values.toList()
                     val request = config.request { tools = definitions.map {
                         modelTool(it.modelName, it.description, Json.parseToJsonElement(it.inputSchema).jsonObject)
@@ -252,7 +254,10 @@ internal class ChatSessionOwner(
                             if (event is ModelEvent.Finished || event is ModelEvent.Failed) preview.setLength(0)
                         } }).run()
                     notice = when (result.state) {
-                        RunState.COMPLETED -> R.string.chat_complete
+                        RunState.COMPLETED -> {
+                            disk.completeChatTask(id, requireNotNull(tools).ledger)
+                            R.string.chat_complete
+                        }
                         RunState.PAUSED -> R.string.chat_paused
                         RunState.FAILED -> R.string.chat_model_failed
                     }

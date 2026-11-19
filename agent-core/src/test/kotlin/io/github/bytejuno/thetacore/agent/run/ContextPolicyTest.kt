@@ -225,12 +225,16 @@ class ContextPolicyTest {
             assertIs<Mutation.Blocked>(f.ledger.resolveRecovery(ticket.callId, RecoveryResolution.ACCEPTED_UNCERTAINTY))
             f.ledger.recordActualExit(ticket.callId, ticket.attemptId, "worker exited")
             assertIs<Mutation.Applied>(f.ledger.resolveRecovery(ticket.callId, RecoveryResolution.ACCEPTED_UNCERTAINTY))
+            val chain = h.chatTaskChainId()
+            assertEquals("chain", chain)
             h.append(h.revision(), listOf(user("what happened?")))
             f.onSubmit = { f.ledger.complete(it.callId, it.attemptId, Status.SUCCEEDED, "read complete") }
             val p = ScriptProvider(listOf(calls("read"), answer("final answer")))
             assertEquals(RunState.COMPLETED, f.loop(p, history = h).run().state)
             assertEquals(2, p.requests.size)
             assertEquals(InstanceState.EXIT_CONFIRMED, f.ledger.get(f.submitted.last().callId)!!.instance!!.state)
+            h.completeChatTask(RunIdentity(chain, h.sessionId, "completed"), f.ledger)
+            assertEquals(chain, h.chatTaskChainId())
             var approval: ApprovalRequest? = null
             f.approve = { approval = it; Decision.DENY }
             val next = ScriptProvider(listOf(calls("tool", args = "{\"next\":true}"), answer()))

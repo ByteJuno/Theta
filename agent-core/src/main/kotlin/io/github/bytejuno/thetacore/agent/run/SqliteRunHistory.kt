@@ -98,6 +98,24 @@ open class SqliteRunHistory internal constructor(
     private fun pendingPath() = "pending"
     private fun checkpointPath() = "context"
 
+    // Only a durably completed chat task rotates this pointer. Before this key existed,
+    // chat used the session ID for every turn, so incomplete legacy work keeps its budget.
+    @Synchronized fun chatTaskChainId(): String {
+        ready()
+        val recorded = if (hasValue("chat-chain")) read<String>("chat-chain") else sessionId
+        val pending = if (hasValue(pendingPath())) read<StoredPending>(pendingPath()) else null
+        val chain = pending?.taskChainId ?: loadBarrier()?.taskChainId ?: loadCheckpoint()?.takeIf {
+            it.kind !in setOf("VIEW", "COMPLETE")
+        }?.taskChainId ?: recorded
+        if (chain != recorded) write("chat-chain", chain)
+        return chain
+    }
+
+    @Synchronized fun completeChatTask(identity: RunIdentity, ledger: InvocationLedger) {
+        require(identity.sessionId == sessionId && identity.taskChainId == chatTaskChainId())
+        if (!ledger.hasOutstandingChainRisk(identity.taskChainId)) write("chat-chain", UUID.randomUUID().toString())
+    }
+
     private fun accountingPath(taskChainId: String): String {
         require(taskChainId.isNotBlank())
         HistoryCodec.requireUtf8(taskChainId)

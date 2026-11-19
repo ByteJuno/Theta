@@ -64,6 +64,65 @@ class ChatSessionOwnerTest {
             }
         }
     }
+    @Test fun completedQuestionsHaveIndependentBudgetsInOnePersistentSession() = runBlocking {
+        val root = Files.createTempDirectory("chat-budgets").toFile()
+        val requests = AtomicInteger()
+        val model = countingProvider(requests) { FinishReason.STOP }
+        try {
+            var f = fixture(root, AtomicInteger(), model)
+            f.owner.open().join()
+            val session = f.owner.state.value.sessionId
+            repeat(51) { index ->
+                if (index == 50) {
+                    f.close()
+                    f = fixture(root, AtomicInteger(), model)
+                    f.owner.open().join()
+                }
+                f.owner.send("question $index").join()
+                await { !f.owner.state.value.active }
+                assertEquals(R.string.chat_complete, f.owner.state.value.notice)
+                assertEquals(index + 1, requests.get())
+            }
+            assertEquals(session, f.owner.state.value.sessionId)
+            assertTrue(f.failures.toString(), f.failures.isEmpty())
+            f.close()
+        } finally { root.deleteRecursively() }
+    }
+
+    private fun countingProvider(requests: AtomicInteger, finish: (Int) -> FinishReason) = object : ModelProvider {
+        override fun executionMode(request: ChatRequest) = ModelExecutionMode.GENERATION_ONLY
+        override fun chat(request: ChatRequest, auth: Credentials): Flow<ModelEvent> = flow {
+            val number = requests.incrementAndGet()
+            emit(Events.started("response-$number", "model"))
+            emit(Events.text(0, "reply")); emit(Events.end(0)); emit(Events.finished(finish(number)))
+        }
+    }
+
+    @Test fun pausedTaskStillExhaustsItsOwnBudgetAfterColdOpen() = runBlocking {
+        val root = Files.createTempDirectory("chat-paused-budget").toFile()
+        val requests = AtomicInteger()
+        val model = countingProvider(requests) { if (it == 1) FinishReason.STOP else FinishReason.LENGTH }
+        try {
+            val f = fixture(root, AtomicInteger(), model)
+            f.owner.open().join()
+            f.owner.send("first task").join(); await { !f.owner.state.value.active }
+            assertEquals(R.string.chat_complete, f.owner.state.value.notice)
+            repeat(50) {
+                f.owner.send("continue unfinished task").join(); await { !f.owner.state.value.active }
+                assertEquals(R.string.chat_paused, f.owner.state.value.notice)
+                assertEquals(it + 2, requests.get())
+            }
+            f.close()
+            val cold = fixture(root, AtomicInteger(), model)
+            cold.owner.open().join(); cold.owner.send("continue after restart").join()
+            await { !cold.owner.state.value.active }
+            assertEquals(R.string.chat_paused, cold.owner.state.value.notice)
+            assertEquals(51, requests.get())
+            assertTrue(cold.failures.toString(), cold.failures.isEmpty())
+            cold.close()
+        } finally { root.deleteRecursively() }
+    }
+
     @Test fun realLoopApprovesThroughHostApiAndPersistsAcrossReopen() = runBlocking {
         val root = Files.createTempDirectory("chat24-").toFile(); val count = AtomicInteger()
         try {
