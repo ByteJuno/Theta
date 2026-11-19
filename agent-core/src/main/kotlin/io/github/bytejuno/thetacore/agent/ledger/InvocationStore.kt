@@ -6,14 +6,12 @@ import java.io.Closeable
  * Any ambiguous acknowledgement MUST suspend all writes/claims until reopen and cold recovery.
  */
 interface InvocationStore : Closeable {
-    /** Exactly one coordinator may attach for the lifetime of this open writer. */
-    fun bindCoordinator()
+    /** Exactly one coordinator may attach. Only it receives the session deletion operation, if supported. */
+    fun bindCoordinator(): ((String) -> Unit)?
     /** Admission health, independent of cached projections and SQL writes. Throw StoreException
      * when the shared owner is closed/uncertain. This does not revoke already executing effects. */
     fun checkAdmission() {}
     fun isSessionDeleted(sessionId: String): Boolean = false
-    /** Trusted host operation, never exposed as a model tool. Retain ledger safety evidence. */
-    fun deleteSession(sessionId: String) { throw StoreException("Session deletion is not supported") }
     fun records(): List<InvocationRecord>
     fun save(record: InvocationRecord, expectedRevision: Long?)
     /** Atomically commit full contents and their record references under the same writer ownership. */

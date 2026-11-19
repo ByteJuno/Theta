@@ -24,7 +24,8 @@ class InvocationLedger(
     private val validator: ArgumentsValidator, private val policy: ApprovalPolicy = ApprovalPolicy(),
     private val maxClaimsPerTaskChain: Int = Int.MAX_VALUE,
 ) {
-    init { require(maxClaimsPerTaskChain > 0); store.bindCoordinator() }
+    init { require(maxClaimsPerTaskChain > 0) }
+    private val deleteStoredSession = store.bindCoordinator()
     private val recordsById = store.records().associateByTo(linkedMapOf()) { it.callId }
     private val deletedSessions = recordsById.values.map { it.input.sessionId }.distinct()
         .filterTo(mutableSetOf(), store::isSessionDeleted)
@@ -438,7 +439,8 @@ class InvocationLedger(
         require(sessionId.isNotBlank())
         check(!halted) { "Reopen storage required" }
         try {
-            store.deleteSession(sessionId)
+            val delete = deleteStoredSession ?: throw StoreException("Session deletion is not supported")
+            delete(sessionId)
             deletedSessions.add(sessionId)
             blobRoots = BlobReferenceIndex(recordsById.values.filter { it.input.sessionId !in deletedSessions })
         } catch (error: StoreException) { if (error.uncertain) halted = true; throw error }

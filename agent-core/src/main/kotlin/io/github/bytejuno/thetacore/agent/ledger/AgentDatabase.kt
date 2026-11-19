@@ -2,12 +2,14 @@ package io.github.bytejuno.thetacore.agent.ledger
 
 import androidx.sqlite.SQLiteConnection
 import androidx.sqlite.SQLiteDriver
+import androidx.sqlite.SQLiteStatement
 import io.github.bytejuno.thetacore.agent.run.HistoryCodec
 import io.github.bytejuno.thetacore.agent.run.SummaryWorkspace
 import io.github.bytejuno.thetacore.agent.run.checkedSessionDirectory
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.security.MessageDigest
 import java.io.Closeable
+import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.channels.FileLock
 import java.nio.file.Files
@@ -58,21 +60,27 @@ class AgentDatabase private constructor(
     @Synchronized internal fun releaseLedger() { ledgerBound = false }
     @Synchronized internal fun bindSession(id: String) {
         ready()
-        validateSessionId(id)
+        require(id.isNotBlank()); HistoryCodec.requireUtf8(id)
         check(!isSessionDeleted(id)) { "Session has been deleted" }
         check(sessions.add(id)) { "Session already open" }
     }
     internal fun isSessionDeleted(id: String): Boolean =
         connection.prepare("SELECT 1 FROM deleted_sessions WHERE session_id=?").use {
-            it.bindText(1, id); it.step()
+            it.bindDeletionKey(id); it.step()
         }
-    private fun validateSessionId(id: String) {
-        require(id.isNotBlank())
-        HistoryCodec.requireUtf8(id)
+    private fun SQLiteStatement.bindDeletionKey(id: String) {
+        if (HistoryCodec.isUtf8(id)) bindText(1, id) else {
+            val units = ByteBuffer.allocate(Math.multiplyExact(id.length, Char.SIZE_BYTES))
+            units.asCharBuffer().put(id)
+            bindBlob(1, units.array())
+        }
+    }
+    internal fun markSessionDeleted(id: String) = connection.prepare("INSERT INTO deleted_sessions(session_id) VALUES(?)").use {
+        it.bindDeletionKey(id); it.step(); Unit
     }
     @Synchronized internal fun checkSessionDeletion(id: String) {
         ready()
-        validateSessionId(id)
+        require(id.isNotBlank())
         check(id !in sessions && ownerPins == 0) { "Close session handles and active runs before deletion" }
     }
     @Synchronized internal fun releaseSession(id: String) { sessions.remove(id) }

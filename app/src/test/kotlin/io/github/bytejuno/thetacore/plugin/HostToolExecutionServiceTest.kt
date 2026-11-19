@@ -27,7 +27,7 @@ class HostToolExecutionServiceTest {
         var bound = false
         val writes = kotlinx.coroutines.channels.Channel<InvocationRecord>(kotlinx.coroutines.channels.Channel.UNLIMITED)
         var fail: (InvocationRecord) -> Boolean = { false }
-        override fun bindCoordinator() { check(!bound); bound = true }
+        override fun bindCoordinator(): ((String) -> Unit)? { check(!bound); bound = true; return null }
         override fun records() = data.values.toList()
         override fun save(record: InvocationRecord, expectedRevision: Long?) {
             if (fail(record)) throw StoreException("injected write failure")

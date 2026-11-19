@@ -1,6 +1,7 @@
 package io.github.bytejuno.thetacore.agent.ledger
 
 import androidx.sqlite.SQLiteDriver
+import io.github.bytejuno.thetacore.agent.run.HistoryCodec
 import kotlinx.serialization.json.Json
 import java.nio.ByteBuffer
 import java.nio.file.Path
@@ -44,9 +45,10 @@ class SqliteInvocationStore private constructor(
         database.ready()
         if (closed || poisoned) throw StoreException("Store closed or uncertain; reopen and recover", poisoned)
     }
-    override fun bindCoordinator() = synchronized(database) {
+    override fun bindCoordinator(): (String) -> Unit = synchronized(database) {
         check(!closed && !bound) { "Store already has a coordinator" }
         bound = true
+        ::deleteSession
     }
     override fun records(): List<InvocationRecord> { synchronized(database) {
         // Immutable last-confirmed projection remains available after an uncertain commit.
@@ -272,12 +274,13 @@ class SqliteInvocationStore private constructor(
         catch (error: Exception) { throw StoreException("Cannot check session deletion", cause = error) }
     }
 
-    override fun deleteSession(sessionId: String) = synchronized(database) {
+    private fun deleteSession(sessionId: String) = synchronized(database) {
         checkAdmission()
         database.checkSessionDeletion(sessionId)
+        val canHaveHistory = HistoryCodec.isUtf8(sessionId)
         // A previous attempt may have committed the tombstone before scratch cleanup.
         if (isSessionDeleted(sessionId)) {
-            database.cleanSessionScratch(sessionId)
+            if (canHaveHistory) database.cleanSessionScratch(sessionId)
             return@synchronized
         }
         val members = recordsById.values.filter { it.input.sessionId == sessionId }
@@ -288,22 +291,20 @@ class SqliteInvocationStore private constructor(
         try {
             database.transaction {
                 fault(SqliteWriteStage.AFTER_BEGIN)
-                db.prepare("INSERT INTO deleted_sessions(session_id) VALUES(?)").use {
-                    it.bindText(1, sessionId); it.step()
-                }
+                database.markSessionDeleted(sessionId)
                 db.prepare("DELETE FROM invocation_contents WHERE call_id=?").use { statement ->
                     members.forEach { statement.bindText(1, it.callId); statement.step(); statement.reset() }
                 }
                 db.prepare("DELETE FROM contents WHERE hash=? AND NOT EXISTS(SELECT 1 FROM invocation_contents WHERE hash=?)").use { statement ->
                     hashes.forEach { statement.bindText(1, it); statement.bindText(2, it); statement.step(); statement.reset() }
                 }
-                for (table in listOf("history_values", "sessions")) db.prepare("DELETE FROM $table WHERE session_id=?").use {
+                if (canHaveHistory) for (table in listOf("history_values", "sessions")) db.prepare("DELETE FROM $table WHERE session_id=?").use {
                     it.bindText(1, sessionId); it.step()
                 }
                 fault(SqliteWriteStage.BEFORE_COMMIT)
             }
             fault(SqliteWriteStage.AFTER_COMMIT)
-            database.cleanSessionScratch(sessionId)
+            if (canHaveHistory) database.cleanSessionScratch(sessionId)
             roots = BlobReferenceIndex(recordsById.values.filterNot { isSessionDeleted(it.input.sessionId) })
             hashes.filter { hash -> !roots.ownsFile("$hash.blob") }.forEach {
                 manifests.remove(it); unavailable.remove(it)

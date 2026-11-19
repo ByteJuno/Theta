@@ -149,6 +149,33 @@ class SessionBlobTest {
         } finally { root.toFile().deleteRecursively() }
     }
 
+    @Test fun onlyBoundLedgerCanDeleteAndReplaysStayBlocked() = Fixture().use { fixture ->
+        val input = fixture.input(cancelled = true)
+        fixture.record(input)
+        assertFailsWith<IllegalStateException> { fixture.store.bindCoordinator() }
+        fixture.ledger.deleteSession(input.sessionId)
+        assertIs<Mutation.Blocked>(fixture.ledger.recordInvocation(input))
+        fixture.reopen()
+        assertIs<Mutation.Blocked>(fixture.ledger.recordInvocation(input))
+        Unit
+    }
+
+    @Test fun ledgerOnlySessionDeletionPreservesDistinctSessionKeys() = Fixture().use { fixture ->
+        val target = "session-\uD800"
+        val (_, unique) = publish(fixture, target, "source", byteArrayOf(1))
+        val others = listOf("session-?", "session-\uFFFD", "session-\uD801")
+        val retained = others.mapIndexed { index, id -> publish(fixture, id, "other-$index").second }
+        fixture.reopen()
+        fixture.ledger.deleteSession(target)
+        fixture.reopen()
+        assertTrue(fixture.store.isSessionDeleted(target))
+        assertFalse(hasContent(fixture.directory, unique.contentHash))
+        for ((id, ref) in others.zip(retained)) {
+            assertFalse(fixture.store.isSessionDeleted(id))
+            assertTrue(fixture.ledger.readSessionBlob(id, ref.id, 0).second.isNotEmpty())
+        }
+    }
+
     @Test fun deletionRetriesAbandonedScratchCleanupAfterCommittedInterruption() {
         val root = Files.createTempDirectory("session-scratch-retry")
         val file = root.resolve(AgentDatabase.FILE_NAME)
@@ -161,7 +188,8 @@ class SessionBlobTest {
                 val target = abandoned(db, "target")
                 val other = abandoned(db, "other")
                 SqliteInvocationStore.open(db) { if (it == SqliteWriteStage.AFTER_COMMIT) error("interrupted") }.use { store ->
-                    assertFailsWith<StoreException> { store.deleteSession("target") }
+                    val ledger = InvocationLedger(store, DefinitionGate(), ArgumentsValidator { _, _ -> true })
+                    assertFailsWith<StoreException> { ledger.deleteSession("target") }
                 }
                 target to other
             }
