@@ -31,14 +31,11 @@ class SqliteInvocationStore private constructor(
     private val recordsById = loadRecords().associateByTo(linkedMapOf()) { it.callId }
     private var roots = BlobReferenceIndex(recordsById.values.filterNot { isSessionDeleted(it.input.sessionId) })
     private val manifests = mutableMapOf<String, ByteArray>()
-    private val unavailable = mutableSetOf<String>()
     internal var blobBytesRead = 0L
         private set
 
     init {
-        roots.liveReferences().distinct().forEach { ref ->
-            try { verifyContent(ref) } catch (_: Exception) { unavailable += ref.contentHash }
-        }
+        roots.liveReferences().forEach(::verifyOwnedContent)
     }
 
     override fun checkAdmission() = synchronized(database) {
@@ -92,6 +89,35 @@ class SqliteInvocationStore private constructor(
     } catch (error: StoreException) { throw error }
     catch (error: Exception) { throw StoreException("Cannot read invocation ledger", cause = error) }
 
+    private fun isQuarantined(hash: String): Boolean =
+        db.prepare("SELECT 1 FROM quarantined_contents WHERE hash=?").use { it.bindText(1, hash); it.step() }
+
+    private fun quarantine(hash: String) {
+        try {
+            database.transaction {
+                db.prepare("INSERT OR IGNORE INTO quarantined_contents(hash) VALUES(?)").use { it.bindText(1, hash); it.step() }
+            }
+        } catch (error: Exception) {
+            throw StoreException("Cannot confirm content quarantine; reopen and recover", true, error)
+        }
+        manifests.remove(hash)
+    }
+
+    // Run before starting a publication transaction. A later rollback must never undo
+    // observation of damage to bytes that were owned before that transaction began.
+    private fun verifyOwnedContent(ref: BlobRef) {
+        if (isQuarantined(ref.contentHash)) return
+        try { verifyContent(ref) } catch (_: IllegalArgumentException) { quarantine(ref.contentHash) }
+    }
+
+    private fun collectUnownedContent(hash: String) {
+        for (table in listOf("content_chunks", "content_manifests", "contents", "quarantined_contents")) {
+            db.prepare("DELETE FROM $table WHERE hash=? AND NOT EXISTS(SELECT 1 FROM invocation_contents WHERE hash=?)").use {
+                it.bindText(1, hash); it.bindText(2, hash); it.step()
+            }
+        }
+    }
+
     private fun verifyContent(ref: BlobRef) {
         val manifest = db.readManifest(ref)
         val digest = MessageDigest.getInstance("SHA-256")
@@ -118,8 +144,8 @@ class SqliteInvocationStore private constructor(
         database.ready(); check(!closed && !poisoned) { "Reopen and recover required" }
         require(offset in 0..ref.sizeBytes && limit in 1..8192)
         require(roots.contains(ref)) { "Unreferenced blob" }
-        if (ref.contentHash in unavailable) throw StoreException("Result content is unavailable: missing or corrupt")
         try {
+            if (isQuarantined(ref.contentHash)) throw StoreException("Result content is unavailable: missing or corrupt")
             // Trusted manifest is anchored to the full content hash on open/publication.
             // Do not reread O(total chunks) metadata on every bounded range request.
             val manifest = requireNotNull(manifests[ref.contentHash]) { "Result content not verified" }
@@ -149,9 +175,13 @@ class SqliteInvocationStore private constructor(
                 }
             }
             return result.toByteArray()
-        } catch (error: Exception) {
-            unavailable += ref.contentHash
+        } catch (error: IllegalArgumentException) {
+            quarantine(ref.contentHash)
             throw StoreException("Result content is unavailable: missing or corrupt", cause = error)
+        } catch (error: StoreException) {
+            throw error
+        } catch (error: Exception) {
+            throw StoreException("Cannot read result content", cause = error)
         }
     } }
 
@@ -172,29 +202,28 @@ class SqliteInvocationStore private constructor(
         val refs = if (isDeleted) emptySet() else snapshot.blobReferences().toSet()
         require(blobs.all { it.ref in refs }) { "Unowned blob publication" }
         val oldRefs = if (isDeleted) emptySet() else previous?.blobReferences().orEmpty().toSet()
-        val published = mutableSetOf<String>()
+        // A new call may retain a reference to previously quarantined content, but its
+        // identical payload cannot silently overwrite the bytes or resurrect an old ID.
+        val writes = blobs.distinctBy { it.ref.contentHash }
+        val addedRefs = refs - oldRefs
         var commitAttempted = false
         var begun = false
         try {
+            for (ref in (writes.map { it.ref } + addedRefs).distinctBy { it.contentHash }) {
+                if (roots.ownsFile("${ref.contentHash}.blob")) {
+                    val owned = if (roots.contains(ref)) ref else roots.liveReferences().first { it.contentHash == ref.contentHash }
+                    verifyOwnedContent(owned)
+                }
+            }
             db.execute("BEGIN IMMEDIATE"); begun = true
             db.verifyWriteConfiguration()
             fault(SqliteWriteStage.AFTER_BEGIN)
-            for (blob in blobs.distinctBy { it.ref.contentHash }) {
+            for (blob in writes) {
                 val ref = blob.ref
+                if (isQuarantined(ref.contentHash)) continue
                 val exists = db.prepare("SELECT 1 FROM contents WHERE hash=?").use { it.bindText(1, ref.contentHash); it.step() }
-                // Content damaged after startup verification is quarantined here, then repaired
-                // by this explicit publication instead of blocking the identical result forever.
-                val healthy = exists && ref.contentHash !in unavailable &&
-                    runCatching { verifyContent(ref) }.onFailure { unavailable += ref.contentHash }.isSuccess
-                if (!healthy) {
-                    // Explicit identical-byte publication repairs quarantined content, not a
-                    // bookkeeping save. Child rows are replaced in this same transaction.
-                    if (exists) {
-                        for (table in listOf("content_manifests", "content_chunks")) {
-                            db.prepare("DELETE FROM $table WHERE hash=?").use { it.bindText(1, ref.contentHash); it.step() }
-                        }
-                    }
-                    db.prepare("INSERT INTO contents(hash,size) VALUES(?,?) ON CONFLICT(hash) DO UPDATE SET size=excluded.size").use {
+                if (!exists) {
+                    db.prepare("INSERT INTO contents(hash,size) VALUES(?,?)").use {
                         it.bindText(1, ref.contentHash); it.bindLong(2, ref.sizeBytes); it.step()
                     }
                     db.writeManifest(ref.contentHash, blob.manifest()) { fault(SqliteWriteStage.AFTER_MANIFEST_CHUNK) }
@@ -210,11 +239,10 @@ class SqliteInvocationStore private constructor(
                     }
                     verifyContent(ref)
                 }
-                published += ref.contentHash
             }
             // Existing evidence may reference quarantined content. Do not prevent cold recovery,
             // actual-exit or approval bookkeeping; new references must be verified before commit.
-            (refs - oldRefs).forEach { verifyContent(it) }
+            addedRefs.filterNot { isQuarantined(it.contentHash) }.forEach(::verifyContent)
             fault(SqliteWriteStage.AFTER_CONTENT)
             val payload = codec.encode(snapshot).toByteArray(Charsets.UTF_8)
             if (expectedRevision == null) {
@@ -237,9 +265,7 @@ class SqliteInvocationStore private constructor(
                 }
             }
             for (hash in (oldRefs - refs).map { it.contentHash }.distinct()) {
-                db.prepare("DELETE FROM contents WHERE hash=? AND NOT EXISTS(SELECT 1 FROM invocation_contents WHERE hash=?)").use {
-                    it.bindText(1, hash); it.bindText(2, hash); it.step()
-                }
+                collectUnownedContent(hash)
             }
             fault(SqliteWriteStage.AFTER_RECORD)
             fault(SqliteWriteStage.BEFORE_COMMIT)
@@ -247,12 +273,8 @@ class SqliteInvocationStore private constructor(
             db.execute("COMMIT"); begun = false
             fault(SqliteWriteStage.AFTER_COMMIT)
             if (!isDeleted) roots.replace(previous, snapshot)
-            // Only a confirmed, fully verified publication repairs quarantine. Failed or
-            // uncertain commits never unquarantine previously damaged evidence.
-            unavailable.removeAll(published)
             for (ref in oldRefs - refs) if (!roots.ownsFile("${ref.contentHash}.blob")) {
                 manifests.remove(ref.contentHash)
-                unavailable.remove(ref.contentHash)
             }
             afterCacheUpdate()
             // Publish the read-only projection last, after all other fallible cache work.
@@ -261,7 +283,7 @@ class SqliteInvocationStore private constructor(
             val rolledBack = !begun || runCatching { db.execute("ROLLBACK") }.isSuccess
             // Fatal failures may interrupt cache maintenance too. Even a confirmed rollback
             // cannot establish that the in-memory owner is safe for further admission.
-            poisoned = error !is Exception || commitAttempted || !rolledBack
+            poisoned = error !is Exception || (error is StoreException && error.uncertain) || commitAttempted || !rolledBack
             if (poisoned) database.poison()
             if (error !is Exception) throw error
             throw StoreException("Invocation transaction failed", poisoned, error)
@@ -295,9 +317,7 @@ class SqliteInvocationStore private constructor(
                 db.prepare("DELETE FROM invocation_contents WHERE call_id=?").use { statement ->
                     members.forEach { statement.bindText(1, it.callId); statement.step(); statement.reset() }
                 }
-                db.prepare("DELETE FROM contents WHERE hash=? AND NOT EXISTS(SELECT 1 FROM invocation_contents WHERE hash=?)").use { statement ->
-                    hashes.forEach { statement.bindText(1, it); statement.bindText(2, it); statement.step(); statement.reset() }
-                }
+                hashes.forEach(::collectUnownedContent)
                 if (canHaveHistory) for (table in listOf("history_values", "sessions")) db.prepare("DELETE FROM $table WHERE session_id=?").use {
                     it.bindText(1, sessionId); it.step()
                 }
@@ -307,7 +327,7 @@ class SqliteInvocationStore private constructor(
             if (canHaveHistory) database.cleanSessionScratch(sessionId)
             roots = BlobReferenceIndex(recordsById.values.filterNot { isSessionDeleted(it.input.sessionId) })
             hashes.filter { hash -> !roots.ownsFile("$hash.blob") }.forEach {
-                manifests.remove(it); unavailable.remove(it)
+                manifests.remove(it)
             }
         } catch (error: Throwable) {
             poisoned = true; database.poison()

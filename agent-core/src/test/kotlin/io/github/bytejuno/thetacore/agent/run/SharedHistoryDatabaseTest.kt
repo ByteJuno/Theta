@@ -168,6 +168,7 @@ class SharedHistoryDatabaseTest {
             sql.execute("DROP TABLE history_chunks")
             sql.execute("DROP TABLE history_values")
             sql.execute("DROP TABLE sessions")
+            sql.execute("DROP TABLE quarantined_contents")
             sql.execute("DROP TABLE deleted_sessions")
             sql.execute("PRAGMA user_version=1")
         }

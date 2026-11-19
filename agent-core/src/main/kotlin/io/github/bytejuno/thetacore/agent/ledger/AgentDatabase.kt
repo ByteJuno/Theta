@@ -125,7 +125,7 @@ class AgentDatabase private constructor(
 
     companion object {
         const val FILE_NAME = "agent.db"
-        const val SCHEMA_VERSION = 3
+        const val SCHEMA_VERSION = 4
         private const val APPLICATION_ID = 0x54485441
         // On POSIX, closing ANY descriptor of a locked file can drop this process's lock.
         // Reject duplicate instances before even opening a second descriptor.
@@ -149,6 +149,7 @@ class AgentDatabase private constructor(
             connection.execute("CREATE INDEX content_owners ON invocation_contents(hash)")
             createHistorySchema(connection)
             createDeletionSchema(connection)
+            createQuarantineSchema(connection)
             connection.execute("PRAGMA application_id=$APPLICATION_ID")
             connection.execute("PRAGMA user_version=$SCHEMA_VERSION")
         }
@@ -161,13 +162,18 @@ class AgentDatabase private constructor(
         private fun createDeletionSchema(connection: SQLiteConnection) {
             connection.execute("CREATE TABLE deleted_sessions (session_id TEXT PRIMARY KEY NOT NULL) WITHOUT ROWID")
         }
+        private fun createQuarantineSchema(connection: SQLiteConnection) {
+            // A missing contents row must still be able to carry a durable quarantine.
+            connection.execute("CREATE TABLE quarantined_contents (hash TEXT PRIMARY KEY NOT NULL) WITHOUT ROWID")
+        }
         /** Only recognized SQLite schemas are upgraded; legacy files are never imported. */
         fun upgradeSchema(connection: SQLiteConnection, oldVersion: Int, newVersion: Int) {
             connection.verifyWriteConfiguration()
-            require(oldVersion in 1..2 && newVersion == SCHEMA_VERSION &&
+            require(oldVersion in 1 until SCHEMA_VERSION && newVersion == SCHEMA_VERSION &&
                 connection.longValue("PRAGMA application_id") == APPLICATION_ID.toLong())
             if (oldVersion == 1) createHistorySchema(connection)
-            createDeletionSchema(connection)
+            if (oldVersion < 3) createDeletionSchema(connection)
+            createQuarantineSchema(connection)
             connection.execute("PRAGMA user_version=$SCHEMA_VERSION")
         }
 
