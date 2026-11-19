@@ -1,5 +1,15 @@
 # Issue 24 — Chat and inline approvals
 
+## November 19 built-in isolation integration
+
+Tested source `2cce30cf92f204fada9e25cc4d0bc10b572c22de`, Git tree `3f57b04ae54938eef8a6eb3db025a7fa98d2c61d`, integrates reviewed main `ea571d28776bb4a9ba5d9f2741c5341c182c1e64`. The single content conflict was in host dispatch. The integration retains the chat bridge's revision guard, cancellation clock and observer setup while using the trusted built-in tool key for both capacity reservation and invocation identity. Shared-resource leases and actual-exit accounting remain enforced. DESIGN and PROTOCOL match main byte-for-byte; no protected-file changes relative to main.
+
+**143/143 targeted JVM tests passed**, zero failures, errors or skips: ChatSessionOwnerTest 14, HostScreenToolTest 5, HostToolExecutionServiceTest 87, PluginExecutionBudgetTest 4, InvocationLedgerTest 32 and HistorySchemaTest 1. Strict `--configuration-cache --configuration-cache-problems=fail` validation stored the configuration cache; elapsed 91.68 seconds. The added bridge regression holds a noncooperative screen worker after timeout, rejects a stale claim revision without allocating capacity, blocks another tool sharing the screen resource, and executes clock plus blob_read through the chat execution bridge before the old worker actually exits. Existing direct-dispatch, unknown-effect/cold-restart, approval, alias and chat tests also pass.
+
+Logs and fresh test XML: `validation-issue11/issue24-2f19bb84-isolation`. Source binding and remote review receipts: `event-runs/2f19bb84-cc9a-4573-909c-b134194189f2`. The following summary-only commit changes no tested sources. The initial merge command's missing-identity failure and the expected content conflict are retained in local worker evidence; no test failure occurred in this integration run.
+
+APK not generated; APK SHA-256 not applicable. No phone/emulator operations, current-build visual verification, API33 runtime, R8 or physical power-loss test. This integration changes no UI resources or layout. The previous lifecycle-helper tests retain their original source binding; no new device pass is inferred. Independent final-head review, lifecycle/signature emulator regression and CI remain required before reviewer merge.
+
 ## November 19 clipped acceptance target repair
 
 Tested source `9d0b2f0a174ea190a0791c4fd89c4b5d1cadc155` preserves reviewer repair `14a8d11d1947d3318451e5cef2e887c7e182ffba` and changes only the lifecycle observation helper and its regression tests. The reviewer verdict, commit parent and reviewer `own_commit` were cross-checked before the explicit branch fast-forward.
