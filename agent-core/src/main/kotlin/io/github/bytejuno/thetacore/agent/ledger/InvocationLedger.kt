@@ -27,6 +27,9 @@ class InvocationLedger(
     init { require(maxClaimsPerTaskChain > 0) }
     private val deleteStoredSession = store.bindCoordinator()
     private val recordsById = store.records().associateByTo(linkedMapOf()) { it.callId }
+    // Only live host claims supply a deadline check. All cancellation entry points consult it
+    // under the definition gate before the first terminal write, even if bridge delivery lags.
+    private val cancellationDeadlines = mutableMapOf<String, () -> Boolean>()
     private val deletedSessions = recordsById.values.map { it.input.sessionId }.distinct()
         .filterTo(mutableSetOf(), store::isSessionDeleted)
     private var blobRoots = BlobReferenceIndex(recordsById.values.filter { it.input.sessionId !in deletedSessions })
@@ -62,6 +65,7 @@ class InvocationLedger(
             else store.saveWithBlobs(snapshot, previous?.revision, blobs)
             if (snapshot.input.sessionId !in deletedSessions) blobRoots.replace(previous, snapshot)
             recordsById[next.callId] = snapshot.detached()
+            if (snapshot.state.terminal) cancellationDeadlines.remove(next.callId)
             if (previous == null) stepCalls.add(snapshot, recordsById)
             Mutation.Applied(next.detached(), ticket)
         } catch (e: StoreException) {
@@ -212,16 +216,22 @@ class InvocationLedger(
     }
 
     /** Host decisions supply identifiers, never caller-owned risk/digest/unknown evidence. */
-    fun decideApproval(callId: String, requestId: String, decision: Decision): Mutation = gate.withGate {
+    @JvmOverloads
+    fun decideApproval(callId: String, requestId: String, decision: Decision,
+        finishRuntimeWait: () -> Boolean = { true }): Mutation = gate.withGate {
         val r = get(callId) ?: return@withGate Mutation.Conflict("Unknown call")
         val pending = r.pending
         if (pending == null || pending.id != requestId) return@withGate Mutation.Conflict("Approval is not current")
         if (r.input.unattended) return@withGate Mutation.Blocked("Unattended approval unavailable")
-        resolveApproval(callId, pending, decision)
+        resolveApproval(callId, pending, decision, finishRuntimeWait)
     }
 
     /** The entire stored request must match; a UI-supplied digest/version is not trusted. */
-    fun resolveApproval(callId: String, approval: ApprovalRequest, decision: Decision): Mutation = gate.withGate {
+    fun resolveApproval(callId: String, approval: ApprovalRequest, decision: Decision): Mutation =
+        resolveApproval(callId, approval, decision) { true }
+
+    private fun resolveApproval(callId: String, approval: ApprovalRequest, decision: Decision,
+        finishRuntimeWait: () -> Boolean): Mutation = gate.withGate {
         executionAdmissionFailure()?.let { return@withGate it }
         val r = get(callId) ?: return@withGate Mutation.Conflict("Unknown call")
         r.receipts.find { it.request.id == approval.id }?.let {
@@ -237,6 +247,7 @@ class InvocationLedger(
         if (decision == Decision.DENY) {
             // Current-request denial grants nothing and must remain possible during refresh or
             // changed policy/evidence. Internal denial leaves the already-running invocation real.
+            if (approval.internal && !finishRuntimeWait()) return@withGate Mutation.Conflict("Runtime approval expired")
             val denied = r.copy(pending = null, receipts = r.receipts + ApprovalReceipt(approval, decision))
             return@withGate update(r, if (approval.internal) denied else terminal(denied, Status.REJECTED, null, "Approval denied"))
         }
@@ -246,12 +257,15 @@ class InvocationLedger(
             return@withGate Mutation.Blocked("ROOT long-term grants disabled")
         if (unknown(r, approval.risk) != approval.unknownCalls)
             return@withGate update(r, r.copy(pending = request(r, approval.risk, approval.internal, approval.summary)))
+        if (approval.internal && !finishRuntimeWait()) return@withGate Mutation.Conflict("Runtime approval expired")
         val next = r.copy(pending = null, receipts = r.receipts + ApprovalReceipt(approval, decision))
         update(r, next.copy(state = if (approval.internal) Status.RUNNING else Status.READY,
             effectiveRisk = maxOf(r.effectiveRisk, approval.risk)))
     }
 
-    fun claimExecution(callId: String, expectedRevision: Long): Mutation = gate.withGate {
+    fun claimExecution(callId: String, expectedRevision: Long): Mutation = claimExecution(callId, expectedRevision, null)
+
+    fun claimExecution(callId: String, expectedRevision: Long, cancellationTimedOut: (() -> Boolean)?): Mutation = gate.withGate {
         executionAdmissionFailure()?.let { return@withGate it }
         if (halted || epoch == null) return@withGate Mutation.Blocked("Cold recovery required")
         val r = get(callId) ?: return@withGate Mutation.Conflict("Unknown call")
@@ -289,7 +303,9 @@ class InvocationLedger(
             }) return@withGate Mutation.Blocked("Step barrier awaits actual exit/submission")
         val instance = ExecutionInstance(id(), epoch!!, InstanceState.UNCONFIRMED)
         val ticket = ExecutionTicket(r.callId, instance.attemptId, instance.processEpoch, d, r.executionArgs!!)
-        update(r, r.copy(state = Status.RUNNING, instance = instance), ticket)
+        update(r, r.copy(state = Status.RUNNING, instance = instance), ticket).also { claim ->
+            if (claim is Mutation.Applied && cancellationTimedOut != null) cancellationDeadlines[callId] = cancellationTimedOut
+        }
     }
 
     /** Every call is a new authorization, even below the historical risk watermark. Applied with
@@ -381,7 +397,9 @@ class InvocationLedger(
     fun timeout(callId: String): Mutation = finishLocally(callId, Status.TIMED_OUT)
     private fun finishLocally(callId: String, status: Status): Mutation = gate.withGate {
         val r = get(callId) ?: return@withGate Mutation.Conflict("Unknown call")
-        if (r.state.terminal) Mutation.AlreadyApplied(r) else update(r, terminal(r, status, null, status.name))
+        if (r.state.terminal) return@withGate Mutation.AlreadyApplied(r)
+        val outcome = if (status == Status.CANCELLED && cancellationDeadlines[callId]?.invoke() == true) Status.TIMED_OUT else status
+        update(r, terminal(r, outcome, null, outcome.name))
     }
     /** Host routing preview under the same definition gate as recording. Reuse terminal's
      * effect/warning semantics without changing history or adding a warning to raw evidence.

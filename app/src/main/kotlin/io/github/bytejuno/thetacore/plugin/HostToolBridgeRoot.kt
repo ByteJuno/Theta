@@ -23,6 +23,7 @@ internal class HostToolBridgeRoot(
 
     /** Open inside the one-shot gate: even a failed open must not retry as a fresh installation. */
     suspend fun initialize(screenBackend: io.github.bytejuno.thetacore.plugin.tools.ScreenBackend? = null,
+        invocationClock: InvocationClock = budget,
         openStore: () -> InvocationStore): HostToolExecutionService = withContext(Dispatchers.IO) {
         mutex.withLock {
             service?.let { return@withLock it }
@@ -44,7 +45,10 @@ internal class HostToolBridgeRoot(
                     catalog.registerHost("host/screen_info", "1", io.github.bytejuno.thetacore.plugin.tools.HostScreenTool(it))
                 }
                 catalog.registerHost("host/blob_read", "1", io.github.bytejuno.thetacore.plugin.tools.HostBlobReadTool(ledger))
-                HostToolExecutionService(budget, owner, catalog, ledger, validator, sessionStore = store as? AndroidAgentStore).also { service = it }
+                HostToolExecutionService(
+                    budget, owner, catalog, ledger, validator,
+                    sessionStore = store as? AndroidAgentStore, invocationClock = invocationClock,
+                ).also { service = it }
             } catch (error: Throwable) {
                 owner.cancel()
                 try { store.close() } catch (close: Throwable) { error.addSuppressed(close) }
