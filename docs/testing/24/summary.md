@@ -1,5 +1,13 @@
 # Issue 24 — Chat and inline approvals
 
+## November 19 pre-merge regression repair
+
+Tested source `532be9424180183d1166e49787e8816498004af7`, Git tree `444c9a01bffeb3ebfcc857f8495ed7f11332d503`. The local alias test reproduced `UnsupportedOperationException` at line 199 on `fc9f165d` when clearing a one-tool snapshot. Restoring detached ordered copies preserves both caller behavior and the run's internal directory. The GPU checkout matched the tested tree and reported `GRADLE_EXIT=0`, 80 host-service tests, zero failures with strict configuration-cache flags.
+
+In reviewer emulator run `20261119-082551`, the host displayed the expected signer mismatch. Repeated 1,164 px swipes in 250 ms alternated between the header and the fixture actions, skipping the version title. The signature acceptance entry now uses the shared overlapping list search. The middle-viewport regression failed on the original helper and passed after the fix. All 30 Python observation tests passed. Signer checks, exact text checks and device deadlines remain in force.
+
+No APK generated in this repair. Device replay of the different-signer case, full final-head regression, CI and visual acceptance remain with the reviewer. Raw evidence is in `event-runs/a6a29238-d3e7-4106-9d23-10a9b3708199` and `validation-issue11/issue24-a6a29238-alias-before`.
+
 ## Round 3 review: renewed inline approval · 2026-11-19
 
 After two prior returns, a GPU probe against `e14990743a46719e4d4696bfac138f9617880aa6` failed (1/1). Two parallel writes requested approval in one model response. While the second prompt was open, the first worker exited with `UNKNOWN`. Allowing the outdated prompt did not execute the second tool, but the chat waiter cancelled it instead of waiting for the renewed decision: `CANCELLED`, no pending request, zero receipts and one tool execution in total.
