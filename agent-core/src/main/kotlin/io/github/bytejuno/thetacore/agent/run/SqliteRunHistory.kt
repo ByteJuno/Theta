@@ -98,6 +98,71 @@ open class SqliteRunHistory internal constructor(
     private fun pendingPath() = "pending"
     private fun checkpointPath() = "context"
 
+    @Synchronized fun chatContext(): ChatTaskContext? {
+        ready()
+        return if (hasValue("chat-context")) HistoryCodec.json.decodeFromString<ChatTaskContext>(read<String>("chat-context"))
+            .takeIf { it.taskChainId == chatTaskChainId() } else null
+    }
+    @Synchronized fun saveChatContext(value: ChatTaskContext) {
+        ready(); require(value.taskChainId == chatTaskChainId() && value.goal.isNotBlank() && value.priorMessageCount >= 0)
+        require(value.priorMessageCount <= head.messageCount)
+        write("chat-context", HistoryCodec.json.encodeToString(value))
+    }
+    @Synchronized fun chatSummaryWindow(): Long? {
+        ready()
+        return if (hasValue("chat-context")) HistoryCodec.json.decodeFromString<ChatTaskContext>(read<String>("chat-context")).summaryWindowTokens else null
+    }
+    @Synchronized fun chatResult(): RunResult? {
+        ready()
+        return if (hasValue("chat-result")) HistoryCodec.json.decodeFromString<RunResult>(read<String>("chat-result")) else null
+    }
+    @Synchronized fun saveChatResult(value: RunResult) {
+        ready(); write("chat-result", HistoryCodec.json.encodeToString(value))
+    }
+    @Synchronized fun saveChatInterruption() {
+        ready()
+        val accounting = loadAccounting(chatTaskChainId())
+        saveChatResult(RunResult(RunState.PAUSED, "Interrupted by user", accounting?.steps ?: 0,
+            accounting?.retries ?: 0, loadBarrier() != null))
+    }
+    private fun journalPath(sequence: Long) = "journal/" + sequence.toString().padStart(20, '0')
+    private fun journalIndex(requestId: String) = "journal-request/" + digest(requestId.toByteArray(Charsets.UTF_8))
+    @Synchronized internal fun journalSubmitted(requestId: String, targetId: String, mode: ModelExecutionMode) {
+        ready(); require(!hasValue(journalIndex(requestId)))
+        val sequence = Math.addExact(if (hasValue("journal-count")) read<Long>("journal-count") else 0L, 1L)
+        val value = StoredAttempt(sequence, requestId, targetId, mode, head.revision)
+        transaction("journal") {
+            writeValue(journalPath(sequence), HistoryCodec.json.encodeToString(value))
+            writeValue(journalIndex(requestId), sequence)
+            writeValue("journal-count", sequence)
+        }
+    }
+    @Synchronized internal fun journalFinished(attempt: ModelAttempt) {
+        ready()
+        val sequence = read<Long>(journalIndex(attempt.requestId))
+        val value = HistoryCodec.json.decodeFromString<StoredAttempt>(read<String>(journalPath(sequence)))
+        require(!value.complete && value.requestId == attempt.requestId && value.targetId == attempt.targetId && value.mode == attempt.mode)
+        write(journalPath(sequence), HistoryCodec.json.encodeToString(value.copy(
+            partial = HistoryCodec.encodeMessage(attempt.partial), finish = (attempt.terminal as? ModelEvent.Finished)?.reason,
+            error = (attempt.terminal as? ModelEvent.Failed)?.error?.code, cancelled = attempt.cancelled, complete = true,
+            usage = attempt.usage?.let { listOf(it.inputTokens, it.cacheReadTokens, it.cacheWriteTokens, it.outputTokens, it.reasoningTokens) } ?: emptyList())))
+    }
+    @Synchronized fun journalPage(before: Long? = null, limit: Int = 20, includeUnfinished: Boolean = true): JournalPage {
+        ready(); require(limit in 1..100)
+        val count = if (hasValue("journal-count")) read<Long>("journal-count") else 0L
+        var sequence = minOf(before?.minus(1) ?: count, count)
+        require(sequence >= 0)
+        val replies = mutableListOf<JournalReply>()
+        repeat(limit) {
+            if (sequence > 0) {
+                val attempt = HistoryCodec.json.decodeFromString<StoredAttempt>(read<String>(journalPath(sequence)))
+                if (attempt.complete || includeUnfinished) attempt.reply()?.let(replies::add)
+                sequence--
+            }
+        }
+        return JournalPage(replies.reversed(), if (sequence > 0) sequence + 1 else null)
+    }
+
     // Only a durably completed chat task rotates this pointer. Before this key existed,
     // chat used the session ID for every turn, so incomplete legacy work keeps its budget.
     @Synchronized fun chatTaskChainId(): String {

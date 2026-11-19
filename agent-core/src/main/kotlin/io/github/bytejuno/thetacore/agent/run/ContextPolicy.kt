@@ -111,10 +111,13 @@ internal data class ExecutionBarrier(val sessionId: String, val taskChainId: Str
 
 /** Public, non-secret inspection surface for a host's continuation UI. */
 data class CheckpointInfo(val id: String, val previousRunId: String, val nextIdentity: RunIdentity?,
-    val steps: Int, val retries: Int, val reason: String, val canContinue: Boolean)
+    val steps: Int, val retries: Int, val reason: String, val canContinue: Boolean,
+    val goal: String = "", val catalog: List<FrozenDefinition> = emptyList(), val pauseClass: String = "REVIEW",
+    val kind: String = "PAUSED")
 
 internal fun ContextCheckpoint.info() = CheckpointInfo(id, runId,
-    nextRunId?.let { identity() }, steps, retries, reason, kind == "CONTINUATION" && !serverUnresolved)
+    nextRunId?.let { identity() }, steps, retries, reason, kind == "CONTINUATION" && !serverUnresolved,
+    goal, catalog.toList(), pauseClass, kind)
 
 /** All request settings and catalog bytes bind a checkpoint; requestId and new messages do not.
  * Cache prefix keys also include provider/model/thinking. No timestamp or per-attempt ID is added. */

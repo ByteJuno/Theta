@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.Serializable
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -17,6 +18,7 @@ data class RunLimits(val maxSteps: Int = 50, val maxRetries: Int = 12, val maxPa
     init { require(maxSteps > 0 && maxRetries >= 0 && maxPaused >= 0 && repeatedCalls > 0 && maxRetryWaitMs >= 0) }
 }
 enum class RunState { COMPLETED, PAUSED, FAILED }
+@Serializable
 data class RunResult(val state: RunState, val reason: String, val steps: Int, val retries: Int,
                      val serverExecutionUnknown: Boolean = false)
 
@@ -319,7 +321,7 @@ class AgentRunLoop(
 
     suspend fun run(): RunResult = run(chatTask = false)
     suspend fun runChatTask(): RunResult {
-        require(history is SqliteRunHistory && contextPolicy == null)
+        require(history is SqliteRunHistory)
         return run(chatTask = true)
     }
 

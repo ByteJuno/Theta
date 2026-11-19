@@ -92,6 +92,227 @@ class ChatSessionOwnerTest {
         } finally { root.deleteRecursively() }
     }
 
+    @Test fun refusedFilteredAndInterruptedRepliesSurviveColdOpenButNeverReplay() = runBlocking {
+        for (finish in listOf(FinishReason.REFUSAL, FinishReason.CONTENT_FILTER, null)) {
+            val root = Files.createTempDirectory("chat-retained").toFile()
+            val requests = mutableListOf<ChatRequest>()
+            val allowSuccess = java.util.concurrent.atomic.AtomicBoolean(false)
+            val model = object : ModelProvider {
+                override fun executionMode(request: ChatRequest) = ModelExecutionMode.GENERATION_ONLY
+                override fun chat(request: ChatRequest, auth: Credentials): Flow<ModelEvent> = flow {
+                    requests += request
+                    emit(Events.started("retained-${requests.size}", "model"))
+                    if (!allowSuccess.get()) {
+                        emit(Events.text(0, "private non-replayable reply"))
+                        if (finish == null) throw java.io.IOException("connection interrupted")
+                        emit(Events.end(0)); emit(Events.finished(finish))
+                    } else {
+                        emit(Events.text(0, "safe answer")); emit(Events.end(0)); emit(Events.finished(FinishReason.STOP))
+                    }
+                }
+            }
+            try {
+                val first = fixture(root, AtomicInteger(), model)
+                first.owner.open().join(); first.owner.send("question").join(); await { !first.owner.state.value.active }
+                val reply = first.owner.state.value.journal.first()
+                assertEquals("private non-replayable reply", (reply.partial.parts.single() as ContentPart.Text).text)
+                assertEquals(finish?.name ?: "NETWORK", reply.reason)
+                assertEquals(1, first.owner.state.value.messages.size)
+                val session = first.owner.state.value.sessionId
+                first.close()
+                val cold = fixture(root, AtomicInteger(), model)
+                cold.owner.open().join()
+                assertEquals(session, cold.owner.state.value.sessionId)
+                assertEquals(reply.requestId, cold.owner.state.value.journal.first().requestId)
+                allowSuccess.set(true)
+                cold.owner.send("next question").join(); await { !cold.owner.state.value.active }
+                assertEquals(R.string.chat_complete, cold.owner.state.value.notice)
+                assertFalse(requests.last().messages.any { message -> message.parts.any { part ->
+                    part is ContentPart.Text && part.text.contains("non-replayable")
+                } })
+                assertTrue(cold.failures.toString(), cold.failures.isEmpty())
+                cold.close()
+            } finally { root.deleteRecursively() }
+        }
+    }
+
+    @Test fun oversizedHistoryOffersExplicitBoundedRecoveryWithoutLosingOriginals() = runBlocking {
+        val root = Files.createTempDirectory("chat-context").toFile()
+        val requests = mutableListOf<ChatRequest>()
+        val model = object : ModelProvider {
+            override fun executionMode(request: ChatRequest) = ModelExecutionMode.GENERATION_ONLY
+            override fun chat(request: ChatRequest, auth: Credentials): Flow<ModelEvent> = flow {
+                requests += request
+                emit(Events.started("bounded-${requests.size}", "model"))
+                emit(Events.text(0, if (request.tools.isEmpty()) "Prior conversation summary" else "final answer"))
+                emit(Events.end(0)); emit(Events.finished(FinishReason.STOP))
+            }
+        }
+        try {
+            val seed = fixture(root, AtomicInteger(), model)
+            seed.store.createHistory("session").use { disk ->
+                repeat(34) { disk.append(disk.revision(), listOf(message(Role.USER, textPart("u".repeat(32_000))),
+                    message(Role.ASSISTANT, textPart("a".repeat(32_000))))) }
+            }
+            seed.owner.open().join(); seed.owner.send("Continue this conversation").join(); await { !seed.owner.state.value.active }
+            assertTrue(requests.isEmpty())
+            assertEquals(R.string.chat_pause_context, chatOutcome(seed.owner.state.value.result!!))
+            assertEquals("BUDGET", seed.owner.state.value.checkpoint!!.pauseClass)
+            seed.close()
+            val cold = fixture(root, AtomicInteger(), model)
+            cold.owner.open().join()
+            assertEquals("BUDGET", cold.owner.state.value.checkpoint!!.pauseClass)
+            assertTrue(requests.isEmpty())
+            cold.owner.resume(summaryWindowTokens = 1_000_000).join(); await { !cold.owner.state.value.active }
+            assertEquals(cold.failures.toString(), R.string.chat_complete, cold.owner.state.value.notice)
+            assertTrue(requests.any { it.tools.isEmpty() })
+            assertTrue(requests.last().tools.isNotEmpty())
+            assertTrue(requests.last().messages.size < 69)
+            assertEquals(0L, cold.owner.state.value.acceptedMessages)
+            assertTrue(cold.failures.toString(), cold.failures.isEmpty())
+            cold.close()
+            val verify = fixture(root, AtomicInteger(), model)
+            verify.store.openHistory("session").use { disk ->
+                val stored = disk.snapshot().messages
+                assertEquals(70, stored.size)
+                assertEquals("u".repeat(32_000), (stored.first().parts.single() as ContentPart.Text).text)
+                assertEquals("a".repeat(32_000), (stored[67].parts.single() as ContentPart.Text).text)
+                assertTrue(disk.chatResult()!!.steps > 1)
+            }
+            verify.close()
+        } finally { root.deleteRecursively() }
+    }
+
+    @Test fun savedContextCheckpointRequiresSelectionAndPreservesTaskBudget() = runBlocking {
+        val root = Files.createTempDirectory("chat-checkpoint").toFile()
+        val requests = AtomicInteger()
+        val model = object : ModelProvider {
+            override fun executionMode(request: ChatRequest) = ModelExecutionMode.GENERATION_ONLY
+            override fun chat(request: ChatRequest, auth: Credentials): Flow<ModelEvent> = flow {
+                val count = requests.incrementAndGet()
+                emit(Events.started("checkpoint-$count", "model")); emit(Events.text(0, "bounded answer")); emit(Events.end(0))
+                emit(Events.finished(if (request.tools.isNotEmpty() && count <= 2) FinishReason.CONTEXT_EXCEEDED else FinishReason.STOP))
+            }
+        }
+        try {
+            val first = fixture(root, AtomicInteger(), model)
+            first.owner.open().join(); first.owner.send("unfinished goal").join(); await { !first.owner.state.value.active }
+            first.owner.resume(summaryWindowTokens = 8192).join(); await { !first.owner.state.value.active }
+            val checkpoint = requireNotNull(first.owner.state.value.checkpoint)
+            assertTrue(first.failures.toString(), checkpoint.canContinue)
+            val count = requests.get()
+            first.close()
+            val cold = fixture(root, AtomicInteger(), model)
+            cold.owner.open().join()
+            assertEquals(count, requests.get())
+            assertEquals(checkpoint.id, cold.owner.state.value.checkpoint!!.id)
+            cold.owner.resume().join(); await { !cold.owner.state.value.active }
+            assertEquals(cold.failures.toString(), R.string.chat_complete, cold.owner.state.value.notice)
+            assertTrue(cold.owner.state.value.result!!.steps > checkpoint.steps)
+            assertTrue(cold.failures.toString(), cold.failures.isEmpty())
+            cold.close()
+        } finally { root.deleteRecursively() }
+    }
+
+    @Test fun cancellationRetainsPartialReplyAndJournalPagingSurvivesReopen() = runBlocking {
+        val root = Files.createTempDirectory("chat-journal-pages").toFile()
+        val arrived = CompletableDeferred<Unit>()
+        val model = object : ModelProvider {
+            override fun executionMode(request: ChatRequest) = ModelExecutionMode.GENERATION_ONLY
+            override fun chat(request: ChatRequest, auth: Credentials): Flow<ModelEvent> = flow {
+                emit(Events.started("cancelled", "model")); emit(Events.text(0, "unfinished text"))
+                arrived.complete(Unit); awaitCancellation()
+            }
+        }
+        try {
+            val first = fixture(root, AtomicInteger(), model)
+            first.owner.open().join(); first.owner.send("start").join(); arrived.await()
+            await { first.owner.previewText() == "unfinished text" }
+            first.owner.stop().join(); await { !first.owner.state.value.active }
+            assertEquals("INTERRUPTED", first.owner.state.value.journal.single().reason)
+            assertEquals("unfinished text", (first.owner.state.value.journal.single().partial.parts.single() as ContentPart.Text).text)
+            val session = first.owner.state.value.sessionId!!
+            first.close()
+            val seed = fixture(root, AtomicInteger(), provider(false))
+            seed.store.openHistory(session).use { disk ->
+                val journal = StoredRunJournal(disk)
+                repeat(25) { index ->
+                    journal.submitted("refusal-$index", "test", ModelExecutionMode.GENERATION_ONLY)
+                    journal.finished(ModelAttempt("refusal-$index", "test", ModelExecutionMode.GENERATION_ONLY,
+                        message(Role.ASSISTANT, textPart("refusal-$index")), Events.finished(FinishReason.REFUSAL), null, false))
+                }
+            }
+            seed.owner.open().join()
+            assertEquals(20, seed.owner.state.value.journal.size)
+            seed.owner.olderReplies().join()
+            assertEquals(26, seed.owner.state.value.journal.size)
+            assertNull(seed.owner.state.value.olderJournal)
+            assertEquals(1, seed.owner.state.value.messages.size)
+            seed.close()
+        } finally { root.deleteRecursively() }
+    }
+
+    @Test fun uncertainRequestNeedsExactExplicitReconciliationAfterColdOpen() = runBlocking {
+        val root = Files.createTempDirectory("chat-reconciliation").toFile()
+        val requests = AtomicInteger()
+        val model = object : ModelProvider {
+            override fun executionMode(request: ChatRequest) = ModelExecutionMode.MAY_EXECUTE_SERVER_TOOLS
+            override fun chat(request: ChatRequest, auth: Credentials): Flow<ModelEvent> = flow {
+                val count = requests.incrementAndGet()
+                emit(Events.started("remote-$count", "model")); emit(Events.text(0, "remote reply"))
+                if (count == 1) throw java.io.IOException("unknown server outcome")
+                emit(Events.end(0)); emit(Events.finished(FinishReason.STOP))
+            }
+        }
+        try {
+            val first = fixture(root, AtomicInteger(), model)
+            first.owner.open().join(); first.owner.send("goal").join(); await { !first.owner.state.value.active }
+            val receipt = requireNotNull(first.owner.state.value.reconciliation)
+            val completedSteps = first.owner.state.value.result!!.steps
+            assertEquals(R.string.chat_pause_reconcile, chatOutcome(first.owner.state.value.result!!))
+            first.close()
+            val cold = fixture(root, AtomicInteger(), model)
+            cold.owner.open().join(); cold.owner.resume().join()
+            assertEquals(1, requests.get())
+            cold.owner.resume(reconcileId = "stale").join()
+            assertEquals(receipt.id, cold.owner.state.value.reconciliation!!.id)
+            cold.owner.resume(reconcileId = receipt.id).join(); await { !cold.owner.state.value.active }
+            assertEquals(2, requests.get())
+            assertEquals(R.string.chat_complete, cold.owner.state.value.notice)
+            assertNull(cold.owner.state.value.reconciliation)
+            assertEquals(completedSteps + 1, cold.owner.state.value.result!!.steps)
+            cold.close()
+        } finally { root.deleteRecursively() }
+    }
+
+    @Test fun checkpointResumeRejectsChangedCatalogInsteadOfGuessingAliases() = runBlocking {
+        val root = Files.createTempDirectory("chat-catalog-checkpoint").toFile()
+        val requests = AtomicInteger()
+        val model = object : ModelProvider {
+            override fun executionMode(request: ChatRequest) = ModelExecutionMode.GENERATION_ONLY
+            override fun chat(request: ChatRequest, auth: Credentials): Flow<ModelEvent> = flow {
+                val count = requests.incrementAndGet()
+                emit(Events.started("catalog-$count", "model")); emit(Events.text(0, "summary")); emit(Events.end(0))
+                emit(Events.finished(if (request.tools.isNotEmpty()) FinishReason.CONTEXT_EXCEEDED else FinishReason.STOP))
+            }
+        }
+        try {
+            val first = fixture(root, AtomicInteger(), model)
+            first.owner.open().join(); first.owner.send("goal").join(); await { !first.owner.state.value.active }
+            first.owner.resume(summaryWindowTokens = 8192).join(); await { !first.owner.state.value.active }
+            assertTrue(first.owner.state.value.checkpoint!!.canContinue)
+            val count = requests.get()
+            first.close()
+            val cold = fixture(root, AtomicInteger(), model)
+            cold.host.catalog.registerHost("host/clock", "2", tool(AtomicInteger()))
+            cold.owner.open().join(); cold.owner.resume().join(); await { !cold.owner.state.value.active }
+            assertEquals(count, requests.get())
+            assertNotNull(cold.owner.state.value.error)
+            assertTrue(cold.owner.state.value.checkpoint!!.canContinue)
+            cold.close()
+        } finally { root.deleteRecursively() }
+    }
+
     private fun countingProvider(requests: AtomicInteger, finish: (Int) -> FinishReason) = object : ModelProvider {
         override fun executionMode(request: ChatRequest) = ModelExecutionMode.GENERATION_ONLY
         override fun chat(request: ChatRequest, auth: Credentials): Flow<ModelEvent> = flow {

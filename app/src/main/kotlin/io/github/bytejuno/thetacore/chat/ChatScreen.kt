@@ -17,6 +17,7 @@ import io.github.bytejuno.thetacore.*
 import io.github.bytejuno.thetacore.R
 import io.github.bytejuno.thetacore.agent.ledger.*
 import io.github.bytejuno.thetacore.agent.protocol.*
+import io.github.bytejuno.thetacore.agent.run.RunState
 import io.github.bytejuno.thetacore.agent.provider.openai.OpenAiProviderSettings
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -53,6 +54,9 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
             listState.animateScrollToItem(listState.layoutInfo.totalItemsCount - 1)
     }
     var sessions by remember { mutableStateOf(false) }
+    var summaryWindow by rememberSaveable(state.sessionId, state.summaryWindowTokens) {
+        mutableStateOf(state.summaryWindowTokens?.toString() ?: "")
+    }
     LaunchedEffect(owner) { owner.open() }
     LaunchedEffect(state.acceptedMessages) { if (state.acceptedMessages > 0) input = "" }
     Column(Modifier.fillMaxSize().imePadding().padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -87,6 +91,52 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
                         is ContentPart.ToolCall -> ToolCard(part, state.records[part.binding.callId], state.recoveries[part.binding.callId], owner)
                         is ContentPart.ToolResult -> Unit // result lives inside the associated tool row
                     } }
+                }
+            }
+            if (state.journal.isNotEmpty() || state.olderJournal != null) item {
+                Text(strings.get(R.string.chat_reply_archive), style = MaterialTheme.typography.titleSmall)
+                Text(strings.get(R.string.chat_reply_archive_notice), style = MaterialTheme.typography.bodySmall)
+                if (state.olderJournal != null && !state.active) TextButton(onClick = { owner.olderReplies() }) {
+                    Text(strings.get(R.string.chat_reply_older))
+                }
+            }
+            itemsIndexed(state.journal) { _, reply ->
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(strings.get(replyReason(reply.reason)), style = MaterialTheme.typography.labelLarge)
+                    reply.partial.parts.forEach { part -> when (part) {
+                        is ContentPart.Text -> SelectionContainer { Text(part.text) }
+                        is ContentPart.Reasoning -> part.summary?.let { SelectionContainer { Text(it) } }
+                        else -> Unit
+                    } }
+                }
+            }
+            if (!state.active && !state.pending && (state.checkpoint != null || state.reconciliation != null ||
+                    state.result?.state in setOf(RunState.PAUSED, RunState.FAILED))) item {
+                OutlinedCard(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        state.result?.let { Text(strings.get(chatOutcome(it))) }
+                        state.checkpoint?.let { Text(strings.get(R.string.chat_checkpoint_counts, it.steps, it.retries)) }
+                        if (state.reconciliation != null) {
+                            Text(strings.get(R.string.chat_retry_warning))
+                            Button(onClick = { owner.resume(reconcileId = state.reconciliation!!.id) }) {
+                                Text(strings.get(R.string.chat_retry_confirm))
+                            }
+                        } else {
+                            Text(strings.get(R.string.chat_summary_notice))
+                            OutlinedTextField(summaryWindow, { summaryWindow = it.filter(Char::isDigit).take(7) },
+                                label = { Text(strings.get(R.string.chat_summary_window)) }, singleLine = true,
+                                modifier = Modifier.fillMaxWidth())
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Button(onClick = { owner.resume(summaryWindow.toLongOrNull()) },
+                                    enabled = summaryWindow.toLongOrNull()?.let { it in 1024..1_000_000 } == true) {
+                                    Text(strings.get(R.string.chat_summary_resume))
+                                }
+                                TextButton(onClick = { owner.resume() }, enabled = !needsBudgetReadmission(state.checkpoint)) {
+                                    Text(strings.get(if (state.checkpoint?.canContinue == true) R.string.chat_checkpoint_resume else R.string.chat_retry))
+                                }
+                            }
+                        }
+                    }
                 }
             }
             if (stream.isNotEmpty()) item {

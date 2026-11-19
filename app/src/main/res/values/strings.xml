@@ -281,4 +281,24 @@
     <string name="chat_risk_write">Risk: changes data</string>
     <string name="chat_risk_device">Risk: controls the device</string>
     <string name="chat_risk_root">Risk: privileged root access</string>
+    <string name="chat_reply_archive">Replies kept outside model history</string>
+    <string name="chat_reply_archive_notice">Refused, filtered and interrupted attempts remain available here and are never sent in later model requests.</string>
+    <string name="chat_reply_older">Earlier retained replies</string>
+    <string name="chat_reply_refused">The model refused this response.</string>
+    <string name="chat_reply_filtered">The response was filtered.</string>
+    <string name="chat_reply_interrupted">The request failed or was interrupted. Partial text is not a completed answer.</string>
+    <string name="chat_pause_context">The request exceeds the available context or memory budget. Enable a bounded summary with a verified model window to continue without deleting history.</string>
+    <string name="chat_pause_budget">The task has reached its cumulative step or retry limit. A restart or continuation does not reset this limit.</string>
+    <string name="chat_pause_truncated">The reply was truncated. Review it and explicitly continue the same task.</string>
+    <string name="chat_pause_repeated">Repeated tool calls stopped this task. Review the tool results before continuing.</string>
+    <string name="chat_pause_tools">Tool execution or effects still require review. Resolve the visible approvals or recovery decisions and wait for actual worker exit.</string>
+    <string name="chat_pause_reconcile">A previous request has an uncertain outcome. Check its effects before accepting another attempt.</string>
+    <string name="chat_checkpoint_counts">Task budget used: %1$d steps, %2$d retries</string>
+    <string name="chat_summary_notice">Optional summaries use the configured model and may incur charges. Original history, tool approvals and cumulative task limits remain intact. Enter its verified context window in tokens; summary admission conservatively charges UTF-8 bytes plus framing and output reserve, not an exact tokenizer.</string>
+    <string name="chat_summary_window">Verified model context window (tokens)</string>
+    <string name="chat_summary_resume">Enable summary and continue</string>
+    <string name="chat_checkpoint_resume">Continue saved checkpoint</string>
+    <string name="chat_retry">Continue current task</string>
+    <string name="chat_retry_warning">Retry only after checking the previous request. It may have run remotely; accepting retry can duplicate remote effects. This does not approve local tools or release their resources.</string>
+    <string name="chat_retry_confirm">I reviewed the outcome; accept retry</string>
 </resources>

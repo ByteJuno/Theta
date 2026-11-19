@@ -34,6 +34,12 @@ internal data class ChatState(
     val draft: String = "",
     val notice: Int? = null,
     val error: Int? = null,
+    val journal: List<JournalReply> = emptyList(),
+    val olderJournal: Long? = null,
+    val checkpoint: CheckpointInfo? = null,
+    val reconciliation: RetryReconciliation? = null,
+    val result: RunResult? = null,
+    val summaryWindowTokens: Long? = null,
 )
 
 /** Application-owned, single-session writer. Activity disposal never cancels an admitted run.
@@ -132,10 +138,20 @@ internal class ChatSessionOwner(
         val messages = page.messages + if (before == null && pending != null) listOf(pending.assistant) else emptyList()
         val records = messages.flatMap { it.parts.filterIsInstance<ContentPart.ToolCall>() }
             .mapNotNull { host.ledger.get(it.binding.callId) }.associateBy { it.callId }
+        val journal = disk.journalPage(includeUnfinished = active == null)
         mutable.update { it.copy(messages = messages, records = records,
             recoveries = host.ledger.pendingRecoveries().filter { it.callId in records }.associateBy { it.callId }, older = page.older,
             showingOlder = before != null, pending = pending != null,
-            draft = previewText()) }
+            draft = previewText(), journal = journal.replies, olderJournal = journal.older,
+            checkpoint = disk.checkpointInfo()?.takeUnless { checkpoint -> checkpoint.kind in setOf("VIEW", "COMPLETE") },
+            reconciliation = disk.retryReconciliation(), result = disk.chatResult(),
+            summaryWindowTokens = disk.chatSummaryWindow()) }
+    }
+    fun olderReplies() = launchOperation {
+        check(active == null)
+        val before = mutable.value.olderJournal ?: return@launchOperation
+        val page = requireNotNull(history).journalPage(before)
+        mutable.update { it.copy(journal = page.replies + it.journal, olderJournal = page.older) }
     }
     fun older() = launchOperation { check(active == null && !mutable.value.pending); mutable.value.older?.let { refresh(it) } }
     fun latest() = launchOperation { refresh() }
@@ -174,9 +190,30 @@ internal class ChatSessionOwner(
         check(disk.pendingStep(tools!!.ledger) == null)
         val snapshot = configuration() // validate/decrypt before acknowledging a new message
         val chain = disk.chatTaskChainId() // Capture checkpoint identity before the history revision advances.
+        if (disk.chatContext() == null) disk.saveChatContext(ChatTaskContext(chain, text,
+            Math.toIntExact(disk.page(null, 1).totalMessages), disk.chatSummaryWindow()))
         disk.append(disk.revision(), listOf(message(Role.USER, textPart(text))))
         mutable.update { it.copy(acceptedMessages = it.acceptedMessages + 1) }
         start(snapshot, null, RunIdentity(chain, disk.sessionId, UUID.randomUUID().toString()))
+    }
+    fun resume(summaryWindowTokens: Long? = null, reconcileId: String? = null) = launchOperation {
+        check(active == null)
+        val disk = requireNotNull(history)
+        check(!disk.hasPendingIntent())
+        val snapshot = configuration()
+        val context = requireNotNull(disk.chatContext())
+        val checkpoint = disk.checkpointInfo()
+        val identity = checkpoint?.takeIf { it.canContinue }?.nextIdentity
+            ?: RunIdentity(disk.chatTaskChainId(), disk.sessionId, UUID.randomUUID().toString())
+        if (reconcileId != null) check(disk.confirmRetryAfterReconciliation(reconcileId, identity, "User reviewed uncertain request and explicitly accepted retry"))
+        check(disk.retryReconciliation() == null)
+        if (summaryWindowTokens != null) {
+            require(summaryWindowTokens in 1024..1_000_000)
+            disk.saveChatContext(context.copy(summaryWindowTokens = summaryWindowTokens))
+        }
+        val resumeId = checkpoint?.takeIf { it.canContinue }?.id
+        val readmitId = checkpoint?.takeIf { it.kind == "PAUSED" && it.pauseClass == "BUDGET" }?.id
+        start(snapshot, null, identity, resumeId, readmitId)
     }
     fun decide(callId: String, requestId: String, decision: Decision) = launchOperation {
         require(decision == Decision.ALLOW_ONCE || decision == Decision.DENY)
@@ -239,14 +276,19 @@ internal class ChatSessionOwner(
         try { action() } finally { ticker.cancel() }
     }
 
-    private fun start(snapshot: OpenAiRunSnapshot?, pending: PendingHistoryStep?, identity: RunIdentity? = null) {
+    private fun start(snapshot: OpenAiRunSnapshot?, pending: PendingHistoryStep?, identity: RunIdentity? = null,
+        resumeId: String? = null, readmitId: String? = null) {
         check(active == null)
         mutable.update { it.copy(active = true, error = null, notice = null, draft = "") }
         active = scope.launch(Dispatchers.IO, start = CoroutineStart.LAZY) {
             var notice = R.string.chat_complete
             try {
-                notice = withStatusUpdates { executeChat(snapshot, pending, identity) }
-            } catch (error: CancellationException) { notice = R.string.chat_stopped }
+                notice = withStatusUpdates { executeChat(snapshot, pending, identity, resumeId, readmitId) }
+            } catch (error: CancellationException) {
+                notice = R.string.chat_stopped
+                try { history?.saveChatInterruption() }
+                catch (error: Exception) { report(error) }
+            }
             catch (error: Exception) { report(error); notice = R.string.chat_paused }
             finally {
                 withContext(NonCancellable) {
@@ -267,7 +309,8 @@ internal class ChatSessionOwner(
         }.also { it.start() }
     }
 
-    private suspend fun executeChat(snapshot: OpenAiRunSnapshot?, pending: PendingHistoryStep?, identity: RunIdentity?): Int {
+    private suspend fun executeChat(snapshot: OpenAiRunSnapshot?, pending: PendingHistoryStep?, identity: RunIdentity?,
+        resumeId: String?, readmitId: String?): Int {
         val disk = requireNotNull(history)
         if (pending != null) {
             val calls = pending.assistant.parts.filterIsInstance<ContentPart.ToolCall>().map { part ->
@@ -292,12 +335,25 @@ internal class ChatSessionOwner(
         } else {
             val config = requireNotNull(snapshot)
             val id = requireNotNull(identity)
-            val definitions = tools!!.catalog.freeze(id.runId).values.toList()
+            val definitions = (tools!!.catalog.frozen(id.runId) ?: tools!!.catalog.freeze(id.runId)).values.toList()
             val request = config.request { tools = definitions.map {
                 modelTool(it.modelName, it.description, Json.parseToJsonElement(it.inputSchema).jsonObject)
             } }
             val target = targetForRun(config)
+            val context = requireNotNull(disk.chatContext())
+            val summary = context.summaryWindowTokens?.let { window ->
+                SummaryModel(target, chatRequest(config.settings.model) {
+                    toolChoice = ToolChoice.None
+                    maxOutputTokens = minOf(2048, (window / 4).toInt())
+                }, ContextBudget({ summaryRequest ->
+                    256L + summaryRequest.messages.sumOf { message -> 256L + message.parts.sumOf { part ->
+                        (part as ContentPart.Text).text.toByteArray(Charsets.UTF_8).size.toLong()
+                    } }
+                }, { window }))
+            }
             val result = AgentRunLoop(id, target, request, disk, executor(definitions),
+                journal = StoredRunJournal(disk),
+                contextPolicy = ContextPolicy(context.goal, context.priorMessageCount, summary, resumeId, readmitId),
                 onEvent = { requestId, event -> synchronized(previewLock) {
                     if (requestId != observedRequest) { observedRequest = requestId; preview.setLength(0) }
                     if (event is ModelEvent.TextDelta) {
@@ -306,6 +362,7 @@ internal class ChatSessionOwner(
                     }
                     if (event is ModelEvent.Finished || event is ModelEvent.Failed) preview.setLength(0)
                 } }).runChatTask()
+            disk.saveChatResult(result)
             return when (result.state) {
                 RunState.COMPLETED -> R.string.chat_complete
                 RunState.PAUSED -> R.string.chat_paused
