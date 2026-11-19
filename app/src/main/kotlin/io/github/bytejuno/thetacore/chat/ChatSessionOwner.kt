@@ -140,6 +140,28 @@ internal class ChatSessionOwner(
     fun older() = launchOperation { check(active == null && !mutable.value.pending); mutable.value.older?.let { refresh(it) } }
     fun latest() = launchOperation { refresh() }
 
+    private fun observeLateExits(host: HostToolExecutionService, runId: String) {
+        mutable.value.records.values.filter {
+            it.input.runId == runId && it.instance?.state == InstanceState.UNCONFIRMED
+        }.forEach { record ->
+            scope.launch(Dispatchers.IO) {
+                try {
+                    host.awaitObservedExit(record.callId)
+                    gate.withLock {
+                        if (record.callId !in mutable.value.records) return@withLock
+                        val current = requireNotNull(host.ledger.get(record.callId))
+                        val recovery = host.ledger.pendingRecoveries().find { it.callId == record.callId }
+                        mutable.update { state -> state.copy(
+                            records = state.records + (record.callId to current),
+                            recoveries = if (recovery == null) state.recoveries - record.callId
+                                else state.recoveries + (record.callId to recovery)) }
+                    }
+                } catch (error: CancellationException) { throw error }
+                catch (error: Exception) { report(error) }
+            }
+        }
+    }
+
     fun continueSavedStep() = launchOperation {
         check(active == null)
         val pending = requireNotNull(history!!.pendingStep(tools!!.ledger))
@@ -194,9 +216,11 @@ internal class ChatSessionOwner(
         }
     }
     private suspend fun approval(request: ApprovalRequest): Decision? {
+        val host = requireNotNull(tools)
         while (true) {
             currentCoroutineContext().ensureActive()
-            val r = requireNotNull(tools!!.ledger.get(request.callId))
+            check(!host.submissionsClosed) { "Host tool storage unavailable" }
+            val r = requireNotNull(host.ledger.get(request.callId))
             r.receipts.firstOrNull { it.request.id == request.id }?.let { return it.decision }
             if (r.pending?.id != request.id) return null
             delay(50)
@@ -205,82 +229,88 @@ internal class ChatSessionOwner(
     private fun executor(definitions: List<FrozenDefinition>) = LedgerToolExecutor(tools!!.ledger,
         tools!!.catalog.gate, definitions, tools!!.runBridge(), RunApprovals(::approval))
 
+    private suspend fun withStatusUpdates(action: suspend () -> Int): Int = coroutineScope {
+        val ticker = launch {
+            while (isActive) {
+                gate.withLock { refresh() }
+                delay(100)
+            }
+        }
+        try { action() } finally { ticker.cancel() }
+    }
+
     private fun start(snapshot: OpenAiRunSnapshot?, pending: PendingHistoryStep?, identity: RunIdentity? = null) {
         check(active == null)
         mutable.update { it.copy(active = true, error = null, notice = null, draft = "") }
         active = scope.launch(Dispatchers.IO, start = CoroutineStart.LAZY) {
-            val ticker = launch {
-                while (isActive) {
-                    gate.withLock { refresh() }
-                    delay(100) // ledger/status sampling; streaming text is coalesced before publication
-                }
-            }
             var notice = R.string.chat_complete
             try {
-                val disk = requireNotNull(history)
-                if (pending != null) {
-                    val calls = pending.assistant.parts.filterIsInstance<ContentPart.ToolCall>().map { part ->
-                        object : CollectedCall {
-                            override val binding = part.binding
-                            override val name = part.name
-                            override val argsJson = part.argsJson
-                            override val complete = true
-                            override val emptyArguments = argsJson.isBlank() || argsJson == "null"
-                        }
-                    }
-                    val executor = executor(pending.records.mapNotNull { it.input.definition }.distinctBy { it.modelName })
-                    try { executor.execute(calls) }
-                    catch (error: Exception) { executor.cancelRemaining(calls); throw error }
-                    finally {
-                        // Same atomic pair commit as AgentRunLoop: logical cancellation is not
-                        // actual worker exit. Preserve the ledger's UNKNOWN/isolation truth.
-                        disk.append(disk.revision(), listOf(pending.assistant,
-                            executor.results(pending.identity, pending.stepId, calls)))
-                    }
-                    notice = R.string.chat_recovered_step
-                } else {
-                    val config = requireNotNull(snapshot)
-                    val id = requireNotNull(identity)
-                    val definitions = tools!!.catalog.freeze(id.runId).values.toList()
-                    val request = config.request { tools = definitions.map {
-                        modelTool(it.modelName, it.description, Json.parseToJsonElement(it.inputSchema).jsonObject)
-                    } }
-                    val target = targetForRun(config)
-                    val result = AgentRunLoop(id, target, request, disk, executor(definitions),
-                        onEvent = { requestId, event -> synchronized(previewLock) {
-                            if (requestId != observedRequest) { observedRequest = requestId; preview.setLength(0) }
-                            if (event is ModelEvent.TextDelta) {
-                                preview.append(event.text)
-                                if (preview.length > 64_000) preview.delete(0, preview.length - 64_000)
-                            }
-                            if (event is ModelEvent.Finished || event is ModelEvent.Failed) preview.setLength(0)
-                        } }).runChatTask()
-                    notice = when (result.state) {
-                        RunState.COMPLETED -> R.string.chat_complete
-                        RunState.PAUSED -> R.string.chat_paused
-                        RunState.FAILED -> R.string.chat_model_failed
-                    }
-                }
+                notice = withStatusUpdates { executeChat(snapshot, pending, identity) }
             } catch (error: CancellationException) { notice = R.string.chat_stopped }
             catch (error: Exception) { report(error); notice = R.string.chat_paused }
             finally {
                 withContext(NonCancellable) {
-                    ticker.cancelAndJoin()
                     gate.withLock {
                         active = null
                         synchronized(previewLock) { preview.setLength(0); observedRequest = null }
-                        // Publish idle only after the final durable projection is visible.
-                        // Otherwise observers can see an idle owner with stale pending approvals.
                         try {
                             val host = requireNotNull(tools)
                             val runId = requireNotNull(identity ?: pending?.identity).runId
                             if (!requireNotNull(history).hasPendingIntent()) host.finishChatRun(runId)
                             refresh()
+                            observeLateExits(host, runId)
                         } catch (error: Exception) { report(error) }
                         mutable.update { it.copy(active = false, draft = "", notice = notice) }
                     }
                 }
             }
         }.also { it.start() }
+    }
+
+    private suspend fun executeChat(snapshot: OpenAiRunSnapshot?, pending: PendingHistoryStep?, identity: RunIdentity?): Int {
+        val disk = requireNotNull(history)
+        if (pending != null) {
+            val calls = pending.assistant.parts.filterIsInstance<ContentPart.ToolCall>().map { part ->
+                object : CollectedCall {
+                    override val binding = part.binding
+                    override val name = part.name
+                    override val argsJson = part.argsJson
+                    override val complete = true
+                    override val emptyArguments = argsJson.isBlank() || argsJson == "null"
+                }
+            }
+            val executor = executor(pending.records.mapNotNull { it.input.definition }.distinctBy { it.modelName })
+            try { executor.execute(calls) }
+            catch (error: Exception) { executor.cancelRemaining(calls); throw error }
+            finally {
+                // Same atomic pair commit as AgentRunLoop: logical cancellation is not
+                // actual worker exit. Preserve the ledger's UNKNOWN/isolation truth.
+                disk.append(disk.revision(), listOf(pending.assistant,
+                    executor.results(pending.identity, pending.stepId, calls)))
+            }
+            return R.string.chat_recovered_step
+        } else {
+            val config = requireNotNull(snapshot)
+            val id = requireNotNull(identity)
+            val definitions = tools!!.catalog.freeze(id.runId).values.toList()
+            val request = config.request { tools = definitions.map {
+                modelTool(it.modelName, it.description, Json.parseToJsonElement(it.inputSchema).jsonObject)
+            } }
+            val target = targetForRun(config)
+            val result = AgentRunLoop(id, target, request, disk, executor(definitions),
+                onEvent = { requestId, event -> synchronized(previewLock) {
+                    if (requestId != observedRequest) { observedRequest = requestId; preview.setLength(0) }
+                    if (event is ModelEvent.TextDelta) {
+                        preview.append(event.text)
+                        if (preview.length > 64_000) preview.delete(0, preview.length - 64_000)
+                    }
+                    if (event is ModelEvent.Finished || event is ModelEvent.Failed) preview.setLength(0)
+                } }).runChatTask()
+            return when (result.state) {
+                RunState.COMPLETED -> R.string.chat_complete
+                RunState.PAUSED -> R.string.chat_paused
+                RunState.FAILED -> R.string.chat_model_failed
+            }
+        }
     }
 }

@@ -30,8 +30,9 @@ class ChatSessionOwnerTest {
         }
     }
     private suspend fun await(predicate: () -> Boolean) = withTimeout(10_000) { while (!predicate()) delay(10) }
-    private suspend fun fixture(root: File, count: AtomicInteger, provider: ModelProvider, hostTool: Tool = tool(count)): Fixture {
-        val store = AndroidAgentStore.open(root, BundledSQLiteDriver())
+    private suspend fun fixture(root: File, count: AtomicInteger, provider: ModelProvider, hostTool: Tool = tool(count),
+        fault: (SqliteWriteStage) -> Unit = {}): Fixture {
+        val store = AndroidAgentStore.open(root, BundledSQLiteDriver(), fault)
         val budget = PluginExecutionBudget()
         val host = HostToolBridgeRoot(budget, hostTool).initialize { store }
         return Fixture(store, budget, host, provider)
@@ -243,6 +244,57 @@ class ChatSessionOwnerTest {
                 assertTrue(cold.failures.toString(), cold.failures.isEmpty()); cold.close()
             } finally { root.deleteRecursively() }
         }
+    }
+
+    @Test fun failedApprovalWriteSettlesWithoutWorkerOrUncaughtFailure() = runBlocking {
+        for (stage in listOf(SqliteWriteStage.BEFORE_COMMIT, SqliteWriteStage.AFTER_COMMIT)) {
+            val root = Files.createTempDirectory("chat-write-failure").toFile()
+            val inject = java.util.concurrent.atomic.AtomicBoolean(false)
+            val count = AtomicInteger()
+            val fixture = fixture(root, count, provider()) {
+                if (it == stage && inject.compareAndSet(true, false)) error("Injected approval write failure")
+            }
+            try {
+                val owner = fixture.owner
+                owner.open().join(); owner.send("goal").join()
+                await { owner.state.value.records.values.any { it.pending != null } }
+                val record = owner.state.value.records.values.single()
+                inject.set(true); owner.decide(record.callId, record.pending!!.id, Decision.ALLOW_ONCE).join()
+                await { !owner.state.value.active }
+                assertFalse(inject.get()); assertEquals(0, count.get()); assertNotNull(owner.state.value.error)
+                assertTrue(fixture.host.submissionsClosed)
+            } finally { fixture.close(); root.deleteRecursively() }
+        }
+    }
+
+    @Test fun lateToolExitPublishesRecoveryOnIdleChat() = runBlocking {
+        val root = Files.createTempDirectory("chat-late-recovery").toFile()
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val write = object : Tool {
+            override val id = "write"
+            override val spec = ToolSpec(id, "test write", schema, risk = ToolRisk.WRITE)
+            override suspend fun call(args: JsonObject, env: ToolEnv): ToolResult {
+                withContext(NonCancellable) { entered.complete(Unit); release.await() }
+                return ToolResult("late", effect = ToolEffect.UNKNOWN)
+            }
+        }
+        val fixture = fixture(root, AtomicInteger(), provider(), write)
+        try {
+            val owner = fixture.owner
+            owner.open().join(); owner.send("goal").join()
+            await { owner.state.value.records.values.any { it.pending != null } }
+            val record = owner.state.value.records.values.single()
+            owner.decide(record.callId, record.pending!!.id, Decision.ALLOW_ONCE).join()
+            withTimeout(10_000) { entered.await() }
+            owner.stop().join(); await { !owner.state.value.active }
+            assertNull(owner.state.value.recoveries[record.callId])
+            release.complete(Unit); fixture.host.awaitObservedExit(record.callId)
+            val recovery = fixture.host.ledger.pendingRecoveries().single()
+            await { owner.state.value.recoveries[record.callId] == recovery }
+            assertEquals(InstanceState.EXIT_CONFIRMED, owner.state.value.records.getValue(record.callId).instance!!.state)
+            assertFalse(owner.state.value.active)
+        } finally { release.complete(Unit); fixture.close(); root.deleteRecursively() }
     }
 
     @Test fun completedTextTasksReleaseBothRunDirectories() = runBlocking {

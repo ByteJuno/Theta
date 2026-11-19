@@ -44,6 +44,7 @@ internal class HostToolExecutionService(
     private val approvalWaiters = mutableMapOf<String, ApprovalWaiter>()
     private fun wakeApproval(callId: String) { approvalWaiters[callId]?.signal?.complete(Unit) }
     @Volatile private var storageFailed = false
+    val submissionsClosed: Boolean get() = storageFailed
     private val storageFailure = CompletableDeferred<Unit>()
     private fun closeSubmissions() = gate.withGate {
         storageFailed = true
