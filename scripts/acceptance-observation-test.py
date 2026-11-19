@@ -123,6 +123,68 @@ class LifecycleSearch(unittest.TestCase):
         self.assertEqual([], state['swipes'])
         self.assertEqual([(308, 424)], state['taps'])
 
+    def clipped_tap(self, target_bounds, *, toolbar=False):
+        root = ET.Element('node', bounds='[0,0][1080,2340]')
+        body = ET.SubElement(root, 'node', bounds='[0,268][1080,2208]', scrollable='true')
+        ET.SubElement(root if toolbar else body, 'node', text='Fixture page',
+                      bounds=target_bounds)
+        state = {'clock': 0, 'taps': [], 'swipes': []}
+
+        def adb(*args, **kwargs):
+            if args[:3] == ('shell', 'input', 'tap'):
+                state['taps'].append(tuple(map(int, args[3:])))
+            elif args[:3] == ('shell', 'input', 'swipe'):
+                state['swipes'].append(args[3:])
+            else:
+                raise AssertionError(f'Unexpected adb: {args}')
+            return ''
+
+        def sleep(seconds):
+            state['clock'] += seconds
+
+        with tempfile.TemporaryDirectory() as output, patch.object(lc, 'OUTPUT', Path(output)), \
+                patch.object(lc.em, 'screen', return_value=list(root.iter('node'))), \
+                patch.object(lc.em, 'crashed', return_value=False), \
+                patch.object(lc, 'adb', side_effect=adb), \
+                patch.object(lc.em, 'adb', side_effect=adb), \
+                patch.object(lc.time, 'monotonic', side_effect=lambda: state['clock']), \
+                patch.object(lc.time, 'sleep', side_effect=sleep), patch.object(lc, 'TIMEOUT', 3):
+            try:
+                lc.tap('Fixture page')
+            except lc.FAIL as error:
+                state['error'] = str(error)
+        return state
+
+    def test_tap_uses_visible_bottom_slice_from_reviewer_geometry(self):
+        state = self.clipped_tap('[44,2157][1036,2289]')
+        self.assertNotIn('error', state)
+        self.assertEqual([(540, 2182)], state['taps'])
+        self.assertEqual([], state['swipes'])
+
+    def test_tap_uses_visible_top_slice_below_fixed_toolbar(self):
+        state = self.clipped_tap('[44,175][1036,307]')
+        self.assertNotIn('error', state)
+        self.assertEqual([(540, 287)], state['taps'])
+
+    def test_tap_clips_both_axes_to_ancestor(self):
+        state = self.clipped_tap('[900,2157][1200,2289]')
+        self.assertEqual([(990, 2182)], state['taps'])
+
+    def test_tap_does_not_clip_toolbar_to_unrelated_scroll_body(self):
+        state = self.clipped_tap('[33,175][248,230]', toolbar=True)
+        self.assertNotIn('error', state)
+        self.assertEqual([(140, 202)], state['taps'])
+        self.assertEqual([], state['swipes'])
+
+    def test_tap_never_uses_fully_clipped_or_invalid_bounds(self):
+        for bounds in ('[44,2208][1036,2340]', '[44,80][1036,268]',
+                       '[1100,300][1200,400]', '[44,400][44,500]', ''):
+            with self.subTest(bounds=bounds):
+                state = self.clipped_tap(bounds)
+                self.assertEqual([], state['taps'])
+                self.assertIn('timed out', state.get('error', ''))
+                self.assertLessEqual(state['clock'], 3.3)
+
     def test_missing_target_rechecks_list_with_a_pause_under_original_deadline(self):
         state = self.search(target=False, initial=3)
         self.assertIn('timed out', state.get('error', ''))
