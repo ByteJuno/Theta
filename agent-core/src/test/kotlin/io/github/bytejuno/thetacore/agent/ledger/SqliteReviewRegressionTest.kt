@@ -31,7 +31,7 @@ class SqliteReviewRegressionTest {
             if (!deleted) assertEquals(0L, Files.size(file))
         }
     }
-    @Test fun confirmedRepublicationUnquarantinesBothOldAndNewReferences() = Fixture().use { f ->
+    @Test fun sameIdPublicationPreservesQuarantineForBothOldAndNewReferences() = Fixture().use { f ->
         val blob = BlobWrite(ByteArray(30_000) { (it % 251).toByte() }, "application/octet-stream")
         val old = completed(f)
         val first = old.copy(revision = old.revision + 1, result = old.result!!.copy(output = StoredToolOutput(blob.ref, emptyList())))
@@ -44,9 +44,16 @@ class SqliteReviewRegressionTest {
         val second = completed(f)
         val next = second.copy(revision = second.revision + 1, result = second.result!!.copy(output = StoredToolOutput(blob.ref, emptyList())))
         f.store.saveWithBlobs(next, second.revision, listOf(blob))
-        for (r in listOf(first, next)) assertContentEquals(blob.bytes().copyOfRange(0, 8192), f.store.readBlob(r.result!!.output!!.raw, 0, 8192))
+        f.store.close()
+        TestInvocationStore.open(f.directory).use { reopened ->
+            for (record in listOf(first, next)) {
+                assertEquals(record, reopened.records().single { it.callId == record.callId })
+                assertFailsWith<StoreException> { reopened.readBlob(record.result!!.output!!.raw, 0, 8192) }
+            }
+            assertFalse(hasContent(f.directory, blob.ref.contentHash))
+        }
     }
-    @Test fun damageAfterStartupIsRepairedByIdenticalPublication() = Fixture().use { f ->
+    @Test fun identicalPublicationDetectsDamageBeforeAnyRead() = Fixture().use { f ->
         val blob = BlobWrite(ByteArray(30_000) { (it % 251).toByte() }, "application/octet-stream")
         val first = completed(f)
         f.store.saveWithBlobs(first.copy(revision = first.revision + 1,
@@ -56,11 +63,32 @@ class SqliteReviewRegressionTest {
         val second = completed(f)
         val next = second.copy(revision = second.revision + 1, result = second.result!!.copy(output = StoredToolOutput(blob.ref, emptyList())))
         f.store.saveWithBlobs(next, second.revision, listOf(blob))
-        assertContentEquals(blob.bytes().copyOfRange(8192, 16384), f.store.readBlob(blob.ref, 8192, 8192))
+        assertFailsWith<StoreException> { f.store.readBlob(blob.ref, 8192, 8192) }
         f.store.close()
-        TestInvocationStore.open(f.directory).use { assertContentEquals(blob.bytes().copyOfRange(8192, 16384), it.readBlob(blob.ref, 8192, 8192)) }
+        TestInvocationStore.open(f.directory).use { assertFailsWith<StoreException> { it.readBlob(blob.ref, 8192, 8192) } }
+        Unit
     }
-    @Test fun failedRepairOfContentDamagedAfterStartupStaysQuarantined() = Fixture().use { f ->
+    @Test fun referenceOnlyPublicationPersistsObservedDamage(): Unit = Fixture().use { f ->
+        val blob = BlobWrite(ByteArray(9000) { (it % 251).toByte() }, "application/octet-stream")
+        val first = completed(f)
+        val stored = StoredToolOutput(blob.ref, emptyList())
+        f.store.saveWithBlobs(first.copy(revision = first.revision + 1,
+            result = first.result!!.copy(output = stored)), first.revision, listOf(blob))
+        damageContent(f.directory, blob.ref.contentHash, "chunk", 1)
+        val second = completed(f)
+        val next = second.copy(revision = second.revision + 1, result = second.result!!.copy(output = stored))
+        f.store.save(next, second.revision)
+        sql(f.directory) { db ->
+            db.prepare("UPDATE content_chunks SET bytes=? WHERE hash=? AND ordinal=1").use {
+                it.bindBlob(1, blob.bytes().copyOfRange(8192, 9000)); it.bindText(2, blob.ref.contentHash); it.step()
+            }
+        }
+        f.reopen()
+        assertEquals(next, f.ledger.get(next.callId))
+        assertFailsWith<StoreException> { f.store.readBlob(blob.ref, 0, 8192) }
+    }
+
+    @Test fun failedPublicationOfContentDamagedAfterStartupStaysQuarantined() = Fixture().use { f ->
         val blob = BlobWrite(ByteArray(30_000) { (it % 251).toByte() }, "application/octet-stream")
         val first = completed(f)
         f.store.saveWithBlobs(first.copy(revision = first.revision + 1,
@@ -73,11 +101,17 @@ class SqliteReviewRegressionTest {
                 result = second.result!!.copy(output = StoredToolOutput(blob.ref, emptyList()))), second.revision, listOf(blob))
         }
         assertFalse(error.uncertain)
-        // Rolled-back repair must not leave damaged content readable as normal content.
+        // Restore the damaged chunk outside the store to distinguish a durable mark from re-detection.
+        sql(f.directory) { db ->
+            db.prepare("UPDATE content_chunks SET bytes=? WHERE hash=? AND ordinal=1").use {
+                it.bindBlob(1, blob.bytes().copyOfRange(8192, 16384)); it.bindText(2, blob.ref.contentHash); it.step()
+            }
+        }
+        f.reopen()
         assertFailsWith<StoreException> { f.store.readBlob(blob.ref, 0, 8192) }
         Unit
     }
-    @Test fun repairRollbackAndUncertainCommitRemainQuarantined() {
+    @Test fun publicationRollbackAndUncertainCommitRemainQuarantined() {
         for (stage in listOf(SqliteWriteStage.BEFORE_COMMIT, SqliteWriteStage.AFTER_COMMIT)) Fixture().use { f ->
             val blob = BlobWrite(ByteArray(30_000) { (it % 251).toByte() }, "application/octet-stream")
             val old = completed(f)
@@ -96,10 +130,10 @@ class SqliteReviewRegressionTest {
                 f.store.save(next, first.revision)
                 assertFailsWith<StoreException> { f.store.readBlob(blob.ref, 0, 8192) }
                 f.store.saveWithBlobs(next.copy(revision = next.revision + 1), next.revision, listOf(blob))
-                assertContentEquals(blob.bytes().copyOfRange(0, 8192), f.store.readBlob(blob.ref, 0, 8192))
+                assertFailsWith<StoreException> { f.store.readBlob(blob.ref, 0, 8192) }
             } else {
                 f.store.close()
-                TestInvocationStore.open(f.directory).use { assertContentEquals(blob.bytes().copyOfRange(0, 8192), it.readBlob(blob.ref, 0, 8192)) }
+                TestInvocationStore.open(f.directory).use { assertFailsWith<StoreException> { it.readBlob(blob.ref, 0, 8192) } }
             }
         }
     }

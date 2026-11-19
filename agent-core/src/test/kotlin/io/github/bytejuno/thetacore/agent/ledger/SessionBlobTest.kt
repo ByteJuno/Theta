@@ -70,6 +70,23 @@ class SessionBlobTest {
         f.ledger.deleteSession("session") // idempotent
     }
 
+    @Test fun deletingLastOwnerCollectsChunksEvenWhenContentRowIsMissing(): Unit = Fixture().use { f ->
+        val bytes = ByteArray(9000) { (it % 251).toByte() }
+        val (_, ref) = publish(f, bytes = bytes)
+        publish(f, "second", "second-run", bytes)
+        sql(f.directory) { db ->
+            db.execute("PRAGMA foreign_keys=OFF")
+            db.prepare("DELETE FROM contents WHERE hash=?").use { it.bindText(1, ref.contentHash); it.step() }
+        }
+        f.reopen()
+        f.ledger.deleteSession("session")
+        assertFailsWith<BlobReadException> { f.ledger.readSessionBlob("second", ref.id, 0) }
+        f.ledger.deleteSession("second")
+        val (_, fresh) = publish(f, "third", "third-run", bytes)
+        assertEquals(ref, fresh)
+        assertContentEquals(bytes.copyOfRange(8192, bytes.size), f.ledger.readSessionBlob("third", ref.id, 8192).second)
+    }
+
     @Test fun deletionRefusesUnconfirmedWorkerAndPreservesUnknownEffectIsolationAndApprovals(): Unit = Fixture().use { f ->
         val input = f.input(definition(Risk.WRITE, resource = "screen"), run = "write")
         val ready = f.approve(f.prepare(input), Decision.ALLOW_ALWAYS)
@@ -208,10 +225,40 @@ class SessionBlobTest {
         } finally { root.toFile().deleteRecursively() }
     }
 
+    @Test fun damagedV3ResultIsIsolatedAcrossRestartWithSafetyEvidenceIntact() {
+        for (damage in listOf("missing", "size", "corrupt")) Fixture().use { f ->
+            val (_, healthy) = publish(f, session = "other", run = "other-run", bytes = byteArrayOf(1, 2, 3))
+            val input = f.input(definition(Risk.WRITE, resource = "screen"), run = "writer")
+            val claim = f.claim(f.approve(f.prepare(input), Decision.ALLOW_ALWAYS))
+            val output = ToolOutputNormalizer.normalize(listOf(OutputPart.Text("result")), null, false,
+                Effect.UNKNOWN, null, ArgumentsValidator { _, _ -> true }, "host_blob_read")
+            val id = claim.record.callId
+            val attempt = claim.ticket!!.attemptId
+            assertIs<Mutation.Applied>(f.ledger.recordToolOutput(id, attempt, Status.SUCCEEDED, output, Effect.UNKNOWN))
+            assertIs<Mutation.Applied>(f.ledger.recordActualExit(id, attempt, "exit"))
+            val before = f.ledger.get(id)!!
+            assertEquals(Effect.UNKNOWN, before.result!!.effect)
+            assertEquals("screen", before.isolation!!.resource)
+            assertEquals(Decision.ALLOW_ALWAYS, before.receipts.single().decision)
+            f.store.close()
+            sql(f.directory) { it.execute("DROP TABLE quarantined_contents"); it.execute("PRAGMA user_version=3") }
+            val ref = output.stored.raw
+            damageContent(f.directory, ref.contentHash, damage)
+            repeat(2) { pass ->
+                f.reopen("after-damage-$pass")
+                assertEquals(before, f.ledger.get(id))
+                assertEquals("Result content is unavailable: missing or corrupt.", assertFailsWith<BlobReadException> {
+                    f.ledger.readSessionBlob(input.sessionId, ref.id, 0)
+                }.message)
+                assertContentEquals(byteArrayOf(1, 2, 3), f.ledger.readSessionBlob("other", healthy.id, 0).second)
+            }
+        }
+    }
+
     @Test fun versionTwoUpgradePreservesContentAndEnablesDeletion(): Unit = Fixture().use { f ->
         val (record, ref) = publish(f)
         f.store.close()
-        sql(f.directory) { it.execute("DROP TABLE deleted_sessions"); it.execute("PRAGMA user_version=2") }
+        sql(f.directory) { it.execute("DROP TABLE quarantined_contents"); it.execute("DROP TABLE deleted_sessions"); it.execute("PRAGMA user_version=2") }
         f.reopen()
         assertEquals(record, f.ledger.get(record.callId))
         assertTrue(f.ledger.readSessionBlob("session", ref.id, 0).second.isNotEmpty())
