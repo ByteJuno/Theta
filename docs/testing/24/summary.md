@@ -1,5 +1,17 @@
 # Issue 24 — Chat and inline approvals
 
+## November 19 clipped acceptance target repair
+
+Tested source `9d0b2f0a174ea190a0791c4fd89c4b5d1cadc155` preserves reviewer repair `14a8d11d1947d3318451e5cef2e887c7e182ffba` and changes only the lifecycle observation helper and its regression tests. The reviewer verdict, commit parent and reviewer `own_commit` were cross-checked before the explicit branch fast-forward.
+
+Reviewer run `20261119-110921`, dedicated emulator `emulator-5580`, failed `upgrade-and-data` while waiting for `Fixture runtime normalV2`. Its source log binds the run to `14a8d11d`; the Release APK SHA-256 was `d672a724bf978fa2129179f14077d940a4bc84f42e577cae3f3bcda71dbb92c2`. The raw results, screenshot, XML, search trace and fixture events were read. V2 enabled and reached `counter:3`; the screen remained in plugin management after a rejected version import. This is not evidence that the runtime failed to upgrade.
+
+The search trace exposes `Fixture page` at `[44,2157][1036,2289]` under a `[0,268][1080,2208]` scroll viewport. The former helper taps `(540,2223)`, outside that viewport. The new regression reproduces this concrete coordinate defect; the retained failure trace does not record the preceding successful lookup/tap, so it cannot prove that this was the exact original tap. The helper now intersects a target with its actual XML ancestors and taps the visible intersection, `(540,2182)` for that geometry. Fully clipped or invalid targets keep searching under the original deadline; unrelated toolbar siblings are not clipped. Exact-text uniqueness and runtime/counter assertions remain unchanged. No retry of the page action or timeout increase was added.
+
+`python -X utf8 -I -B scripts/acceptance-observation-test.py -v`: **35/35 passed**, zero failures/errors, 0.589 seconds wall time. The red run on the old helper retained 7 failing subtest assertions and 1 invalid-bounds error; all 30 earlier tests stayed passing. Five new tests cover bottom/top clipping, horizontal clipping, a fixed toolbar sibling, and fully clipped/invalid targets. Offline replay of the actual captured XML retained the existing visible page center. These are script tests with synthetic device/clock boundaries, not Android acceptance. `git diff --check` passed.
+
+No APK generated, no Gradle run, and no device operated in this repair. The screenshot is failure evidence for the old reviewer head, not visual acceptance of this commit. The old signature run returned `SIGNATURES_EXIT=0`; its result is not transferred to the new head. Final-head lifecycle/signature regression, CI, chat visual checks and Android restart remain the independent reviewer's gates. Original evidence and red/green output are retained outside Git in `event-runs/d717aa4f-2339-49ad-91d7-0ac94a1d85bf`.
+
 ## November 19 integration of approval timing and blob storage
 
 Tested source `668111458c5f5ee11f8ff8cb13ec4132ec71366d` includes main `f9ee70a953f53721eaae32422b61e99e6818002e`. Chat and cold approvals use the session store. Live and recovered dispatch retain the revision check and use the host clock to distinguish cancellation from timeout. The clock is bound before the worker starts. The integration also includes main’s updated SQLite blob storage.
