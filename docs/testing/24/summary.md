@@ -11,7 +11,15 @@ Base main: `0c8e97cd89dec865b6166bf2c207bef8bbf95a7c`.
 - Shared host reservation precedes durable claims. Unavailable capacity cannot invent a worker. Existing actual-exit, unknown-effect, cancellation and stale-definition gates remain in force.
 - Chinese and English strings use the existing resource checker/theme. Final history refresh now precedes publication of idle state, fixing the observed cold-approval UI race.
 
-## Current main-integration repair — 2026-11-18
+## Chat task budgets — 2026-11-19
+
+The reviewer’s GPU probe on `9a5e339f` observed 50 model requests after 51 independent questions. Implementation `c76be86683b8fcb02e9d5fea35bbc10ab5aea5f5` persists the current chat task chain separately from the session. Finishing a settled task starts a new budget for the next question. Pauses, cold tool steps, checkpoint continuations, execution barriers and outstanding unknown-effect approvals retain their chain. Existing chat sessions without a stored chain use their original session-based identity until a task completes safely. The 50-step limit is unchanged.
+
+The established GPU test runner reported Gradle exit 0, 73 tests and zero failures/errors across `ChatSessionOwnerTest` and `ContextPolicyTest`, with `--configuration-cache --configuration-cache-problems=fail`. The aggregate runner does not report skips. The formal chat tests check 51 independent questions with a cold reopen before question 51, and separately exhaust an unfinished task and confirm that a cold retry cannot submit another model request. The unknown-effect regression checks that a completed explanatory answer preserves the next write’s approval. The staging Git tree matched the implementation tree (`69ae6b11b848b89ed077cd1cb95f24a726bd6c2a`). Earlier GPU attempts exited 127 before running tests due to CRLF in the Windows source archive. The original reviewer verdict and all three runner logs are retained under `event-runs/1d04d991-0de4-40bf-8173-5299d7a2750d`.
+
+APK not generated for this implementation. No device or visual validation in this round. Final-head review, prescribed simulator regression and CI belong to the review pipeline.
+
+## Earlier main-integration repair — 2026-11-18
 
 Validated implementation: `0a344f1ee2cabacfd8c668d92ff6eb323d9feed5`; integrated main: `500b49f7` (exact merge parent in Git).
 The sole content conflict joined the chat streaming callback and the bounded-history request limit in the AgentRunLoop constructor. Both behaviors are retained; other history/ledger changes came from reviewed main. No layout or navigation changes in this repair.
