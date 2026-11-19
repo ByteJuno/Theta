@@ -1,5 +1,15 @@
 # Issue 24 — Chat and inline approvals
 
+## Cold approvals, task completion and catalog lifetime · 2026-11-19
+
+Tested source `c3e623041724f84d48e5ff0f8021e7f1cca6880f`, Git tree `fad061a57288e24d4e756b8233249418ac2815f3`. The staging checkout reproduced that tree before invoking `theta-gpu-test`. The GPU runner reported Gradle exit 0, **84 tests, 0 failures/errors** for `ChatSessionOwnerTest`, `HostBlobOutputTest` and `ContextPolicyTest` with `--configuration-cache --configuration-cache-problems=fail`. The wrapper did not report skips or cache reuse. This round generated no APK. Android process death and visual interaction remain unverified.
+
+- A SQLite snapshot taken while a real chat approval was pending was reopened with a different host catalog. Both structured and oversized results were approved once, recorded as succeeded/applied and projected into chat. The oversized result named the original collision-resolved reader. The raw blob remained readable and a later tool call also succeeded.
+- At step 50, fault injection before or after the final append commit recovered the matching answer, accounting and chain. A subsequent question reached the provider. Continuing an exhausted paused task and retaining approval requirements for an accepted unknown write were also checked.
+- After 24 independent text questions and a session switch, both frozen directories contained zero runs. A cancelled worker with a late, oversized return retained both directories until the host observed actual exit and persisted the result.
+
+Original reviewer GPU findings at `ad98384`: successful cold write recorded as cancelled/unknown, a committed answer with an exhausted chain, and 24 retained catalogs. The first development check reported 1 failure in 84 tests because the new assertion compared raw result text to the protocol envelope. The corrected test checks the entire encoded envelope. Raw findings and both GPU logs are retained outside Git in `event-runs/8ae2e8ce-7fb1-43a7-b2bf-52ed1f7768ef`. Independent final-head review, prescribed regression and CI remain pending.
+
 Implementation: `b5985b0`; validated source after main integration: `47fff50977ede06d10b2330eb018588ef00076ff`.
 Base main: `0c8e97cd89dec865b6166bf2c207bef8bbf95a7c`.
 
