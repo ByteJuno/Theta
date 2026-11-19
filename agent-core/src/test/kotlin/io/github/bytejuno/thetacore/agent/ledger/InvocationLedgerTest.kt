@@ -1,6 +1,7 @@
 package io.github.bytejuno.thetacore.agent.ledger
 
 import io.github.bytejuno.thetacore.agent.protocol.ContentPart
+import kotlinx.serialization.json.jsonObject
 import org.junit.Test
 import java.util.concurrent.Callable
 import java.util.concurrent.CountDownLatch
@@ -343,6 +344,42 @@ class InvocationLedgerTest {
             f.reopen()
             assertEquals(exited, f.ledger.get(id))
         }
+    }
+
+    @Test fun legacyHostClaimKeepsOwnerWideRestartAndColdRecoveryEvidence(): Unit = Fixture().use { f ->
+        val screen = definition(resource = "screen").copy(owner = "host", toolKey = "host/screen_info")
+        val clock = screen.copy(toolKey = "host/clock", exclusiveResource = null)
+        val active = f.claim(f.ready(f.input(screen)))
+        val id = active.record.callId
+        f.ledger.timeout(id)
+        val marked = assertIs<Mutation.Applied>(f.ledger.markRestartRequired(id, active.ticket!!.attemptId,
+            untilActualExit = true)).record
+        assertTrue(marked.blocksRestartOf(screen.copy(version = "2", modelName = "new_alias")))
+        assertFalse(marked.blocksRestartOf(clock))
+        val json = kotlinx.serialization.json.Json { encodeDefaults = true }
+        val encoded = json.parseToJsonElement(json.encodeToString(InvocationRecord.serializer(), marked)).jsonObject
+        val oldInstance = kotlinx.serialization.json.JsonObject(encoded.getValue("instance").jsonObject - "builtinToolKey")
+        val legacy = json.decodeFromString(InvocationRecord.serializer(),
+            kotlinx.serialization.json.JsonObject(encoded + ("instance" to oldInstance)).toString())
+        assertTrue(legacy.blocksRestartOf(clock))
+        assertEquals(InstanceState.UNCONFIRMED, legacy.instance!!.state)
+        f.store.save(legacy.copy(revision = marked.revision + 1), marked.revision)
+        f.reopen()
+        val recovered = f.ledger.get(id)!!
+        assertTrue(recovered.recoveryPending)
+        assertEquals("screen", recovered.isolation!!.resource)
+        assertEquals(marked.result, recovered.result)
+        val blocked = f.ready(f.input(screen, chain = "other"))
+        assertIs<Mutation.Blocked>(f.ledger.claimExecution(blocked.callId, blocked.revision))
+    }
+
+    @Test fun pluginRestartCoversSiblingToolsOfTheSameOwner(): Unit = Fixture().use { f ->
+        val plugin = definition(source = Source.THIRD_PARTY)
+        val active = f.claim(f.ready(f.input(plugin)))
+        f.ledger.cancel(active.record.callId)
+        f.ledger.markRestartRequired(active.record.callId, active.ticket!!.attemptId)
+        val sibling = f.ready(f.input(plugin.copy(toolKey = "plugin/other"), chain = "independent"))
+        assertEquals("Plugin restart required", assertIs<Mutation.Blocked>(f.ledger.claimExecution(sibling.callId, sibling.revision)).reason)
     }
 
     @Test fun graceRestrictionPersistsAndColdLossStillRequiresRecovery(): Unit = Fixture().use { f ->

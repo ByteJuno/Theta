@@ -92,9 +92,13 @@ class HostScreenToolTest {
         exerciseTimeout(unknown = true)
     }
 
-    private suspend fun exerciseTimeout(unknown: Boolean) {
+    @Test fun runBridgeKeepsBuiltinIsolationAndRejectsStaleRevision() = runBlocking {
+        exerciseTimeout(unknown = false, throughBridge = true)
+    }
+
+    private suspend fun exerciseTimeout(unknown: Boolean, throughBridge: Boolean = false) {
         val dir = Files.createTempDirectory("screen-timeout").toFile()
-        val budget = PluginExecutionBudget(processSlots = 4, perPluginSlots = 2)
+        val budget = PluginExecutionBudget(processSlots = 2, perPluginSlots = 1)
         val entered = CountDownLatch(1)
         val release = CountDownLatch(1)
         val timerHeld = CountDownLatch(1)
@@ -113,6 +117,7 @@ class HostScreenToolTest {
         var firstId: String? = null
         try {
             service = HostToolBridgeRoot(budget).initialize(backend) { store }
+            service.catalog.registerHost("host/other_screen", "1", HostScreenTool(ScreenBackend { info }))
             val first = input(service, session = "session-a")
             firstId = first.binding.callId
             // A conservative host risk override supplies the unknown-external-state branch. The
@@ -138,7 +143,44 @@ class HostScreenToolTest {
             assertEquals("Resource occupied or externally isolated", (other.claim() as Mutation.Blocked).reason)
             assertNull(service.ledger.get(other.input.binding.callId)!!.instance)
             assertEquals(0, other.executions.get())
-            // Different owner avoids the host restart gate; different resource is still runnable.
+            // The same registration is held even when checked directly at the ledger boundary.
+            val same = input(service, session = "another-session")
+            val ready = (service.prepare(same) as Mutation.Applied).record
+            assertEquals("Plugin restart required", (service.ledger.claimExecution(ready.callId, ready.revision) as Mutation.Blocked).reason)
+            val sameResource = input(service, key = "host/other_screen", session = "another-session")
+            service.prepare(sameResource)
+            val resourceClaim = if (throughBridge) service.runBridge().claimAndSubmit(sameResource.binding.callId,
+                service.ledger.get(sameResource.binding.callId)!!.revision) else service.dispatch(sameResource.binding.callId)
+            assertEquals("Resource occupied or externally isolated", (resourceClaim as Mutation.Blocked).reason)
+            val clock = input(service, key = "host/clock", session = "independent")
+            service.prepare(clock)
+            val clockReady = service.ledger.get(clock.binding.callId)!!
+            if (throughBridge) {
+                assertEquals("Claim revision changed", (service.runBridge().claimAndSubmit(clock.binding.callId,
+                    clockReady.revision - 1) as Mutation.Conflict).reason)
+                assertNull(service.ledger.get(clock.binding.callId)!!.instance)
+                assertEquals(1, budget.occupiedSlots())
+            }
+            val clockClaim = if (throughBridge) service.runBridge().claimAndSubmit(clock.binding.callId,
+                clockReady.revision) else service.dispatch(clock.binding.callId)
+            assertNotNull((clockClaim as Mutation.Applied).ticket)
+            withTimeout(20_000) { service.awaitObservedExit(clock.binding.callId) }
+            val clockRecord = service.ledger.get(clock.binding.callId)!!
+            assertEquals(Status.SUCCEEDED, clockRecord.state)
+            val raw = clockRecord.result!!.output!!.raw
+            val read = input(service, key = "host/blob_read", session = clock.sessionId,
+                args = """{"id":"${raw.id}","offset":0}""")
+            service.prepare(read)
+            val readClaim = if (throughBridge) service.runBridge().claimAndSubmit(read.binding.callId,
+                service.ledger.get(read.binding.callId)!!.revision) else service.dispatch(read.binding.callId)
+            assertNotNull((readClaim as Mutation.Applied).ticket)
+            withTimeout(20_000) { service.awaitObservedExit(read.binding.callId) }
+            val readRecord = service.ledger.get(read.binding.callId)!!
+            assertEquals(Status.SUCCEEDED, readRecord.state)
+            val data = Json.parseToJsonElement(readRecord.result!!.text).jsonObject.getValue("data").jsonPrimitive.content
+            assertTrue(java.util.Base64.getDecoder().decode(data).decodeToString().contains("epochMillis"))
+            assertEquals(InstanceState.UNCONFIRMED, service.ledger.get(firstId)!!.instance!!.state)
+            // A different plugin owner can still take the spare process slot.
             unrelated.execute(budget)
             assertEquals(1, unrelated.executions.get())
             assertEquals(1, budget.occupiedSlots())

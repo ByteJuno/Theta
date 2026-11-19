@@ -212,7 +212,10 @@ internal object HistoryCodec {
                 "version" to v.version, "generation" to v.generation, "risk" to v.risk,
                 "unknownCalls" to v.unknownCalls, "internal" to v.internal, "summary" to v.summary)
             is ApprovalReceipt -> fields("request" to v.request, "decision" to v.decision, "reason" to v.reason)
-            is ExecutionInstance -> fields("attemptId" to v.attemptId, "processEpoch" to v.processEpoch, "state" to v.state)
+            is ExecutionInstance -> {
+                val instance = arrayOf("attemptId" to v.attemptId, "processEpoch" to v.processEpoch, "state" to v.state)
+                if (v.builtinToolKey == null) fields(*instance) else fields(*instance, "builtinToolKey" to v.builtinToolKey)
+            }
             is LogicalResult -> fields("status" to v.status, "effect" to v.effect, "text" to v.text,
                 "inconsistentRead" to v.inconsistentRead, "output" to v.output)
             is ExitEvidence -> fields("attemptId" to v.attemptId, "text" to v.text, "outcome" to v.outcome)
