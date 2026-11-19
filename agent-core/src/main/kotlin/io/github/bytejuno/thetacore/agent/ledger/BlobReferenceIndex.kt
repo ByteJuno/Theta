@@ -4,6 +4,7 @@ package io.github.bytejuno.thetacore.agent.ledger
 internal class BlobReferenceIndex(records: Collection<InvocationRecord>) {
     private val references = mutableMapOf<BlobRef, Int>()
     private val runs = mutableMapOf<String, MutableMap<String, MutableMap<BlobRef, Int>>>()
+    private val sessions = mutableMapOf<String, MutableMap<String, MutableMap<BlobRef, Int>>>()
     private val files = mutableMapOf<String, Int>()
     var rootVisits = 0L
         private set
@@ -12,6 +13,7 @@ internal class BlobReferenceIndex(records: Collection<InvocationRecord>) {
     init { records.forEach { replace(null, it) } }
     fun contains(ref: BlobRef) = ref in references
     fun matches(run: String, id: String): Set<BlobRef> = runs[run]?.get(id)?.keys.orEmpty()
+    fun sessionMatches(session: String, id: String): Set<BlobRef> = sessions[session]?.get(id)?.keys.orEmpty()
     fun liveFiles(): Set<String> = files.keys
     fun liveReferences(): Set<BlobRef> = references.keys
     fun ownsFile(name: String) = name in files
@@ -31,20 +33,22 @@ internal class BlobReferenceIndex(records: Collection<InvocationRecord>) {
         val old = roots(previous)
         val new = roots(next)
         // Run changes are unusual but store replacement must still remove the old run's access.
-        val sameRun = previous?.input?.runId == next.input.runId
+        val sameRun = previous?.input?.runId == next.input.runId && previous.input.sessionId == next.input.sessionId
         val removed = if (sameRun) old - new else old
         val added = if (sameRun) new - old else new
-        fun change(run: String, ref: BlobRef, delta: Int) {
+        fun change(input: InvocationInput, ref: BlobRef, delta: Int) {
             adjust(references, ref, delta)
             names(ref).forEach { adjust(files, it, delta) }
-            val ids = runs.getOrPut(run) { mutableMapOf() }
-            val refs = ids.getOrPut(ref.id) { mutableMapOf() }
-            adjust(refs, ref, delta)
-            if (refs.isEmpty()) ids.remove(ref.id)
-            if (ids.isEmpty()) runs.remove(run)
+            for ((index, key) in listOf(runs to input.runId, sessions to input.sessionId)) {
+                val ids = index.getOrPut(key) { mutableMapOf() }
+                val refs = ids.getOrPut(ref.id) { mutableMapOf() }
+                adjust(refs, ref, delta)
+                if (refs.isEmpty()) ids.remove(ref.id)
+                if (ids.isEmpty()) index.remove(key)
+            }
         }
-        removed.forEach { change(requireNotNull(previous).input.runId, it, -1) }
-        added.forEach { change(next.input.runId, it, 1) }
+        removed.forEach { change(requireNotNull(previous).input, it, -1) }
+        added.forEach { change(next.input, it, 1) }
         return candidates(removed)
     }
 }

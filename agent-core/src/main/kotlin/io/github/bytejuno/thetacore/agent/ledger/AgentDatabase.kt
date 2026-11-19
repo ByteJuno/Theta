@@ -2,10 +2,14 @@ package io.github.bytejuno.thetacore.agent.ledger
 
 import androidx.sqlite.SQLiteConnection
 import androidx.sqlite.SQLiteDriver
+import androidx.sqlite.SQLiteStatement
+import io.github.bytejuno.thetacore.agent.run.HistoryCodec
+import io.github.bytejuno.thetacore.agent.run.SummaryWorkspace
 import io.github.bytejuno.thetacore.agent.run.checkedSessionDirectory
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.security.MessageDigest
 import java.io.Closeable
+import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.channels.FileLock
 import java.nio.file.Files
@@ -38,18 +42,47 @@ class AgentDatabase private constructor(
     /** Scratch namespaces are database-local and keyed by encoded identity, never raw session IDs. */
     @Synchronized internal fun summaryDirectory(sessionId: String): Path {
         ready(); check(sessionId in sessions)
-        val root = summaryRoot(identity)
-        val key = MessageDigest.getInstance("SHA-256").digest(sessionId.toByteArray(Charsets.UTF_8))
-            .joinToString("") { "%02x".format(it) }
-        val directory = root.resolve(key)
+        val directory = scratchPath(sessionId)
         checkedSessionDirectory(directory.resolve("summary-tmp"), allowMissing = true)
         Files.createDirectories(directory)
         return checkedSessionDirectory(directory)
     }
+    private fun scratchPath(sessionId: String): Path {
+        val key = MessageDigest.getInstance("SHA-256").digest(sessionId.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+        return summaryRoot(identity).resolve(key)
+    }
+    internal fun cleanSessionScratch(sessionId: String) {
+        SummaryWorkspace.cleanExisting(scratchPath(sessionId))
+    }
     internal fun ready() { if (closed || uncertain) throw StoreException("Database closed or uncertain; reopen and cold recover", uncertain) }
     @Synchronized internal fun bindLedger() { ready(); check(!ledgerBound); ledgerBound = true }
     @Synchronized internal fun releaseLedger() { ledgerBound = false }
-    @Synchronized internal fun bindSession(id: String) { ready(); check(sessions.add(id)) { "Session already open" } }
+    @Synchronized internal fun bindSession(id: String) {
+        ready()
+        require(id.isNotBlank()); HistoryCodec.requireUtf8(id)
+        check(!isSessionDeleted(id)) { "Session has been deleted" }
+        check(sessions.add(id)) { "Session already open" }
+    }
+    internal fun isSessionDeleted(id: String): Boolean =
+        connection.prepare("SELECT 1 FROM deleted_sessions WHERE session_id=?").use {
+            it.bindDeletionKey(id); it.step()
+        }
+    private fun SQLiteStatement.bindDeletionKey(id: String) {
+        if (HistoryCodec.isUtf8(id)) bindText(1, id) else {
+            val units = ByteBuffer.allocate(Math.multiplyExact(id.length, Char.SIZE_BYTES))
+            units.asCharBuffer().put(id)
+            bindBlob(1, units.array())
+        }
+    }
+    internal fun markSessionDeleted(id: String) = connection.prepare("INSERT INTO deleted_sessions(session_id) VALUES(?)").use {
+        it.bindDeletionKey(id); it.step(); Unit
+    }
+    @Synchronized internal fun checkSessionDeletion(id: String) {
+        ready()
+        require(id.isNotBlank())
+        check(id !in sessions && ownerPins == 0) { "Close session handles and active runs before deletion" }
+    }
     @Synchronized internal fun releaseSession(id: String) { sessions.remove(id) }
     @Synchronized internal fun <T> access(block: () -> T): T { ready(); return block() }
     @Synchronized internal fun poison() { uncertain = true }
@@ -81,7 +114,7 @@ class AgentDatabase private constructor(
 
     companion object {
         const val FILE_NAME = "agent.db"
-        const val SCHEMA_VERSION = 2
+        const val SCHEMA_VERSION = 3
         private const val APPLICATION_ID = 0x54485441
         // On POSIX, closing ANY descriptor of a locked file can drop this process's lock.
         // Reject duplicate instances before even opening a second descriptor.
@@ -104,6 +137,7 @@ class AgentDatabase private constructor(
             connection.execute("CREATE TABLE invocation_contents (call_id TEXT NOT NULL REFERENCES invocations(call_id) ON DELETE CASCADE, hash TEXT NOT NULL, PRIMARY KEY(call_id, hash)) WITHOUT ROWID")
             connection.execute("CREATE INDEX content_owners ON invocation_contents(hash)")
             createHistorySchema(connection)
+            createDeletionSchema(connection)
             connection.execute("PRAGMA application_id=$APPLICATION_ID")
             connection.execute("PRAGMA user_version=$SCHEMA_VERSION")
         }
@@ -113,12 +147,16 @@ class AgentDatabase private constructor(
             connection.execute("CREATE TABLE history_values (session_id TEXT NOT NULL REFERENCES sessions(session_id), name TEXT NOT NULL, PRIMARY KEY(session_id,name)) WITHOUT ROWID")
             connection.execute("CREATE TABLE history_chunks (session_id TEXT NOT NULL, name TEXT NOT NULL, ordinal INTEGER NOT NULL, bytes BLOB NOT NULL, PRIMARY KEY(session_id,name,ordinal), FOREIGN KEY(session_id,name) REFERENCES history_values(session_id,name) ON DELETE CASCADE) WITHOUT ROWID")
         }
-        /** Only the recognized SQLite v1 schema is upgraded; legacy files are never imported. */
+        private fun createDeletionSchema(connection: SQLiteConnection) {
+            connection.execute("CREATE TABLE deleted_sessions (session_id TEXT PRIMARY KEY NOT NULL) WITHOUT ROWID")
+        }
+        /** Only recognized SQLite schemas are upgraded; legacy files are never imported. */
         fun upgradeSchema(connection: SQLiteConnection, oldVersion: Int, newVersion: Int) {
             connection.verifyWriteConfiguration()
-            require(oldVersion == 1 && newVersion == SCHEMA_VERSION &&
+            require(oldVersion in 1..2 && newVersion == SCHEMA_VERSION &&
                 connection.longValue("PRAGMA application_id") == APPLICATION_ID.toLong())
-            createHistorySchema(connection)
+            if (oldVersion == 1) createHistorySchema(connection)
+            createDeletionSchema(connection)
             connection.execute("PRAGMA user_version=$SCHEMA_VERSION")
         }
 
@@ -189,7 +227,7 @@ class AgentDatabase private constructor(
                 try {
                     connection.verifyWriteConfiguration()
                     if (version == 0L) createSchema(connection)
-                    else if (version == 1L) upgradeSchema(connection, 1, SCHEMA_VERSION)
+                    else if (version < SCHEMA_VERSION) upgradeSchema(connection, version.toInt(), SCHEMA_VERSION)
                     fault(SqliteInitStage.BEFORE_SCHEMA_COMMIT)
                     connection.execute("COMMIT")
                     fault(SqliteInitStage.AFTER_SCHEMA_COMMIT)
