@@ -1,5 +1,11 @@
 # Issue 24 — Chat and inline approvals
 
+## Round 3 review: renewed inline approval · 2026-11-19
+
+After two prior returns, a GPU probe against `e14990743a46719e4d4696bfac138f9617880aa6` failed (1/1). Two parallel writes requested approval in one model response. While the second prompt was open, the first worker exited with `UNKNOWN`. Allowing the outdated prompt did not execute the second tool, but the chat waiter cancelled it instead of waiting for the renewed decision: `CANCELLED`, no pending request, zero receipts and one tool execution in total.
+
+For repair source `f1ea016700f0594a16304b37ec21a7351ea99512`, the GPU probe instead observed `WAITING_APPROVAL` with the first call listed as unknown, zero receipts, one execution and the chat still active. The app run passed 13/13 (the probe and `ChatSessionOwnerTest`); the permanent regression checks that an explicit decision on the new ID can either reject without executing or allow exactly once. The core `UnknownContinuationTest` run passed 12/12. No probe, raw evidence or APK was added to Git. Visual interaction remains unverified; these JVM results do not replace the final emulator and CI gates.
+
 ## Cold approvals, task completion and catalog lifetime · 2026-11-19
 
 Tested source `c3e623041724f84d48e5ff0f8021e7f1cca6880f`, Git tree `fad061a57288e24d4e756b8233249418ac2815f3`. The staging checkout reproduced that tree before invoking `theta-gpu-test`. The GPU runner reported Gradle exit 0, **84 tests, 0 failures/errors** for `ChatSessionOwnerTest`, `HostBlobOutputTest` and `ContextPolicyTest` with `--configuration-cache --configuration-cache-problems=fail`. The wrapper did not report skips or cache reuse. This round generated no APK. Android process death and visual interaction remain unverified.
