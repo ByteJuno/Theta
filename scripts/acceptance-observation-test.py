@@ -344,10 +344,34 @@ class Observations(unittest.TestCase):
         run.current = 'different-signer-update'
         run.observations = []
         run.screen = lambda: [ET.Element('node', text=text)]
-        run.scroll = Mock()
         run.snapshot = Mock()
         run.reject('other-v2', trust=trust)
         return run.observations[0]['rejection']
+
+    def test_signature_entry_finds_version_between_list_ends(self):
+        # Model the recorded list: a fling skips from the header to the actions.
+        position = 2
+        def screen():
+            labels = ['Code packages', 'Fixture · 1.0', 'Disable Fixture']
+            return [ET.Element('node', bounds='[0,268][1080,2208]', scrollable='true'),
+                    ET.Element('node', text=labels[position], bounds='[44,500][600,580]')]
+
+        def adb(*args, **kwargs):
+            nonlocal position
+            self.assertEqual(('shell', 'input', 'swipe'), args[:3])
+            start, end, duration = int(args[4]), int(args[6]), int(args[7])
+            step = 1 if abs(start - end) <= 400 and duration >= 800 else 2
+            position = max(0, min(2, position + (step if start > end else -step)))
+
+        # Load isolated helpers since the signature entry binds its own transport.
+        lifecycle = load('signature_version_search', 'lifecycle-acceptance.py')
+        with tempfile.TemporaryDirectory() as output, patch.object(sig.Acceptance, 'adb', side_effect=adb), \
+                patch.object(sig.Acceptance, 'screen', side_effect=screen), \
+                patch.object(lifecycle.em, 'crashed', return_value=False), \
+                patch.object(lifecycle, 'TIMEOUT', 2):
+            sig.Acceptance(lifecycle, Path(output), None, None, {})
+            node = lifecycle.text('Fixture · 1.0')
+            self.assertEqual('Fixture · 1.0', node.get('text'))
 
     def test_localized_signer_mismatch_is_specific(self):
         for locale in ('values', 'values-zh'):

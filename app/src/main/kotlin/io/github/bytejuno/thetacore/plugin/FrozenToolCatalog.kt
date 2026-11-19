@@ -57,7 +57,7 @@ internal class FrozenToolCatalog(val gate: DefinitionGate, private val budget: P
         gate.uninstall(key)
     }
     fun freeze(runId: String): Map<String, FrozenDefinition> = gate.withGate {
-        runs[runId]?.let { return@withGate it.toMap() }
+        runs[runId]?.let { return@withGate LinkedHashMap(it) }
         val names = ModelToolNames.allocate(entries.keys)
         val snapshot = entries.values.map { entry ->
             entry.definition.copy(modelName = names.getValue(entry.definition.toolKey))
@@ -65,7 +65,7 @@ internal class FrozenToolCatalog(val gate: DefinitionGate, private val budget: P
         check(snapshot.size == entries.size) { "Model tool names must be unique" }
         gate.freezeRun(runId, snapshot.values)
         runs[runId] = snapshot
-        snapshot.toMap()
+        LinkedHashMap(snapshot)
     }
     /** Recover only already-persisted calls, never allocate aliases from today's directory.
      * This snapshot cannot be used for a new model request; full run catalog recovery is #31. */
@@ -78,7 +78,7 @@ internal class FrozenToolCatalog(val gate: DefinitionGate, private val budget: P
     }
     fun definition(runId: String, name: String): FrozenDefinition? = gate.withGate { runs[runId]?.get(name) }
     /** Null means this run has no frozen catalog here, which says nothing about whether a name is unknown. */
-    fun frozen(runId: String): Map<String, FrozenDefinition>? = gate.withGate { runs[runId]?.toMap() }
+    fun frozen(runId: String): Map<String, FrozenDefinition>? = gate.withGate { runs[runId]?.let { LinkedHashMap(it) } }
     val frozenRunCount: Int get() = gate.withGate { runs.size }
     fun release(runId: String) = gate.withGate {
         runs.remove(runId)
