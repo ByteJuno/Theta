@@ -26,7 +26,8 @@ class InvocationLedger(
 ) {
     init { require(maxClaimsPerTaskChain > 0); store.bindCoordinator() }
     private val recordsById = store.records().associateByTo(linkedMapOf()) { it.callId }
-    private val deletedSessions = store.deletedSessions().toMutableSet()
+    private val deletedSessions = recordsById.values.map { it.input.sessionId }.distinct()
+        .filterTo(mutableSetOf(), store::isSessionDeleted)
     private var blobRoots = BlobReferenceIndex(recordsById.values.filter { it.input.sessionId !in deletedSessions })
     private val stepCalls = StepCallIndex(recordsById.values)
     internal val stepCallVisits get() = stepCalls.callVisits
@@ -52,6 +53,9 @@ class InvocationLedger(
         if (next.input.sessionId in deletedSessions && (previous == null || blobs.isNotEmpty()))
             return Mutation.Blocked("Session has been deleted")
         return try {
+            // A deleted history may have no invocation records to load at startup.
+            if (previous == null && store.isSessionDeleted(next.input.sessionId))
+                return Mutation.Blocked("Session has been deleted")
             val snapshot = next.detached()
             if (blobs.isEmpty()) store.save(snapshot, previous?.revision)
             else store.saveWithBlobs(snapshot, previous?.revision, blobs)

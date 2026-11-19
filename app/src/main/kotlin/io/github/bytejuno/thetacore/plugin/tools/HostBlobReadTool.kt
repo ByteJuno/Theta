@@ -12,7 +12,8 @@ internal class HostBlobReadTool(private val ledger: InvocationLedger) : Tool {
         Json.parseToJsonElement("""{"type":"object","properties":{"id":{"type":"string","minLength":64,"maxLength":64},"offset":{"type":"integer","minimum":0}},"required":["id","offset"],"additionalProperties":false}""").jsonObject,
         risk = ToolRisk.READ, idempotent = true, parallelSafe = true)
     override suspend fun call(args: JsonObject, env: ToolEnv): ToolResult {
-        val offset = args.getValue("offset").jsonPrimitive.long
+        // An unrepresentable integer is outside every blob. Keep ownership checks first.
+        val offset = args.getValue("offset").jsonPrimitive.longOrNull ?: -1L
         val (ref, bytes) = try {
             ledger.readSessionBlob(env.sessionId, args.getValue("id").jsonPrimitive.content, offset)
         } catch (error: io.github.bytejuno.thetacore.agent.ledger.BlobReadException) {

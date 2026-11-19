@@ -1,6 +1,8 @@
 package io.github.bytejuno.thetacore.agent.ledger
 
 import io.github.bytejuno.thetacore.agent.run.SqliteRunHistory
+import java.nio.file.Files
+import androidx.sqlite.driver.bundled.BundledSQLiteDriver
 import org.junit.Test
 import kotlin.test.*
 
@@ -118,6 +120,61 @@ class SessionBlobTest {
                     assertEquals(0L, db.connection.longValue("SELECT count(*) FROM sessions"))
                     assertEquals(0L, db.connection.longValue("SELECT count(*) FROM history_chunks"))
                     assertFailsWith<IllegalStateException> { SqliteRunHistory.create(db, "session") }
+                }
+            }
+        } finally { root.toFile().deleteRecursively() }
+    }
+
+    @Test fun deletingLongUtf8IdLeavesOtherSessionsUsableAfterRestart() {
+        val root = Files.createTempDirectory("long-session")
+        val file = root.resolve(AgentDatabase.FILE_NAME)
+        val longId = "界".repeat(21846) // 65,538 UTF-8 bytes
+        try {
+            AgentDatabase.open(file, BundledSQLiteDriver()).use { db ->
+                SqliteRunHistory.create(db, longId).close()
+                SqliteRunHistory.create(db, "other").close()
+                SqliteInvocationStore.open(db).use { store ->
+                    InvocationLedger(store, DefinitionGate(), ArgumentsValidator { _, _ -> true }).deleteSession(longId)
+                }
+            }
+            AgentDatabase.open(file, BundledSQLiteDriver()).use { db ->
+                SqliteInvocationStore.open(db).use { store ->
+                    val ledger = InvocationLedger(store, DefinitionGate(), ArgumentsValidator { _, _ -> true })
+                    assertTrue(store.isSessionDeleted(longId))
+                    ledger.deleteSession(longId)
+                    assertFailsWith<IllegalStateException> { SqliteRunHistory.create(db, longId) }
+                    SqliteRunHistory.open(db, "other").use { assertEquals(0L, it.revision()) }
+                }
+            }
+        } finally { root.toFile().deleteRecursively() }
+    }
+
+    @Test fun deletionRetriesAbandonedScratchCleanupAfterCommittedInterruption() {
+        val root = Files.createTempDirectory("session-scratch-retry")
+        val file = root.resolve(AgentDatabase.FILE_NAME)
+        try {
+            fun abandoned(db: AgentDatabase, id: String) = SqliteRunHistory.create(db, id).use {
+                val path = db.summaryDirectory(id).resolve("summary-tmp/theta-summary-123.data")
+                Files.write(path, id.toByteArray())
+            }
+            val (target, other) = AgentDatabase.open(file, BundledSQLiteDriver()).use { db ->
+                val target = abandoned(db, "target")
+                val other = abandoned(db, "other")
+                SqliteInvocationStore.open(db) { if (it == SqliteWriteStage.AFTER_COMMIT) error("interrupted") }.use { store ->
+                    assertFailsWith<StoreException> { store.deleteSession("target") }
+                }
+                target to other
+            }
+            assertTrue(Files.exists(target))
+            AgentDatabase.open(file, BundledSQLiteDriver()).use { db ->
+                SqliteInvocationStore.open(db).use { store ->
+                    val ledger = InvocationLedger(store, DefinitionGate(), ArgumentsValidator { _, _ -> true })
+                    assertFailsWith<IllegalStateException> { SqliteRunHistory.open(db, "target") }
+                    ledger.deleteSession("target")
+                    assertFalse(Files.exists(target))
+                    assertContentEquals("other".toByteArray(), Files.readAllBytes(other))
+                    ledger.deleteSession("other")
+                    assertFalse(Files.exists(other))
                 }
             }
         } finally { root.toFile().deleteRecursively() }

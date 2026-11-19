@@ -2,6 +2,8 @@ package io.github.bytejuno.thetacore.agent.ledger
 
 import androidx.sqlite.SQLiteConnection
 import androidx.sqlite.SQLiteDriver
+import io.github.bytejuno.thetacore.agent.run.HistoryCodec
+import io.github.bytejuno.thetacore.agent.run.SummaryWorkspace
 import io.github.bytejuno.thetacore.agent.run.checkedSessionDirectory
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.security.MessageDigest
@@ -38,26 +40,39 @@ class AgentDatabase private constructor(
     /** Scratch namespaces are database-local and keyed by encoded identity, never raw session IDs. */
     @Synchronized internal fun summaryDirectory(sessionId: String): Path {
         ready(); check(sessionId in sessions)
-        val root = summaryRoot(identity)
-        val key = MessageDigest.getInstance("SHA-256").digest(sessionId.toByteArray(Charsets.UTF_8))
-            .joinToString("") { "%02x".format(it) }
-        val directory = root.resolve(key)
+        val directory = scratchPath(sessionId)
         checkedSessionDirectory(directory.resolve("summary-tmp"), allowMissing = true)
         Files.createDirectories(directory)
         return checkedSessionDirectory(directory)
+    }
+    private fun scratchPath(sessionId: String): Path {
+        val key = MessageDigest.getInstance("SHA-256").digest(sessionId.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+        return summaryRoot(identity).resolve(key)
+    }
+    internal fun cleanSessionScratch(sessionId: String) {
+        SummaryWorkspace.cleanExisting(scratchPath(sessionId))
     }
     internal fun ready() { if (closed || uncertain) throw StoreException("Database closed or uncertain; reopen and cold recover", uncertain) }
     @Synchronized internal fun bindLedger() { ready(); check(!ledgerBound); ledgerBound = true }
     @Synchronized internal fun releaseLedger() { ledgerBound = false }
     @Synchronized internal fun bindSession(id: String) {
         ready()
-        connection.prepare("SELECT 1 FROM deleted_sessions WHERE session_id=?").use {
-            it.bindText(1, id); check(!it.step()) { "Session has been deleted" }
-        }
+        validateSessionId(id)
+        check(!isSessionDeleted(id)) { "Session has been deleted" }
         check(sessions.add(id)) { "Session already open" }
+    }
+    internal fun isSessionDeleted(id: String): Boolean =
+        connection.prepare("SELECT 1 FROM deleted_sessions WHERE session_id=?").use {
+            it.bindText(1, id); it.step()
+        }
+    private fun validateSessionId(id: String) {
+        require(id.isNotBlank())
+        HistoryCodec.requireUtf8(id)
     }
     @Synchronized internal fun checkSessionDeletion(id: String) {
         ready()
+        validateSessionId(id)
         check(id !in sessions && ownerPins == 0) { "Close session handles and active runs before deletion" }
     }
     @Synchronized internal fun releaseSession(id: String) { sessions.remove(id) }

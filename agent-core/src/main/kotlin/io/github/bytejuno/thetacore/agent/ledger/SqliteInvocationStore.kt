@@ -27,11 +27,8 @@ class SqliteInvocationStore private constructor(
     private var bound = false
     /** Test-only fatal failure seam before publishing the confirmed record projection. */
     internal var afterCacheUpdate: () -> Unit = {}
-    private val deleted = db.prepare("SELECT ${textColumn("session_id", 65536)} FROM deleted_sessions").use {
-        buildSet { while (it.step()) { require(!it.isNull(0)); add(it.getText(0)) } }.toMutableSet()
-    }
     private val recordsById = loadRecords().associateByTo(linkedMapOf()) { it.callId }
-    private var roots = BlobReferenceIndex(recordsById.values.filter { it.input.sessionId !in deleted })
+    private var roots = BlobReferenceIndex(recordsById.values.filterNot { isSessionDeleted(it.input.sessionId) })
     private val manifests = mutableMapOf<String, ByteArray>()
     private val unavailable = mutableSetOf<String>()
     internal var blobBytesRead = 0L
@@ -86,7 +83,7 @@ class SqliteInvocationStore private constructor(
                 }
             }
         }
-        require(owners == records.filter { it.input.sessionId !in deleted }.flatMap { record -> record.blobReferences().map { record.callId to it.contentHash } }.toSet()) {
+        require(owners == records.filterNot { isSessionDeleted(it.input.sessionId) }.flatMap { record -> record.blobReferences().map { record.callId to it.contentHash } }.toSet()) {
             "Corrupt content ownership index"
         }
         records
@@ -165,7 +162,7 @@ class SqliteInvocationStore private constructor(
         val previous = recordsById[record.callId]
         require(previous?.revision == expectedRevision && record.revision == (expectedRevision ?: 0) + 1) { "Revision conflict" }
         val snapshot = record.detached()
-        val isDeleted = record.input.sessionId in deleted
+        val isDeleted = isSessionDeleted(record.input.sessionId)
         require(!isDeleted || (previous != null && blobs.isEmpty() &&
             snapshot.blobReferences().toSet() == previous.blobReferences().toSet())) {
             "Deleted sessions cannot publish content or new calls"
@@ -269,12 +266,20 @@ class SqliteInvocationStore private constructor(
         }
     } }
 
-    override fun deletedSessions(): Set<String> = synchronized(database) { deleted.toSet() }
+    override fun isSessionDeleted(sessionId: String): Boolean = synchronized(database) {
+        checkAdmission()
+        try { database.isSessionDeleted(sessionId) }
+        catch (error: Exception) { throw StoreException("Cannot check session deletion", cause = error) }
+    }
 
     override fun deleteSession(sessionId: String) = synchronized(database) {
         checkAdmission()
-        if (sessionId in deleted) return@synchronized
         database.checkSessionDeletion(sessionId)
+        // A previous attempt may have committed the tombstone before scratch cleanup.
+        if (isSessionDeleted(sessionId)) {
+            database.cleanSessionScratch(sessionId)
+            return@synchronized
+        }
         val members = recordsById.values.filter { it.input.sessionId == sessionId }
         require(members.all { it.state.terminal && it.instance?.state != InstanceState.UNCONFIRMED }) {
             "Session has unfinished invocations"
@@ -298,8 +303,8 @@ class SqliteInvocationStore private constructor(
                 fault(SqliteWriteStage.BEFORE_COMMIT)
             }
             fault(SqliteWriteStage.AFTER_COMMIT)
-            deleted.add(sessionId)
-            roots = BlobReferenceIndex(recordsById.values.filter { it.input.sessionId !in deleted })
+            database.cleanSessionScratch(sessionId)
+            roots = BlobReferenceIndex(recordsById.values.filterNot { isSessionDeleted(it.input.sessionId) })
             hashes.filter { hash -> !roots.ownsFile("$hash.blob") }.forEach {
                 manifests.remove(it); unavailable.remove(it)
             }

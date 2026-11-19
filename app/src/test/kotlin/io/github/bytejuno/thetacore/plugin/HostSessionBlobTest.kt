@@ -40,7 +40,7 @@ class HostSessionBlobTest {
                         }
                         val run = "later-$pass"
                         val reader = service.catalog.freeze(run).values.single { it.toolKey == "host/blob_read" }
-                        suspend fun read(session: String, id: String, offset: Long, step: String): InvocationRecord {
+                        suspend fun read(session: String, id: String, offset: Number, step: String): InvocationRecord {
                             val args = buildJsonObject { put("id", id); put("offset", offset) }.toString()
                             val reply = service.executeStep(calls(reader.modelName, args, step), session, session, run, step)!!
                             return service.ledger.get((reply.parts.single() as ContentPart.ToolResult).callId)!!
@@ -64,6 +64,13 @@ class HostSessionBlobTest {
                         assertEquals(Status.FAILED, invalid.state)
                         assertTrue(invalid.result!!.text.startsWith("Invalid result range"))
                         assertFalse(invalid.result!!.text.contains("Exception"))
+                        val oversized = Long.MAX_VALUE.toBigInteger() + java.math.BigInteger.ONE
+                        assertEquals(invalid.result!!.text, read("session", ref.id, oversized, "huge-owned").result!!.text)
+                        for ((index, id) in listOf(ref.id, "f".repeat(64)).withIndex()) {
+                            val denied = read("other", id, oversized, "huge-denied-$index")
+                            assertEquals(Status.FAILED, denied.state)
+                            assertEquals(foreign.result!!.text, denied.result!!.text)
+                        }
                         if (pass == 1) {
                             service.ledger.deleteSession("session")
                             val denied = read("other", ref.id, 0, "deleted")
