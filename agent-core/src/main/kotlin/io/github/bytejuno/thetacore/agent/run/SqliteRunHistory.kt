@@ -695,7 +695,6 @@ open class SqliteRunHistory internal constructor(
          * the existing session without resetting its revision, pending work, or checkpoints. */
         fun create(database: AgentDatabase, sessionId: String = UUID.randomUUID().toString(),
                    fault: (HistoryWritePoint) -> Unit = {}): SqliteRunHistory {
-            require(sessionId.isNotBlank()); HistoryCodec.requireUtf8(sessionId)
             database.bindSession(sessionId)
             try {
                 database.access {

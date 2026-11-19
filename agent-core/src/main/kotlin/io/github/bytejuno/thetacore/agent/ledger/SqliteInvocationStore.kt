@@ -1,6 +1,7 @@
 package io.github.bytejuno.thetacore.agent.ledger
 
 import androidx.sqlite.SQLiteDriver
+import io.github.bytejuno.thetacore.agent.run.HistoryCodec
 import kotlinx.serialization.json.Json
 import java.nio.ByteBuffer
 import java.nio.file.Path
@@ -28,7 +29,7 @@ class SqliteInvocationStore private constructor(
     /** Test-only fatal failure seam before publishing the confirmed record projection. */
     internal var afterCacheUpdate: () -> Unit = {}
     private val recordsById = loadRecords().associateByTo(linkedMapOf()) { it.callId }
-    private val roots = BlobReferenceIndex(recordsById.values)
+    private var roots = BlobReferenceIndex(recordsById.values.filterNot { isSessionDeleted(it.input.sessionId) })
     private val manifests = mutableMapOf<String, ByteArray>()
     private val unavailable = mutableSetOf<String>()
     internal var blobBytesRead = 0L
@@ -44,9 +45,10 @@ class SqliteInvocationStore private constructor(
         database.ready()
         if (closed || poisoned) throw StoreException("Store closed or uncertain; reopen and recover", poisoned)
     }
-    override fun bindCoordinator() = synchronized(database) {
+    override fun bindCoordinator(): (String) -> Unit = synchronized(database) {
         check(!closed && !bound) { "Store already has a coordinator" }
         bound = true
+        ::deleteSession
     }
     override fun records(): List<InvocationRecord> { synchronized(database) {
         // Immutable last-confirmed projection remains available after an uncertain commit.
@@ -83,7 +85,7 @@ class SqliteInvocationStore private constructor(
                 }
             }
         }
-        require(owners == records.flatMap { record -> record.blobReferences().map { record.callId to it.contentHash } }.toSet()) {
+        require(owners == records.filterNot { isSessionDeleted(it.input.sessionId) }.flatMap { record -> record.blobReferences().map { record.callId to it.contentHash } }.toSet()) {
             "Corrupt content ownership index"
         }
         records
@@ -162,9 +164,14 @@ class SqliteInvocationStore private constructor(
         val previous = recordsById[record.callId]
         require(previous?.revision == expectedRevision && record.revision == (expectedRevision ?: 0) + 1) { "Revision conflict" }
         val snapshot = record.detached()
-        val refs = snapshot.blobReferences().toSet()
+        val isDeleted = isSessionDeleted(record.input.sessionId)
+        require(!isDeleted || (previous != null && blobs.isEmpty() &&
+            snapshot.blobReferences().toSet() == previous.blobReferences().toSet())) {
+            "Deleted sessions cannot publish content or new calls"
+        }
+        val refs = if (isDeleted) emptySet() else snapshot.blobReferences().toSet()
         require(blobs.all { it.ref in refs }) { "Unowned blob publication" }
-        val oldRefs = previous?.blobReferences().orEmpty().toSet()
+        val oldRefs = if (isDeleted) emptySet() else previous?.blobReferences().orEmpty().toSet()
         val published = mutableSetOf<String>()
         var commitAttempted = false
         var begun = false
@@ -239,7 +246,7 @@ class SqliteInvocationStore private constructor(
             commitAttempted = true
             db.execute("COMMIT"); begun = false
             fault(SqliteWriteStage.AFTER_COMMIT)
-            roots.replace(previous, snapshot)
+            if (!isDeleted) roots.replace(previous, snapshot)
             // Only a confirmed, fully verified publication repairs quarantine. Failed or
             // uncertain commits never unquarantine previously damaged evidence.
             unavailable.removeAll(published)
@@ -260,6 +267,54 @@ class SqliteInvocationStore private constructor(
             throw StoreException("Invocation transaction failed", poisoned, error)
         }
     } }
+
+    override fun isSessionDeleted(sessionId: String): Boolean = synchronized(database) {
+        checkAdmission()
+        try { database.isSessionDeleted(sessionId) }
+        catch (error: Exception) { throw StoreException("Cannot check session deletion", cause = error) }
+    }
+
+    private fun deleteSession(sessionId: String) = synchronized(database) {
+        checkAdmission()
+        database.checkSessionDeletion(sessionId)
+        val canHaveHistory = HistoryCodec.isUtf8(sessionId)
+        // A previous attempt may have committed the tombstone before scratch cleanup.
+        if (isSessionDeleted(sessionId)) {
+            if (canHaveHistory) database.cleanSessionScratch(sessionId)
+            return@synchronized
+        }
+        val members = recordsById.values.filter { it.input.sessionId == sessionId }
+        require(members.all { it.state.terminal && it.instance?.state != InstanceState.UNCONFIRMED }) {
+            "Session has unfinished invocations"
+        }
+        val hashes = members.flatMap { it.blobReferences() }.map { it.contentHash }.toSet()
+        try {
+            database.transaction {
+                fault(SqliteWriteStage.AFTER_BEGIN)
+                database.markSessionDeleted(sessionId)
+                db.prepare("DELETE FROM invocation_contents WHERE call_id=?").use { statement ->
+                    members.forEach { statement.bindText(1, it.callId); statement.step(); statement.reset() }
+                }
+                db.prepare("DELETE FROM contents WHERE hash=? AND NOT EXISTS(SELECT 1 FROM invocation_contents WHERE hash=?)").use { statement ->
+                    hashes.forEach { statement.bindText(1, it); statement.bindText(2, it); statement.step(); statement.reset() }
+                }
+                if (canHaveHistory) for (table in listOf("history_values", "sessions")) db.prepare("DELETE FROM $table WHERE session_id=?").use {
+                    it.bindText(1, sessionId); it.step()
+                }
+                fault(SqliteWriteStage.BEFORE_COMMIT)
+            }
+            fault(SqliteWriteStage.AFTER_COMMIT)
+            if (canHaveHistory) database.cleanSessionScratch(sessionId)
+            roots = BlobReferenceIndex(recordsById.values.filterNot { isSessionDeleted(it.input.sessionId) })
+            hashes.filter { hash -> !roots.ownsFile("$hash.blob") }.forEach {
+                manifests.remove(it); unavailable.remove(it)
+            }
+        } catch (error: Throwable) {
+            poisoned = true; database.poison()
+            if (error !is Exception) throw error
+            throw StoreException("Session deletion acknowledgement uncertain; reopen and recover", true, error)
+        }
+    }
 
     override fun close() = synchronized(database) {
         if (!closed) {

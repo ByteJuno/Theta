@@ -10,7 +10,7 @@ import kotlinx.serialization.json.JsonObject
 internal class TestStore : InvocationStore {
     private val data = linkedMapOf<String, InvocationRecord>()
     private var bound = false
-    override fun bindCoordinator() { check(!bound); bound = true }
+    override fun bindCoordinator(): ((String) -> Unit)? { check(!bound); bound = true; return null }
     override fun records() = data.values.toList()
     override fun save(record: InvocationRecord, expectedRevision: Long?) {
         check(data[record.callId]?.revision == expectedRevision)

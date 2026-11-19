@@ -168,11 +168,12 @@ class SharedHistoryDatabaseTest {
             sql.execute("DROP TABLE history_chunks")
             sql.execute("DROP TABLE history_values")
             sql.execute("DROP TABLE sessions")
+            sql.execute("DROP TABLE deleted_sessions")
             sql.execute("PRAGMA user_version=1")
         }
         Files.write(root.resolve("head.json"), "obsolete file is not a session".toByteArray())
         AgentDatabase.open(file, BundledSQLiteDriver()).use { db ->
-            assertEquals(2, db.connection.longValue("PRAGMA user_version"))
+            assertEquals(AgentDatabase.SCHEMA_VERSION.toLong(), db.connection.longValue("PRAGMA user_version"))
             assertFails { SqliteRunHistory.open(db, "session") }
             SqliteInvocationStore.open(db).use { assertTrue(it.records().isEmpty()) }
             SqliteRunHistory.create(db, "session").use { assertEquals(0, it.revision()) }

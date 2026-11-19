@@ -17,7 +17,7 @@ class StepCallIndexTest {
                 row("other-session", "run", "step"), row("session", "other-run", "step"))
             val store = object : InvocationStore {
                 var reads = 0
-                override fun bindCoordinator() = Unit
+                override fun bindCoordinator() = null
                 override fun records(): List<InvocationRecord> { reads++; return unrelated + target.reversed() }
                 override fun save(record: InvocationRecord, expectedRevision: Long?) = error("read-only fixture")
                 override fun close() = Unit
