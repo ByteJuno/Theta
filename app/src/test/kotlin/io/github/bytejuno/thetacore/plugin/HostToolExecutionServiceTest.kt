@@ -1883,12 +1883,17 @@ class HostToolExecutionServiceTest {
             alarms.add(alarm)
             return { synchronized(this) { alarms.remove(alarm) } }
         }
+        @Synchronized fun takeDueAlarms(): List<() -> Unit> {
+            val due = alarms.filter { it.due <= (if (it.elapsed) millis + sleptMillis else millis) }
+            alarms.removeAll(due)
+            return due.map { it.action }
+        }
         fun advance(delta: Long, deliver: Boolean = true) {
             val due = synchronized(this) {
                 millis += delta
-                if (deliver) alarms.filter { it.due <= (if (it.elapsed) millis + sleptMillis else millis) }.also { alarms.removeAll(it) } else emptyList()
+                if (deliver) takeDueAlarms() else emptyList()
             }
-            due.forEach { it.action() }
+            due.forEach { it() }
         }
     }
 
@@ -1916,6 +1921,59 @@ class HostToolExecutionServiceTest {
                 assertNull(record.pending)
                 assertFalse(record.receipts.any { it.request.id == pending.id && it.decision != Decision.DENY })
                 assertEquals(0, effects.get())
+            }
+        }
+    }
+
+    @Test fun runCancellationBeforeAlarmDeliveryUsesTheApprovalDeadline() = runBlocking {
+        for (expired in listOf(false, true)) {
+            val clock = ManualClock()
+            Fixture(clock = clock).use { f ->
+                val release = CountDownLatch(1)
+                try {
+                    val definition = f.register(tool(resource = "screen") { env ->
+                        currentCoroutineContext()[Job]!!.invokeOnCompletion { release.await() }
+                        env.requestApproval("write", ToolRisk.WRITE)
+                        ToolResult("done")
+                    })
+                    val calls = completedCalls(List(2) { definition.modelName }, "cancel-run").calls()
+                    val id = calls.first().binding.callId
+                    val signals = mutableListOf<String>()
+                    val executor = LedgerToolExecutor(f.ledger, f.gate, listOf(definition), object : ToolExecutionBridge {
+                        override fun submit(ticket: ExecutionTicket) = error("Dispatched by host")
+                        override suspend fun awaitTerminal(callId: String) = error("Not awaiting submission")
+                        override fun requestCancel(callId: String) { signals += callId }
+                    })
+                    executor.register(RunIdentity("chain", "session", "run"), "step", calls, cancelled = false)
+                    assertTrue(f.ledger.validateAndPrepare(id) is Mutation.Applied)
+                    assertTrue(f.service.dispatch(id) is Mutation.Applied)
+                    val pending = pendingUpgrade(f, id)
+                    val expected = if (expired) Status.TIMED_OUT else Status.CANCELLED
+                    f.gate.withGate {
+                        clock.advance(10_000)
+                        clock.sleepFor(if (expired) 590_000 else 589_999)
+                        val queued = clock.takeDueAlarms()
+                        assertEquals(if (expired) 1 else 0, queued.size)
+                        executor.cancelRemaining(calls)
+                        assertEquals(expected, f.ledger.get(id)!!.state)
+                        queued.forEach { it() }
+                    }
+                    assertEquals(listOf(id), signals)
+                    f.service.cancel(id) // Deliver the bridge signal after the batch reconciled.
+                    val record = f.ledger.get(id)!!
+                    assertEquals(expected, record.state)
+                    assertNull(record.pending)
+                    assertFalse(record.receipts.any { it.request.id == pending.id })
+                    assertEquals(InstanceState.UNCONFIRMED, record.instance!!.state)
+                    assertEquals(1, f.budget.occupiedSlots())
+                    val unsubmitted = f.ledger.get(calls.last().binding.callId)!!
+                    assertEquals(Status.CANCELLED, unsubmitted.state)
+                    assertEquals(Effect.NONE, unsubmitted.result!!.effect)
+                    assertNull(unsubmitted.instance)
+                    release.countDown()
+                    withTimeout(5_000) { f.service.awaitObservedExit(id) }
+                    assertEquals(0, f.budget.occupiedSlots())
+                } finally { release.countDown() }
             }
         }
     }

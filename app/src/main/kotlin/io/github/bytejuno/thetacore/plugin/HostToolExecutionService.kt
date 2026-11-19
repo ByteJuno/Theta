@@ -176,7 +176,9 @@ internal class HostToolExecutionService(
             val reservation = budget.reserve(entry.definition.owner, owner,
                 onCancel = { invocation?.cancel() }, onExit = {})
                 ?: return@withGate Mutation.Blocked("Execution capacity unavailable")
-            val claimed = try { observe(ledger.claimExecution(callId, record.revision)) }
+            val claimed = try {
+                observe(ledger.claimExecution(callId, record.revision) { checkNotNull(invocation).timedOutAtCancellation() })
+            }
                 catch (error: Throwable) { reservation.abandon(); closeSubmissions(); throw error }
             val ticket = (claimed as? Mutation.Applied)?.ticket
             if (ticket == null) { reservation.abandon(); return@withGate claimed }
@@ -303,8 +305,8 @@ internal class HostToolExecutionService(
     }
     suspend fun cancel(callId: String): Mutation = withContext(Dispatchers.IO) {
         gate.withGate {
-            val timedOut = active[callId]?.cancel() == PluginInvocationStatus.TIMED_OUT
-            val mutation = observe(if (timedOut) ledger.timeout(callId) else ledger.cancel(callId))
+            active[callId]?.cancel()
+            val mutation = observe(ledger.cancel(callId))
             wakeApproval(callId)
             mutation
         }

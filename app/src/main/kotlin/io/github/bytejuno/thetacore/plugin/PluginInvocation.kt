@@ -272,6 +272,12 @@ internal class PluginInvocation(
         completion.complete(value)
     }
 
+    /** Sample the live deadline before the ledger commits a run-wide or individual cancellation. */
+    fun timedOutAtCancellation(): Boolean = synchronized(budget.gate) {
+        if (started) expireIfDue()
+        terminalStatus == PluginInvocationStatus.TIMED_OUT
+    }
+
     /** Unique logical terminal; cancellation delivery and actual exit are separate. */
     fun cancel(): PluginInvocationStatus = synchronized(budget.gate) {
         if (!started || !expireIfDue()) finish(PluginInvocationResult(PluginInvocationStatus.CANCELLED, message = "Invocation cancelled"))
