@@ -1,5 +1,13 @@
 # Issue 24 — Chat and inline approvals
 
+## November 19 integration of approval timing and blob storage
+
+Tested source `668111458c5f5ee11f8ff8cb13ec4132ec71366d` includes main `f9ee70a953f53721eaae32422b61e99e6818002e`. Chat and cold approvals use the session store. Live and recovered dispatch retain the revision check and use the host clock to distinguish cancellation from timeout. The clock is bound before the worker starts. The integration also includes main’s updated SQLite blob storage.
+
+99/99 JVM tests passed on this source (87 HostToolExecutionServiceTest, 12 ChatSessionOwnerTest), with zero failures, errors or skips. Strict Gradle configuration cache was stored; the final run took 43.93 seconds. The first integration exposed a positional clock argument mismatch during unit-test compilation. The constructor was corrected and the original log retained under `validation-issue11/issue24-ea7566b0-main`. Final test XML and Gradle output are in `validation-issue11/issue24-ea7566b0-final`.
+
+No APK was generated. Visual layout, Android restart and the different-signer device scenario await the independent reviewer’s final-head regression and CI. This integration changes no UI resources.
+
 ## November 19 pre-merge regression repair
 
 Tested source `532be9424180183d1166e49787e8816498004af7`, Git tree `444c9a01bffeb3ebfcc857f8495ed7f11332d503`. The local alias test reproduced `UnsupportedOperationException` at line 199 on `fc9f165d` when clearing a one-tool snapshot. Restoring detached ordered copies preserves both caller behavior and the run's internal directory. The GPU checkout matched the tested tree and reported `GRADLE_EXIT=0`, 80 host-service tests, zero failures with strict configuration-cache flags.
