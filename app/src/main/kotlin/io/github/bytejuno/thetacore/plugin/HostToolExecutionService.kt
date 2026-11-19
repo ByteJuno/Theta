@@ -173,7 +173,8 @@ internal class HostToolExecutionService(
             if (record.state != Status.READY) return@withGate checked
             val entry = catalog.current(requireNotNull(record.input.definition)) ?: return@withGate Mutation.Blocked("Definition unavailable")
             var invocation: PluginInvocation? = null
-            val reservation = budget.reserve(entry.definition.owner, owner,
+            val executionDomain = entry.definition.builtinToolKey ?: entry.definition.owner
+            val reservation = budget.reserve(executionDomain, owner,
                 onCancel = { invocation?.cancel() }, onExit = {})
                 ?: return@withGate Mutation.Blocked("Execution capacity unavailable")
             val claimed = try {
@@ -182,7 +183,7 @@ internal class HostToolExecutionService(
                 catch (error: Throwable) { reservation.abandon(); closeSubmissions(); throw error }
             val ticket = (claimed as? Mutation.Applied)?.ticket
             if (ticket == null) { reservation.abandon(); return@withGate claimed }
-            invocation = PluginInvocation(budget, entry.definition.owner, owner, entry.tool,
+            invocation = PluginInvocation(budget, executionDomain, owner, entry.tool,
                 Json.parseToJsonElement(ticket.argsJson).jsonObject,
                 ToolInvocationRequest(record.input.runId, record.input.sessionId, callId, record.input.unattended),
                 requestApproval = { summary, risk -> requestRuntimeApproval(ticket, summary, Risk.valueOf(risk.name)) },

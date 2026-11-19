@@ -37,7 +37,7 @@ class HistorySchemaTest {
                 "chain", "session", "run", "step", 4, "{}", definition, true, Risk.WRITE, true, "tool"),
             definition.digest, Status.TIMED_OUT, Risk.ROOT, "{}", approval,
             listOf(ApprovalReceipt(approval, Decision.DENY, ApprovalDenialReason.UNATTENDED_UNKNOWN)),
-            ExecutionInstance(UUID.randomUUID().toString(), "epoch", InstanceState.UNCONFIRMED), result,
+            ExecutionInstance(UUID.randomUUID().toString(), "epoch", InstanceState.UNCONFIRMED, "host/screen_info"), result,
             listOf(ExitEvidence("attempt", "late", result)), Isolation("unknown", "resource", RecoveryResolution.ACCEPTED_UNCERTAINTY),
             true, true, true, approval.id)
         // Wire-shape fixtures intentionally exercise optional fields together; transition validity
