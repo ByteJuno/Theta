@@ -50,13 +50,15 @@ class ChatSessionOwnerTest {
             budget.close(); store.close()
         }
     }
-    private fun provider(tool: Boolean = true, streaming: CompletableDeferred<Unit>? = null) = object : ModelProvider {
+    private fun provider(tool: Boolean = true, streaming: CompletableDeferred<Unit>? = null, calls: Int = 1) = object : ModelProvider {
         var requests = 0
         override fun executionMode(request: ChatRequest) = ModelExecutionMode.GENERATION_ONLY
         override fun chat(request: ChatRequest, auth: Credentials): Flow<ModelEvent> = flow {
             emit(Events.started("response-${requests++}", "model"))
             if (tool && requests == 1) {
-                emit(Events.toolStart(0, "wire", "host_clock")); emit(Events.toolDelta(0, "{}")); emit(Events.end(0))
+                repeat(calls) { index ->
+                    emit(Events.toolStart(index, "wire-$index", "host_clock")); emit(Events.toolDelta(index, "{}")); emit(Events.end(index))
+                }
                 emit(Events.finished(FinishReason.TOOL_CALLS))
             } else {
                 emit(Events.text(0, "hello")); streaming?.await(); emit(Events.text(0, " world")); emit(Events.end(0))
@@ -256,6 +258,49 @@ class ChatSessionOwnerTest {
             assertEquals(0, f.host.catalog.gate.frozenRunCount)
             f.close()
         } finally { root.deleteRecursively() }
+    }
+
+    @Test fun parallelUnknownResultRenewsInlineApprovalWithoutLosingTheCall() = runBlocking {
+        for (decision in listOf(Decision.DENY, Decision.ALLOW_ONCE)) {
+            val root = Files.createTempDirectory("chat-renewal").toFile()
+            val count = AtomicInteger()
+            val release = CompletableDeferred<Unit>()
+            val parallelTool = object : Tool {
+                override val id = "write"
+                override val spec = ToolSpec(id, "test write", schema, risk = ToolRisk.WRITE, parallelSafe = true, timeoutMs = 30_000)
+                override suspend fun call(args: JsonObject, env: ToolEnv): ToolResult = if (count.incrementAndGet() == 1) {
+                    release.await(); ToolResult("interrupted", isError = true, effect = ToolEffect.UNKNOWN)
+                } else ToolResult("done", effect = ToolEffect.APPLIED)
+            }
+            val fixture = fixture(root, count, provider(calls = 2), parallelTool)
+            try {
+                val owner = fixture.owner
+                owner.open().join(); owner.send("two writes").join()
+                suspend fun pending(order: Int): InvocationRecord {
+                    await { owner.state.value.records.values.any { it.pending != null && it.input.callOrder == order } }
+                    return owner.state.value.records.values.single { it.input.callOrder == order }
+                }
+                val first = pending(0)
+                owner.decide(first.callId, first.pending!!.id, Decision.ALLOW_ONCE).join()
+                val second = pending(1)
+                val oldId = second.pending!!.id
+                release.complete(Unit)
+                await { fixture.host.ledger.get(first.callId)?.instance?.state == InstanceState.EXIT_CONFIRMED }
+                owner.decide(second.callId, oldId, Decision.ALLOW_ONCE).join()
+                val updated = requireNotNull(pending(1).pending)
+                assertNotEquals(oldId, updated.id)
+                assertEquals(listOf(first.callId), updated.unknownCalls)
+                assertEquals(1, count.get())
+                owner.decide(second.callId, updated.id, decision).join()
+                await { !owner.state.value.active }
+                val final = requireNotNull(fixture.host.ledger.get(second.callId))
+                assertEquals(updated.id, final.receipts.single().request.id)
+                assertEquals(decision, final.receipts.single().decision)
+                assertEquals(if (decision == Decision.DENY) Status.REJECTED else Status.SUCCEEDED, final.state)
+                assertEquals(if (decision == Decision.DENY) 1 else 2, count.get())
+                assertEquals(R.string.chat_complete, owner.state.value.notice)
+            } finally { release.complete(Unit); fixture.close(); root.deleteRecursively() }
+        }
     }
 
     @Test fun validatedStreamingAppearsBeforeFinishAndCancellationSettlesOwner() = runBlocking {

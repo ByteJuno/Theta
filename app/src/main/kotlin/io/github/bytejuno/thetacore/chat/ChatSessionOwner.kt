@@ -193,12 +193,12 @@ internal class ChatSessionOwner(
             }
         }
     }
-    private suspend fun approval(request: ApprovalRequest): Decision {
+    private suspend fun approval(request: ApprovalRequest): Decision? {
         while (true) {
             currentCoroutineContext().ensureActive()
             val r = requireNotNull(tools!!.ledger.get(request.callId))
             r.receipts.firstOrNull { it.request.id == request.id }?.let { return it.decision }
-            check(r.pending?.id == request.id) { "Approval changed while waiting" }
+            if (r.pending?.id != request.id) return null
             delay(50)
         }
     }

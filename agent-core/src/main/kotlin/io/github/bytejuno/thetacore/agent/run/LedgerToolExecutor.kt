@@ -20,7 +20,8 @@ interface ToolExecutionBridge {
     suspend fun awaitTerminal(callId: String)
     fun requestCancel(callId: String)
 }
-fun interface RunApprovals { suspend fun decide(request: ApprovalRequest): Decision }
+/** Null signals a superseded request; only the current durable record can advance the call. */
+fun interface RunApprovals { suspend fun decide(request: ApprovalRequest): Decision? }
 
 data class RunIdentity(val taskChainId: String, val sessionId: String, val runId: String, val unattended: Boolean = false)
 class ToolStepBlocked(message: String) : IllegalStateException(message)
@@ -142,7 +143,8 @@ class LedgerToolExecutor(
                     val pending = requireNotNull(r.pending)
                     val decision = approvals.decide(pending)
                     currentCoroutineContext().ensureActive()
-                    r = record(ledger.resolveApproval(r.callId, pending, decision))
+                    r = if (decision != null) record(ledger.resolveApproval(r.callId, pending, decision))
+                        else requireNotNull(ledger.get(r.callId)).also { check(it.pending?.id != pending.id) }
                 }
             }
             resolveCurrent()
