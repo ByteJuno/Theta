@@ -6,6 +6,7 @@ import io.github.bytejuno.thetacore.uiText
 
 import android.content.Context
 import android.net.Uri
+import android.os.SystemClock
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -88,7 +89,7 @@ internal class PluginManager(context: Context) {
     private val app = context.applicationContext
     private companion object {
         // Multiple manager instances must never multiply the process execution allowance.
-        val executionBudget = PluginExecutionBudget()
+        val executionBudget = PluginExecutionBudget(approvalElapsedNanos = SystemClock::elapsedRealtimeNanos)
         val hostToolBridge = HostToolBridgeRoot(executionBudget)
     }
 

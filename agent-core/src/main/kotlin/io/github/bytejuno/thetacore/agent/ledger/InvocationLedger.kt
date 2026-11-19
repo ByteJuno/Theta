@@ -195,16 +195,22 @@ class InvocationLedger(
     }
 
     /** Host decisions supply identifiers, never caller-owned risk/digest/unknown evidence. */
-    fun decideApproval(callId: String, requestId: String, decision: Decision): Mutation = gate.withGate {
+    @JvmOverloads
+    fun decideApproval(callId: String, requestId: String, decision: Decision,
+        finishRuntimeWait: () -> Boolean = { true }): Mutation = gate.withGate {
         val r = get(callId) ?: return@withGate Mutation.Conflict("Unknown call")
         val pending = r.pending
         if (pending == null || pending.id != requestId) return@withGate Mutation.Conflict("Approval is not current")
         if (r.input.unattended) return@withGate Mutation.Blocked("Unattended approval unavailable")
-        resolveApproval(callId, pending, decision)
+        resolveApproval(callId, pending, decision, finishRuntimeWait)
     }
 
     /** The entire stored request must match; a UI-supplied digest/version is not trusted. */
-    fun resolveApproval(callId: String, approval: ApprovalRequest, decision: Decision): Mutation = gate.withGate {
+    fun resolveApproval(callId: String, approval: ApprovalRequest, decision: Decision): Mutation =
+        resolveApproval(callId, approval, decision) { true }
+
+    private fun resolveApproval(callId: String, approval: ApprovalRequest, decision: Decision,
+        finishRuntimeWait: () -> Boolean): Mutation = gate.withGate {
         executionAdmissionFailure()?.let { return@withGate it }
         val r = get(callId) ?: return@withGate Mutation.Conflict("Unknown call")
         r.receipts.find { it.request.id == approval.id }?.let {
@@ -220,6 +226,7 @@ class InvocationLedger(
         if (decision == Decision.DENY) {
             // Current-request denial grants nothing and must remain possible during refresh or
             // changed policy/evidence. Internal denial leaves the already-running invocation real.
+            if (approval.internal && !finishRuntimeWait()) return@withGate Mutation.Conflict("Runtime approval expired")
             val denied = r.copy(pending = null, receipts = r.receipts + ApprovalReceipt(approval, decision))
             return@withGate update(r, if (approval.internal) denied else terminal(denied, Status.REJECTED, null, "Approval denied"))
         }
@@ -229,6 +236,7 @@ class InvocationLedger(
             return@withGate Mutation.Blocked("ROOT long-term grants disabled")
         if (unknown(r, approval.risk) != approval.unknownCalls)
             return@withGate update(r, r.copy(pending = request(r, approval.risk, approval.internal, approval.summary)))
+        if (approval.internal && !finishRuntimeWait()) return@withGate Mutation.Conflict("Runtime approval expired")
         val next = r.copy(pending = null, receipts = r.receipts + ApprovalReceipt(approval, decision))
         update(r, next.copy(state = if (approval.internal) Status.RUNNING else Status.READY,
             effectiveRisk = maxOf(r.effectiveRisk, approval.risk)))

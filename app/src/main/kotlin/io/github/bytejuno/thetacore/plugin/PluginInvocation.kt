@@ -36,6 +36,8 @@ internal data class PluginToolProgress(val text: String, val fraction: Float?)
 
 internal interface InvocationClock {
     fun nowNanos(): Long
+    /** Monotonic time including suspend on Android, used only during human approval. */
+    fun elapsedRealtimeNanos(): Long
     fun arm(delayMillis: Long, action: () -> Unit): () -> Unit
 }
 
@@ -75,7 +77,8 @@ internal class PluginInvocation(
     private var lease: PluginExecutionBudget.Lease? = reservation
     private var disarm: (() -> Unit)? = null
     private var terminalStatus: PluginInvocationStatus? = null
-    private var waitingSince: Long? = null
+    private data class ApprovalWait(val elapsedStart: Long, val executionStart: Long)
+    private var approvalWait: ApprovalWait? = null
     private var approvalRemainingNanos = TimeUnit.MINUTES.toNanos(10)
     private var started = false
     private var startedNanos = 0L
@@ -203,34 +206,38 @@ internal class PluginInvocation(
 
     private fun reportProgress(text: String, fraction: Float?) = synchronized(budget.gate) {
         if (completion.isCompleted || expireIfDue()) return
-        if (waitingSince == null) lastProgressNanos = clock.nowNanos()
+        if (approvalWait == null) lastProgressNanos = clock.nowNanos()
         mutableProgress.value = PluginToolProgress(text.take(1024), fraction?.takeIf { it.isFinite() }?.coerceIn(0f, 1f))
         armDeadline()
     }
 
     fun setHumanApprovalWaiting(waiting: Boolean): Boolean = synchronized(budget.gate) {
-        val now = clock.nowNanos()
+        val wait = approvalWait
+        val now = if (wait == null) clock.nowNanos() else clock.elapsedRealtimeNanos()
         if (expireIfDue(now)) return false
-        val since = waitingSince
-        if (waiting == (since != null)) return true
-        if (since == null) waitingSince = now else {
-            val elapsed = now - since
-            approvalRemainingNanos -= elapsed
-            startedNanos += elapsed
-            lastProgressNanos += elapsed
-            waitingSince = null
+        if (waiting == (wait != null)) return true
+        if (wait == null) {
+            approvalWait = ApprovalWait(clock.elapsedRealtimeNanos(), now)
+        } else {
+            approvalRemainingNanos -= now - wait.elapsedStart
+            val paused = clock.nowNanos() - wait.executionStart
+            startedNanos += paused
+            lastProgressNanos += paused
+            approvalWait = null
         }
         armDeadline()
         !completion.isCompleted
     }
 
+    private fun deadlineClockNanos() = if (approvalWait == null) clock.nowNanos() else clock.elapsedRealtimeNanos()
+
     private fun remainingNanos(now: Long): Long {
-        waitingSince?.let { return approvalRemainingNanos - (now - it) }
+        approvalWait?.let { return approvalRemainingNanos - (now - it.elapsedStart) }
         return minOf(TimeUnit.MILLISECONDS.toNanos(totalTimeoutMillis) - (now - startedNanos),
             TimeUnit.MILLISECONDS.toNanos(idleMillis) - (now - lastProgressNanos))
     }
 
-    private fun expireIfDue(now: Long = clock.nowNanos()): Boolean {
+    private fun expireIfDue(now: Long = deadlineClockNanos()): Boolean {
         if (completion.isCompleted) return true
         if (remainingNanos(now) > 0) return false
         finish(PluginInvocationResult(PluginInvocationStatus.TIMED_OUT, message = "Tool execution timed out; actual exit is tracked separately"))
@@ -243,7 +250,7 @@ internal class PluginInvocation(
         disarm = null
         if (completion.isCompleted || expireIfDue()) return
         // Round up; a sub-millisecond remainder must not become a tight timer loop.
-        val millis = (remainingNanos(clock.nowNanos()).coerceAtLeast(1) + 999_999) / 1_000_000
+        val millis = (remainingNanos(deadlineClockNanos()).coerceAtLeast(1) + 999_999) / 1_000_000
         disarm = clock.arm(millis) {
             synchronized(budget.gate) { if (!expireIfDue()) armDeadline() }
         }
@@ -252,7 +259,7 @@ internal class PluginInvocation(
     private fun finish(value: PluginInvocationResult) {
         if (terminalStatus != null) return
         terminalStatus = value.status
-        waitingSince = null
+        approvalWait = null
         disarm?.invoke()
         disarm = null
         completion.complete(value)

@@ -1868,6 +1868,9 @@ class HostToolExecutionServiceTest {
 
     private class ManualClock : InvocationClock {
         private var millis = 0L
+        private var sleptMillis = 0L
+        @Synchronized fun sleepFor(delta: Long) { sleptMillis += delta }
+        @Synchronized override fun elapsedRealtimeNanos() = TimeUnit.MILLISECONDS.toNanos(millis + sleptMillis)
         private data class Alarm(val due: Long, val action: () -> Unit)
         private val alarms = mutableListOf<Alarm>()
         @Synchronized override fun nowNanos(): Long = TimeUnit.MILLISECONDS.toNanos(millis)
@@ -1882,6 +1885,77 @@ class HostToolExecutionServiceTest {
                 if (deliver) alarms.filter { it.due <= millis }.also { alarms.removeAll(it) } else emptyList()
             }
             due.forEach { it.action() }
+        }
+    }
+
+    @Test fun approvalAtDeadlineAfterDeepSleepCannotWriteAnAllowReceipt() = runBlocking {
+        for (cancelFirst in listOf(false, true)) {
+            val clock = ManualClock()
+            Fixture(clock = clock).use { f ->
+                val effects = AtomicInteger()
+                val input = f.input(f.register(tool { env ->
+                    if (env.requestApproval("write", ToolRisk.WRITE)) effects.incrementAndGet()
+                    ToolResult("done")
+                }))
+                val id = input.binding.callId
+                f.service.prepare(input); f.service.dispatch(id)
+                val pending = pendingUpgrade(f, id)
+                f.gate.withGate {
+                    clock.advance(10_000)
+                    clock.sleepFor(590_000)
+                }
+                if (cancelFirst) f.service.cancel(id)
+                assertTrue(f.service.decide(id, pending.id, Decision.ALLOW_ONCE) is Mutation.Conflict)
+                withTimeout(5_000) { f.service.awaitObservedExit(id) }
+                val record = f.ledger.get(id)!!
+                assertEquals(Status.TIMED_OUT, record.state)
+                assertNull(record.pending)
+                assertFalse(record.receipts.any { it.request.id == pending.id && it.decision != Decision.DENY })
+                assertEquals(0, effects.get())
+            }
+        }
+    }
+
+    @Test fun blockedRootChoiceChargesPolicyTimeToHumanWait() = runBlocking {
+        val clock = ManualClock()
+        val policy = ApprovalPolicy(allowRootLongTerm = { clock.advance(6); false })
+        Fixture(policy = policy, clock = clock).use { f ->
+            val answer = CompletableDeferred<Boolean>()
+            val input = f.input(f.register(tool(timeout = 100) { env ->
+                clock.advance(95)
+                answer.complete(env.requestApproval("root", ToolRisk.ROOT))
+                ToolResult("done")
+            }))
+            val id = input.binding.callId
+            f.service.prepare(input); f.service.dispatch(id)
+            val pending = pendingUpgrade(f, id)
+            f.gate.withGate { clock.advance(1_000) }
+            assertTrue(f.service.decide(id, pending.id, Decision.ALLOW_ALWAYS) is Mutation.Blocked)
+            assertEquals(pending.id, f.ledger.get(id)!!.pending?.id)
+            assertTrue(f.service.decide(id, pending.id, Decision.ALLOW_ONCE) is Mutation.Applied)
+            assertTrue(withTimeout(5_000) { answer.await() })
+            f.service.awaitObservedExit(id)
+            assertEquals(Status.SUCCEEDED, f.ledger.get(id)!!.state)
+        }
+    }
+
+    @Test fun deadlineCrossedDuringPolicyCheckCannotGrantApproval() = runBlocking {
+        val clock = ManualClock()
+        val policy = ApprovalPolicy(allowRootLongTerm = { clock.advance(6, deliver = false); true })
+        Fixture(policy = policy, clock = clock).use { f ->
+            val input = f.input(f.register(tool { env ->
+                env.requestApproval("root", ToolRisk.ROOT)
+                ToolResult("done")
+            }))
+            val id = input.binding.callId
+            f.service.prepare(input); f.service.dispatch(id)
+            val pending = pendingUpgrade(f, id)
+            f.gate.withGate { clock.advance(599_995) }
+            assertTrue(f.service.decide(id, pending.id, Decision.ALLOW_ALWAYS) is Mutation.Conflict)
+            f.service.awaitObservedExit(id)
+            val record = f.ledger.get(id)!!
+            assertEquals(Status.TIMED_OUT, record.state)
+            assertFalse(record.receipts.any { it.request.id == pending.id && it.decision != Decision.DENY })
         }
     }
 

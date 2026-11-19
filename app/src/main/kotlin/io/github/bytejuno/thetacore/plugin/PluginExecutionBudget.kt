@@ -26,6 +26,7 @@ internal class PluginExecutionBudget(
     private val processSlots: Int = 8,
     private val perPluginSlots: Int = 2,
     cancellationThreads: Int = 2,
+    private val approvalElapsedNanos: () -> Long = System::nanoTime,
 ) : AutoCloseable, InvocationClock {
     init { require(processSlots > 0 && perPluginSlots > 0 && cancellationThreads > 0) }
     // Shared only by short host-memory transitions in the entry/invocation controllers.
@@ -173,6 +174,7 @@ internal class PluginExecutionBudget(
     fun occupiedSlots(): Int = synchronized(lock) { active.size }
 
     override fun nowNanos() = System.nanoTime()
+    override fun elapsedRealtimeNanos() = approvalElapsedNanos()
     override fun arm(delayMillis: Long, action: () -> Unit): () -> Unit {
         val future = schedule(delayMillis, action)
         return { future?.cancel(false) }

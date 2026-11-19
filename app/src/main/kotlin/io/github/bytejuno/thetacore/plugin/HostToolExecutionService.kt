@@ -56,14 +56,15 @@ internal class HostToolExecutionService(
             else if (catalog.frozen(record.input.runId) == null) Mutation.Blocked("Run catalog not frozen")
             else if (request.internal && (active[callId]?.actualExited?.isCompleted != false ||
                     approvalWaiters[callId]?.requestId != requestId ||
-                    active[callId]?.setHumanApprovalWaiting(false) != true)) Mutation.Conflict("Runtime approval instance is no longer live")
-            else observe(ledger.decideApproval(callId, requestId, decision)).also { mutation ->
+                    active[callId]?.setHumanApprovalWaiting(true) != true)) Mutation.Conflict("Runtime approval instance is no longer live")
+            else observe(ledger.decideApproval(callId, requestId, decision) {
+                // Only a final decision reaches this point, after policy and renewal checks.
+                active[callId]?.setHumanApprovalWaiting(false) == true
+            }).also { mutation ->
                 // Only the owner of the replaced ID follows an evidence-driven renewal.
                 if (mutation is Mutation.Applied) approvalWaiters[callId]?.takeIf { it.requestId == requestId }?.let { waiter ->
                     mutation.record.pending?.takeIf { it.internal }?.let { waiter.requestId = it.id }
                 }
-                if (request.internal && !storageFailed && ledger.get(callId)?.pending?.internal == true)
-                    active[callId]?.setHumanApprovalWaiting(true)
                 wakeApproval(callId)
             }
         }
