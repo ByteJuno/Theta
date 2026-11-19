@@ -12,7 +12,7 @@ class LedgerStorageIndexTest {
         var reads = 0
         private var bound = false
         private val values = seed.associateByTo(linkedMapOf()) { it.callId }
-        override fun bindCoordinator() { check(!bound); bound = true }
+        override fun bindCoordinator(): ((String) -> Unit)? { check(!bound); bound = true; return null }
         override fun records(): List<InvocationRecord> { reads++; return values.values.toList() }
         override fun save(record: InvocationRecord, expectedRevision: Long?) {
             record.validate()

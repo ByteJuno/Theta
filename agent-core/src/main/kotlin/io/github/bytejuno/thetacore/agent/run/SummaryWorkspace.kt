@@ -40,17 +40,26 @@ internal fun checkedSessionDirectory(path: Path, allowMissing: Boolean = false):
  */
 internal class SummaryWorkspace(sessionDirectory: Path) {
     private val directory = checkedSessionDirectory(sessionDirectory).resolve("summary-tmp")
-    private val names = Regex("theta-summary-[0-9]+\\.data")
+    companion object {
+        private val names = Regex("theta-summary-[0-9]+\\.data")
+
+        fun cleanExisting(sessionDirectory: Path) {
+            val directory = checkedSessionDirectory(sessionDirectory.resolve("summary-tmp"), allowMissing = true)
+            if (Files.notExists(directory, NOFOLLOW_LINKS)) return
+            Files.newDirectoryStream(directory).use { paths ->
+                for (path in paths) if (names.matches(path.fileName.toString()) &&
+                    Files.readAttributes(path, BasicFileAttributes::class.java, NOFOLLOW_LINKS).isRegularFile) {
+                    Files.delete(path)
+                }
+            }
+        }
+    }
 
     init {
         checkDirectories(directory.parent)
         try { Files.createDirectory(directory) }
         catch (_: java.nio.file.FileAlreadyExistsException) { /* Validate without following links below. */ }
-        checkDirectories(directory)
-        Files.newDirectoryStream(directory).use { paths ->
-            for (path in paths) if (names.matches(path.fileName.toString()) &&
-                Files.isRegularFile(path, NOFOLLOW_LINKS)) Files.delete(path)
-        }
+        cleanExisting(directory.parent)
     }
 
     fun create(): Path {
