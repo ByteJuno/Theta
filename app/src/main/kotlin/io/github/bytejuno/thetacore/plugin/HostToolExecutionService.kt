@@ -22,6 +22,7 @@ internal class HostToolExecutionService(
     private val exitGraceMillis: Long = 2_000,
     /** Test scheduling seam outside the gate; never supplies authorization or executes plugin code. */
     private val afterRuntimeApprovalStart: suspend () -> Unit = {},
+    private val invocationClock: InvocationClock = budget,
 ) {
     private val gate get() = catalog.gate
     private val control = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -34,9 +35,11 @@ internal class HostToolExecutionService(
     private fun wakeApproval(callId: String) { approvalWaiters[callId]?.signal?.complete(Unit) }
     @Volatile private var storageFailed = false
     private val storageFailure = CompletableDeferred<Unit>()
-    private fun closeSubmissions() {
+    private fun closeSubmissions() = gate.withGate {
         storageFailed = true
+        approvalWaiters.keys.forEach { active[it]?.setHumanApprovalWaiting(false) }
         storageFailure.complete(Unit)
+        Unit
     }
     private fun observe(mutation: Mutation): Mutation {
         if (mutation is Mutation.StorageFailure) closeSubmissions()
@@ -50,10 +53,14 @@ internal class HostToolExecutionService(
             val record = ledger.get(callId) ?: return@withGate Mutation.Conflict("Unknown call")
             val request = record.pending
             if (request == null || request.id != requestId) Mutation.Conflict("Approval is not current")
-            else if (request.internal && (active[callId] == null || active[callId]!!.terminal.isCompleted ||
-                    active[callId]!!.actualExited.isCompleted)) Mutation.Conflict("Runtime approval instance is no longer live")
             else if (catalog.frozen(record.input.runId) == null) Mutation.Blocked("Run catalog not frozen")
-            else observe(ledger.decideApproval(callId, requestId, decision)).also { mutation ->
+            else if (request.internal && (active[callId]?.actualExited?.isCompleted != false ||
+                    approvalWaiters[callId]?.requestId != requestId ||
+                    active[callId]?.setHumanApprovalWaiting(true) != true)) Mutation.Conflict("Runtime approval instance is no longer live")
+            else observe(ledger.decideApproval(callId, requestId, decision) {
+                // Only a final decision reaches this point, after policy and renewal checks.
+                active[callId]?.setHumanApprovalWaiting(false) == true
+            }).also { mutation ->
                 // Only the owner of the replaced ID follows an evidence-driven renewal.
                 if (mutation is Mutation.Applied) approvalWaiters[callId]?.takeIf { it.requestId == requestId }?.let { waiter ->
                     mutation.record.pending?.takeIf { it.internal }?.let { waiter.requestId = it.id }
@@ -84,6 +91,7 @@ internal class HostToolExecutionService(
                     val r = (m as? Mutation.Applied)?.record ?: return@withGate false
                     val pending = r.pending ?: run { immediateRisk = r.effectiveRisk; return@withGate true }
                     owned = ApprovalWaiter(pending.id).also { approvalWaiters[ticket.callId] = it }
+                    if (!active.getValue(ticket.callId).setHumanApprovalWaiting(true)) return@withGate false
                     null
                 }
                 afterRuntimeApprovalStart()
@@ -115,6 +123,7 @@ internal class HostToolExecutionService(
                             }
                             val renewed = current.pending ?: return@withGate true
                             waiter.requestId = renewed.id
+                            if (!active.getValue(ticket.callId).setHumanApprovalWaiting(true)) return@withGate false
                         }
                         waiter.signal = CompletableDeferred()
                         null
@@ -126,6 +135,7 @@ internal class HostToolExecutionService(
                 gate.withGate {
                     owned?.let { waiter ->
                         if (approvalWaiters[ticket.callId] === waiter) {
+                            active[ticket.callId]?.setHumanApprovalWaiting(false)
                             approvalWaiters.remove(ticket.callId)
                             observe(ledger.withdrawRiskUpgrade(ticket.callId, ticket.attemptId, waiter.requestId))
                         }
@@ -166,7 +176,9 @@ internal class HostToolExecutionService(
             val reservation = budget.reserve(entry.definition.owner, owner,
                 onCancel = { invocation?.cancel() }, onExit = {})
                 ?: return@withGate Mutation.Blocked("Execution capacity unavailable")
-            val claimed = try { observe(ledger.claimExecution(callId, record.revision)) }
+            val claimed = try {
+                observe(ledger.claimExecution(callId, record.revision) { checkNotNull(invocation).timedOutAtCancellation() })
+            }
                 catch (error: Throwable) { reservation.abandon(); closeSubmissions(); throw error }
             val ticket = (claimed as? Mutation.Applied)?.ticket
             if (ticket == null) { reservation.abandon(); return@withGate claimed }
@@ -174,7 +186,7 @@ internal class HostToolExecutionService(
                 Json.parseToJsonElement(ticket.argsJson).jsonObject,
                 ToolInvocationRequest(record.input.runId, record.input.sessionId, callId, record.input.unattended),
                 requestApproval = { summary, risk -> requestRuntimeApproval(ticket, summary, Risk.valueOf(risk.name)) },
-                frozenSpec = entry.spec, reservation = reservation, unattendedApprovalPolicy = true,
+                frozenSpec = entry.spec, reservation = reservation, unattendedApprovalPolicy = true, clock = invocationClock,
                 beforeExecution = {
                     gate.withGate {
                         val failure = ledger.executionAdmissionFailure()
@@ -293,9 +305,9 @@ internal class HostToolExecutionService(
     }
     suspend fun cancel(callId: String): Mutation = withContext(Dispatchers.IO) {
         gate.withGate {
+            active[callId]?.cancel()
             val mutation = observe(ledger.cancel(callId))
             wakeApproval(callId)
-            active[callId]?.cancel()
             mutation
         }
     }
