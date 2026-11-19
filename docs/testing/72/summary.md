@@ -1,6 +1,6 @@
 # #72 — Runtime approval wait budget
 
-Tested implementation: `6521a55782c97b7f89ae818484fc5712b5a59067`. The submitted source and protocol appendix match the tested files. APK: not generated (no SHA-256).
+Previous tested implementation: `6521a55782c97b7f89ae818484fc5712b5a59067`. APK: not generated (no SHA-256).
 
 | Local JVM suite | Passed |
 | --- | ---: |
@@ -17,3 +17,9 @@ Tested implementation: `6521a55782c97b7f89ae818484fc5712b5a59067`. The submitted
 - Review return on `f0db658`: the old host admitted a late approval after simulated suspend and timed out after a blocked ROOT choice. New host regressions cover 10 s awake + 590 s asleep, both decision-first and cancellation-first, with no allow receipt or tool action. With 5 ms of idle time left, a 6 ms blocked policy check still allows a subsequent one-time approval. A permitted choice whose policy check crosses the approval deadline cannot create a grant.
 
 No UI changes or device access. Android runtime/API 33, R8, independent final-head review, prescribed emulator regression and CI are outside this local result.
+
+## Silent wake after approval expiry
+
+Implementation `cb0cc6d2d8aac7f8bb8c345e313968feff38a8fa`. The reviewer reproduced the old timer on `f00ebb8`: after 10 seconds awake and 590 seconds suspended the ledger still showed RUNNING and a pending request, until 590 more seconds of awake time elapsed. The new host regression failed against the old scheduling path (one test, one timeout).
+
+With the fix, the same virtual wake delivers the elapsed deadline without a decision, cancellation, progress or additional awake time. The ledger records TIMED_OUT and clears the prompt without an allow receipt. The execution slot stays occupied while the worker's completion handler is held. Local JVM: 85 HostToolExecutionServiceTest and 10 PluginInvocationTest cases passed, zero skips, failures or errors, 49.4 s with strict configuration cache (stored). The test drives the host using two simulated clocks. Android's absolute wait and system time-change receiver were compiled; physical suspend/resume and system clock changes were not exercised on a device. No APK generated. Final-head review, prescribed emulator regression and CI belong to the reviewer.
