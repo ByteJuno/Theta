@@ -317,13 +317,19 @@ class AgentRunLoop(
         return RunResult(state, reason, steps, retries, unresolved)
     }
 
-    suspend fun run(): RunResult {
+    suspend fun run(): RunResult = run(chatTask = false)
+    suspend fun runChatTask(): RunResult {
+        require(history is SqliteRunHistory && contextPolicy == null)
+        return run(chatTask = true)
+    }
+
+    private suspend fun run(chatTask: Boolean): RunResult {
         check(started.compareAndSet(false, true)) { "Run is one-shot; do not replay a partially executed step" }
         val disk = history as? SqliteRunHistory
         disk?.beginRun()
         var failure: Throwable? = null
         try {
-            return runStarted()
+            return runStarted(chatTask)
         } catch (e: HistoryViewLimitException) {
             // Do not materialize the rejected transaction merely to construct another checkpoint.
             return RunResult(RunState.PAUSED, e.message!!, steps, retries,
@@ -342,7 +348,7 @@ class AgentRunLoop(
         }
     }
 
-    private suspend fun runStarted(): RunResult {
+    private suspend fun runStarted(chatTask: Boolean): RunResult {
         tools.freeze(identity)
         var view = history.runSnapshot()
         if (history !is SqliteRunHistory) validateHistory(view.messages)
@@ -481,7 +487,10 @@ class AgentRunLoop(
             }
             steps++
             // Reserve the count before pending intent, ledger registration or history append.
-            persistAccounting()
+            val chatDisk = (history as? SqliteRunHistory)?.takeIf { chatTask }
+            val finalAnswer = chatDisk != null && calls.isEmpty() && !truncated && !serverUnknown &&
+                finish.reason != FinishReason.PAUSED && disposition != HistoryDisposition.DISCARD
+            if (!finalAnswer) persistAccounting()
             val duplicate = calls.any { call ->
                 val args = runCatching { canonical(Json.parseToJsonElement(call.argsJson)) }.getOrDefault(call.argsJson)
                 val key = call.name + "\u0000" + args
@@ -502,7 +511,9 @@ class AgentRunLoop(
                 }
                 // Persist the complete assistant before registration, so a process loss during
                 // registration/execution can reconcile the entire ordered step from ledger truth.
-                history.prepareStep(view.revision, identity, step, assistant)
+                if (chatDisk != null) chatDisk.prepareStep(view.revision, identity, step, assistant,
+                    tools.definitions.singleOrNull { it.toolKey == "host/blob_read" })
+                else history.prepareStep(view.revision, identity, step, assistant)
                 try {
                     tools.register(identity, step, calls, cancelled = !execute)
                     if (execute) tools.execute(calls)
@@ -520,7 +531,11 @@ class AgentRunLoop(
                 if (disposition != HistoryDisposition.DISCARD) {
                     val batch = if (calls.isEmpty()) listOf(assistant)
                         else listOf(assistant, tools.results(identity, step, calls))
-                    history.append(view.revision, batch)
+                    if (finalAnswer) requireNotNull(chatDisk).appendChatAnswer(view.revision, assistant,
+                        RunAccounting(identity.sessionId, identity.taskChainId, identity.runId, steps, retries),
+                        tools.canRetireChatChain(identity))
+                    else history.append(view.revision, batch)
+                    if (finalAnswer) accountingActive = false // Final counters committed with the answer.
                     view = history.runSnapshot()
                     admissionPending = false
                 }

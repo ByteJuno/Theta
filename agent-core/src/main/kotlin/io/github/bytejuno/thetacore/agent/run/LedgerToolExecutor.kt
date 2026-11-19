@@ -206,6 +206,8 @@ class LedgerToolExecutor(
         ledger.resultsForStep(identity.sessionId, identity.runId, step, calls.map { it.binding.callId })
             ?: throw ToolStepBlocked("Incomplete ledger step; history must remain uncommitted")
 
+    internal fun canRetireChatChain(identity: RunIdentity) = !ledger.hasOutstandingChainRisk(identity.taskChainId)
+
     fun continuationBlocked(identity: RunIdentity): Boolean = ledger.continuationBlocked(identity.taskChainId)
 
     fun unresolved(calls: List<CollectedCall>): Boolean = calls.any {

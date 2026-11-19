@@ -27,6 +27,15 @@ internal class HostToolExecutionService(
     private val gate get() = catalog.gate
     private val control = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val active = mutableMapOf<String, PluginInvocation>()
+    private val retiringRuns = mutableSetOf<String>()
+
+    /** The history owner has committed or reconciled the pending step. A late return can
+     * still need the frozen reader until the last observer records actual exit. */
+    fun finishChatRun(runId: String) = gate.withGate {
+        if (active.keys.any { ledger.get(it)?.input?.runId == runId }) retiringRuns.add(runId)
+        else { retiringRuns.remove(runId); catalog.release(runId) }
+        Unit
+    }
     private val observations = mutableMapOf<String, Deferred<Unit>>()
     private val logicalResults = mutableMapOf<String, CompletableDeferred<Unit>>()
     // Signals carry no authorization. On wake the coroutine re-reads the durable record under gate.
@@ -256,7 +265,6 @@ internal class HostToolExecutionService(
         }
         val run = ledger.get(ticket.callId)!!.input.runId
         val retrieval = catalog.frozen(run)?.values?.firstOrNull { it.toolKey == "host/blob_read" }?.modelName
-        check(retrieval != null) { "Blob retrieval capability was not frozen for this run" }
         normalizationCount++
         ToolOutputNormalizer.normalize(parts, result?.structured, error,
             effect, ticket.definition.outputSchema, ArgumentsValidator(validator::validOutput), retrieval).also {
@@ -310,6 +318,8 @@ internal class HostToolExecutionService(
                     call.returnEvidence?.let { acknowledged(outcome(ticket, it, call.bodyEntered, normalization)) }
                     acknowledged(observe(ledger.recordActualExit(ticket.callId, ticket.attemptId, "Shared execution budget confirmed worker and cancellation handlers exited")))
                     active.remove(ticket.callId)
+                    val runId = durable.input.runId
+                    if (runId in retiringRuns) finishChatRun(runId)
                     // A failed monitor keeps its entries so waiters still see the failure.
                     observations.remove(ticket.callId)
                     logicalResults.remove(ticket.callId)

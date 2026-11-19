@@ -22,18 +22,18 @@ import java.util.concurrent.atomic.AtomicInteger
 
 class ChatSessionOwnerTest {
     private val schema = Json.parseToJsonElement("""{"type":"object","additionalProperties":false}""").jsonObject
-    private fun tool(count: AtomicInteger) = object : Tool {
+    private fun tool(count: AtomicInteger, output: ToolResult = ToolResult("done", effect = ToolEffect.APPLIED)) = object : Tool {
         override val id = "write"
         override val spec = ToolSpec("write", "test write", schema, risk = ToolRisk.WRITE, timeoutMs = 5_000)
         override suspend fun call(args: JsonObject, env: ToolEnv): ToolResult {
-            count.incrementAndGet(); return ToolResult("done", effect = ToolEffect.APPLIED)
+            count.incrementAndGet(); return output
         }
     }
     private suspend fun await(predicate: () -> Boolean) = withTimeout(10_000) { while (!predicate()) delay(10) }
-    private suspend fun fixture(root: File, count: AtomicInteger, provider: ModelProvider): Fixture {
+    private suspend fun fixture(root: File, count: AtomicInteger, provider: ModelProvider, hostTool: Tool = tool(count)): Fixture {
         val store = AndroidAgentStore.open(root, BundledSQLiteDriver())
         val budget = PluginExecutionBudget()
-        val host = HostToolBridgeRoot(budget, tool(count)).initialize { store }
+        val host = HostToolBridgeRoot(budget, hostTool).initialize { store }
         return Fixture(store, budget, host, provider)
     }
     private inner class Fixture(val store: AndroidAgentStore, val budget: PluginExecutionBudget,
@@ -188,6 +188,76 @@ class ChatSessionOwnerTest {
             } finally { root.deleteRecursively() }
         }
     }
+    @Test fun coldApprovalPreservesStructuredAndOversizedOutputAndOriginalRetrievalAlias() = runBlocking {
+        for (large in listOf(false, true)) {
+            val root = Files.createTempDirectory("chat-cold-output").toFile()
+            val count = AtomicInteger()
+            val payload = ToolResult(if (large) "x".repeat(68000) else "done",
+                structured = Json.parseToJsonElement("""{"ok":true}"""), effect = ToolEffect.APPLIED)
+            val write = tool(count, payload)
+            try {
+                val live = File(root, "live").also { it.mkdir() }
+                val saved = File(root, "saved").also { it.mkdir() }
+                val seed = fixture(live, count, provider(), write)
+                // Aliases collide only in the original process. Capture the real pending transaction
+                // before stopping its owner, so teardown cannot inject cancellation into the copy.
+                seed.host.catalog.registerHost("host/blob/read", "1", write)
+                seed.owner.open().join(); seed.owner.send("goal").join()
+                await { seed.owner.state.value.records.values.any { it.pending != null } }
+                val original = seed.owner.state.value.records.values.single()
+                val run = original.input.runId
+                val reader = seed.host.catalog.frozen(run)!!.values.single { it.toolKey == "host/blob_read" }
+                assertNotEquals("host_blob_read", reader.modelName)
+                BundledSQLiteDriver().open(File(live, AgentDatabase.FILE_NAME).path).use { db ->
+                    db.prepare("VACUUM INTO ?").use {
+                        it.bindText(1, File(saved, AgentDatabase.FILE_NAME).path); it.step()
+                    }
+                }
+                seed.close()
+                val cold = fixture(saved, count, provider(), write)
+                cold.owner.open().join()
+                val request = cold.host.ledger.get(original.callId)!!.pending!!
+                assertEquals(reader, cold.host.catalog.definition(run, reader.modelName))
+                cold.owner.decide(original.callId, request.id, Decision.ALLOW_ONCE).join()
+                await { !cold.owner.state.value.active }
+                val record = cold.host.ledger.get(original.callId)!!
+                assertEquals(Status.SUCCEEDED, record.state)
+                val result = requireNotNull(record.result)
+                assertEquals(Effect.APPLIED, result.effect)
+                assertEquals(1, record.receipts.size)
+                assertEquals(1, count.get())
+                val part = cold.owner.state.value.messages.last().parts.single() as ContentPart.ToolResult
+                assertEquals(ModelResultText.encode(result.status, result.effect, result.text), part.text)
+                assertFalse(part.isError)
+                assertTrue(part.text.contains(if (large) "Retrieve with ${reader.modelName}(" else "[structured JSON]"))
+                val raw = requireNotNull(result.output).raw
+                assertEquals(raw, cold.host.ledger.readBlob(run, raw.id, 0).first)
+                cold.owner.send("again").join()
+                await { cold.owner.state.value.records.values.any { it.pending != null } }
+                val next = cold.owner.state.value.records.values.single { it.pending != null }
+                cold.owner.decide(next.callId, next.pending!!.id, Decision.ALLOW_ONCE).join()
+                await { !cold.owner.state.value.active }
+                assertEquals(2, count.get()); assertEquals(Status.SUCCEEDED, cold.host.ledger.get(next.callId)!!.state)
+                assertTrue(cold.failures.toString(), cold.failures.isEmpty()); cold.close()
+            } finally { root.deleteRecursively() }
+        }
+    }
+
+    @Test fun completedTextTasksReleaseBothRunDirectories() = runBlocking {
+        val root = Files.createTempDirectory("chat-catalog-lifetime").toFile()
+        try {
+            val f = fixture(root, AtomicInteger(), provider(false)); f.owner.open().join()
+            repeat(24) {
+                f.owner.send("question $it").join(); await { !f.owner.state.value.active }
+                assertEquals(R.string.chat_complete, f.owner.state.value.notice)
+            }
+            f.owner.newSession().join()
+            assertEquals(0, f.host.catalog.frozenRunCount)
+            assertEquals(0, f.host.catalog.gate.frozenRunCount)
+            f.close()
+        } finally { root.deleteRecursively() }
+    }
+
     @Test fun validatedStreamingAppearsBeforeFinishAndCancellationSettlesOwner() = runBlocking {
         val root = Files.createTempDirectory("chat24-").toFile(); val hold = CompletableDeferred<Unit>()
         try {

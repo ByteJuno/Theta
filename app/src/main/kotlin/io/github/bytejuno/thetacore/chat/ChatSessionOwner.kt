@@ -51,7 +51,6 @@ internal class ChatSessionOwner(
     private var history: SqliteRunHistory? = null
     private var tools: HostToolExecutionService? = null
     private var active: Job? = null
-    private val restored = mutableSetOf<String>()
     private var observedRequest: String? = null
     private val previewLock = Any()
     private val preview = StringBuilder()
@@ -110,17 +109,19 @@ internal class ChatSessionOwner(
         if (pending == null) disk.recoverPending(host.ledger)
         else {
             restorePending(pending)
-            if (pending.records.all { it.state.terminal && it.instance?.state != InstanceState.UNCONFIRMED })
+            if (pending.records.all { it.state.terminal && it.instance?.state != InstanceState.UNCONFIRMED }) {
                 disk.recoverPending(host.ledger)
+                host.finishChatRun(pending.identity.runId)
+            }
         }
         mutable.value = ChatState(loading = false, sessions = (listOf(key) + sessions).distinct(), sessionId = key)
         refresh()
     }
     private fun restorePending(pending: PendingHistoryStep) {
         val host = requireNotNull(tools)
-        if (host.catalog.frozen(pending.identity.runId) == null && restored.add(pending.identity.runId)) {
+        if (host.catalog.frozen(pending.identity.runId) == null) {
             host.catalog.restorePending(pending.identity.runId,
-                pending.records.mapNotNull { it.input.definition }.distinctBy { it.modelName })
+                (pending.records.mapNotNull { it.input.definition } + listOfNotNull(pending.resultReader)).distinct())
         }
     }
     private fun refresh(before: HistoryCursor? = null) {
@@ -187,6 +188,7 @@ internal class ChatSessionOwner(
             if (pending != null) {
                 pending.records.filter { !it.state.terminal }.forEach { tools!!.cancel(it.callId) }
                 history!!.recoverPending(tools!!.ledger)
+                tools!!.finishChatRun(pending.identity.runId)
                 refresh()
             }
         }
@@ -252,12 +254,9 @@ internal class ChatSessionOwner(
                                 if (preview.length > 64_000) preview.delete(0, preview.length - 64_000)
                             }
                             if (event is ModelEvent.Finished || event is ModelEvent.Failed) preview.setLength(0)
-                        } }).run()
+                        } }).runChatTask()
                     notice = when (result.state) {
-                        RunState.COMPLETED -> {
-                            disk.completeChatTask(id, requireNotNull(tools).ledger)
-                            R.string.chat_complete
-                        }
+                        RunState.COMPLETED -> R.string.chat_complete
                         RunState.PAUSED -> R.string.chat_paused
                         RunState.FAILED -> R.string.chat_model_failed
                     }
@@ -272,7 +271,12 @@ internal class ChatSessionOwner(
                         synchronized(previewLock) { preview.setLength(0); observedRequest = null }
                         // Publish idle only after the final durable projection is visible.
                         // Otherwise observers can see an idle owner with stale pending approvals.
-                        try { refresh() } catch (error: Exception) { report(error) }
+                        try {
+                            val host = requireNotNull(tools)
+                            val runId = requireNotNull(identity ?: pending?.identity).runId
+                            if (!requireNotNull(history).hasPendingIntent()) host.finishChatRun(runId)
+                            refresh()
+                        } catch (error: Exception) { report(error) }
                         mutable.update { it.copy(active = false, draft = "", notice = notice) }
                     }
                 }

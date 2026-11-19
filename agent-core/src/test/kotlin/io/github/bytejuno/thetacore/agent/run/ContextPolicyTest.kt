@@ -213,6 +213,33 @@ class ContextPolicyTest {
         }
     }
 
+    @Test fun `final chat answer and next budget survive a single transaction boundary`() = runTest {
+        for (stage in listOf(HistoryWriteStage.BEFORE_COMMIT, HistoryWriteStage.AFTER_COMMIT)) {
+            val dir = root.resolve("chat-final-$stage")
+            val f = RunFixture()
+            val model = ScriptProvider(listOf(answer("final"), answer("next")))
+            fun chat(h: TestRunHistory) = AgentRunLoop(RunIdentity(h.chatTaskChainId(), h.sessionId, "run-${h.revision()}"),
+                ModelTarget("provider", model, Credentials { "test" }), f.request(), h,
+                LedgerToolExecutor(f.ledger, f.gate, f.definitions, f.bridge))
+            TestRunHistory.create(dir, "session", durability).use { h ->
+                h.append(0, listOf(user("question")))
+                h.saveAccounting(RunAccounting("session", "session", "old", 49, 0))
+            }
+            TestRunHistory.open(dir, durability) { point ->
+                if (point.file == "append" && point.stage == stage) error("power loss")
+            }.use { h -> assertFailsWith<HistoryStorageException> { chat(h).runChatTask() } }
+            TestRunHistory.open(dir, durability).use { h ->
+                val committed = stage == HistoryWriteStage.AFTER_COMMIT
+                assertEquals(if (committed) 2 else 1, h.snapshot().messages.size)
+                assertEquals(if (committed) 50 else 49, h.loadAccounting("session")!!.steps)
+                assertEquals(committed, h.chatTaskChainId() != "session")
+                h.append(h.revision(), listOf(user("next question")))
+                assertEquals(RunState.COMPLETED, chat(h).runChatTask().state)
+                assertEquals(2, model.requests.size)
+            }
+        }
+    }
+
     @Test fun `accepted unknown write allows ordinary question but next write still requires unknown approval`() = runTest {
         // Accepted effect uncertainty permits inspection only without unresolved resource isolation.
         val definition = testDefinition(risk = Risk.WRITE)
@@ -230,10 +257,9 @@ class ContextPolicyTest {
             h.append(h.revision(), listOf(user("what happened?")))
             f.onSubmit = { f.ledger.complete(it.callId, it.attemptId, Status.SUCCEEDED, "read complete") }
             val p = ScriptProvider(listOf(calls("read"), answer("final answer")))
-            assertEquals(RunState.COMPLETED, f.loop(p, history = h).run().state)
+            assertEquals(RunState.COMPLETED, f.loop(p, history = h).runChatTask().state)
             assertEquals(2, p.requests.size)
             assertEquals(InstanceState.EXIT_CONFIRMED, f.ledger.get(f.submitted.last().callId)!!.instance!!.state)
-            h.completeChatTask(RunIdentity(chain, h.sessionId, "completed"), f.ledger)
             assertEquals(chain, h.chatTaskChainId())
             var approval: ApprovalRequest? = null
             f.approve = { approval = it; Decision.DENY }
