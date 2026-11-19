@@ -278,7 +278,7 @@ class InvocationLedger(
         if (records.count { it.input.taskChainId == r.input.taskChainId && it.instance != null } >= maxClaimsPerTaskChain)
             return@withGate Mutation.Blocked("Task-chain claim budget exhausted")
         val d = requireNotNull(r.input.definition)
-        if (records.any { it.restartRequired && it.input.definition?.owner == d.owner })
+        if (records.any { it.blocksRestartOf(d) })
             return@withGate Mutation.Blocked("Plugin restart required")
         // Chain isolation also stops unrelated resources. Keep approval refresh and owner-restart
         // ordering intact; this check is still under the scheduling gate, before any claim/ticket.
@@ -293,7 +293,7 @@ class InvocationLedger(
                 !it.state.terminal && it.instance == null ||
                     ((!d.parallelSafe || it.input.definition?.parallelSafe != true) && it.instance?.state == InstanceState.UNCONFIRMED)
             }) return@withGate Mutation.Blocked("Step barrier awaits actual exit/submission")
-        val instance = ExecutionInstance(id(), epoch!!, InstanceState.UNCONFIRMED)
+        val instance = ExecutionInstance(id(), epoch!!, InstanceState.UNCONFIRMED, d.builtinToolKey)
         val ticket = ExecutionTicket(r.callId, instance.attemptId, instance.processEpoch, d, r.executionArgs!!)
         update(r, r.copy(state = Status.RUNNING, instance = instance), ticket).also { claim ->
             if (claim is Mutation.Applied && cancellationTimedOut != null) cancellationDeadlines[callId] = cancellationTimedOut

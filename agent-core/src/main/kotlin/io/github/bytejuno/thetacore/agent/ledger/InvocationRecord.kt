@@ -41,6 +41,11 @@ import java.util.UUID
     /** Aliases belong to a run, not the registration. All other fields must still match. */
     fun sameRegistrationAs(other: FrozenDefinition): Boolean = copy(modelName = other.modelName) == other
 
+    /** Assigned by the host registry. SDK metadata and run-local model aliases cannot select a domain. */
+    val builtinToolKey: String? get() = toolKey.takeIf {
+        source == Source.FIRST_PARTY && owner == "host" && it.startsWith("host/") && it.length > 5
+    }
+
     val digest: String get() = sha256("definition-v1:" + buildJsonObject {
         put("name", name); put("description", description)
         put("inputSchema", Json.parseToJsonElement(inputSchema)); put("risk", declaredRisk.name)
@@ -91,7 +96,11 @@ internal fun sha256(value: String) = MessageDigest.getInstance("SHA-256")
 @Serializable enum class ApprovalDenialReason { POLICY, UNATTENDED_UNKNOWN, UNATTENDED_APPROVAL }
 @Serializable data class ApprovalReceipt(val request: ApprovalRequest, val decision: Decision,
     val reason: ApprovalDenialReason? = null)
-@Serializable data class ExecutionInstance(val attemptId: String, val processEpoch: String, val state: InstanceState)
+@Serializable data class ExecutionInstance(val attemptId: String, val processEpoch: String, val state: InstanceState,
+    /** Null for plugin-wide claims and for host claims written before per-tool isolation. */
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val builtinToolKey: String? = null)
 @Serializable data class LogicalResult(val status: Status, val effect: Effect, val text: String, val inconsistentRead: Boolean,
     val output: StoredToolOutput? = null)
 @Serializable data class ExitEvidence(val attemptId: String, val text: String, val outcome: LogicalResult?)
@@ -112,6 +121,12 @@ internal fun sha256(value: String) = MessageDigest.getInstance("SHA-256")
     val acknowledgedUnknownDenial: String? = null,
 ) {
     val callId: String get() = input.binding.callId
+    internal fun blocksRestartOf(candidate: FrozenDefinition): Boolean {
+        if (!restartRequired || input.definition?.owner != candidate.owner) return false
+        val key = instance?.builtinToolKey ?: return true
+        return key == candidate.builtinToolKey
+    }
+
     fun validate() {
         require(formatVersion == 2 && revision > 0) { "Unsupported format or revision" }
         require(!recoveryPending || (state.terminal && instance?.state == InstanceState.EXIT_CONFIRMED && isolation != null))
@@ -129,6 +144,7 @@ internal fun sha256(value: String) = MessageDigest.getInstance("SHA-256")
         require(state != Status.READY || (executionArgs != null && instance == null && pending == null))
         require(state != Status.WAITING_APPROVAL || (pending != null && !pending.internal && executionArgs != null && instance == null))
         require(!state.terminal || pending == null)
+        require(instance?.builtinToolKey == null || instance.builtinToolKey == input.definition?.builtinToolKey)
         require(instance == null || executionArgs != null)
         require(instance == null || instance.state != InstanceState.NOT_SUBMITTED)
         require(instance == null || (UUID.fromString(instance.attemptId).toString() == instance.attemptId && instance.processEpoch.isNotBlank()))

@@ -27,7 +27,7 @@ internal class FrozenToolCatalog(val gate: DefinitionGate, private val budget: P
             next
         }
         val captured = CompletableDeferred<ToolSpec>()
-        val lease = budget.submit("host", owner,
+        val lease = budget.submit(key, owner,
             onCancel = { captured.cancel() }, onExit = {}) {
             try {
                 val raw = tool.spec
