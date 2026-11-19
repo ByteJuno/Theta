@@ -22,8 +22,8 @@ internal class HostToolExecutionService(
     private val exitGraceMillis: Long = 2_000,
     /** Test scheduling seam outside the gate; never supplies authorization or executes plugin code. */
     private val afterRuntimeApprovalStart: suspend () -> Unit = {},
-    val sessionStore: AndroidAgentStore? = null,
     private val invocationClock: InvocationClock = budget,
+    val sessionStore: AndroidAgentStore? = null,
 ) {
     private val gate get() = catalog.gate
     private val control = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -204,22 +204,21 @@ internal class HostToolExecutionService(
     private fun prepareClaimed(ticket: ExecutionTicket, record: InvocationRecord,
         entry: FrozenToolCatalog.Entry, reservation: PluginExecutionBudget.Lease): PluginInvocation {
         val invocation = PluginInvocation(budget, entry.definition.owner, owner, entry.tool,
-                Json.parseToJsonElement(ticket.argsJson).jsonObject,
-                ToolInvocationRequest(record.input.runId, record.input.sessionId, ticket.callId, record.input.unattended),
-                requestApproval = { summary, risk -> requestRuntimeApproval(ticket, summary, Risk.valueOf(risk.name)) },
-                frozenSpec = entry.spec, reservation = reservation, unattendedApprovalPolicy = true, clock = invocationClock,
-                beforeExecution = {
-                    gate.withGate {
-                        val failure = ledger.executionAdmissionFailure()
-                        failure?.let(::observe)
-                        !storageFailed && failure == null
-                    }
-                })
-            val call = invocation
-            active[ticket.callId] = call
-            logicalResults[ticket.callId] = CompletableDeferred()
-            // Observer lifetime is independent of run cancellation; no plugin callbacks on IO.
-            observations[ticket.callId] = control.async { monitor(ticket, call) }
+            Json.parseToJsonElement(ticket.argsJson).jsonObject,
+            ToolInvocationRequest(record.input.runId, record.input.sessionId, ticket.callId, record.input.unattended),
+            requestApproval = { summary, risk -> requestRuntimeApproval(ticket, summary, Risk.valueOf(risk.name)) },
+            frozenSpec = entry.spec, reservation = reservation, unattendedApprovalPolicy = true, clock = invocationClock,
+            beforeExecution = {
+                gate.withGate {
+                    val failure = ledger.executionAdmissionFailure()
+                    failure?.let(::observe)
+                    !storageFailed && failure == null
+                }
+            })
+        active[ticket.callId] = invocation
+        logicalResults[ticket.callId] = CompletableDeferred()
+        // Observer lifetime is independent of run cancellation; no plugin callbacks on IO.
+        observations[ticket.callId] = control.async { monitor(ticket, invocation) }
         return invocation
     }
 
