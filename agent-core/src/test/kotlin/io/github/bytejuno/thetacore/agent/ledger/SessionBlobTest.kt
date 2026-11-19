@@ -70,6 +70,23 @@ class SessionBlobTest {
         f.ledger.deleteSession("session") // idempotent
     }
 
+    @Test fun deletingLastOwnerCollectsChunksEvenWhenContentRowIsMissing(): Unit = Fixture().use { f ->
+        val bytes = ByteArray(9000) { (it % 251).toByte() }
+        val (_, ref) = publish(f, bytes = bytes)
+        publish(f, "second", "second-run", bytes)
+        sql(f.directory) { db ->
+            db.execute("PRAGMA foreign_keys=OFF")
+            db.prepare("DELETE FROM contents WHERE hash=?").use { it.bindText(1, ref.contentHash); it.step() }
+        }
+        f.reopen()
+        f.ledger.deleteSession("session")
+        assertFailsWith<BlobReadException> { f.ledger.readSessionBlob("second", ref.id, 0) }
+        f.ledger.deleteSession("second")
+        val (_, fresh) = publish(f, "third", "third-run", bytes)
+        assertEquals(ref, fresh)
+        assertContentEquals(bytes.copyOfRange(8192, bytes.size), f.ledger.readSessionBlob("third", ref.id, 8192).second)
+    }
+
     @Test fun deletionRefusesUnconfirmedWorkerAndPreservesUnknownEffectIsolationAndApprovals(): Unit = Fixture().use { f ->
         val input = f.input(definition(Risk.WRITE, resource = "screen"), run = "write")
         val ready = f.approve(f.prepare(input), Decision.ALLOW_ALWAYS)

@@ -68,6 +68,26 @@ class SqliteReviewRegressionTest {
         TestInvocationStore.open(f.directory).use { assertFailsWith<StoreException> { it.readBlob(blob.ref, 8192, 8192) } }
         Unit
     }
+    @Test fun referenceOnlyPublicationPersistsObservedDamage(): Unit = Fixture().use { f ->
+        val blob = BlobWrite(ByteArray(9000) { (it % 251).toByte() }, "application/octet-stream")
+        val first = completed(f)
+        val stored = StoredToolOutput(blob.ref, emptyList())
+        f.store.saveWithBlobs(first.copy(revision = first.revision + 1,
+            result = first.result!!.copy(output = stored)), first.revision, listOf(blob))
+        damageContent(f.directory, blob.ref.contentHash, "chunk", 1)
+        val second = completed(f)
+        val next = second.copy(revision = second.revision + 1, result = second.result!!.copy(output = stored))
+        f.store.save(next, second.revision)
+        sql(f.directory) { db ->
+            db.prepare("UPDATE content_chunks SET bytes=? WHERE hash=? AND ordinal=1").use {
+                it.bindBlob(1, blob.bytes().copyOfRange(8192, 9000)); it.bindText(2, blob.ref.contentHash); it.step()
+            }
+        }
+        f.reopen()
+        assertEquals(next, f.ledger.get(next.callId))
+        assertFailsWith<StoreException> { f.store.readBlob(blob.ref, 0, 8192) }
+    }
+
     @Test fun failedPublicationOfContentDamagedAfterStartupStaysQuarantined() = Fixture().use { f ->
         val blob = BlobWrite(ByteArray(30_000) { (it % 251).toByte() }, "application/octet-stream")
         val first = completed(f)

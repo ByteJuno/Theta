@@ -111,7 +111,7 @@ class SqliteInvocationStore private constructor(
     }
 
     private fun collectUnownedContent(hash: String) {
-        for (table in listOf("contents", "quarantined_contents")) {
+        for (table in listOf("content_chunks", "content_manifests", "contents", "quarantined_contents")) {
             db.prepare("DELETE FROM $table WHERE hash=? AND NOT EXISTS(SELECT 1 FROM invocation_contents WHERE hash=?)").use {
                 it.bindText(1, hash); it.bindText(2, hash); it.step()
             }
@@ -205,11 +205,15 @@ class SqliteInvocationStore private constructor(
         // A new call may retain a reference to previously quarantined content, but its
         // identical payload cannot silently overwrite the bytes or resurrect an old ID.
         val writes = blobs.distinctBy { it.ref.contentHash }
+        val addedRefs = refs - oldRefs
         var commitAttempted = false
         var begun = false
         try {
-            for (blob in writes) {
-                if (roots.ownsFile("${blob.ref.contentHash}.blob")) verifyOwnedContent(blob.ref)
+            for (ref in (writes.map { it.ref } + addedRefs).distinctBy { it.contentHash }) {
+                if (roots.ownsFile("${ref.contentHash}.blob")) {
+                    val owned = if (roots.contains(ref)) ref else roots.liveReferences().first { it.contentHash == ref.contentHash }
+                    verifyOwnedContent(owned)
+                }
             }
             db.execute("BEGIN IMMEDIATE"); begun = true
             db.verifyWriteConfiguration()
@@ -238,7 +242,7 @@ class SqliteInvocationStore private constructor(
             }
             // Existing evidence may reference quarantined content. Do not prevent cold recovery,
             // actual-exit or approval bookkeeping; new references must be verified before commit.
-            (refs - oldRefs).filterNot { isQuarantined(it.contentHash) }.forEach(::verifyContent)
+            addedRefs.filterNot { isQuarantined(it.contentHash) }.forEach(::verifyContent)
             fault(SqliteWriteStage.AFTER_CONTENT)
             val payload = codec.encode(snapshot).toByteArray(Charsets.UTF_8)
             if (expectedRevision == null) {
