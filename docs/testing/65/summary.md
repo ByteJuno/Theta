@@ -28,3 +28,9 @@ Verified implementation `0d3f8550e3ea4130da7cb0ef905aaabe69e491d6` on Windows wi
 - Send the oversized integer through the host tool. The owning session receives the public range error. Foreign and unknown IDs receive identical session-unavailable errors.
 
 Raw results are in `validation-issue11/issue65-8e70214a-final`. This run generated no APK and involved no device. Final-head review, prescribed emulator regression and CI are pending.
+
+## Independent review, round 2
+
+On `f2383397`, deleting through the public store while a ledger was attached left its projection stale: replay of the same cancelled call returned `AlreadyApplied` immediately, but `Blocked` after reopen. The repaired store hands its deletion operation only to its single bound coordinator. A separate probe confirmed that a ledger-only session ID with an unpaired surrogate round-tripped exactly but could not be deleted. Such IDs now use lossless UTF-16 code units as SQLite blob keys, distinct from text keys, without touching history or scratch namespaces that never admitted them.
+
+Implementation `12f281f174cb95e5d0a97a2414185adb3d75cda9`: 39 targeted core tests (including the two temporary probe cases) and 2 targeted host tests passed with zero failures. The tests covered blocked replay before and after reopen, deletion of uniquely owned content, preservation of three similar session IDs, and session reads through the host bridge. API scan passed at minSdk 33 with zero hits. No device regression is claimed; the outer script checks the final head.
