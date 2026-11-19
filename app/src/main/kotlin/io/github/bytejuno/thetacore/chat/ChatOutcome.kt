@@ -24,5 +24,7 @@ internal fun chatOutcome(result: RunResult): Int = when {
 internal fun replyReason(reason: String): Int = when (reason) {
     "REFUSAL" -> R.string.chat_reply_refused
     "CONTENT_FILTER", "CONTENT_BLOCKED" -> R.string.chat_reply_filtered
+    "LENGTH" -> R.string.chat_reply_length
+    "CONTEXT_EXCEEDED" -> R.string.chat_reply_context
     else -> R.string.chat_reply_interrupted
 }

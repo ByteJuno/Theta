@@ -4,6 +4,7 @@ import io.github.bytejuno.thetacore.R
 import io.github.bytejuno.thetacore.agent.ledger.*
 import io.github.bytejuno.thetacore.agent.protocol.*
 import io.github.bytejuno.thetacore.agent.provider.openai.OpenAiRunSnapshot
+import io.github.bytejuno.thetacore.agent.provider.openai.OpenAiChatCodec
 import io.github.bytejuno.thetacore.agent.run.*
 import io.github.bytejuno.thetacore.plugin.HostToolExecutionService
 import io.github.bytejuno.thetacore.provider.ProviderSettingsException
@@ -335,24 +336,29 @@ internal class ChatSessionOwner(
         } else {
             val config = requireNotNull(snapshot)
             val id = requireNotNull(identity)
+            val context = requireNotNull(disk.chatContext())
+            val window = context.summaryWindowTokens
             val definitions = (tools!!.catalog.frozen(id.runId) ?: tools!!.catalog.freeze(id.runId)).values.toList()
-            val request = config.request { tools = definitions.map {
+            val configured = config.request { tools = definitions.map {
                 modelTool(it.modelName, it.description, Json.parseToJsonElement(it.inputSchema).jsonObject)
             } }
+            val request = if (window != null && configured.maxOutputTokens == null) object : ChatRequest by configured {
+                override val maxOutputTokens: Int = minOf(2048, (window / 4).toInt())
+            } else configured
             val target = targetForRun(config)
-            val context = requireNotNull(disk.chatContext())
+            val codec = OpenAiChatCodec(config.settings.adapterConfig())
+            val requestBudget = ContextBudget({ candidate ->
+                256L + codec.encode(candidate).toByteArray(Charsets.UTF_8).size
+            }, { window })
             val summary = context.summaryWindowTokens?.let { window ->
                 SummaryModel(target, chatRequest(config.settings.model) {
                     toolChoice = ToolChoice.None
                     maxOutputTokens = minOf(2048, (window / 4).toInt())
-                }, ContextBudget({ summaryRequest ->
-                    256L + summaryRequest.messages.sumOf { message -> 256L + message.parts.sumOf { part ->
-                        (part as ContentPart.Text).text.toByteArray(Charsets.UTF_8).size.toLong()
-                    } }
-                }, { window }))
+                }, requestBudget)
             }
             val result = AgentRunLoop(id, target, request, disk, executor(definitions),
                 journal = StoredRunJournal(disk),
+                budget = requestBudget,
                 contextPolicy = ContextPolicy(context.goal, context.priorMessageCount, summary, resumeId, readmitId),
                 onEvent = { requestId, event -> synchronized(previewLock) {
                     if (requestId != observedRequest) { observedRequest = requestId; preview.setLength(0) }

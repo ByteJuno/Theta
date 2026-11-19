@@ -11,12 +11,14 @@ data class JournalPage(val replies: List<JournalReply>, val older: Long?)
 internal data class StoredAttempt(val sequence: Long, val requestId: String, val targetId: String,
     val mode: ModelExecutionMode, val historyRevision: Long, val partial: StoredMessage? = null,
     val finish: FinishReason? = null, val error: ModelErrorCode? = null, val cancelled: Boolean = false,
-    val complete: Boolean = false, val usage: List<Long?> = emptyList()) {
+    val complete: Boolean = false, val usage: List<Long?> = emptyList(), val disposition: String? = null) {
     fun reply(): JournalReply? {
         val reason = when {
             !complete || cancelled || finish == null && error == null -> "INTERRUPTED"
             error != null -> error.name
             finish == FinishReason.REFUSAL || finish == FinishReason.CONTENT_FILTER -> finish.name
+            finish in setOf(FinishReason.LENGTH, FinishReason.CONTEXT_EXCEEDED) &&
+                (disposition == HistoryDisposition.DISCARD.name || disposition == null) -> finish!!.name
             else -> return null
         }
         return JournalReply(sequence, requestId, partial?.let(HistoryCodec::decodeMessage)

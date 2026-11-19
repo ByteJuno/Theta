@@ -347,6 +347,137 @@ class ChatSessionOwnerTest {
         } finally { root.deleteRecursively() }
     }
 
+    @Test fun completedQuestionDoesNotCancelSubsequentApproval() = runBlocking {
+        for (decision in listOf(Decision.ALLOW_ONCE, Decision.DENY)) {
+            val root = Files.createTempDirectory("chat-next-approval").toFile()
+            val executions = AtomicInteger()
+            val requests = AtomicInteger()
+            val delegate = provider()
+            val model = object : ModelProvider {
+                override fun executionMode(request: ChatRequest) = ModelExecutionMode.GENERATION_ONLY
+                override fun chat(request: ChatRequest, auth: Credentials): Flow<ModelEvent> = flow {
+                    if (requests.incrementAndGet() == 1) {
+                        emit(Events.started("first", "model")); emit(Events.text(0, "first answer"))
+                        emit(Events.end(0)); emit(Events.finished(FinishReason.STOP))
+                    } else delegate.chat(request, auth).collect { emit(it) }
+                }
+            }
+            try {
+                val fixture = fixture(root, executions, model)
+                try {
+                    fixture.owner.open().join(); fixture.owner.send("first question").join()
+                    await { !fixture.owner.state.value.active }
+                    fixture.owner.send("write after first answer").join()
+                    await { fixture.owner.state.value.records.values.any { it.pending != null } || !fixture.owner.state.value.active }
+                    fixture.owner.latest().join()
+                    assertTrue(fixture.failures.toString(), fixture.owner.state.value.active)
+                    val record = fixture.owner.state.value.records.values.single()
+                    assertNotNull(record.pending); assertEquals(0, executions.get())
+                    assertNull(fixture.owner.state.value.checkpoint)
+                    fixture.owner.decide(record.callId, record.pending!!.id, decision).join()
+                    await { !fixture.owner.state.value.active }
+                    assertEquals(if (decision == Decision.ALLOW_ONCE) 1 else 0, executions.get())
+                    assertEquals(decision, fixture.host.ledger.get(record.callId)!!.receipts.single().decision)
+                    assertEquals(6, fixture.owner.state.value.messages.size)
+                    assertTrue(fixture.failures.toString(), fixture.failures.isEmpty())
+                } finally { fixture.close() }
+            } finally { root.deleteRecursively() }
+        }
+    }
+
+    @Test fun rejectedContextRecoveryShrinksBeforeGenerationEvenWhenNewWindowWouldFit() = runBlocking {
+        for (window in listOf(8192L, 32768L)) {
+            val root = Files.createTempDirectory("chat-rejected-context").toFile()
+            val requests = mutableListOf<ChatRequest>()
+            val model = object : ModelProvider {
+                override fun executionMode(request: ChatRequest) = ModelExecutionMode.GENERATION_ONLY
+                override fun chat(request: ChatRequest, auth: Credentials): Flow<ModelEvent> = flow {
+                    requests += request
+                    if (requests.size == 1) {
+                        emit(Events.failed(modelError(ModelErrorCode.CONTEXT_TOO_LONG, "window rejected")))
+                    } else {
+                        emit(Events.started("recovered-${requests.size}", "model"))
+                        emit(Events.text(0, if (request.tools.isEmpty()) "summary of earlier answers" else "final answer"))
+                        emit(Events.end(0)); emit(Events.finished(FinishReason.STOP))
+                    }
+                }
+            }
+            try {
+                val first = fixture(root, AtomicInteger(), model)
+                first.store.createHistory("session").use { disk ->
+                    disk.append(0, listOf(message(Role.USER, textPart("u".repeat(5000))),
+                        message(Role.ASSISTANT, textPart("a".repeat(5000)))))
+                }
+                first.owner.open().join(); first.owner.send("continue goal").join(); await { !first.owner.state.value.active }
+                assertEquals(1, requests.size)
+                val retries = first.owner.state.value.result!!.retries
+                first.close()
+                val cold = fixture(root, AtomicInteger(), model)
+                try {
+                    cold.owner.open().join(); assertEquals(1, requests.size)
+                    cold.owner.resume(summaryWindowTokens = window).join(); await { !cold.owner.state.value.active }
+                    assertEquals(cold.failures.toString(), R.string.chat_complete, cold.owner.state.value.notice)
+                    assertTrue(requests[1].tools.isEmpty())
+                    val generation = requests.last()
+                    assertTrue(generation.tools.isNotEmpty())
+                    val codec = OpenAiChatCodec(OpenAiChatConfig("test", "https://example.invalid/v1", setOf("model")))
+                    assertTrue(codec.encode(generation).length < codec.encode(requests.first()).length)
+                    assertTrue(256L + codec.encode(generation).toByteArray(Charsets.UTF_8).size + generation.maxOutputTokens!! <= window)
+                    assertTrue(cold.owner.state.value.result!!.retries >= retries)
+                    assertTrue(cold.failures.toString(), cold.failures.isEmpty())
+                } finally { cold.close() }
+                val verified = fixture(root, AtomicInteger(), model)
+                try {
+                    verified.store.openHistory("session").use { disk ->
+                        assertEquals(4, disk.snapshot().messages.size)
+                        assertEquals("u".repeat(5000), (disk.snapshot().messages.first().parts.single() as ContentPart.Text).text)
+                    }
+                } finally { verified.close() }
+            } finally { root.deleteRecursively() }
+        }
+    }
+
+    @Test fun incompleteTruncatedRepliesSurviveColdOpenAndNeverReplay() = runBlocking {
+        for (finish in listOf(FinishReason.LENGTH, FinishReason.CONTEXT_EXCEEDED)) {
+            val root = Files.createTempDirectory("chat-truncated-reply").toFile()
+            val requests = mutableListOf<ChatRequest>()
+            val model = object : ModelProvider {
+                override fun executionMode(request: ChatRequest) = ModelExecutionMode.GENERATION_ONLY
+                override fun chat(request: ChatRequest, auth: Credentials): Flow<ModelEvent> = flow {
+                    requests += request; emit(Events.started("truncated-${requests.size}", "model"))
+                    if (requests.size == 1) {
+                        emit(Events.text(0, "discarded partial reply")); emit(Events.end(0))
+                        emit(Events.toolStart(1, "incomplete", "host_clock")); emit(Events.toolDelta(1, "{"))
+                        emit(Events.end(1))
+                        emit(Events.finished(finish))
+                    } else {
+                        emit(Events.text(0, "safe answer")); emit(Events.end(0)); emit(Events.finished(FinishReason.STOP))
+                    }
+                }
+            }
+            try {
+                val first = fixture(root, AtomicInteger(), model)
+                first.owner.open().join(); first.owner.send("question").join(); await { !first.owner.state.value.active }
+                val reply = first.owner.state.value.journal.single()
+                assertEquals(finish.name, reply.reason)
+                assertEquals(if (finish == FinishReason.LENGTH) R.string.chat_reply_length else R.string.chat_reply_context,
+                    replyReason(reply.reason))
+                assertEquals(1, first.owner.state.value.messages.size)
+                assertTrue(first.failures.toString(), first.failures.isEmpty()); first.close()
+                val cold = fixture(root, AtomicInteger(), model)
+                try {
+                    cold.owner.open().join(); assertEquals(reply.requestId, cold.owner.state.value.journal.single().requestId)
+                    cold.owner.send("new question").join(); await { !cold.owner.state.value.active }
+                    assertEquals(R.string.chat_complete, cold.owner.state.value.notice)
+                    assertFalse(requests.last().messages.any { message -> message.parts.any { part ->
+                        part is ContentPart.ToolCall || part is ContentPart.Text && part.text.contains("discarded partial")
+                    } })
+                    assertTrue(cold.failures.toString(), cold.failures.isEmpty())
+                } finally { cold.close() }
+            } finally { root.deleteRecursively() }
+        }
+    }
+
     @Test fun realLoopApprovesThroughHostApiAndPersistsAcrossReopen() = runBlocking {
         val root = Files.createTempDirectory("chat24-").toFile(); val count = AtomicInteger()
         try {
@@ -384,14 +515,21 @@ class ChatSessionOwnerTest {
         for (decision in listOf(Decision.ALLOW_ONCE, Decision.DENY)) {
             val root = Files.createTempDirectory("chat24-").toFile(); val count = AtomicInteger()
             try {
+                val completed = fixture(root, count, provider(false))
+                completed.store.createHistory("session").close()
+                completed.owner.open().join(); completed.owner.send("earlier question").join()
+                await { !completed.owner.state.value.active }
+                assertEquals(R.string.chat_complete, completed.owner.state.value.notice)
+                completed.close()
                 val seed = fixture(root, count, provider(false))
                 val d = seed.host.catalog.freeze("old-run").getValue("host_clock")
                 val binding = callBinding("test", "request", "response", 0, "wire")
-                seed.store.createHistory("session").use { history ->
-                    history.append(0, listOf(message(Role.USER, textPart("goal"))))
-                    history.prepareStep(1, RunIdentity("session", "session", "old-run"), "step",
+                seed.store.openHistory("session").use { history ->
+                    val chain = history.chatTaskChainId()
+                    history.append(history.revision(), listOf(message(Role.USER, textPart("goal"))))
+                    history.prepareStep(history.revision(), RunIdentity(chain, "session", "old-run"), "step",
                         message(Role.ASSISTANT, toolCallPart(binding, d.modelName, "{}")))
-                    val input = InvocationInput(BindingValue.copyOf(binding), "session", "session", "old-run", "step", 0,
+                    val input = InvocationInput(BindingValue.copyOf(binding), chain, "session", "old-run", "step", 0,
                         "{}", d, false, Risk.WRITE)
                     assertTrue(seed.host.prepare(input) is Mutation.Applied)
                 }
@@ -407,7 +545,7 @@ class ChatSessionOwnerTest {
                 assertEquals(if (decision == Decision.DENY) 0 else 1, count.get())
                 assertEquals(decision, cold.host.ledger.get(binding.callId)!!.receipts.single().decision)
                 assertFalse(cold.owner.state.value.pending)
-                assertEquals(3, cold.owner.state.value.messages.size) // no model request on cold decision
+                assertEquals(5, cold.owner.state.value.messages.size)
                 assertTrue(cold.failures.toString(), cold.failures.isEmpty()); cold.close()
             } finally { root.deleteRecursively() }
         }

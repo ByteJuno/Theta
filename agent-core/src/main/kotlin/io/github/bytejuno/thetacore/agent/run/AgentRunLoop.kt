@@ -70,6 +70,7 @@ class AgentRunLoop(
     private var admissionPending = false
     private var accountingActive = false
     private var confirmedGenerationResponse = false
+    private var rejectedContextReadmission = false
 
     private fun persistAccounting() {
         if (accountingActive) (history as? SqliteRunHistory)?.saveAccounting(
@@ -159,6 +160,7 @@ class AgentRunLoop(
             require(records.map { it.atLedgerPrecision() } == saved.ledger.map { it.atLedgerPrecision() } && !tools.checkpointBlocked(records))
             disk.saveCheckpoint(saved.copy(pauseClass = "ADMITTED", reason = "Budget readmission reserved"))
             admissionPending = true
+            rejectedContextReadmission = saved.reason.contains("CONTEXT_TOO_LONG")
         }
         if (policy.resumeCheckpointId != null) {
             require(saved != null && saved.id == policy.resumeCheckpointId && saved.kind == "CONTINUATION")
@@ -358,6 +360,8 @@ class AgentRunLoop(
         restoreContext(view)
         persistedPause?.let { return result(RunState.PAUSED, it, serverUnknown) }
         accountingActive = true
+        if (rejectedContextReadmission && !compactPrior(view))
+            return pauseContext(view, "Model error: CONTEXT_TOO_LONG")
         val causes = mutableMapOf<String, Int>()
         // Transient failures share one budget per selected endpoint/model, regardless of error code.
         // Credentials are deliberately excluded: rotating a key must not reset this budget.
@@ -406,7 +410,7 @@ class AgentRunLoop(
                 throw e
             } finally {
                 journal.finished(ModelAttempt(request.requestId, target.id, mode, reducer.assistantMessage(),
-                    reducer.terminal, reducer.usage, cancelled))
+                    reducer.terminal, reducer.usage, cancelled, reducer.historyDisposition()))
             }
             val terminal = reducer.terminal!!
             confirmedGenerationResponse = mode == ModelExecutionMode.GENERATION_ONLY && evidence.confirms(terminal)

@@ -145,6 +145,7 @@ open class SqliteRunHistory internal constructor(
         write(journalPath(sequence), HistoryCodec.json.encodeToString(value.copy(
             partial = HistoryCodec.encodeMessage(attempt.partial), finish = (attempt.terminal as? ModelEvent.Finished)?.reason,
             error = (attempt.terminal as? ModelEvent.Failed)?.error?.code, cancelled = attempt.cancelled, complete = true,
+            disposition = attempt.disposition?.name,
             usage = attempt.usage?.let { listOf(it.inputTokens, it.cacheReadTokens, it.cacheWriteTokens, it.outputTokens, it.reasoningTokens) } ?: emptyList())))
     }
     @Synchronized fun journalPage(before: Long? = null, limit: Int = 20, includeUnfinished: Boolean = true): JournalPage {
@@ -325,9 +326,11 @@ open class SqliteRunHistory internal constructor(
     }
 
     /** Null means absent/stale, not that an uncertain checkpoint can be safely resumed. */
-    @Synchronized fun checkpointInfo(): CheckpointInfo? = loadCheckpoint()?.takeIf {
-        it.matches(runSnapshot(), it.settingsKey)
-    }?.info()
+    @Synchronized fun checkpointInfo(): CheckpointInfo? {
+        ready()
+        if (hasPendingIntent()) return null
+        return loadCheckpoint()?.takeIf { it.matches(runSnapshot(), it.settingsKey) }?.info()
+    }
 
     private inline fun <reified T> read(name: String): T {
         try {

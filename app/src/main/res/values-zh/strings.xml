@@ -281,8 +281,10 @@
     <string name="chat_risk_write">风险：修改数据</string>
     <string name="chat_risk_device">风险：控制设备</string>
     <string name="chat_risk_root">风险：Root 特权访问</string>
-    <string name="chat_reply_archive">不参与模型历史的回复记录</string>
-    <string name="chat_reply_archive_notice">拒答、过滤和中断的回复保留在此，后续模型请求不会携带这些内容。</string>
+    <string name="chat_reply_archive">保留的回复记录</string>
+    <string name="chat_reply_archive_notice">拒答、过滤、中断及未进入历史的截断回复保留在此。未进入历史的内容不会发送给模型；旧版截断记录可能同时已有正式历史条目。</string>
+    <string name="chat_reply_length">回复达到输出上限，部分内容不代表完整答复。</string>
+    <string name="chat_reply_context">回复超出上下文窗口，部分内容不代表完整答复。</string>
     <string name="chat_reply_older">更早的保留回复</string>
     <string name="chat_reply_refused">模型拒绝了此次回复。</string>
     <string name="chat_reply_filtered">此次回复被过滤。</string>

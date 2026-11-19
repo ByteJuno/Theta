@@ -9,6 +9,40 @@ import kotlin.test.*
 class StoredRunJournalTest {
     private val durability = Durability.PROCESS_CRASH_ONLY
 
+    @Test fun discardedTruncationsPageAcrossReopenWithoutDuplicatingCommittedReplies() {
+        val root = Files.createTempDirectory("journal-truncation")
+        TestRunHistory.create(root, "session", durability).use { disk ->
+            disk.append(0, listOf(message(Role.USER, textPart("original"))))
+            val journal = StoredRunJournal(disk)
+            repeat(25) { index ->
+                val request = "truncated-$index"
+                journal.submitted(request, "target", ModelExecutionMode.GENERATION_ONLY)
+                journal.finished(ModelAttempt(request, "target", ModelExecutionMode.GENERATION_ONLY,
+                    message(Role.ASSISTANT, textPart("partial-$index")),
+                    Events.finished(if (index % 2 == 0) FinishReason.LENGTH else FinishReason.CONTEXT_EXCEEDED),
+                    null, false, HistoryDisposition.DISCARD))
+            }
+            journal.submitted("committed", "target", ModelExecutionMode.GENERATION_ONLY)
+            journal.finished(ModelAttempt("committed", "target", ModelExecutionMode.GENERATION_ONLY,
+                message(Role.ASSISTANT, textPart("kept partial")), Events.finished(FinishReason.LENGTH),
+                null, false, HistoryDisposition.KEEP))
+            journal.submitted("legacy", "target", ModelExecutionMode.GENERATION_ONLY)
+            journal.finished(ModelAttempt("legacy", "target", ModelExecutionMode.GENERATION_ONLY,
+                message(Role.ASSISTANT, textPart("legacy partial")), Events.finished(FinishReason.LENGTH), null, false))
+        }
+        TestRunHistory.open(root, durability).use { disk ->
+            val newest = disk.journalPage(limit = 20)
+            val older = disk.journalPage(newest.older, 20)
+            val replies = older.replies + newest.replies
+            assertEquals(26, replies.size)
+            assertNull(older.older)
+            assertEquals("partial-0", (replies.first().partial.parts.single() as ContentPart.Text).text)
+            assertEquals("legacy", replies.last().requestId)
+            assertFalse(replies.any { it.requestId == "committed" })
+            assertEquals(1, disk.runSnapshot().messages.size)
+        }
+    }
+
     @Test fun uncertainJournalWriteRetainsOldOrCommittedReplyAndNeverChangesHistory() {
         for (stage in listOf(HistoryWriteStage.BEFORE_COMMIT, HistoryWriteStage.AFTER_COMMIT)) {
             val root = Files.createTempDirectory("journal-fault")
