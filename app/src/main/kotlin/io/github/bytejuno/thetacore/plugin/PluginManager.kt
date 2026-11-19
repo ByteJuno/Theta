@@ -6,7 +6,6 @@ import io.github.bytejuno.thetacore.uiText
 
 import android.content.Context
 import android.net.Uri
-import android.os.SystemClock
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -89,13 +88,14 @@ internal class PluginManager(context: Context) {
     private val app = context.applicationContext
     private companion object {
         // Multiple manager instances must never multiply the process execution allowance.
-        val executionBudget = PluginExecutionBudget(approvalElapsedNanos = SystemClock::elapsedRealtimeNanos)
+        val executionBudget = PluginExecutionBudget()
         val hostToolBridge = HostToolBridgeRoot(executionBudget)
     }
 
     /** Application startup owns the store and the single recovery attempt, never an Activity. */
     suspend fun initializeHostTools(): HostToolExecutionService =
-        hostToolBridge.initialize(io.github.bytejuno.thetacore.plugin.tools.AndroidScreenBackend(app)) {
+        hostToolBridge.initialize(io.github.bytejuno.thetacore.plugin.tools.AndroidScreenBackend(app),
+            AndroidInvocationClock(app, executionBudget)) {
             AndroidAgentStore.open(app)
         }
     private val stageCleanup = PluginStageCleanup()

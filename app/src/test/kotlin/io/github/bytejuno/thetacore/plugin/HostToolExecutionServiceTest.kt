@@ -1871,18 +1871,22 @@ class HostToolExecutionServiceTest {
         private var sleptMillis = 0L
         @Synchronized fun sleepFor(delta: Long) { sleptMillis += delta }
         @Synchronized override fun elapsedRealtimeNanos() = TimeUnit.MILLISECONDS.toNanos(millis + sleptMillis)
-        private data class Alarm(val due: Long, val action: () -> Unit)
+        private data class Alarm(val due: Long, val elapsed: Boolean, val action: () -> Unit)
         private val alarms = mutableListOf<Alarm>()
         @Synchronized override fun nowNanos(): Long = TimeUnit.MILLISECONDS.toNanos(millis)
         @Synchronized override fun arm(delayMillis: Long, action: () -> Unit): () -> Unit {
-            val alarm = Alarm(millis + delayMillis, action)
+            return add(Alarm(millis + delayMillis, false, action))
+        }
+        @Synchronized override fun armApproval(deadlineNanos: Long, action: () -> Unit): () -> Unit =
+            add(Alarm((deadlineNanos + 999_999) / 1_000_000, true, action))
+        private fun add(alarm: Alarm): () -> Unit {
             alarms.add(alarm)
             return { synchronized(this) { alarms.remove(alarm) } }
         }
         fun advance(delta: Long, deliver: Boolean = true) {
             val due = synchronized(this) {
                 millis += delta
-                if (deliver) alarms.filter { it.due <= millis }.also { alarms.removeAll(it) } else emptyList()
+                if (deliver) alarms.filter { it.due <= (if (it.elapsed) millis + sleptMillis else millis) }.also { alarms.removeAll(it) } else emptyList()
             }
             due.forEach { it.action() }
         }
@@ -1913,6 +1917,37 @@ class HostToolExecutionServiceTest {
                 assertFalse(record.receipts.any { it.request.id == pending.id && it.decision != Decision.DENY })
                 assertEquals(0, effects.get())
             }
+        }
+    }
+
+    @Test fun wakeAfterSilentApprovalExpiryTimesOutWithoutAUserDecision() = runBlocking {
+        val clock = ManualClock()
+        Fixture(clock = clock).use { f ->
+            val release = CountDownLatch(1)
+            try {
+                val input = f.input(f.register(tool { env ->
+                    currentCoroutineContext()[Job]!!.invokeOnCompletion { release.await() }
+                    env.requestApproval("write", ToolRisk.WRITE)
+                    ToolResult("done")
+                }))
+                val id = input.binding.callId
+                f.service.prepare(input); f.service.dispatch(id)
+                val pending = pendingUpgrade(f, id)
+                f.gate.withGate {
+                    clock.advance(10_000)
+                    clock.sleepFor(590_000)
+                    clock.advance(0) // Deliver alarms due on wake without advancing awake time.
+                }
+                withTimeout(5_000) {
+                    var record = f.store.writes.receive()
+                    while (record.callId != id || record.state != Status.TIMED_OUT) record = f.store.writes.receive()
+                }
+                val record = f.ledger.get(id)!!
+                assertNull(record.pending)
+                assertFalse(record.receipts.any { it.request.id == pending.id && it.decision != Decision.DENY })
+                assertEquals(InstanceState.UNCONFIRMED, record.instance!!.state)
+                assertEquals(1, f.budget.occupiedSlots())
+            } finally { release.countDown() }
         }
     }
 

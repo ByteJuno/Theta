@@ -38,6 +38,10 @@ internal interface InvocationClock {
     fun nowNanos(): Long
     /** Monotonic time including suspend on Android, used only during human approval. */
     fun elapsedRealtimeNanos(): Long
+    fun armApproval(deadlineNanos: Long, action: () -> Unit): () -> Unit {
+        val remaining = (deadlineNanos - elapsedRealtimeNanos()).coerceAtLeast(0)
+        return arm((remaining + 999_999) / 1_000_000, action)
+    }
     fun arm(delayMillis: Long, action: () -> Unit): () -> Unit
 }
 
@@ -249,10 +253,13 @@ internal class PluginInvocation(
         disarm?.invoke()
         disarm = null
         if (completion.isCompleted || expireIfDue()) return
-        // Round up; a sub-millisecond remainder must not become a tight timer loop.
-        val millis = (remainingNanos(deadlineClockNanos()).coerceAtLeast(1) + 999_999) / 1_000_000
-        disarm = clock.arm(millis) {
-            synchronized(budget.gate) { if (!expireIfDue()) armDeadline() }
+        val checkDeadline = { synchronized(budget.gate) { if (!expireIfDue()) armDeadline() } }
+        val wait = approvalWait
+        disarm = if (wait != null) {
+            clock.armApproval(wait.elapsedStart + approvalRemainingNanos, checkDeadline)
+        } else {
+            val millis = (remainingNanos(clock.nowNanos()).coerceAtLeast(1) + 999_999) / 1_000_000
+            clock.arm(millis, checkDeadline)
         }
     }
 
