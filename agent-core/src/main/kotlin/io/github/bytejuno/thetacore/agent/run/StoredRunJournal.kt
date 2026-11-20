@@ -34,4 +34,4 @@ class StoredRunJournal(private val history: SqliteRunHistory) : RunJournal {
 
 @Serializable
 data class ChatTaskContext(val taskChainId: String, val goal: String, val priorMessageCount: Int,
-    val summaryWindowTokens: Long? = null)
+    val summaryWindowTokens: Long? = null, val contextWindowTokens: Long? = summaryWindowTokens)

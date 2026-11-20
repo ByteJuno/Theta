@@ -1,0 +1,18 @@
+<resources>
+    <string name="checkpoint_title">恢复暂停的任务</string>
+    <string name="checkpoint_readmit">使用更大窗口重试</string>
+    <string name="checkpoint_continue_summary">从已保存摘要续接</string>
+    <string name="checkpoint_summary_warning">摘要可能丢失细节，请核对原始对话和工具结果后再继续。现有审批和任务累计限制仍然有效。</string>
+    <string name="checkpoint_readmit_warning">请只使用已核实的模型上下文窗口。此路径不生成摘要，也不更换模型；原始消息、审批和累计限制均保留。请求仍可能被拒绝或暂停。</string>
+    <string name="checkpoint_not_attended">无人值守任务或无法核实原始身份时，不提供确认入口，也不会自动重试请求。</string>
+    <string name="checkpoint_window_unknown">当前模型窗口：未配置</string>
+    <string name="checkpoint_current_window">当前模型窗口：%1$d 个 token</string>
+    <string name="checkpoint_selected_window">所选模型窗口：%1$d 个 token</string>
+    <string name="checkpoint_window_help">请输入 1,024–1,000,000 个 token。更大窗口重试要求大于当前窗口；此设置不会扩大服务商的实际容量。</string>
+    <string name="checkpoint_details">检查点技术详情</string>
+    <string name="checkpoint_identifier">检查点：%1$s</string>
+    <string name="checkpoint_run">暂停运行：%1$s</string>
+    <string name="checkpoint_diagnostic">诊断信息：%1$s</string>
+    <string name="checkpoint_confirm">确认并继续</string>
+    <string name="checkpoint_cancel">保持暂停</string>
+</resources>
