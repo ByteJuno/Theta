@@ -160,7 +160,10 @@ class AgentRunLoop(
             require(records.map { it.atLedgerPrecision() } == saved.ledger.map { it.atLedgerPrecision() } && !tools.checkpointBlocked(records))
             disk.saveCheckpoint(saved.copy(pauseClass = "ADMITTED", reason = "Budget readmission reserved"))
             admissionPending = true
-            rejectedContextReadmission = saved.reason.contains("CONTEXT_TOO_LONG")
+            // Both a rejected input and an output that exhausted context require a smaller
+            // request view before another generation. Keep recognizing persisted checkpoints.
+            rejectedContextReadmission = saved.reason.contains("CONTEXT_TOO_LONG") ||
+                saved.reason == "Truncated response; checkpoint required"
         }
         if (policy.resumeCheckpointId != null) {
             require(saved != null && saved.id == policy.resumeCheckpointId && saved.kind == "CONTINUATION")

@@ -437,6 +437,63 @@ class ChatSessionOwnerTest {
         }
     }
 
+    @Test fun contextExceededReadmissionSummarizesBeforeGenerationAcrossColdOpen() = runBlocking {
+        for (incomplete in listOf(false, true)) {
+            val root = Files.createTempDirectory("chat-context-exceeded").toFile()
+            val requests = mutableListOf<ChatRequest>()
+            val executions = AtomicInteger()
+            val model = object : ModelProvider {
+                override fun executionMode(request: ChatRequest) = ModelExecutionMode.GENERATION_ONLY
+                override fun chat(request: ChatRequest, auth: Credentials): Flow<ModelEvent> = flow {
+                    requests += request
+                    emit(Events.started("context-${requests.size}", "model"))
+                    if (requests.size == 1) {
+                        emit(Events.text(0, "truncated reply")); emit(Events.end(0))
+                        if (incomplete) {
+                            emit(Events.toolStart(1, "wire", "host_clock"))
+                            emit(Events.toolDelta(1, "{")); emit(Events.end(1))
+                        }
+                        emit(Events.finished(FinishReason.CONTEXT_EXCEEDED))
+                    } else {
+                        emit(Events.text(0, if (request.tools.isEmpty()) "prior summary" else "final answer"))
+                        emit(Events.end(0)); emit(Events.finished(FinishReason.STOP))
+                    }
+                }
+            }
+            try {
+                val first = fixture(root, executions, model)
+                try {
+                    first.store.createHistory("session").use { disk ->
+                        disk.append(0, listOf(message(Role.USER, textPart("u".repeat(5000))),
+                            message(Role.ASSISTANT, textPart("a".repeat(5000)))))
+                    }
+                    first.owner.open().join(); first.owner.send("continue goal").join()
+                    await { !first.owner.state.value.active }
+                    assertEquals(1, requests.size)
+                    assertEquals("BUDGET", first.owner.state.value.checkpoint!!.pauseClass)
+                    assertTrue(first.failures.toString(), first.failures.isEmpty())
+                } finally { first.close() }
+                val cold = fixture(root, executions, model)
+                try {
+                    cold.owner.open().join(); assertEquals(1, requests.size)
+                    cold.owner.resume(summaryWindowTokens = 32768).join()
+                    await { !cold.owner.state.value.active }
+                    assertEquals(cold.failures.toString(), R.string.chat_complete, cold.owner.state.value.notice)
+                    assertTrue(requests[1].tools.isEmpty())
+                    assertTrue(requests.last().tools.isNotEmpty())
+                    val codec = OpenAiChatCodec(OpenAiChatConfig("test", "https://example.invalid/v1", setOf("model")))
+                    assertTrue(codec.encode(requests.last()).length < codec.encode(requests.first()).length)
+                    assertFalse(requests.last().messages.any { m -> m.parts.any { it is ContentPart.ToolCall } })
+                    assertEquals(0, executions.get())
+                    assertEquals(if (incomplete) 4 else 5, cold.owner.state.value.messages.size)
+                    assertEquals("u".repeat(5000), (cold.owner.state.value.messages.first().parts.single() as ContentPart.Text).text)
+                    assertTrue(cold.owner.state.value.result!!.steps >= 2)
+                    assertTrue(cold.failures.toString(), cold.failures.isEmpty())
+                } finally { cold.close() }
+            } finally { root.deleteRecursively() }
+        }
+    }
+
     @Test fun incompleteTruncatedRepliesSurviveColdOpenAndNeverReplay() = runBlocking {
         for (finish in listOf(FinishReason.LENGTH, FinishReason.CONTEXT_EXCEEDED)) {
             val root = Files.createTempDirectory("chat-truncated-reply").toFile()
