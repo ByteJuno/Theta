@@ -1,5 +1,13 @@
 # Issue 83 — foreground task execution
 
+## Reviewer correction (round 5)
+
+- Reviewed head: `035244e6f40a7b4d8880ca978d4ce52096fbedbc`; four prior writer returns remain recorded. The previous implementation/tree binding was checked: its final delta only changed this summary, so applicable unchanged test evidence was reused.
+- A temporary `RetainedChainAdmissionProbe` reproduced a cold-recovery failure after a completed answer whose tool still had an `UNKNOWN` effect. The next accepted user input retained the task chain but left `chat-result=COMPLETED`; cold open showed two user inputs, `recovery=null`, and no recovery actions. The red run reported `GRADLE_EXIT=1`, one test/one failure; the model/tool counts remained two/one, so this was missing explicit recovery, not automatic replay. Raw output remains in the reviewer transcript; the Probe is untracked and excluded from commits.
+- Fix implementation: `d25c952cfb35b2140946efefcaa6ff9444358f93`; tree: `170dfedd0e42d8084a613b88adc2a33d622d5a17`. Accepted input now atomically changes an existing chat result to PAUSED while preserving trusted identity, counters and uncertainty. A cold-continuation regression verifies exactly one further model request, unchanged original invocation, and no duplicate user input/tool execution. Transaction faults cover all five write stages on the retained-chain path.
+- Authorized GPU validation: `/opt/homelab-report/theta-gpu-test :agent-core:test --tests '*ChatRecoveryIdentityTest*' --tests '*HistoryStorageRegressionTest*' :app:testDebugUnitTest --tests '*ChatSessionOwnerTest*' --tests '*RetainedChainAdmissionProbe*'`. Result: `GRADLE_EXIT=0`, **61 tests / 0 failures** (46 chat-owner, 6 recovery-identity, 8 storage, 1 temporary Probe). Green Probe output confirmed PAUSED and a non-null cold recovery token. No existing assertion or timeout was removed or weakened.
+- This following commit only updates the summary. No new APK, visual/device result or full CI result is claimed for the reviewer fix; previous APK hashes remain bound to their original sources. Final-source CI and prescribed emulator checks remain with the external review script. No protected path, dependency or UI resource changed.
+
 ## Same-tool continuation after internal approval withdrawal
 
 - Tested implementation: `04808b5572659d51be306726b6d0aa3f892d9f55`; tree: `3c14b18d1e3caedadab8513a9581740709422241`. Verified OWNER RETURN [7032104483](https://github.com/ByteJuno/Theta/pull/104#issuecomment-7032104483), unchanged remote head `0c4fc8a0d073ac2007119cb5bea4266bc2636a23`, trusted reviewer `waiting_writer` state and raw GPU probe output. Explicit ff-only pull synchronized this PR branch before repair. The following documentation commit changes only this summary.
