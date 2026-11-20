@@ -65,6 +65,8 @@ internal class ChatSessionOwner(
     private var active: Job? = null
     private var activeRunId: String? = null
     private var observedRequest: String? = null
+    private var cachedPageSession: String? = null
+    private var cachedPage: HistoryPage? = null
     private val previewLock = Any()
     private val preview = StringBuilder()
     fun previewText(): String = synchronized(previewLock) { preview.toString() }
@@ -131,6 +133,8 @@ internal class ChatSessionOwner(
         }
         history?.close()
         history = null
+        cachedPageSession = null
+        cachedPage = null
         try { host.ledger.deleteSession(id) }
         catch (error: Exception) {
             history = requireNotNull(host.sessionStore).openHistory(id)
@@ -144,6 +148,8 @@ internal class ChatSessionOwner(
         val store = requireNotNull(host.sessionStore)
         history?.close()
         history = null
+        cachedPageSession = null
+        cachedPage = null
         val key = id ?: "${System.currentTimeMillis()}-${UUID.randomUUID()}"
         val disk = if (id == null) store.createHistory(key) else store.openHistory(key)
         history = disk
@@ -171,7 +177,17 @@ internal class ChatSessionOwner(
     private suspend fun refresh(before: HistoryCursor? = null) {
         val disk = requireNotNull(history)
         val host = requireNotNull(tools)
-        val page = disk.page(before, 40)
+        val page = if (before == null && active != null && cachedPageSession == disk.sessionId &&
+            cachedPage?.revision == disk.revision()) {
+            cachedPage!!
+        } else {
+            disk.page(before, 40).also { loaded ->
+                if (before == null) {
+                    cachedPageSession = disk.sessionId
+                    cachedPage = loaded
+                }
+            }
+        }
         val pending = disk.pendingStep(host.ledger)
         val messages = page.messages + if (before == null && pending != null) listOf(pending.assistant) else emptyList()
         val records = messages.flatMap { it.parts.filterIsInstance<ContentPart.ToolCall>() }

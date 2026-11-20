@@ -152,6 +152,32 @@ class BoundedHistoryTest {
         TestRunHistory.corrupt(path, "batches/1")
         TestRunHistory.open(path, Durability.PROCESS_CRASH_ONLY).use { assertFails { it.runSnapshot() } }
     }
+
+    @Test fun repeatedCheckpointOperationsAtImmutableRevisionAvoidFullRescans() {
+        val path = Files.createTempDirectory("bounded-checkpoint-cache")
+        TestRunHistory.create(path, "session", Durability.PROCESS_CRASH_ONLY).use { h ->
+            repeat(20) { h.append(it.toLong(), listOf(user("msg-$it".padEnd(1024, 'x')))) }
+            val source = h.runSnapshot()
+            val key = settingsKey("provider", RunFixture().request())
+            val digest = h.verifiedSourceDigest(source, source.messages.size)
+            val saved = ContextCheckpoint(id = "cp-1", sessionId = "session", taskChainId = "chain", runId = "run",
+                nextRunId = null, unattended = false, sourceRevision = source.revision, sourceCount = source.messages.size,
+                sourceDigest = digest, settingsKey = key, goal = "goal", steps = 1, retries = 0, kind = "PAUSED",
+                summary = null, reason = "budget", serverUnresolved = false, ledger = emptyList(), catalog = emptyList(),
+                pauseClass = "BUDGET")
+            h.saveCheckpoint(saved)
+            assertEquals("cp-1", h.checkpointInfo()!!.id)
+            val decodedAfterWarmup = h.io().messagesDecoded
+            repeat(5) {
+                val expectedId = if (it == 0) "cp-1" else "cp-${it + 1}"
+                assertEquals(expectedId, h.checkpointInfo()!!.id)
+                h.saveCheckpoint(saved.copy(id = "cp-${it + 2}", steps = it + 2))
+            }
+            assertEquals(decodedAfterWarmup, h.io().messagesDecoded)
+            h.append(h.revision(), listOf(user("newer")))
+            assertNull(h.checkpointInfo())
+        }
+    }
     @Test fun exportMeasurementClasspath() {
         val classes = listOf(BoundedHistoryMeasurement::class.java, SqliteRunHistory::class.java,
             kotlin.Unit::class.java, androidx.sqlite.SQLiteDriver::class.java,
