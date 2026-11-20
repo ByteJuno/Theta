@@ -122,6 +122,9 @@ class HostBlobOutputTest {
                 service.prepare(input); service.dispatch(id)
                 assertTrue(entered.await(5, TimeUnit.SECONDS))
                 service.cancel(id)
+                service.finishChatRun("run")
+                assertEquals(1, service.catalog.frozenRunCount)
+                assertEquals(1, service.catalog.gate.frozenRunCount)
                 returnBody.countDown()
                 withTimeout(15000) { while (service.ledger.get(id)!!.evidence.none { it.outcome?.output != null }) delay(5) }
                 val late = service.ledger.get(id)!!
@@ -131,6 +134,8 @@ class HostBlobOutputTest {
                 assertEquals(1L, service.normalizationCount)
                 assertTrue(service.ledger.readBlob("run", ref.id, 0).second.isNotEmpty())
                 releaseChild.countDown(); service.awaitObservedExit(id)
+                assertEquals(0, service.catalog.frozenRunCount)
+                assertEquals(0, service.catalog.gate.frozenRunCount)
                 assertEquals(1L, service.normalizationCount)
                 assertEquals(1, service.ledger.get(id)!!.evidence.count { it.outcome?.output != null })
                 assertEquals(Status.CANCELLED, service.ledger.get(id)!!.state)

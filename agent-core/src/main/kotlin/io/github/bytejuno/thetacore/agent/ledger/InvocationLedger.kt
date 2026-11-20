@@ -154,6 +154,14 @@ class InvocationLedger(
         }
     }
 
+    /** A completed text response cannot retire approvals for an earlier uncertain effect. */
+    internal fun hasOutstandingChainRisk(taskChainId: String): Boolean = gate.withGate {
+        continuationBlocked(taskChainId) || recordsById.values.any {
+            it.input.taskChainId == taskChainId && hasUnknown(it) &&
+                it.isolation?.resolution != RecoveryResolution.VERIFIED_CLEAR
+        }
+    }
+
     /** Denial-time evidence, never recomputed from later siblings. An internal denial does not
      * undo the enclosing READ's execution or replace its eventual terminal result. */
     fun rejectedUnknownUnattended(callId: String): Boolean = gate.withGate {

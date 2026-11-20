@@ -92,7 +92,11 @@ class HostScreenToolTest {
         exerciseTimeout(unknown = true)
     }
 
-    private suspend fun exerciseTimeout(unknown: Boolean) {
+    @Test fun runBridgeKeepsBuiltinIsolationAndRejectsStaleRevision() = runBlocking {
+        exerciseTimeout(unknown = false, throughBridge = true)
+    }
+
+    private suspend fun exerciseTimeout(unknown: Boolean, throughBridge: Boolean = false) {
         val dir = Files.createTempDirectory("screen-timeout").toFile()
         val budget = PluginExecutionBudget(processSlots = 2, perPluginSlots = 1)
         val entered = CountDownLatch(1)
@@ -145,10 +149,21 @@ class HostScreenToolTest {
             assertEquals("Plugin restart required", (service.ledger.claimExecution(ready.callId, ready.revision) as Mutation.Blocked).reason)
             val sameResource = input(service, key = "host/other_screen", session = "another-session")
             service.prepare(sameResource)
-            assertEquals("Resource occupied or externally isolated", (service.dispatch(sameResource.binding.callId) as Mutation.Blocked).reason)
+            val resourceClaim = if (throughBridge) service.runBridge().claimAndSubmit(sameResource.binding.callId,
+                service.ledger.get(sameResource.binding.callId)!!.revision) else service.dispatch(sameResource.binding.callId)
+            assertEquals("Resource occupied or externally isolated", (resourceClaim as Mutation.Blocked).reason)
             val clock = input(service, key = "host/clock", session = "independent")
             service.prepare(clock)
-            assertNotNull((service.dispatch(clock.binding.callId) as Mutation.Applied).ticket)
+            val clockReady = service.ledger.get(clock.binding.callId)!!
+            if (throughBridge) {
+                assertEquals("Claim revision changed", (service.runBridge().claimAndSubmit(clock.binding.callId,
+                    clockReady.revision - 1) as Mutation.Conflict).reason)
+                assertNull(service.ledger.get(clock.binding.callId)!!.instance)
+                assertEquals(1, budget.occupiedSlots())
+            }
+            val clockClaim = if (throughBridge) service.runBridge().claimAndSubmit(clock.binding.callId,
+                clockReady.revision) else service.dispatch(clock.binding.callId)
+            assertNotNull((clockClaim as Mutation.Applied).ticket)
             withTimeout(20_000) { service.awaitObservedExit(clock.binding.callId) }
             val clockRecord = service.ledger.get(clock.binding.callId)!!
             assertEquals(Status.SUCCEEDED, clockRecord.state)
@@ -156,7 +171,9 @@ class HostScreenToolTest {
             val read = input(service, key = "host/blob_read", session = clock.sessionId,
                 args = """{"id":"${raw.id}","offset":0}""")
             service.prepare(read)
-            assertNotNull((service.dispatch(read.binding.callId) as Mutation.Applied).ticket)
+            val readClaim = if (throughBridge) service.runBridge().claimAndSubmit(read.binding.callId,
+                service.ledger.get(read.binding.callId)!!.revision) else service.dispatch(read.binding.callId)
+            assertNotNull((readClaim as Mutation.Applied).ticket)
             withTimeout(20_000) { service.awaitObservedExit(read.binding.callId) }
             val readRecord = service.ledger.get(read.binding.callId)!!
             assertEquals(Status.SUCCEEDED, readRecord.state)

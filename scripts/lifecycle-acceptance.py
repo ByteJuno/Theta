@@ -129,7 +129,7 @@ def scroll(down, nodes=None, observation=None):
     return True
 
 
-def matching(description, predicate, timeout=None):
+def matching(description, predicate, timeout=None, *, for_tap=False):
     # Revisit offscreen content: asynchronous results may appear above the final
     # viewport after a complete sweep. Pause between sweeps without resetting
     # wait()'s deadline. Each direction retains the hard cap for changing XML.
@@ -151,7 +151,9 @@ def matching(description, predicate, timeout=None):
         observations[-1]["screen_started_at"] = started
         require(len(matches) <= 1, f"Ambiguous match for {description}: {len(matches)} nodes")
         if matches:
-            return matches[0]  # Never use Element truthiness (leaf nodes are falsey).
+            found = tap_target(matches[0], nodes) if for_tap else matches[0]
+            if found is not None:
+                return found
         if not nodes:
             sweep["last"] = None  # A failed dump cannot establish a list boundary.
             return None
@@ -201,8 +203,34 @@ def resource_text(key):
     return matching(key, lambda value: value in expected)
 
 
+def tap_target(node, nodes):
+    def bounds(element):
+        values = re.findall(r"-?\d+", element.get("bounds", ""))
+        if len(values) != 4:
+            return None
+        left, top, right, bottom = map(int, values)
+        return (left, top, right, bottom) if left < right and top < bottom else None
+
+    visible = bounds(node)
+    if visible is None:
+        return None
+    parents = {child: parent for parent in nodes for child in parent}
+    ancestor = parents.get(node)
+    while ancestor is not None:
+        clip = bounds(ancestor)
+        if clip is None:
+            return None
+        visible = (max(visible[0], clip[0]), max(visible[1], clip[1]),
+                   min(visible[2], clip[2]), min(visible[3], clip[3]))
+        ancestor = parents.get(ancestor)
+    left, top, right, bottom = visible
+    if left < 0 or top < 0 or left >= right or top >= bottom:
+        return None
+    return ET.Element("node", bounds=f"[{left},{top}][{right},{bottom}]")
+
+
 def tap(value):
-    em.tap(text(value))
+    em.tap(matching(repr(value), lambda text: text == value, for_tap=True))
 
 
 def absent(value):
@@ -244,6 +272,16 @@ def back():
 
 def start(recovery=False):
     adb("shell", "am", "start", "-W", "-n", f"{PACKAGE}/.MainActivity", "--ez", "skip_plugins", str(recovery).lower())
+    if not recovery:
+        def plugin_entry_ready():
+            nodes = em.screen()
+            entry = [n for n in nodes if n.get("text") == "Plugins and diagnostics"]
+            if entry:
+                require(len(entry) == 1, "Ambiguous plugin navigation")
+                em.tap(entry[0])
+                return False
+            return any(n.get("text") == "Import code APK" for n in nodes)
+        wait("plugin management from chat", plugin_entry_ready)
 
 
 def restart(recovery=False):

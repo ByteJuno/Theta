@@ -66,8 +66,6 @@ class Acceptance:
         self.lc.OUTPUT = output
         self.em.OUTPUT = output
         self.em.screen = self.screen
-        self.lc.scroll = self.scroll
-        self.lc.matching = self.matching
 
     def adb(self, *args, timeout=30, check=True):
         # Before check_device succeeds, only its three read-only probes are legal.
@@ -103,37 +101,6 @@ class Acceptance:
         if x2 <= x1 or y2 <= y1 or x2 <= 0 or y2 <= 0:
             return None
         return x1, y1, x2, y2
-
-    def scroll(self, down):
-        # A long AlertDialog has its OWN scrollable body; swiping the activity's
-        # 25%-80% range can hit dialog buttons or the obscured list instead.
-        nodes = self.screen()
-        candidates = [self.bounds(n) for n in nodes if n.get("scrollable") == "true"]
-        candidates = [b for b in candidates if b and b[3] - b[1] > 60]
-        if candidates:
-            x1, y1, x2, y2 = min(candidates, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]))
-        else:
-            sizes = re.findall(r"(\d+)x(\d+)", self.adb("shell", "wm", "size"))
-            art.require(sizes, "Cannot determine display size")
-            width, height = map(int, sizes[-1])
-            x1, x2, y1, y2 = 0, width, int(height * .28), int(height * .72)
-        x = max(1, (x1 + x2) // 2)
-        top, bottom = max(1, y1 + (y2 - y1) // 5), y2 - (y2 - y1) // 5
-        self.adb("shell", "input", "swipe", str(x), str(bottom if down else top),
-                 str(x), str(top if down else bottom), "250")
-
-    def matching(self, description, predicate):
-        attempt = 0
-
-        def locate():
-            nonlocal attempt
-            node = self.em.find(self.screen(), predicate)
-            if node is None:
-                self.scroll(attempt % 12 < 6)
-                attempt += 1
-            return node
-
-        return self.lc.wait(description, locate)
 
     def snapshot(self, label):
         directory = self.out / self.current / label
@@ -173,9 +140,9 @@ class Acceptance:
                          "Integrity verified; author identity not authenticated.",
                          "Current signer certificate SHA-256:",
                          "This signer set is pinned until an explicit clear-data uninstall."):
-            self.matching(required, lambda t, value=required: value in t)
+            self.lc.matching(required, lambda t, value=required: value in t)
         digest = data["signer_sha256"]
-        node = self.matching("exact displayed certificate SHA-256", lambda t: re.sub(r"\s+", "", t).lower() == digest)
+        node = self.lc.matching("exact displayed certificate SHA-256", lambda t: re.sub(r"\s+", "", t).lower() == digest)
         self.observations.append({"case": self.current, "artifact": name, "expected_fingerprint": digest,
                                   "displayed_text": node.get("text")})
         self.snapshot("fingerprint-" + name)
@@ -212,7 +179,7 @@ class Acceptance:
             for text in texts:
                 if text in expected:
                     return text
-            self.scroll(attempts % 12 < 6)
+            self.lc.scroll(attempts % 12 < 6, nodes)
             attempts += 1
             return False
 

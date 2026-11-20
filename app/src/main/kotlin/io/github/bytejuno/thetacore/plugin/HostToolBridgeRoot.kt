@@ -45,7 +45,10 @@ internal class HostToolBridgeRoot(
                     catalog.registerHost("host/screen_info", "1", io.github.bytejuno.thetacore.plugin.tools.HostScreenTool(it))
                 }
                 catalog.registerHost("host/blob_read", "1", io.github.bytejuno.thetacore.plugin.tools.HostBlobReadTool(ledger))
-                HostToolExecutionService(budget, owner, catalog, ledger, validator, invocationClock = invocationClock).also { service = it }
+                HostToolExecutionService(
+                    budget, owner, catalog, ledger, validator,
+                    sessionStore = store as? AndroidAgentStore, invocationClock = invocationClock,
+                ).also { service = it }
             } catch (error: Throwable) {
                 owner.cancel()
                 try { store.close() } catch (close: Throwable) { error.addSuppressed(close) }

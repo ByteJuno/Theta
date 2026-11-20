@@ -117,6 +117,8 @@ private fun ThetaCoreApp(
     resumed: Boolean,
     onIncomingTaken: () -> Unit,
 ) {
+    var showPlugins by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(recovery || incoming != null) }
+    LaunchedEffect(incoming) { if (incoming != null) showPlugins = true }
     val strings = uiStrings()
     val context = LocalContext.current
     val colors = if (isSystemInDarkTheme()) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
@@ -246,7 +248,11 @@ private fun ThetaCoreApp(
                 } else if (activePage != null) {
                     BackHandler { leavePage() }
                     activePage.Content()
+                } else if (!showPlugins) {
+                    io.github.bytejuno.thetacore.chat.ChatScreen(context.applicationContext as ThetaApplication) { showPlugins = true }
                 } else {
+                    BackHandler { showPlugins = false }
+                    TextButton(onClick = { showPlugins = false }) { Text(strings.get(R.string.chat_back)) }
                     if (restorePolicy.skipCode || restorePolicy.skipData || restorePolicy.suspects.isNotEmpty()) {
                         Text(if (restorePolicy.skipData) strings.get(R.string.safe_mode_all)
                             else if (restorePolicy.skipCode) strings.get(R.string.safe_mode_code)

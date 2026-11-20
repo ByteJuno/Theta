@@ -42,7 +42,8 @@ interface RunJournal {
     fun finished(attempt: ModelAttempt)
 }
 data class ModelAttempt(val requestId: String, val targetId: String, val mode: ModelExecutionMode,
-    val partial: Message, val terminal: ModelEvent?, val usage: TokenUsage?, val cancelled: Boolean)
+    val partial: Message, val terminal: ModelEvent?, val usage: TokenUsage?, val cancelled: Boolean,
+    val disposition: HistoryDisposition? = null)
 class MemoryRunJournal : RunJournal {
     private val starts = mutableListOf<Triple<String, String, ModelExecutionMode>>()
     private val ends = mutableListOf<ModelAttempt>()

@@ -22,6 +22,8 @@ class DefinitionGate {
         require(runs[runId] == null || runs[runId] == frozen) { "Run directory is immutable" }
         runs[runId] = frozen
     }
+    val frozenRunCount: Int get() = withGate { runs.size }
+    fun releaseRun(runId: String) = withGate { runs.remove(runId); Unit }
     internal fun check(input: InvocationInput): DefinitionState = withGate {
         val d = input.definition ?: return@withGate DefinitionState.STALE
         when {

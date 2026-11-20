@@ -64,8 +64,8 @@ object ToolOutputNormalizer {
     const val TEXT_LIMIT = 32 * 1024
     private val json = Json { encodeDefaults = true }
     fun normalize(content: List<OutputPart>, structured: JsonElement?, isError: Boolean, effect: Effect?,
-        outputSchema: String?, validator: ArgumentsValidator, retrievalName: String): NormalizedOutput {
-        require(retrievalName.matches(Regex("[A-Za-z0-9_-]{1,64}")))
+        outputSchema: String?, validator: ArgumentsValidator, retrievalName: String?): NormalizedOutput {
+        require(retrievalName == null || retrievalName.matches(Regex("[A-Za-z0-9_-]{1,64}")))
         val writes = mutableListOf<BlobWrite>()
         val parts = content.map { part -> when (part) {
             is OutputPart.Text -> StoredOutputPart(text = part.text)
@@ -80,8 +80,12 @@ object ToolOutputNormalizer {
         writes += raw
         val valid = structured == null || outputSchema == null || validator.valid(outputSchema, structured.toString())
         val warning = if (valid) null else "Tool returned invalid structured output"
+        // Older pending records may have no frozen retrieval alias. Keep the original blob
+        // and its reference without advertising a guessed callable name.
+        fun retrieval(id: String) = retrievalName?.let { "Retrieve with $it(id=\"$id\", offset=0)" }
+            ?: "No retrieval alias recorded for this run"
         val original = parts.map { part -> part.text ?: "[${part.kind}: ${part.blob!!.mimeType}; blob ${part.blob.id}; " +
-            "retrieve with $retrievalName(id=\"${part.blob.id}\", offset=0)]" }
+            "${retrieval(part.blob.id)}]" }
         val empty = original.all { it.isEmpty() }
         val text = buildList {
             if (structured != null && valid) add("[structured JSON]\n$structured")
@@ -89,7 +93,7 @@ object ToolOutputNormalizer {
             if (!valid && empty) add(warning!!)
         }.joinToString("\n")
         val notice = "\n[Truncated tool result; full original JSON: blob ${raw.ref.id}. " +
-            "Retrieve with $retrievalName(id=\"${raw.ref.id}\", offset=0); follow nextOffset. " +
+            "${retrieval(raw.ref.id)}. " + (if (retrievalName != null) "Follow nextOffset. " else "") +
             "Data is base64-encoded bytes. Truncated JSON above is text, not a complete structured value.]"
         val bounded = ModelResultText.bound(text, notice)
         return NormalizedOutput(bounded, isError || (!valid && empty),

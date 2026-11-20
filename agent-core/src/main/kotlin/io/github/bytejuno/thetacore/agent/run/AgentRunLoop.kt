@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.Serializable
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -17,6 +18,7 @@ data class RunLimits(val maxSteps: Int = 50, val maxRetries: Int = 12, val maxPa
     init { require(maxSteps > 0 && maxRetries >= 0 && maxPaused >= 0 && repeatedCalls > 0 && maxRetryWaitMs >= 0) }
 }
 enum class RunState { COMPLETED, PAUSED, FAILED }
+@Serializable
 data class RunResult(val state: RunState, val reason: String, val steps: Int, val retries: Int,
                      val serverExecutionUnknown: Boolean = false)
 
@@ -47,6 +49,7 @@ class AgentRunLoop(
     initialRetries: Int = 0,
     private val contextPolicy: ContextPolicy? = null,
     private val requestViewLimit: RequestViewLimit = RequestViewLimit(),
+    private val onEvent: (String, ModelEvent) -> Unit = { _, _ -> },
 ) {
     private var target = target.copy()
     private var config = copyRequest(request, emptyList())
@@ -67,6 +70,7 @@ class AgentRunLoop(
     private var admissionPending = false
     private var accountingActive = false
     private var confirmedGenerationResponse = false
+    private var rejectedContextReadmission = false
 
     private fun persistAccounting() {
         if (accountingActive) (history as? SqliteRunHistory)?.saveAccounting(
@@ -156,6 +160,10 @@ class AgentRunLoop(
             require(records.map { it.atLedgerPrecision() } == saved.ledger.map { it.atLedgerPrecision() } && !tools.checkpointBlocked(records))
             disk.saveCheckpoint(saved.copy(pauseClass = "ADMITTED", reason = "Budget readmission reserved"))
             admissionPending = true
+            // Both a rejected input and an output that exhausted context require a smaller
+            // request view before another generation. Keep recognizing persisted checkpoints.
+            rejectedContextReadmission = saved.reason.contains("CONTEXT_TOO_LONG") ||
+                saved.reason == "Truncated response; checkpoint required"
         }
         if (policy.resumeCheckpointId != null) {
             require(saved != null && saved.id == policy.resumeCheckpointId && saved.kind == "CONTINUATION")
@@ -316,13 +324,19 @@ class AgentRunLoop(
         return RunResult(state, reason, steps, retries, unresolved)
     }
 
-    suspend fun run(): RunResult {
+    suspend fun run(): RunResult = run(chatTask = false)
+    suspend fun runChatTask(): RunResult {
+        require(history is SqliteRunHistory)
+        return run(chatTask = true)
+    }
+
+    private suspend fun run(chatTask: Boolean): RunResult {
         check(started.compareAndSet(false, true)) { "Run is one-shot; do not replay a partially executed step" }
         val disk = history as? SqliteRunHistory
         disk?.beginRun()
         var failure: Throwable? = null
         try {
-            return runStarted()
+            return runStarted(chatTask)
         } catch (e: HistoryViewLimitException) {
             // Do not materialize the rejected transaction merely to construct another checkpoint.
             return RunResult(RunState.PAUSED, e.message!!, steps, retries,
@@ -341,7 +355,7 @@ class AgentRunLoop(
         }
     }
 
-    private suspend fun runStarted(): RunResult {
+    private suspend fun runStarted(chatTask: Boolean): RunResult {
         tools.freeze(identity)
         var view = history.runSnapshot()
         if (history !is SqliteRunHistory) validateHistory(view.messages)
@@ -349,6 +363,8 @@ class AgentRunLoop(
         restoreContext(view)
         persistedPause?.let { return result(RunState.PAUSED, it, serverUnknown) }
         accountingActive = true
+        if (rejectedContextReadmission && !compactPrior(view))
+            return pauseContext(view, "Model error: CONTEXT_TOO_LONG")
         val causes = mutableMapOf<String, Int>()
         // Transient failures share one budget per selected endpoint/model, regardless of error code.
         // Credentials are deliberately excluded: rotating a key must not reset this budget.
@@ -391,13 +407,13 @@ class AgentRunLoop(
             try {
                 // Wrap creation as well as collection: synchronous chat() failures obey 2.8 too.
                 evidence.observe(flow { emitAll(target.provider.chat(request, target.credentials)) })
-                    .validated(target.id, request.requestId, timeouts).collect { reducer.accept(it) }
+                    .validated(target.id, request.requestId, timeouts).collect { reducer.accept(it); onEvent(request.requestId, it) }
             } catch (e: CancellationException) {
                 cancelled = true
                 throw e
             } finally {
                 journal.finished(ModelAttempt(request.requestId, target.id, mode, reducer.assistantMessage(),
-                    reducer.terminal, reducer.usage, cancelled))
+                    reducer.terminal, reducer.usage, cancelled, reducer.historyDisposition()))
             }
             val terminal = reducer.terminal!!
             confirmedGenerationResponse = mode == ModelExecutionMode.GENERATION_ONLY && evidence.confirms(terminal)
@@ -480,7 +496,10 @@ class AgentRunLoop(
             }
             steps++
             // Reserve the count before pending intent, ledger registration or history append.
-            persistAccounting()
+            val chatDisk = (history as? SqliteRunHistory)?.takeIf { chatTask }
+            val finalAnswer = chatDisk != null && calls.isEmpty() && !truncated && !serverUnknown &&
+                finish.reason != FinishReason.PAUSED && disposition != HistoryDisposition.DISCARD
+            if (!finalAnswer) persistAccounting()
             val duplicate = calls.any { call ->
                 val args = runCatching { canonical(Json.parseToJsonElement(call.argsJson)) }.getOrDefault(call.argsJson)
                 val key = call.name + "\u0000" + args
@@ -501,7 +520,9 @@ class AgentRunLoop(
                 }
                 // Persist the complete assistant before registration, so a process loss during
                 // registration/execution can reconcile the entire ordered step from ledger truth.
-                history.prepareStep(view.revision, identity, step, assistant)
+                if (chatDisk != null) chatDisk.prepareStep(view.revision, identity, step, assistant,
+                    tools.definitions.singleOrNull { it.toolKey == "host/blob_read" })
+                else history.prepareStep(view.revision, identity, step, assistant)
                 try {
                     tools.register(identity, step, calls, cancelled = !execute)
                     if (execute) tools.execute(calls)
@@ -519,7 +540,11 @@ class AgentRunLoop(
                 if (disposition != HistoryDisposition.DISCARD) {
                     val batch = if (calls.isEmpty()) listOf(assistant)
                         else listOf(assistant, tools.results(identity, step, calls))
-                    history.append(view.revision, batch)
+                    if (finalAnswer) requireNotNull(chatDisk).appendChatAnswer(view.revision, assistant,
+                        RunAccounting(identity.sessionId, identity.taskChainId, identity.runId, steps, retries),
+                        tools.canRetireChatChain(identity))
+                    else history.append(view.revision, batch)
+                    if (finalAnswer) accountingActive = false // Final counters committed with the answer.
                     view = history.runSnapshot()
                     admissionPending = false
                 }

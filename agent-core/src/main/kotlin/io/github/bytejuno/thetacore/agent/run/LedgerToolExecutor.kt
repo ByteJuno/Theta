@@ -13,11 +13,15 @@ import kotlinx.coroutines.ensureActive
  * A thrown submit may have submitted work: the claimed invocation remains real and uncertain.
  */
 interface ToolExecutionBridge {
+    /** Optional host reservation + durable claim + scheduling, all under the shared gate.
+     * Null delegates to the default ledger claim path; a non-null result owns submission. */
+    fun claimAndSubmit(callId: String, expectedRevision: Long): Mutation? = null
     fun submit(ticket: ExecutionTicket)
     suspend fun awaitTerminal(callId: String)
     fun requestCancel(callId: String)
 }
-fun interface RunApprovals { suspend fun decide(request: ApprovalRequest): Decision }
+/** Null signals a superseded request; only the current durable record can advance the call. */
+fun interface RunApprovals { suspend fun decide(request: ApprovalRequest): Decision? }
 
 data class RunIdentity(val taskChainId: String, val sessionId: String, val runId: String, val unattended: Boolean = false)
 class ToolStepBlocked(message: String) : IllegalStateException(message)
@@ -139,7 +143,8 @@ class LedgerToolExecutor(
                     val pending = requireNotNull(r.pending)
                     val decision = approvals.decide(pending)
                     currentCoroutineContext().ensureActive()
-                    r = record(ledger.resolveApproval(r.callId, pending, decision))
+                    r = if (decision != null) record(ledger.resolveApproval(r.callId, pending, decision))
+                        else requireNotNull(ledger.get(r.callId)).also { check(it.pending?.id != pending.id) }
                 }
             }
             resolveCurrent()
@@ -164,9 +169,10 @@ class LedgerToolExecutor(
                     // Approval/barrier callbacks may cancel and still return normally. Check inside
                     // the scheduling gate, before a durable claim can make this an executed call.
                     context.ensureActive()
-                    val mutation = ledger.claimExecution(r.callId, r.revision)
+                    val hosted = bridge.claimAndSubmit(r.callId, r.revision)
+                    val mutation = hosted ?: ledger.claimExecution(r.callId, r.revision)
                     val next = record(mutation)
-                    (mutation as? Mutation.Applied)?.ticket?.let { bridge.submit(it) }
+                    if (hosted == null) (mutation as? Mutation.Applied)?.ticket?.let { bridge.submit(it) }
                     next
                 }
                 if (claimed.state != Status.WAITING_APPROVAL) break
@@ -201,6 +207,8 @@ class LedgerToolExecutor(
     fun results(identity: RunIdentity, step: String, calls: List<CollectedCall>): Message =
         ledger.resultsForStep(identity.sessionId, identity.runId, step, calls.map { it.binding.callId })
             ?: throw ToolStepBlocked("Incomplete ledger step; history must remain uncommitted")
+
+    internal fun canRetireChatChain(identity: RunIdentity) = !ledger.hasOutstandingChainRisk(identity.taskChainId)
 
     fun continuationBlocked(identity: RunIdentity): Boolean = ledger.continuationBlocked(identity.taskChainId)
 

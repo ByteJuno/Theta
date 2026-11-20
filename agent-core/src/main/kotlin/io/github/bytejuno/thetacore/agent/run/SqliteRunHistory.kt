@@ -24,6 +24,8 @@ data class HistoryIo(val bytesRead: Long, val bytesWritten: Long, val filesRead:
 enum class HistoryWriteStage { AFTER_BEGIN, AFTER_CHUNK, AFTER_VALUE, BEFORE_COMMIT, AFTER_COMMIT }
 data class HistoryWritePoint(val file: String, val stage: HistoryWriteStage)
 class HistoryStorageException(message: String, cause: Throwable? = null) : IllegalStateException(message, cause)
+data class PendingHistoryStep(val identity: RunIdentity, val stepId: String, val assistant: Message,
+    val records: List<InvocationRecord>, val resultReader: FrozenDefinition? = null)
 data class HistoryRecovery(val recovered: Boolean, val requiresDecision: Boolean, val callIds: List<String>)
 
 /** Session handle borrowing the host's single AgentDatabase. Close releases only this session.
@@ -95,6 +97,85 @@ open class SqliteRunHistory internal constructor(
     private fun callPath(callId: String) = "calls/${digest(callId.toByteArray(Charsets.UTF_8))}"
     private fun pendingPath() = "pending"
     private fun checkpointPath() = "context"
+
+    @Synchronized fun chatContext(): ChatTaskContext? {
+        ready()
+        return if (hasValue("chat-context")) HistoryCodec.json.decodeFromString<ChatTaskContext>(read<String>("chat-context"))
+            .takeIf { it.taskChainId == chatTaskChainId() } else null
+    }
+    @Synchronized fun saveChatContext(value: ChatTaskContext) {
+        ready(); require(value.taskChainId == chatTaskChainId() && value.goal.isNotBlank() && value.priorMessageCount >= 0)
+        require(value.priorMessageCount <= head.messageCount)
+        write("chat-context", HistoryCodec.json.encodeToString(value))
+    }
+    @Synchronized fun chatSummaryWindow(): Long? {
+        ready()
+        return if (hasValue("chat-context")) HistoryCodec.json.decodeFromString<ChatTaskContext>(read<String>("chat-context")).summaryWindowTokens else null
+    }
+    @Synchronized fun chatResult(): RunResult? {
+        ready()
+        return if (hasValue("chat-result")) HistoryCodec.json.decodeFromString<RunResult>(read<String>("chat-result")) else null
+    }
+    @Synchronized fun saveChatResult(value: RunResult) {
+        ready(); write("chat-result", HistoryCodec.json.encodeToString(value))
+    }
+    @Synchronized fun saveChatInterruption() {
+        ready()
+        val accounting = loadAccounting(chatTaskChainId())
+        saveChatResult(RunResult(RunState.PAUSED, "Interrupted by user", accounting?.steps ?: 0,
+            accounting?.retries ?: 0, loadBarrier() != null))
+    }
+    private fun journalPath(sequence: Long) = "journal/" + sequence.toString().padStart(20, '0')
+    private fun journalIndex(requestId: String) = "journal-request/" + digest(requestId.toByteArray(Charsets.UTF_8))
+    @Synchronized internal fun journalSubmitted(requestId: String, targetId: String, mode: ModelExecutionMode) {
+        ready(); require(!hasValue(journalIndex(requestId)))
+        val sequence = Math.addExact(if (hasValue("journal-count")) read<Long>("journal-count") else 0L, 1L)
+        val value = StoredAttempt(sequence, requestId, targetId, mode, head.revision)
+        transaction("journal") {
+            writeValue(journalPath(sequence), HistoryCodec.json.encodeToString(value))
+            writeValue(journalIndex(requestId), sequence)
+            writeValue("journal-count", sequence)
+        }
+    }
+    @Synchronized internal fun journalFinished(attempt: ModelAttempt) {
+        ready()
+        val sequence = read<Long>(journalIndex(attempt.requestId))
+        val value = HistoryCodec.json.decodeFromString<StoredAttempt>(read<String>(journalPath(sequence)))
+        require(!value.complete && value.requestId == attempt.requestId && value.targetId == attempt.targetId && value.mode == attempt.mode)
+        write(journalPath(sequence), HistoryCodec.json.encodeToString(value.copy(
+            partial = HistoryCodec.encodeMessage(attempt.partial), finish = (attempt.terminal as? ModelEvent.Finished)?.reason,
+            error = (attempt.terminal as? ModelEvent.Failed)?.error?.code, cancelled = attempt.cancelled, complete = true,
+            disposition = attempt.disposition?.name,
+            usage = attempt.usage?.let { listOf(it.inputTokens, it.cacheReadTokens, it.cacheWriteTokens, it.outputTokens, it.reasoningTokens) } ?: emptyList())))
+    }
+    @Synchronized fun journalPage(before: Long? = null, limit: Int = 20, includeUnfinished: Boolean = true): JournalPage {
+        ready(); require(limit in 1..100)
+        val count = if (hasValue("journal-count")) read<Long>("journal-count") else 0L
+        var sequence = minOf(before?.minus(1) ?: count, count)
+        require(sequence >= 0)
+        val replies = mutableListOf<JournalReply>()
+        repeat(limit) {
+            if (sequence > 0) {
+                val attempt = HistoryCodec.json.decodeFromString<StoredAttempt>(read<String>(journalPath(sequence)))
+                if (attempt.complete || includeUnfinished) attempt.reply()?.let(replies::add)
+                sequence--
+            }
+        }
+        return JournalPage(replies.reversed(), if (sequence > 0) sequence + 1 else null)
+    }
+
+    // Only a durably completed chat task rotates this pointer. Before this key existed,
+    // chat used the session ID for every turn, so incomplete legacy work keeps its budget.
+    @Synchronized fun chatTaskChainId(): String {
+        ready()
+        val recorded = if (hasValue("chat-chain")) read<String>("chat-chain") else sessionId
+        val pending = if (hasValue(pendingPath())) read<StoredPending>(pendingPath()) else null
+        val chain = pending?.taskChainId ?: loadBarrier()?.taskChainId ?: loadCheckpoint()?.takeIf {
+            it.kind !in setOf("VIEW", "COMPLETE")
+        }?.taskChainId ?: recorded
+        if (chain != recorded) write("chat-chain", chain)
+        return chain
+    }
 
     private fun accountingPath(taskChainId: String): String {
         require(taskChainId.isNotBlank())
@@ -245,9 +326,11 @@ open class SqliteRunHistory internal constructor(
     }
 
     /** Null means absent/stale, not that an uncertain checkpoint can be safely resumed. */
-    @Synchronized fun checkpointInfo(): CheckpointInfo? = loadCheckpoint()?.takeIf {
-        it.matches(runSnapshot(), it.settingsKey)
-    }?.info()
+    @Synchronized fun checkpointInfo(): CheckpointInfo? {
+        ready()
+        if (hasPendingIntent()) return null
+        return loadCheckpoint()?.takeIf { it.matches(runSnapshot(), it.settingsKey) }?.info()
+    }
 
     private inline fun <reified T> read(name: String): T {
         try {
@@ -422,7 +505,12 @@ open class SqliteRunHistory internal constructor(
         return HistorySnapshot(head.revision, messages)
     }
 
-    @Synchronized override fun prepareStep(expectedRevision: Long, identity: RunIdentity, stepId: String, assistant: Message) {
+    @Synchronized override fun prepareStep(expectedRevision: Long, identity: RunIdentity, stepId: String, assistant: Message) =
+        prepareStep(expectedRevision, identity, stepId, assistant, null)
+
+    @Synchronized fun prepareStep(expectedRevision: Long, identity: RunIdentity, stepId: String, assistant: Message,
+        resultReader: FrozenDefinition?) {
+        require(resultReader == null || resultReader.toolKey == "host/blob_read")
         ready(); check(expectedRevision == head.revision)
         require(identity.sessionId == sessionId)
         check(!hasValue(pendingPath())) { "Pending tool step must be recovered first" }
@@ -432,7 +520,7 @@ open class SqliteRunHistory internal constructor(
         listOf(identity.taskChainId, identity.sessionId, identity.runId, stepId).forEach(HistoryCodec::requireUtf8)
         val value = StoredPending(revision = expectedRevision, taskChainId = identity.taskChainId,
             sessionId = sessionId, runId = identity.runId, unattended = identity.unattended, stepId = stepId,
-            assistant = stored)
+            assistant = stored, resultReader = resultReader)
         val decoded = validatePending(value)
         require(HistoryCodec.encodeMessage(decoded) == stored)
         decoded.parts.filterIsInstance<ContentPart.ToolCall>().forEach { call ->
@@ -456,7 +544,19 @@ open class SqliteRunHistory internal constructor(
         return assistant
     }
 
-    @Synchronized override fun append(expectedRevision: Long, messages: List<Message>) {
+    @Synchronized override fun append(expectedRevision: Long, messages: List<Message>) =
+        appendBatch(expectedRevision, messages, null, false)
+
+    /** The loop selects this path only after the final model event has been validated. */
+    @Synchronized internal fun appendChatAnswer(expectedRevision: Long, answer: Message, accounting: RunAccounting,
+        rotateChain: Boolean) {
+        require(accounting.sessionId == sessionId && chatTaskChainId() == accounting.taskChainId)
+        val barrier = loadBarrier()
+        require(barrier == null || barrier.taskChainId == accounting.taskChainId && barrier.runId == accounting.runId)
+        appendBatch(expectedRevision, listOf(answer), accounting, rotateChain)
+    }
+
+    private fun appendBatch(expectedRevision: Long, messages: List<Message>, completion: RunAccounting?, rotateChain: Boolean) {
         ready(); check(expectedRevision == head.revision) { "History changed during run" }
         val next = freezeMessages(messages)
         require(next.isNotEmpty()); validateHistory(next) // only the new, complete transaction
@@ -487,6 +587,16 @@ open class SqliteRunHistory internal constructor(
             writeValue(batchPath(value.revision), value)
             for (id in calls) writeValue(callPath(id), CallLocation(id, value.revision, hash))
             writeValue("head", newHead)
+            if (completion != null) {
+                writeValue(accountingPath(completion.taskChainId), completion)
+                if (rotateChain) {
+                    writeValue("chat-chain", UUID.randomUUID().toString())
+                    // A completed admitted chat has consumed its previous checkpoint. Keep the
+                    // independently stored context view and reconciliation receipts.
+                    deleteValue(checkpointPath())
+                }
+                if (loadBarrier() != null) deleteValue("execution")
+            }
         }
         head = newHead
         if (pending != null) clearPending()
@@ -497,6 +607,28 @@ open class SqliteRunHistory internal constructor(
      * step before execution. Existing terminal truth wins, including UNKNOWN and late-exit evidence.
      * A stale pending value after HEAD commit is verified and removed without a second history append.
      */
+    /** Read-only host inspection. Missing rows still require ordinary cold reconciliation.
+     * Does not grant approval, freeze aliases, submit workers or clear the pending transaction. */
+    @Synchronized fun hasPendingIntent(): Boolean { ready(); return hasValue(pendingPath()) }
+
+    @Synchronized fun pendingStep(ledger: InvocationLedger): PendingHistoryStep? {
+        ready()
+        if (!hasValue(pendingPath())) return null
+        val p = read<StoredPending>(pendingPath())
+        val assistant = validatePending(p)
+        if (p.revision != head.revision) return null // committed stale pending uses recoverPending
+        val records = assistant.parts.filterIsInstance<ContentPart.ToolCall>().mapIndexed { order, call ->
+            val record = ledger.get(call.binding.callId) ?: return null
+            require(record.input.binding == BindingValue.copyOf(call.binding) &&
+                record.input.sessionId == sessionId && record.input.taskChainId == p.taskChainId &&
+                record.input.runId == p.runId && record.input.stepId == p.stepId &&
+                record.input.callOrder == order && record.input.argsJson == call.argsJson &&
+                record.input.modelName == call.name && record.input.unattended == p.unattended)
+            record
+        }
+        return PendingHistoryStep(RunIdentity(p.taskChainId, sessionId, p.runId, p.unattended), p.stepId, assistant, records, p.resultReader)
+    }
+
     @Synchronized fun recoverPending(ledger: InvocationLedger): HistoryRecovery {
         ready()
         if (!hasValue(pendingPath())) return HistoryRecovery(false, false, emptyList())
@@ -545,7 +677,8 @@ open class SqliteRunHistory internal constructor(
         check(m is Mutation.Applied || m is Mutation.AlreadyApplied) { "Ledger recovery failed: $m" }
     }
     private fun clearPending() = remove(pendingPath())
-    private fun remove(name: String) = transaction(name) {
+    private fun remove(name: String) = transaction(name) { deleteValue(name) }
+    private fun deleteValue(name: String) {
         db.prepare("DELETE FROM history_values WHERE session_id=? AND name=?").use {
             it.bindText(1, sessionId); it.bindText(2, name); it.step()
         }

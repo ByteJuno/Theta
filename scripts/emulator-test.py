@@ -140,6 +140,7 @@ def run(host, probe, hello):
     step("install the R8 host")
     adb("install", "-r", host, timeout=300)
     adb("shell", "am", "start", "-W", "-n", f"{PACKAGE}/.MainActivity")
+    tap_text("Plugins and diagnostics")
     wait_for("host shows up", lambda t: t == "No plugins installed")
 
     if hello:
@@ -180,6 +181,7 @@ def run(host, probe, hello):
     step("leave and restart: the plugin comes back from disk")
     adb("shell", "am", "force-stop", PACKAGE)
     adb("shell", "am", "start", "-W", "-n", f"{PACKAGE}/.MainActivity")
+    tap_text("Plugins and diagnostics")
     tap_card("Probe")
     wait_for("probe after restart", lambda t: PROBE_PASSED.match(t) is not None, fail=lambda t: t.startswith("FAIL "))
 
@@ -203,6 +205,7 @@ def run(host, probe, hello):
     step("disabled preference survives process restart")
     adb("shell", "am", "force-stop", PACKAGE)
     adb("shell", "am", "start", "-W", "-n", f"{PACKAGE}/.MainActivity")
+    tap_text("Plugins and diagnostics")
     wait_for("disabled after restart", lambda t: t == "Enable Probe", sweep=True)
     absent("disabled Probe loaded after restart", lambda t: t == "Probe")
 
@@ -226,6 +229,7 @@ def run(host, probe, hello):
     step("normal restart restores enabled Probe")
     adb("shell", "am", "force-stop", PACKAGE)
     adb("shell", "am", "start", "-W", "-n", f"{PACKAGE}/.MainActivity", "--ez", "skip_plugins", "false")
+    tap_text("Plugins and diagnostics")
     tap_card("Probe")
     wait_for("Probe after recovery", lambda t: PROBE_PASSED.match(t) is not None, fail=lambda t: t.startswith("FAIL "))
     adb("shell", "input", "keyevent", "KEYCODE_BACK")
@@ -237,6 +241,7 @@ def run(host, probe, hello):
     absent("pending uninstall still exposes its page", lambda t: t == "Probe")
     adb("shell", "am", "force-stop", PACKAGE)
     adb("shell", "am", "start", "-W", "-n", f"{PACKAGE}/.MainActivity")
+    tap_text("Plugins and diagnostics")
     wait_for("host restored after deletion", lambda t: t == ("Hello" if hello else "No plugins installed"), sweep=True)
     absent("Probe still installed after deferred deletion", lambda t: "Probe" in t)
 

@@ -15,7 +15,7 @@ internal class FrozenToolCatalog(val gate: DefinitionGate, private val budget: P
     private val owner: CoroutineScope, private val validator: Schema202012Validator) {
     internal data class Entry(val definition: FrozenDefinition, val tool: Tool, val spec: ToolSpec)
     private val entries = mutableMapOf<String, Entry>()
-    private val runs = mutableMapOf<String, Map<String, Entry>>()
+    private val runs = mutableMapOf<String, Map<String, FrozenDefinition>>()
     private val generations = mutableMapOf<String, Long>()
 
     suspend fun registerHost(key: String, version: String, tool: Tool): FrozenDefinition {
@@ -57,19 +57,33 @@ internal class FrozenToolCatalog(val gate: DefinitionGate, private val budget: P
         gate.uninstall(key)
     }
     fun freeze(runId: String): Map<String, FrozenDefinition> = gate.withGate {
-        runs[runId]?.let { return@withGate it.mapValues { entry -> entry.value.definition } }
+        runs[runId]?.let { return@withGate LinkedHashMap(it) }
         val names = ModelToolNames.allocate(entries.keys)
         val snapshot = entries.values.map { entry ->
-            entry.copy(definition = entry.definition.copy(modelName = names.getValue(entry.definition.toolKey)))
-        }.sortedBy { it.definition.modelName }.associateBy { it.definition.modelName }
+            entry.definition.copy(modelName = names.getValue(entry.definition.toolKey))
+        }.sortedBy { it.modelName }.associateBy { it.modelName }
         check(snapshot.size == entries.size) { "Model tool names must be unique" }
-        gate.freezeRun(runId, snapshot.values.map { it.definition })
+        gate.freezeRun(runId, snapshot.values)
         runs[runId] = snapshot
-        snapshot.mapValues { it.value.definition }
+        LinkedHashMap(snapshot)
     }
-    fun definition(runId: String, name: String): FrozenDefinition? = gate.withGate { runs[runId]?.get(name)?.definition }
+    /** Recover only already-persisted calls, never allocate aliases from today's directory.
+     * This snapshot cannot be used for a new model request; full run catalog recovery is #31. */
+    fun restorePending(runId: String, definitions: List<FrozenDefinition>) = gate.withGate {
+        check(runs[runId] == null)
+        require(definitions.map { it.modelName }.distinct().size == definitions.size)
+        val restored = definitions.associateBy { it.modelName }
+        gate.freezeRun(runId, definitions)
+        runs[runId] = restored
+    }
+    fun definition(runId: String, name: String): FrozenDefinition? = gate.withGate { runs[runId]?.get(name) }
     /** Null means this run has no frozen catalog here, which says nothing about whether a name is unknown. */
-    fun frozen(runId: String): Map<String, FrozenDefinition>? = gate.withGate { runs[runId]?.mapValues { it.value.definition } }
+    fun frozen(runId: String): Map<String, FrozenDefinition>? = gate.withGate { runs[runId]?.let { LinkedHashMap(it) } }
+    val frozenRunCount: Int get() = gate.withGate { runs.size }
+    fun release(runId: String) = gate.withGate {
+        runs.remove(runId)
+        gate.releaseRun(runId)
+    }
     fun current(definition: FrozenDefinition): Entry? = gate.withGate {
         entries[definition.toolKey]?.takeIf { it.definition.sameRegistrationAs(definition) }
     }

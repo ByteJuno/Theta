@@ -123,6 +123,68 @@ class LifecycleSearch(unittest.TestCase):
         self.assertEqual([], state['swipes'])
         self.assertEqual([(308, 424)], state['taps'])
 
+    def clipped_tap(self, target_bounds, *, toolbar=False):
+        root = ET.Element('node', bounds='[0,0][1080,2340]')
+        body = ET.SubElement(root, 'node', bounds='[0,268][1080,2208]', scrollable='true')
+        ET.SubElement(root if toolbar else body, 'node', text='Fixture page',
+                      bounds=target_bounds)
+        state = {'clock': 0, 'taps': [], 'swipes': []}
+
+        def adb(*args, **kwargs):
+            if args[:3] == ('shell', 'input', 'tap'):
+                state['taps'].append(tuple(map(int, args[3:])))
+            elif args[:3] == ('shell', 'input', 'swipe'):
+                state['swipes'].append(args[3:])
+            else:
+                raise AssertionError(f'Unexpected adb: {args}')
+            return ''
+
+        def sleep(seconds):
+            state['clock'] += seconds
+
+        with tempfile.TemporaryDirectory() as output, patch.object(lc, 'OUTPUT', Path(output)), \
+                patch.object(lc.em, 'screen', return_value=list(root.iter('node'))), \
+                patch.object(lc.em, 'crashed', return_value=False), \
+                patch.object(lc, 'adb', side_effect=adb), \
+                patch.object(lc.em, 'adb', side_effect=adb), \
+                patch.object(lc.time, 'monotonic', side_effect=lambda: state['clock']), \
+                patch.object(lc.time, 'sleep', side_effect=sleep), patch.object(lc, 'TIMEOUT', 3):
+            try:
+                lc.tap('Fixture page')
+            except lc.FAIL as error:
+                state['error'] = str(error)
+        return state
+
+    def test_tap_uses_visible_bottom_slice_from_reviewer_geometry(self):
+        state = self.clipped_tap('[44,2157][1036,2289]')
+        self.assertNotIn('error', state)
+        self.assertEqual([(540, 2182)], state['taps'])
+        self.assertEqual([], state['swipes'])
+
+    def test_tap_uses_visible_top_slice_below_fixed_toolbar(self):
+        state = self.clipped_tap('[44,175][1036,307]')
+        self.assertNotIn('error', state)
+        self.assertEqual([(540, 287)], state['taps'])
+
+    def test_tap_clips_both_axes_to_ancestor(self):
+        state = self.clipped_tap('[900,2157][1200,2289]')
+        self.assertEqual([(990, 2182)], state['taps'])
+
+    def test_tap_does_not_clip_toolbar_to_unrelated_scroll_body(self):
+        state = self.clipped_tap('[33,175][248,230]', toolbar=True)
+        self.assertNotIn('error', state)
+        self.assertEqual([(140, 202)], state['taps'])
+        self.assertEqual([], state['swipes'])
+
+    def test_tap_never_uses_fully_clipped_or_invalid_bounds(self):
+        for bounds in ('[44,2208][1036,2340]', '[44,80][1036,268]',
+                       '[1100,300][1200,400]', '[44,400][44,500]', ''):
+            with self.subTest(bounds=bounds):
+                state = self.clipped_tap(bounds)
+                self.assertEqual([], state['taps'])
+                self.assertIn('timed out', state.get('error', ''))
+                self.assertLessEqual(state['clock'], 3.3)
+
     def test_missing_target_rechecks_list_with_a_pause_under_original_deadline(self):
         state = self.search(target=False, initial=3)
         self.assertIn('timed out', state.get('error', ''))
@@ -309,7 +371,7 @@ class Observations(unittest.TestCase):
                 self.assertFalse(matches('Theta'))
                 self.assertTrue(kwargs.get('sweep', False), 'Hello card is below language controls')
                 raise ReachedReturn()
-        with patch.object(em, 'adb'), patch.object(em, 'install_plugin'), patch.object(em, 'tap_card'), patch.object(em, 'wait_for', side_effect=waiting):
+        with patch.object(em, 'adb'), patch.object(em, 'install_plugin'), patch.object(em, 'tap_card'), patch.object(em, 'tap_text'), patch.object(em, 'wait_for', side_effect=waiting):
             with self.assertRaises(ReachedReturn):
                 em.run('host.apk', 'probe.apk', 'hello.apk')
 
@@ -344,10 +406,34 @@ class Observations(unittest.TestCase):
         run.current = 'different-signer-update'
         run.observations = []
         run.screen = lambda: [ET.Element('node', text=text)]
-        run.scroll = Mock()
         run.snapshot = Mock()
         run.reject('other-v2', trust=trust)
         return run.observations[0]['rejection']
+
+    def test_signature_entry_finds_version_between_list_ends(self):
+        # Model the recorded list: a fling skips from the header to the actions.
+        position = 2
+        def screen():
+            labels = ['Code packages', 'Fixture · 1.0', 'Disable Fixture']
+            return [ET.Element('node', bounds='[0,268][1080,2208]', scrollable='true'),
+                    ET.Element('node', text=labels[position], bounds='[44,500][600,580]')]
+
+        def adb(*args, **kwargs):
+            nonlocal position
+            self.assertEqual(('shell', 'input', 'swipe'), args[:3])
+            start, end, duration = int(args[4]), int(args[6]), int(args[7])
+            step = 1 if abs(start - end) <= 400 and duration >= 800 else 2
+            position = max(0, min(2, position + (step if start > end else -step)))
+
+        # Load isolated helpers since the signature entry binds its own transport.
+        lifecycle = load('signature_version_search', 'lifecycle-acceptance.py')
+        with tempfile.TemporaryDirectory() as output, patch.object(sig.Acceptance, 'adb', side_effect=adb), \
+                patch.object(sig.Acceptance, 'screen', side_effect=screen), \
+                patch.object(lifecycle.em, 'crashed', return_value=False), \
+                patch.object(lifecycle, 'TIMEOUT', 2):
+            sig.Acceptance(lifecycle, Path(output), None, None, {})
+            node = lifecycle.text('Fixture · 1.0')
+            self.assertEqual('Fixture · 1.0', node.get('text'))
 
     def test_localized_signer_mismatch_is_specific(self):
         for locale in ('values', 'values-zh'):
@@ -397,6 +483,33 @@ class Observations(unittest.TestCase):
     def test_confirmation_is_never_rejection(self):
         with self.assertRaisesRegex(RuntimeError, 'gate bypass'):
             self.rejection('Install Fixture 2.0?', trust=True)
+
+class ChatNavigation(unittest.TestCase):
+    def test_start_opens_plugins_from_observed_chat_entry(self):
+        entry = ET.Element('node', text='Plugins and diagnostics', bounds='[0,0][200,60]')
+        ready = ET.Element('node', text='Import code APK', bounds='[0,80][200,140]')
+        def immediate_wait(label, predicate, **kwargs):
+            self.assertFalse(predicate())
+            self.assertTrue(predicate())
+        with patch.object(lc, 'adb'), patch.object(lc, 'wait', side_effect=immediate_wait), \
+                patch.object(lc.em, 'screen', side_effect=[[entry], [ready]]), patch.object(lc.em, 'tap') as tap:
+            lc.start()
+        tap.assert_called_once_with(entry)
+
+    def test_start_keeps_existing_plugins_and_recovery_navigation(self):
+        ready = ET.Element('node', text='Import code APK')
+        with patch.object(lc, 'adb'), patch.object(lc, 'wait', side_effect=lambda label, predicate: self.assertTrue(predicate())), \
+                patch.object(lc.em, 'screen', return_value=[ready]), patch.object(lc.em, 'tap') as tap:
+            lc.start()
+            lc.start(recovery=True)
+        tap.assert_not_called()
+
+    def test_duplicate_chat_entry_remains_a_failure(self):
+        nodes = [ET.Element('node', text='Plugins and diagnostics') for _ in range(2)]
+        with patch.object(lc, 'adb'), patch.object(lc, 'wait', side_effect=lambda label, predicate: predicate()), \
+                patch.object(lc.em, 'screen', return_value=nodes), patch.object(lc.em, 'tap') as tap:
+            with self.assertRaises(Exception): lc.start()
+        tap.assert_not_called()
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

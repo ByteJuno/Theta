@@ -2475,4 +2475,25 @@ class HostToolExecutionServiceTest {
             assertSame(service, root.initialize { error("must not open or cold recover a new writer") })
         } finally { budget.close() }
     }
+    @Test fun agentBridgeCapacityFailureDoesNotClaimOrInventWorker() = runBlocking {
+        Fixture(slots = 1).use { f ->
+            val release = CompletableDeferred<Unit>()
+            val entered = CompletableDeferred<Unit>()
+            val d = f.register(tool(parallel = true) { entered.complete(Unit); release.await(); ToolResult("done") })
+            val first = f.input(d)
+            assertTrue(f.service.prepare(first) is Mutation.Applied)
+            assertTrue(f.service.dispatch(first.binding.callId) is Mutation.Applied)
+            entered.await()
+            val second = f.input(d, order = 1)
+            assertTrue(f.service.prepare(second) is Mutation.Applied)
+            val record = f.ledger.get(second.binding.callId)!!
+            val blocked = f.service.runBridge().claimAndSubmit(record.callId, record.revision)
+            assertTrue(blocked is Mutation.Blocked)
+            assertEquals(Status.READY, f.ledger.get(record.callId)!!.state)
+            assertNull(f.ledger.get(record.callId)!!.instance)
+            release.complete(Unit)
+            f.service.awaitObservedExit(first.binding.callId)
+        }
+    }
+
 }

@@ -97,7 +97,7 @@ internal data class HistoryBatch(val version: Int = 1, val sessionId: String, va
 @Serializable
 internal data class StoredPending(val version: Int = 1, val revision: Long, val taskChainId: String,
     val sessionId: String, val runId: String, val unattended: Boolean, val stepId: String,
-    val assistant: StoredMessage)
+    val assistant: StoredMessage, val resultReader: FrozenDefinition? = null)
 @Serializable
 internal data class CallLocation(val callId: String, val revision: Long, val batchHash: String)
 /** Accounting is independent of context admission and remains writable with pending tool intent. */
@@ -168,7 +168,7 @@ internal object HistoryCodec {
                 "previousHash" to v.previousHash, "previousCount" to v.previousCount, "messages" to v.messages)
             is StoredPending -> fields("version" to v.version, "revision" to v.revision, "taskChainId" to v.taskChainId,
                 "sessionId" to v.sessionId, "runId" to v.runId, "unattended" to v.unattended,
-                "stepId" to v.stepId, "assistant" to v.assistant)
+                "stepId" to v.stepId, "assistant" to v.assistant, "resultReader" to v.resultReader)
             is CallLocation -> fields("callId" to v.callId, "revision" to v.revision, "batchHash" to v.batchHash)
             is StoredMessage -> fields("role" to v.role, "parts" to v.parts)
             is StoredPart -> fields("kind" to v.kind, "text" to v.text, "name" to v.name, "args" to v.args,
