@@ -9,6 +9,63 @@ import org.junit.Test
 import kotlin.test.*
 
 class AgentRunLoopTest {
+    @Test fun modelAdmissionGatesEveryRequestBeforeJournalSubmission() = runTest {
+        for (reject in listOf(false, true)) {
+            val fixture = RunFixture(listOf(testDefinition()))
+            val provider = ScriptProvider(listOf(calls("tool"), answer()))
+            val entered = CompletableDeferred<Unit>()
+            val release = CompletableDeferred<Unit>()
+            var admissions = 0
+            val run = async {
+                runCatching {
+                    AgentRunLoop(RunIdentity("chain", "session", "run"),
+                        ModelTarget("provider", provider, Credentials { "test" }), fixture.request(), fixture.history,
+                        LedgerToolExecutor(fixture.ledger, fixture.gate, fixture.definitions, fixture.bridge,
+                            RunApprovals { Decision.ALLOW_ONCE }), fixture.journal,
+                        beforeModelSubmit = {
+                            admissions++
+                            assertEquals(admissions - 1, fixture.journal.submissions().size)
+                            if (admissions == 2) {
+                                entered.complete(Unit)
+                                release.await()
+                                if (reject) error("admission rejected")
+                            }
+                        }).run()
+                }
+            }
+            entered.await()
+            assertEquals(1, provider.requests.size)
+            assertEquals(1, fixture.journal.submissions().size)
+            assertEquals(1, fixture.journal.attempts().size)
+            assertEquals(3, fixture.history.snapshot().messages.size)
+            release.complete(Unit)
+            val result = run.await()
+            if (reject) assertEquals("admission rejected", result.exceptionOrNull()?.message)
+            else assertEquals(RunState.COMPLETED, result.getOrThrow().state)
+            assertEquals(if (reject) 1 else 2, provider.requests.size)
+            assertEquals(provider.requests.size, fixture.journal.submissions().size)
+            assertEquals(provider.requests.size, fixture.journal.attempts().size)
+            assertEquals(Status.SUCCEEDED, fixture.store.records().single().state)
+        }
+    }
+
+    @Test fun cancelledModelAdmissionDoesNotCreateRequestOrJournal() = runTest {
+        val fixture = RunFixture()
+        val provider = ScriptProvider(listOf(answer()))
+        val entered = CompletableDeferred<Unit>()
+        val run = launch {
+            AgentRunLoop(RunIdentity("chain", "session", "run"),
+                ModelTarget("provider", provider, Credentials { "test" }), fixture.request(), fixture.history,
+                LedgerToolExecutor(fixture.ledger, fixture.gate, fixture.definitions, fixture.bridge,
+                    RunApprovals { Decision.ALLOW_ONCE }), fixture.journal,
+                beforeModelSubmit = { entered.complete(Unit); awaitCancellation() }).run()
+        }
+        entered.await(); run.cancelAndJoin()
+        assertTrue(provider.requests.isEmpty())
+        assertTrue(fixture.journal.submissions().isEmpty())
+        assertTrue(fixture.journal.attempts().isEmpty())
+    }
+
     @Test fun toolAdmissionWaitsBeforeClaimAndFailureNeverSubmits() = runTest {
         for (reject in listOf(false, true)) {
             val fixture = RunFixture(listOf(testDefinition(risk = Risk.WRITE)))

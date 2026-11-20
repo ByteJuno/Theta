@@ -325,6 +325,133 @@ class ChatSessionOwnerTest {
         }
     }
 
+    @Test fun withdrawnInternalApprovalWaitsForModelAdmission() = runBlocking {
+        withdrawnApprovalModelAdmission(false)
+    }
+
+    @Test fun withdrawnInternalApprovalRejectsModelAndRetainsColdExplicitRetry() = runBlocking {
+        withdrawnApprovalModelAdmission(true)
+    }
+
+    private suspend fun withdrawnApprovalModelAdmission(reject: Boolean) {
+        val root = Files.createTempDirectory("chat-withdrawn-admission").toFile()
+        fun submittedJournal() = BundledSQLiteDriver().open(File(root, AgentDatabase.FILE_NAME).path).use { connection ->
+            connection.prepare("SELECT name, ordinal, hex(bytes) FROM history_chunks WHERE name LIKE 'journal/%' ORDER BY name, ordinal").use { query ->
+                buildList {
+                    while (query.step()) add("${query.getText(0)}:${query.getLong(1)}:${query.getText(2)}")
+                }
+            }
+        }
+        val withdraw = CompletableDeferred<Unit>()
+        val restartEntered = CompletableDeferred<Unit>()
+        val restart = CompletableDeferred<Unit>()
+        val toolCalls = AtomicInteger()
+        val requests = AtomicInteger()
+        val protectedRequests = java.util.concurrent.CopyOnWriteArrayList<Boolean>()
+        val presence = object : ChatTaskPresence {
+            @Volatile var protected = false
+            @Volatile var suspended = false
+            override suspend fun update(executionId: String, progress: ChatTaskProgress) {
+                if (progress == ChatTaskProgress.Approval) {
+                    protected = false
+                    suspended = true
+                } else {
+                    if (!protected && suspended) {
+                        restartEntered.complete(Unit)
+                        restart.await()
+                        if (reject) throw ChatTaskPresenceException(IllegalStateException("restart rejected"))
+                    }
+                    protected = true
+                }
+            }
+            override suspend fun finish(executionId: String, waiting: ChatTaskProgress?) { protected = false }
+        }
+        val read = object : Tool {
+            override val id = "read"
+            override val spec = ToolSpec(id, "withdrawn internal approval", schema, risk = ToolRisk.READ)
+            override suspend fun call(args: JsonObject, env: ToolEnv): ToolResult = coroutineScope {
+                toolCalls.incrementAndGet()
+                val approval = launch { env.requestApproval("optional write", ToolRisk.WRITE) }
+                withdraw.await()
+                approval.cancelAndJoin()
+                ToolResult("read result retained", effect = ToolEffect.NONE)
+            }
+        }
+        val model = object : ModelProvider {
+            override fun executionMode(request: ChatRequest) = ModelExecutionMode.GENERATION_ONLY
+            override fun chat(request: ChatRequest, auth: Credentials): Flow<ModelEvent> = flow {
+                protectedRequests += presence.protected
+                val count = requests.incrementAndGet()
+                emit(Events.started("response-$count", "model"))
+                if (count == 1) {
+                    emit(Events.toolStart(0, "wire", "host_clock")); emit(Events.toolDelta(0, "{}")); emit(Events.end(0))
+                    emit(Events.finished(FinishReason.TOOL_CALLS))
+                } else {
+                    assertTrue(request.messages.any { message -> message.parts.any {
+                        it is ContentPart.ToolResult && it.text.contains("read result retained")
+                    } })
+                    restart.await()
+                    emit(Events.text(0, "complete")); emit(Events.end(0)); emit(Events.finished(FinishReason.STOP))
+                }
+            }
+        }
+        val fixture = fixture(root, toolCalls, model, hostTool = read, presence = presence)
+        var closed = false
+        try {
+            val owner = fixture.owner
+            owner.open().join(); owner.send("original goal").join()
+            await { owner.state.value.records.values.any { it.pending?.internal == true } && presence.suspended }
+            val originalJournal = submittedJournal()
+            assertTrue(originalJournal.isNotEmpty())
+            withdraw.complete(Unit)
+            withTimeout(10_000) { restartEntered.await() }
+            delay(100)
+            assertEquals(1, requests.get())
+            assertEquals(listOf(true), protectedRequests.toList())
+            assertEquals(originalJournal, submittedJournal())
+            restart.complete(Unit)
+            await { !owner.state.value.active }
+            assertEquals(if (reject) 1 else 2, requests.get())
+            assertEquals(1, toolCalls.get())
+            assertEquals(Status.SUCCEEDED, owner.state.value.records.values.single().state)
+            assertTrue(owner.state.value.messages.any { message -> message.parts.any {
+                it is ContentPart.ToolResult && it.text.contains("read result retained")
+            } })
+            assertTrue(owner.state.value.journal.isEmpty())
+            if (reject) {
+                assertEquals(originalJournal, submittedJournal())
+                assertEquals(R.string.chat_background_failed, owner.state.value.error)
+                assertEquals(RunState.PAUSED, owner.state.value.result?.state)
+                val token = requireNotNull(owner.state.value.recovery)
+                assertTrue(ChatRecoveryAction.CONTINUE in recoveryActions(owner.state.value))
+                fixture.close(); closed = true
+                val cold = fixture(root, toolCalls, model, hostTool = read)
+                try {
+                    cold.owner.open().join()
+                    assertEquals(token, cold.owner.state.value.recovery)
+                    assertEquals(1, requests.get())
+                    assertEquals(originalJournal, submittedJournal())
+                    assertTrue(cold.owner.state.value.journal.isEmpty())
+                    cold.owner.recover(token, ChatRecoveryAction.CONTINUE).join()
+                    await { !cold.owner.state.value.active }
+                    assertEquals(2, requests.get())
+                    assertTrue(submittedJournal().containsAll(originalJournal))
+                    assertEquals(1, toolCalls.get())
+                    assertEquals(1, cold.owner.state.value.messages.count { it.role == Role.USER })
+                    assertEquals(RunState.COMPLETED, cold.owner.state.value.result?.state)
+                } finally { cold.close() }
+            } else {
+                assertEquals(listOf(true, true), protectedRequests.toList())
+                assertEquals(RunState.COMPLETED, owner.state.value.result?.state)
+                assertTrue(fixture.failures.toString(), fixture.failures.isEmpty())
+            }
+        } finally {
+            withdraw.complete(Unit); restart.complete(Unit)
+            if (!closed) fixture.close()
+            root.deleteRecursively()
+        }
+    }
+
     @Test fun internalApprovalKeepsForegroundUntilOtherParallelWorkerStops() = runBlocking {
         val root = Files.createTempDirectory("chat-parallel-presence").toFile()
         val presence = RecordingPresence()

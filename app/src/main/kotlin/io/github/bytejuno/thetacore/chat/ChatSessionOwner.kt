@@ -446,6 +446,10 @@ internal class ChatSessionOwner(
                 journal = StoredRunJournal(disk),
                 budget = requestBudget,
                 contextPolicy = ContextPolicy(context.goal, context.priorMessageCount, summary, resumeId, readmitId),
+                beforeModelSubmit = { gate.withLock {
+                    currentCoroutineContext().ensureActive()
+                    presence.update(requireNotNull(mutable.value.executionId), ChatTaskProgress.Model)
+                } },
                 onEvent = { requestId, event -> synchronized(previewLock) {
                     if (requestId != observedRequest) { observedRequest = requestId; preview.setLength(0) }
                     if (event is ModelEvent.TextDelta) {
