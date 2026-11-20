@@ -17,6 +17,7 @@ import java.net.InetAddress
 import java.net.Proxy
 import java.util.Base64
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 class ImageRequestException(val failure: Failure) : Exception(failure.name) {
     enum class Failure { HTTP, NETWORK, INVALID_RESPONSE, TOO_LARGE, UNSAFE_URL }
@@ -115,7 +116,14 @@ class OpenAiImageClient internal constructor(private val generation: OkHttpClien
     }
 
     private suspend fun fetch(client: OkHttpClient, request: Request, limit: Int): ByteArray = callbackFlow {
-        val call = client.newCall(request)
+        // GET has no one-shot body: OkHttp may follow up a 503 Retry-After: 0 even
+        // with connection retries disabled. Permit only one network exchange per fetch.
+        val exchanged = AtomicBoolean()
+        val call = client.newBuilder().addNetworkInterceptor { chain ->
+            if (!exchanged.compareAndSet(false, true))
+                throw IOException("Image request follow-up blocked")
+            chain.proceed(chain.request())
+        }.build().newCall(request)
         call.enqueue(object : Callback {
             override fun onFailure(call: Call, error: IOException) { close(error) }
             override fun onResponse(call: Call, response: Response) {

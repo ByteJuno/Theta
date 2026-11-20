@@ -71,6 +71,12 @@ class OpenAiImageClientTest {
             try { client.generate(snapshot(source.url("/v1").toString()), "cat"); fail() }
             catch (error: ImageRequestException) { assertFalse(error.toString().contains("private-signature")) }
             assertEquals(2, images.requestCount)
+            source.enqueue(response("""{"data":[{"url":"$url"}]}"""))
+            images.enqueue(MockResponse.Builder().code(503).addHeader("Retry-After", "0").body("busy").build())
+            images.enqueue(response("must not be fetched"))
+            try { client.generate(snapshot(source.url("/v1").toString()), "cat"); fail("Must not follow up the download") }
+            catch (error: ImageRequestException) { assertFalse(error.toString().contains("private-signature")) }
+            assertEquals(3, images.requestCount)
         } }
     }
     @Test fun publicDnsRejectsEveryLocalPrivateAndMixedAnswer() {
