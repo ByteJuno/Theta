@@ -31,19 +31,19 @@ class ChatSessionOwnerTest {
     }
     private suspend fun await(predicate: () -> Boolean) = withTimeout(10_000) { while (!predicate()) delay(10) }
     private suspend fun fixture(root: File, count: AtomicInteger, provider: ModelProvider, hostTool: Tool = tool(count),
-        fault: (SqliteWriteStage) -> Unit = {}): Fixture {
+        presence: ChatTaskPresence = ChatTaskPresence.None, fault: (SqliteWriteStage) -> Unit = {}): Fixture {
         val store = AndroidAgentStore.open(root, BundledSQLiteDriver(), fault)
         val budget = PluginExecutionBudget()
         val host = HostToolBridgeRoot(budget, hostTool).initialize { store }
-        return Fixture(store, budget, host, provider)
+        return Fixture(store, budget, host, provider, presence)
     }
     private inner class Fixture(val store: AndroidAgentStore, val budget: PluginExecutionBudget,
-        val host: HostToolExecutionService, provider: ModelProvider) {
+        val host: HostToolExecutionService, provider: ModelProvider, presence: ChatTaskPresence = ChatTaskPresence.None) {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         val failures = mutableListOf<Throwable>()
         val owner = ChatSessionOwner(scope, { host }, {
             OpenAiRunSnapshot(OpenAiProviderSettings("test", "https://example.invalid/v1", "model"), ApiKeyCredentials("test-key"))
-        }, { synchronized(failures) { failures += it } }, { ModelTarget("test", provider, Credentials { "test-key" }) })
+        }, { synchronized(failures) { failures += it } }, { ModelTarget("test", provider, Credentials { "test-key" }) }, presence)
         suspend fun close() {
             owner.stop().join()
             await { !owner.state.value.active }
@@ -67,6 +67,160 @@ class ChatSessionOwnerTest {
             }
         }
     }
+    private class RecordingPresence : ChatTaskPresence {
+        val events = java.util.concurrent.CopyOnWriteArrayList<Pair<String, ChatTaskProgress?>>()
+        var failure = false
+        var admitted: CompletableDeferred<Unit>? = null
+        override suspend fun update(executionId: String, progress: ChatTaskProgress) {
+            events += executionId to progress
+            if (failure) throw ChatTaskPresenceException(IllegalStateException("service rejected"))
+            admitted?.await()
+        }
+        override suspend fun finish(executionId: String, waiting: ChatTaskProgress?) {
+            events += executionId to waiting
+        }
+    }
+
+    @Test fun foregroundAdmissionPrecedesModelAndCompletionStopsPresence() = runBlocking {
+        val root = Files.createTempDirectory("chat83-").toFile()
+        val presence = RecordingPresence().also { it.admitted = CompletableDeferred() }
+        val model = provider(false)
+        val fixture = fixture(root, AtomicInteger(), model, presence = presence)
+        try {
+            fixture.owner.open().join(); fixture.owner.send("goal").join()
+            await { presence.events.isNotEmpty() }
+            assertEquals(0, model.requests)
+            presence.admitted!!.complete(Unit)
+            await { !fixture.owner.state.value.active }
+            assertEquals(1, model.requests)
+            assertEquals(ChatTaskProgress.Model, presence.events.first().second)
+            assertNull(presence.events.last().second)
+            assertEquals(1, presence.events.map { it.first }.distinct().size)
+        } finally { fixture.close(); root.deleteRecursively() }
+    }
+
+    @Test fun foregroundAdmissionFailureNeverSubmitsModelAndStopsPresence() = runBlocking {
+        val root = Files.createTempDirectory("chat83-").toFile()
+        val presence = RecordingPresence().also { it.failure = true }
+        val model = provider(false)
+        val fixture = fixture(root, AtomicInteger(), model, presence = presence)
+        try {
+            fixture.owner.open().join(); fixture.owner.send("goal").join()
+            await { !fixture.owner.state.value.active }
+            assertEquals(0, model.requests)
+            assertEquals(R.string.chat_background_failed, fixture.owner.state.value.error)
+            assertEquals(RunState.PAUSED, fixture.owner.state.value.result?.state)
+            assertNull(presence.events.last().second)
+        } finally { fixture.close(); root.deleteRecursively() }
+    }
+
+    @Test fun approvalStopsForegroundAndResumesBeforeToolExecution() = runBlocking {
+        val root = Files.createTempDirectory("chat83-").toFile()
+        val presence = RecordingPresence()
+        val count = AtomicInteger()
+        val fixture = fixture(root, count, provider(), presence = presence)
+        try {
+            fixture.owner.open().join(); fixture.owner.send("goal").join()
+            await { presence.events.any { it.second == ChatTaskProgress.Approval } }
+            assertEquals(0, count.get())
+            val record = fixture.owner.state.value.records.values.single()
+            val before = presence.events.size
+            fixture.owner.decide(record.callId, record.pending!!.id, Decision.ALLOW_ONCE).join()
+            await { !fixture.owner.state.value.active }
+            assertEquals(ChatTaskProgress.Model, presence.events[before].second)
+            assertEquals(1, count.get())
+            assertNull(presence.events.last().second)
+        } finally { fixture.close(); root.deleteRecursively() }
+    }
+
+    @Test fun failedForegroundRestartDoesNotApproveOrExecuteAndCanRetry() = runBlocking {
+        val root = Files.createTempDirectory("chat83-").toFile()
+        val presence = RecordingPresence()
+        val count = AtomicInteger()
+        val fixture = fixture(root, count, provider(), presence = presence)
+        try {
+            fixture.owner.open().join(); fixture.owner.send("goal").join()
+            await { presence.events.any { it.second == ChatTaskProgress.Approval } }
+            val record = fixture.owner.state.value.records.values.single()
+            presence.failure = true
+            fixture.owner.decide(record.callId, record.pending!!.id, Decision.ALLOW_ONCE).join()
+            assertEquals(0, count.get())
+            assertEquals(record.pending, fixture.host.ledger.get(record.callId)!!.pending)
+            assertTrue(fixture.host.ledger.get(record.callId)!!.receipts.isEmpty())
+            presence.failure = false
+            fixture.owner.decide(record.callId, record.pending!!.id, Decision.ALLOW_ONCE).join()
+            await { !fixture.owner.state.value.active }
+            assertEquals(1, count.get())
+            assertNull(presence.events.last().second)
+        } finally { fixture.close(); root.deleteRecursively() }
+    }
+
+    @Test fun staleNotificationCannotCancelLaterExecutionAndCurrentStopSettles() = runBlocking {
+        val root = Files.createTempDirectory("chat83-").toFile()
+        val presence = RecordingPresence()
+        val hold = CompletableDeferred<Unit>()
+        val fixture = fixture(root, AtomicInteger(), provider(false, hold), presence = presence)
+        try {
+            fixture.owner.open().join(); fixture.owner.send("goal").join()
+            await { fixture.owner.previewText().isNotEmpty() }
+            fixture.owner.stop("old-execution").join()
+            assertTrue(fixture.owner.state.value.active)
+            fixture.owner.stop(fixture.owner.state.value.executionId!!).join()
+            await { !fixture.owner.state.value.active }
+            assertEquals(R.string.chat_stopped, fixture.owner.state.value.notice)
+            assertNull(presence.events.last().second)
+        } finally { fixture.close(); root.deleteRecursively() }
+    }
+
+    @Test fun modelFailureAndContextPauseBothStopForegroundPresence() = runBlocking {
+        for (reason in listOf(FinishReason.CONTENT_FILTER, FinishReason.CONTEXT_EXCEEDED)) {
+            val root = Files.createTempDirectory("chat83-").toFile()
+            val presence = RecordingPresence()
+            val model = object : ModelProvider {
+                override fun executionMode(request: ChatRequest) = ModelExecutionMode.GENERATION_ONLY
+                override fun chat(request: ChatRequest, auth: Credentials): Flow<ModelEvent> = flow {
+                    emit(Events.started("response", "model")); emit(Events.finished(reason))
+                }
+            }
+            val fixture = fixture(root, AtomicInteger(), model, presence = presence)
+            try {
+                fixture.owner.open().join(); fixture.owner.send("goal").join()
+                await { !fixture.owner.state.value.active }
+                assertNotEquals(R.string.chat_complete, fixture.owner.state.value.notice)
+                assertEquals(ChatTaskProgress.Model, presence.events.first().second)
+                assertNull(presence.events.last().second)
+            } finally { fixture.close(); root.deleteRecursively() }
+        }
+    }
+
+    @Test fun runningToolReportsProgressAndCancellationDoesNotReleaseWorkerResourcesEarly() = runBlocking {
+        val root = Files.createTempDirectory("chat83-").toFile()
+        val presence = RecordingPresence()
+        val release = CompletableDeferred<Unit>()
+        val count = AtomicInteger()
+        val held = object : Tool {
+            override val id = "held"
+            override val spec = ToolSpec("held", "test", schema, risk = ToolRisk.WRITE, timeoutMs = 5_000)
+            override suspend fun call(args: JsonObject, env: ToolEnv): ToolResult = withContext(NonCancellable) {
+                count.incrementAndGet(); release.await(); ToolResult("done", effect = ToolEffect.APPLIED)
+            }
+        }
+        val fixture = fixture(root, count, provider(), hostTool = held, presence = presence)
+        try {
+            fixture.owner.open().join(); fixture.owner.send("goal").join()
+            await { presence.events.any { it.second == ChatTaskProgress.Approval } }
+            val record = fixture.owner.state.value.records.values.single()
+            fixture.owner.decide(record.callId, record.pending!!.id, Decision.ALLOW_ONCE).join()
+            await { presence.events.any { it.second is ChatTaskProgress.Tool } }
+            fixture.owner.stop(fixture.owner.state.value.executionId!!).join()
+            await { !fixture.owner.state.value.active }
+            assertEquals(InstanceState.UNCONFIRMED, fixture.host.ledger.get(record.callId)!!.instance!!.state)
+            assertEquals(1, count.get())
+            release.complete(Unit)
+            fixture.host.awaitObservedExit(record.callId)
+        } finally { release.complete(Unit); fixture.close(); root.deleteRecursively() }
+    }
+
     @Test fun completedQuestionsHaveIndependentBudgetsInOnePersistentSession() = runBlocking {
         val root = Files.createTempDirectory("chat-budgets").toFile()
         val requests = AtomicInteger()
@@ -592,13 +746,17 @@ class ChatSessionOwnerTest {
                 }
                 val original = seed.host.ledger.get(binding.callId)!!
                 seed.close()
-                val cold = fixture(root, count, provider(false)); cold.owner.open().join()
+                val presence = RecordingPresence()
+                val cold = fixture(root, count, provider(false), presence = presence); cold.owner.open().join()
+                assertTrue(presence.events.isEmpty())
                 assertEquals(original, cold.host.ledger.get(binding.callId)); assertEquals(0, count.get())
                 assertTrue(cold.owner.state.value.pending)
                 assertTrue(showApproval(cold.owner.state.value.records.getValue(binding.callId)))
                 assertEquals(R.string.chat_tool_approval, toolState(cold.owner.state.value.records[binding.callId]))
                 cold.owner.decide(binding.callId, original.pending!!.id, decision).join()
                 await { !cold.owner.state.value.active }
+                assertEquals(ChatTaskProgress.Model, presence.events.first().second)
+                assertNull(presence.events.last().second)
                 assertEquals(if (decision == Decision.DENY) 0 else 1, count.get())
                 assertEquals(decision, cold.host.ledger.get(binding.callId)!!.receipts.single().decision)
                 assertFalse(cold.owner.state.value.pending)

@@ -41,6 +41,7 @@ internal data class ChatState(
     val reconciliation: RetryReconciliation? = null,
     val result: RunResult? = null,
     val summaryWindowTokens: Long? = null,
+    val executionId: String? = null,
 )
 
 /** Application-owned, single-session writer. Activity disposal never cancels an admitted run.
@@ -51,6 +52,7 @@ internal class ChatSessionOwner(
     private val configuration: () -> OpenAiRunSnapshot,
     private val diagnostic: (Throwable) -> Unit = {},
     private val targetForRun: (OpenAiRunSnapshot) -> ModelTarget = { it.target() },
+    private val presence: ChatTaskPresence = ChatTaskPresence.None,
 ) {
     private val mutable = MutableStateFlow(ChatState())
     val state = mutable.asStateFlow()
@@ -58,6 +60,7 @@ internal class ChatSessionOwner(
     private var history: SqliteRunHistory? = null
     private var tools: HostToolExecutionService? = null
     private var active: Job? = null
+    private var activeRunId: String? = null
     private var observedRequest: String? = null
     private val previewLock = Any()
     private val preview = StringBuilder()
@@ -73,6 +76,7 @@ internal class ChatSessionOwner(
     private fun report(error: Exception) {
         diagnostic(error)
         val label = when (error) {
+            is ChatTaskPresenceException -> R.string.chat_background_failed
             is ProviderSettingsException -> when (error.failure) {
                 ProviderSettingsException.Failure.NOT_CONFIGURED -> R.string.chat_configure_first
                 ProviderSettingsException.Failure.DECRYPT_FAILED -> R.string.chat_credentials_unavailable
@@ -102,7 +106,7 @@ internal class ChatSessionOwner(
         val next = requireNotNull(tools!!.sessionStore).sessionIds(previous.lastOrNull())
         mutable.update { it.copy(sessions = (previous + next).distinct()) }
     }
-    private fun selectInternal(id: String?, sessions: List<String>) {
+    private suspend fun selectInternal(id: String?, sessions: List<String>) {
         val host = requireNotNull(tools)
         val store = requireNotNull(host.sessionStore)
         history?.close()
@@ -131,7 +135,7 @@ internal class ChatSessionOwner(
                 (pending.records.mapNotNull { it.input.definition } + listOfNotNull(pending.resultReader)).distinct())
         }
     }
-    private fun refresh(before: HistoryCursor? = null) {
+    private suspend fun refresh(before: HistoryCursor? = null) {
         val disk = requireNotNull(history)
         val host = requireNotNull(tools)
         val page = disk.page(before, 40)
@@ -147,6 +151,9 @@ internal class ChatSessionOwner(
             checkpoint = disk.checkpointInfo()?.takeUnless { checkpoint -> checkpoint.kind in setOf("VIEW", "COMPLETE") },
             reconciliation = disk.retryReconciliation(), result = disk.chatResult(),
             summaryWindowTokens = disk.chatSummaryWindow()) }
+        if (active != null) mutable.value.executionId?.let { executionId ->
+            presence.update(executionId, taskProgress(records.values.filter { it.input.runId == activeRunId }))
+        }
     }
     fun olderReplies() = launchOperation {
         check(active == null)
@@ -221,14 +228,24 @@ internal class ChatSessionOwner(
         val host = requireNotNull(tools)
         val r = requireNotNull(host.ledger.get(callId))
         require(r.input.sessionId == history!!.sessionId && !r.input.unattended)
-        when (host.decide(callId, requestId, decision)) {
-            is Mutation.Applied, is Mutation.AlreadyApplied -> Unit
-            else -> error("Approval changed or unavailable")
-        }
-        refresh()
-        if (active == null) {
-            val pending = history!!.pendingStep(host.ledger)
-            if (pending != null) start(null, pending) // finish existing calls only, no model replay
+        val coldToken = if (active == null && r.pending?.id == requestId) UUID.randomUUID().toString() else null
+        try {
+            if (r.pending?.id == requestId) {
+                presence.update(requireNotNull(coldToken ?: mutable.value.executionId), ChatTaskProgress.Model)
+            }
+            when (host.decide(callId, requestId, decision)) {
+                is Mutation.Applied, is Mutation.AlreadyApplied -> Unit
+                else -> error("Approval changed or unavailable")
+            }
+            refresh()
+            if (active == null) {
+                val pending = history!!.pendingStep(host.ledger)
+                if (pending != null) start(null, pending, executionId = coldToken ?: UUID.randomUUID().toString())
+                else coldToken?.let { presence.finish(it, null) }
+            }
+        } catch (error: Exception) {
+            if (coldToken != null) withContext(NonCancellable) { presence.finish(coldToken, ChatTaskProgress.Approval) }
+            throw error
         }
     }
     fun recover(callId: String, requestId: String, resolution: RecoveryResolution) = launchOperation {
@@ -241,7 +258,8 @@ internal class ChatSessionOwner(
         }
         refresh()
     }
-    fun stop() = launchOperation {
+    fun stop(expectedExecutionId: String? = null) = launchOperation {
+        if (expectedExecutionId != null && expectedExecutionId != mutable.value.executionId) return@launchOperation
         active?.cancel()
         if (active == null) {
             val pending = history?.pendingStep(tools!!.ledger)
@@ -278,19 +296,28 @@ internal class ChatSessionOwner(
     }
 
     private fun start(snapshot: OpenAiRunSnapshot?, pending: PendingHistoryStep?, identity: RunIdentity? = null,
-        resumeId: String? = null, readmitId: String? = null) {
+        resumeId: String? = null, readmitId: String? = null, executionId: String = UUID.randomUUID().toString()) {
         check(active == null)
-        mutable.update { it.copy(active = true, error = null, notice = null, draft = "") }
+        activeRunId = requireNotNull(identity ?: pending?.identity).runId
+        mutable.update { it.copy(active = true, error = null, notice = null, draft = "", executionId = executionId) }
         active = scope.launch(Dispatchers.IO, start = CoroutineStart.LAZY) {
             var notice = R.string.chat_complete
             try {
+                presence.update(executionId, ChatTaskProgress.Model)
                 notice = withStatusUpdates { executeChat(snapshot, pending, identity, resumeId, readmitId) }
             } catch (error: CancellationException) {
                 notice = R.string.chat_stopped
                 try { history?.saveChatInterruption() }
                 catch (error: Exception) { report(error) }
             }
-            catch (error: Exception) { report(error); notice = R.string.chat_paused }
+            catch (error: Exception) {
+                report(error)
+                notice = R.string.chat_paused
+                if (error is ChatTaskPresenceException) {
+                    try { history?.saveChatInterruption() }
+                    catch (storageError: Exception) { report(storageError) }
+                }
+            }
             finally {
                 withContext(NonCancellable) {
                     gate.withLock {
@@ -303,7 +330,12 @@ internal class ChatSessionOwner(
                             refresh()
                             observeLateExits(host, runId)
                         } catch (error: Exception) { report(error) }
-                        mutable.update { it.copy(active = false, draft = "", notice = notice) }
+                        val waiting = taskProgress(mutable.value.records.values.filter { it.input.runId == activeRunId })
+                            .takeIf { it == ChatTaskProgress.Approval || it == ChatTaskProgress.Recovery }
+                        try { presence.finish(executionId, waiting) }
+                        catch (error: Exception) { report(error) }
+                        activeRunId = null
+                        mutable.update { it.copy(active = false, draft = "", notice = notice, executionId = null) }
                     }
                 }
             }

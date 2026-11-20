@@ -4,6 +4,10 @@
 
     <!-- 插件不向系统注册权限，它们用的网络权限由宿主声明。 -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <queries>
         <intent>
@@ -24,6 +28,11 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.ThetaCore">
         <provider android:name="io.github.libxposed.service.XposedProvider" tools:node="remove" />
+        <service android:name=".chat.ChatTaskService" android:exported="false" android:foregroundServiceType="specialUse">
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="User-started interactive agent inference and local tool execution; stops while awaiting user input" />
+        </service>
+        <receiver android:name=".chat.ChatTaskStopReceiver" android:exported="false" />
         <provider
             android:name=".hook.TrustedXposedProvider"
             android:authorities="${applicationId}.XposedService"
