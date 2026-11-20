@@ -382,6 +382,60 @@ class ChatSessionOwnerTest {
         } finally { root.deleteRecursively() }
     }
 
+    @Test fun coldFirstUncertainRequestRetainsRecoveryIdentity() = runBlocking { crashWhileSubmitted(false) }
+    @Test fun coldUncertainRequestAfterCompletedTurnRemainsRecoverable() = runBlocking { crashWhileSubmitted(true) }
+
+    private suspend fun crashWhileSubmitted(priorCompleted: Boolean) {
+        val root = Files.createTempDirectory("chat-cold-recovery").toFile()
+        val entered = CompletableDeferred<Unit>()
+        val requests = AtomicInteger()
+        val model = object : ModelProvider {
+            override fun executionMode(request: ChatRequest) = ModelExecutionMode.MAY_EXECUTE_SERVER_TOOLS
+            override fun chat(request: ChatRequest, auth: Credentials): Flow<ModelEvent> = flow {
+                val count = requests.incrementAndGet()
+                emit(Events.started("cold-$count", "model"))
+                if (count == if (priorCompleted) 2 else 1) {
+                    entered.complete(Unit)
+                    awaitCancellation()
+                } else {
+                    emit(Events.text(0, "answer")); emit(Events.end(0)); emit(Events.finished(FinishReason.STOP))
+                }
+            }
+        }
+        try {
+            val live = File(root, "live").also { it.mkdir() }
+            val saved = File(root, "saved").also { it.mkdir() }
+            val seed = fixture(live, AtomicInteger(), model)
+            try {
+                seed.owner.open().join()
+                if (priorCompleted) {
+                    seed.owner.send("completed goal").join(); await { !seed.owner.state.value.active }
+                    assertEquals(RunState.COMPLETED, seed.owner.state.value.result!!.state)
+                }
+                seed.owner.send("uncertain goal").join()
+                withTimeout(10_000) { entered.await() }
+                BundledSQLiteDriver().open(File(live, AgentDatabase.FILE_NAME).path).use { db ->
+                    db.prepare("VACUUM INTO ?").use {
+                        it.bindText(1, File(saved, AgentDatabase.FILE_NAME).path); it.step()
+                    }
+                }
+            } finally { seed.close() }
+            val cold = fixture(saved, AtomicInteger(), model)
+            try {
+                cold.owner.open().join()
+                val state = cold.owner.state.value
+                assertNotNull("Unknown server result must remain pending", state.reconciliation)
+                assertNotNull("Fresh attended submission must retain its recovery identity", state.recovery)
+                assertEquals(setOf(ChatRecoveryAction.RETRY), recoveryActions(state))
+                val count = requests.get()
+                cold.owner.recover(state.recovery!!, ChatRecoveryAction.RETRY, confirmed = true).join()
+                await { !cold.owner.state.value.active }
+                assertEquals(count + 1, requests.get())
+                assertEquals(RunState.COMPLETED, cold.owner.state.value.result!!.state)
+            } finally { cold.close() }
+        } finally { root.deleteRecursively() }
+    }
+
     @Test fun checkpointResumeRejectsChangedCatalogInsteadOfGuessingAliases() = runBlocking {
         val root = Files.createTempDirectory("chat-catalog-checkpoint").toFile()
         val requests = AtomicInteger()
