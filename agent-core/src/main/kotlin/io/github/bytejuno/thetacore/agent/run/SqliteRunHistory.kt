@@ -112,6 +112,26 @@ open class SqliteRunHistory internal constructor(
         ready()
         return if (hasValue("chat-context")) HistoryCodec.json.decodeFromString<ChatTaskContext>(read<String>("chat-context")).summaryWindowTokens else null
     }
+    @Synchronized fun chatContextWindow(): Long? {
+        ready()
+        return if (hasValue("chat-context")) HistoryCodec.json.decodeFromString<ChatTaskContext>(read<String>("chat-context")).contextWindowTokens else null
+    }
+    @Synchronized fun chatRecoveryIdentity(): RunIdentity? {
+        ready()
+        if (hasValue(pendingPath())) return read<StoredPending>(pendingPath()).let {
+            RunIdentity(it.taskChainId, it.sessionId, it.runId, it.unattended)
+        }
+        val chain = chatTaskChainId()
+        val checkpoint = loadCheckpoint()?.takeIf { it.taskChainId == chain && it.kind !in setOf("VIEW", "COMPLETE") }
+        val accounting = loadAccounting(chain)
+        val barrier = loadBarrier()
+        if (barrier != null) {
+            if (accounting?.runId != barrier.runId || accounting.unattended == null) return null
+            return RunIdentity(chain, sessionId, barrier.runId, accounting.unattended)
+        }
+        if (checkpoint != null) return RunIdentity(chain, sessionId, checkpoint.runId, checkpoint.unattended)
+        return accounting?.unattended?.let { RunIdentity(chain, sessionId, accounting.runId, it) }
+    }
     @Synchronized fun chatResult(): RunResult? {
         ready()
         return if (hasValue("chat-result")) HistoryCodec.json.decodeFromString<RunResult>(read<String>("chat-result")) else null

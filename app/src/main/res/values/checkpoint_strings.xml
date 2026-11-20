@@ -1,0 +1,18 @@
+<resources>
+    <string name="checkpoint_title">Paused task recovery</string>
+    <string name="checkpoint_readmit">Retry with a larger window</string>
+    <string name="checkpoint_continue_summary">Continue from saved summary</string>
+    <string name="checkpoint_summary_warning">Summaries may lose details. Check the original conversation and tool results before continuing. Existing approvals and cumulative task limits still apply.</string>
+    <string name="checkpoint_readmit_warning">Use only a context window verified for this model. This path does not generate a summary or change the model. It preserves the original messages, approvals and cumulative limits; the request can still be rejected or paused.</string>
+    <string name="checkpoint_not_attended">Confirmation is unavailable for an unattended task or when its original identity cannot be verified. No request will be retried automatically.</string>
+    <string name="checkpoint_window_unknown">Current model window: not configured</string>
+    <string name="checkpoint_current_window">Current model window: %1$d tokens</string>
+    <string name="checkpoint_selected_window">Selected model window: %1$d tokens</string>
+    <string name="checkpoint_window_help">Enter 1,024–1,000,000 tokens. Larger-window retry requires a value greater than the current window. This setting does not increase the provider’s actual capacity.</string>
+    <string name="checkpoint_details">Technical checkpoint details</string>
+    <string name="checkpoint_identifier">Checkpoint: %1$s</string>
+    <string name="checkpoint_run">Paused run: %1$s</string>
+    <string name="checkpoint_diagnostic">Diagnostic: %1$s</string>
+    <string name="checkpoint_confirm">Confirm and continue</string>
+    <string name="checkpoint_cancel">Keep paused</string>
+</resources>

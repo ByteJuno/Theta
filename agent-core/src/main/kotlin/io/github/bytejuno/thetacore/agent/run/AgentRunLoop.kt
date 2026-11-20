@@ -74,7 +74,7 @@ class AgentRunLoop(
 
     private fun persistAccounting() {
         if (accountingActive) (history as? SqliteRunHistory)?.saveAccounting(
-            RunAccounting(identity.sessionId, identity.taskChainId, identity.runId, steps, retries))
+            RunAccounting(identity.sessionId, identity.taskChainId, identity.runId, steps, retries, identity.unattended))
     }
 
     private fun irreducible(source: HistorySnapshot): Boolean {
@@ -541,7 +541,7 @@ class AgentRunLoop(
                     val batch = if (calls.isEmpty()) listOf(assistant)
                         else listOf(assistant, tools.results(identity, step, calls))
                     if (finalAnswer) requireNotNull(chatDisk).appendChatAnswer(view.revision, assistant,
-                        RunAccounting(identity.sessionId, identity.taskChainId, identity.runId, steps, retries),
+                        RunAccounting(identity.sessionId, identity.taskChainId, identity.runId, steps, retries, identity.unattended),
                         tools.canRetireChatChain(identity))
                     else history.append(view.revision, batch)
                     if (finalAnswer) accountingActive = false // Final counters committed with the answer.

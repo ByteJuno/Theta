@@ -41,6 +41,8 @@ internal data class ChatState(
     val reconciliation: RetryReconciliation? = null,
     val result: RunResult? = null,
     val summaryWindowTokens: Long? = null,
+    val contextWindowTokens: Long? = null,
+    val recovery: ChatRecoveryToken? = null,
 )
 
 /** Application-owned, single-session writer. Activity disposal never cancels an admitted run.
@@ -140,13 +142,23 @@ internal class ChatSessionOwner(
         val records = messages.flatMap { it.parts.filterIsInstance<ContentPart.ToolCall>() }
             .mapNotNull { host.ledger.get(it.binding.callId) }.associateBy { it.callId }
         val journal = disk.journalPage(includeUnfinished = active == null)
+        val checkpoint = disk.checkpointInfo()
+        val reconciliation = disk.retryReconciliation()
         mutable.update { it.copy(messages = messages, records = records,
             recoveries = host.ledger.pendingRecoveries().filter { it.callId in records }.associateBy { it.callId }, older = page.older,
             showingOlder = before != null, pending = pending != null,
             draft = previewText(), journal = journal.replies, olderJournal = journal.older,
-            checkpoint = disk.checkpointInfo()?.takeUnless { checkpoint -> checkpoint.kind in setOf("VIEW", "COMPLETE") },
-            reconciliation = disk.retryReconciliation(), result = disk.chatResult(),
-            summaryWindowTokens = disk.chatSummaryWindow()) }
+            checkpoint = checkpoint?.takeUnless { it.kind in setOf("VIEW", "COMPLETE") },
+            reconciliation = reconciliation, result = disk.chatResult(),
+            summaryWindowTokens = disk.chatSummaryWindow(), contextWindowTokens = disk.chatContextWindow(),
+            recovery = if (active == null) recoveryToken(disk, checkpoint, reconciliation) else null) }
+    }
+    private fun recoveryToken(disk: SqliteRunHistory, checkpoint: CheckpointInfo? = disk.checkpointInfo(),
+        reconciliation: RetryReconciliation? = disk.retryReconciliation()): ChatRecoveryToken? {
+        if (disk.hasPendingIntent() || disk.chatResult()?.state == RunState.COMPLETED) return null
+        val identity = disk.chatRecoveryIdentity() ?: return null
+        val context = disk.chatContext() ?: return null
+        return ChatRecoveryToken(identity, disk.revision(), checkpoint, reconciliation, context)
     }
     fun olderReplies() = launchOperation {
         check(active == null)
@@ -189,28 +201,59 @@ internal class ChatSessionOwner(
         check(active == null && text.isNotBlank() && text.length <= 32_000)
         val disk = requireNotNull(history)
         check(disk.pendingStep(tools!!.ledger) == null)
+        val previousIdentity = disk.chatRecoveryIdentity()
+        check(previousIdentity?.unattended != true)
+        if (disk.retryReconciliation() != null || disk.checkpointInfo()?.kind in setOf("PAUSED", "CONTINUATION"))
+            check(previousIdentity != null)
         val snapshot = configuration() // validate/decrypt before acknowledging a new message
         val chain = disk.chatTaskChainId() // Capture checkpoint identity before the history revision advances.
         if (disk.chatContext() == null) disk.saveChatContext(ChatTaskContext(chain, text,
-            Math.toIntExact(disk.page(null, 1).totalMessages), disk.chatSummaryWindow()))
+            Math.toIntExact(disk.page(null, 1).totalMessages), disk.chatSummaryWindow(), disk.chatContextWindow()))
         disk.append(disk.revision(), listOf(message(Role.USER, textPart(text))))
         mutable.update { it.copy(acceptedMessages = it.acceptedMessages + 1) }
         start(snapshot, null, RunIdentity(chain, disk.sessionId, UUID.randomUUID().toString()))
     }
     fun resume(summaryWindowTokens: Long? = null, reconcileId: String? = null) = launchOperation {
+        resumeInternal(summaryWindowTokens, reconcileId)
+    }
+    fun recover(expected: ChatRecoveryToken, action: ChatRecoveryAction, window: Long? = null,
+        confirmed: Boolean = false) = launchOperation {
+        val disk = requireNotNull(history)
+        check(active == null && !disk.hasPendingIntent())
+        check(recoveryToken(disk) == expected && !expected.identity.unattended)
+        check(action in recoveryActions(mutable.value))
+        when (action) {
+            ChatRecoveryAction.RETRY -> {
+                check(confirmed)
+                resumeInternal(reconcileId = requireNotNull(expected.reconciliation).id)
+            }
+            ChatRecoveryAction.READMIT, ChatRecoveryAction.SUMMARIZE -> {
+                check(confirmed && validRecoveryWindow(action, window, expected.context.contextWindowTokens))
+                resumeInternal(summaryWindowTokens = window, summarize = action == ChatRecoveryAction.SUMMARIZE)
+            }
+            ChatRecoveryAction.CONTINUE_SUMMARY -> { check(confirmed); resumeInternal() }
+            ChatRecoveryAction.CONTINUE -> resumeInternal()
+        }
+    }
+    private fun resumeInternal(summaryWindowTokens: Long? = null, reconcileId: String? = null,
+        summarize: Boolean = true) {
         check(active == null)
         val disk = requireNotNull(history)
         check(!disk.hasPendingIntent())
         val snapshot = configuration()
         val context = requireNotNull(disk.chatContext())
+        val previous = requireNotNull(disk.chatRecoveryIdentity())
+        check(!previous.unattended && previous.taskChainId == context.taskChainId)
         val checkpoint = disk.checkpointInfo()
         val identity = checkpoint?.takeIf { it.canContinue }?.nextIdentity
-            ?: RunIdentity(disk.chatTaskChainId(), disk.sessionId, UUID.randomUUID().toString())
+            ?: previous.copy(runId = UUID.randomUUID().toString())
+        check(!identity.unattended && identity.sessionId == previous.sessionId && identity.taskChainId == previous.taskChainId)
         if (reconcileId != null) check(disk.confirmRetryAfterReconciliation(reconcileId, identity, "User reviewed uncertain request and explicitly accepted retry"))
         check(disk.retryReconciliation() == null)
         if (summaryWindowTokens != null) {
             require(summaryWindowTokens in 1024..1_000_000)
-            disk.saveChatContext(context.copy(summaryWindowTokens = summaryWindowTokens))
+            disk.saveChatContext(context.copy(contextWindowTokens = summaryWindowTokens,
+                summaryWindowTokens = summaryWindowTokens.takeIf { summarize }))
         }
         val resumeId = checkpoint?.takeIf { it.canContinue }?.id
         val readmitId = checkpoint?.takeIf { it.kind == "PAUSED" && it.pauseClass == "BUDGET" }?.id
@@ -337,7 +380,7 @@ internal class ChatSessionOwner(
             val config = requireNotNull(snapshot)
             val id = requireNotNull(identity)
             val context = requireNotNull(disk.chatContext())
-            val window = context.summaryWindowTokens
+            val window = context.contextWindowTokens
             val definitions = (tools!!.catalog.frozen(id.runId) ?: tools!!.catalog.freeze(id.runId)).values.toList()
             val configured = config.request { tools = definitions.map {
                 modelTool(it.modelName, it.description, Json.parseToJsonElement(it.inputSchema).jsonObject)
