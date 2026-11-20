@@ -1,5 +1,16 @@
 # Issue 83 — foreground task execution
 
+## CI return correction — active recovery inspection
+
+- Source: `18f438f40df3914951884bf5102738031c2b4113`; tree: `697cdbe94b17d3d4febc8838a7aaa0b9f0532033`. Based on reviewed head `2b084910266399f73acc1019cdef88454767ecbb`; the following evidence commit changes only this summary.
+- Exact-head CI run `44663343016`, build job `136046596810`, failed in `ChatSessionOwnerTest.oversizedHistoryOffersExplicitBoundedRecoveryWithoutLosingOriginals` with `TimeoutCancellationException` (540 app cases, one failure). The original remote log is retained. The isolated writer baseline passed in 8.051s, so the CI timeout itself was not reproduced locally.
+- The 100ms status ticker called `checkpointInfo()` during active summarization: this validates `runSnapshot()` and hashes the full checkpoint source under the history monitor. It also performed recovery reconciliation intended for stopped runs. Recovery controls are already hidden while active. Inspection now runs only after the task stops, outside the retriable StateFlow update lambda. Active ledger/approval/notification updates still run; terminal/cold recovery continues to validate original durable data. No storage integrity checks, deadlines, assertions or request budgets were weakened.
+- New regression pauses a real SQLite-backed summary request, verifies no active checkpoint/reconciliation is exposed, then cancels and verifies both durable recovery records return. Corrected test failed before the guard with active `SUMMARY_RESERVED` checkpoint exposure and passed after it. Initial test-fixture attempts were below the request-view budget and failed before the intended assertion; those failures remain preserved and are not counted as successful reproduction.
+- Final tasks: `:app:testDebugUnitTest --tests *ChatSessionOwnerTest :app:assembleDebug`, through `run-validation.py` with strict `--configuration-cache --configuration-cache-problems=fail`. **34 passed; zero failures/errors/skips**, 61.33s including build, configuration cache stored. Original oversized-history case: 3.780s; new regression: 0.896s. Timing is observational, not a cross-machine performance guarantee.
+- New Debug APK SHA-256: `3f2309df84a851ff22bbf761c01151ef333f2bc3f98f30f283e5201e4c5222a3`. Source file digests checked before publication. No new lint/resource run: neither layout/resources nor service APIs changed. No protected files changed; only this issue's single summary is tracked.
+- Raw CI log, source manifest, APK and validation receipt: `event-runs/3f903f7f-c254-4c58-a44f-c0ef03919e29`; failed and successful runs: `validation-issue11/issue83-3f903f7f-{baseline,red,green,red-r2,final}`, all outside Git.
+- **Independent final-head CI/review and required foreground-service/emulator acceptance remain pending. Visual and device behavior remain unverified.** No phone/emulator was operated and no scheduler was created. Earlier APK/test receipts below remain bound to their original commits, not this repair.
+
 ## Source and artifact (original writer validation)
 
 - Implementation: `1c8aa5dd29cc35541c814c092d6492bfefb48e42`.
