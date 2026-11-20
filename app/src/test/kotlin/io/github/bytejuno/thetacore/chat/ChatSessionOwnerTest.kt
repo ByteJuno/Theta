@@ -154,7 +154,12 @@ class ChatSessionOwnerTest {
             count.incrementAndGet(); return output
         }
     }
-    private suspend fun await(predicate: () -> Boolean) = withTimeout(10_000) { while (!predicate()) delay(10) }
+    private suspend fun await(describe: String = "condition", predicate: () -> Boolean) {
+        try { withTimeout(10_000) { while (!predicate()) delay(10) } }
+        catch (error: TimeoutCancellationException) {
+            throw AssertionError("Timed out waiting for $describe", error)
+        }
+    }
     private suspend fun fixture(root: File, count: AtomicInteger, provider: ModelProvider, hostTool: Tool = tool(count),
         presence: ChatTaskPresence = ChatTaskPresence.None, fault: (SqliteWriteStage) -> Unit = {}): Fixture {
         val store = AndroidAgentStore.open(root, BundledSQLiteDriver(), fault)

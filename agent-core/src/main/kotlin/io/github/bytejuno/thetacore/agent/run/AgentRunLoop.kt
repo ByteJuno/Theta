@@ -1,5 +1,6 @@
 package io.github.bytejuno.thetacore.agent.run
 
+import io.github.bytejuno.thetacore.agent.ledger.InvocationRecord
 import io.github.bytejuno.thetacore.agent.ledger.canonical
 import io.github.bytejuno.thetacore.agent.ledger.atLedgerPrecision
 import io.github.bytejuno.thetacore.agent.protocol.*
@@ -122,7 +123,8 @@ class AgentRunLoop(
         }
         // A paired history is not proof of actual worker exit. Check live ledger truth even
         // without context policy/checkpoint, and before consuming any explicit admission token.
-        val localBlocked = tools.localExecutionBlocked(tools.checkpointRecords(source.messages)) ||
+        val sourceRecords = tools.checkpointRecords(source.messages)
+        val localBlocked = tools.localExecutionBlocked(sourceRecords) ||
             saved?.let { tools.localExecutionBlocked(tools.currentCheckpointRecords(it.ledger)) } == true
         if (localBlocked) {
             persistedPause = "Local tool execution or effect requires reconciliation"
@@ -155,9 +157,9 @@ class AgentRunLoop(
                 saved.pauseClass == "BUDGET" && !saved.serverUnresolved)
             require(saved.taskChainId == identity.taskChainId && saved.goal == policy.goal)
             require(saved.catalog == tools.definitions.sortedBy { it.modelName })
-            require(saved.matches(source, saved.settingsKey)) { "Budget readmission requires unchanged durable source" }
+            require(matches(saved, source, saved.settingsKey)) { "Budget readmission requires unchanged durable source" }
             require(saved.budgetKey != budgetKey()) { "Choose a changed window or summary configuration" }
-            val records = tools.checkpointRecords(source.messages)
+            val records = tools.currentCheckpointRecords(sourceRecords)
             require(records.map { it.atLedgerPrecision() } == saved.ledger.map { it.atLedgerPrecision() } && !tools.checkpointBlocked(records))
             disk.saveCheckpoint(saved.copy(pauseClass = "ADMITTED", reason = "Budget readmission reserved"))
             admissionPending = true
@@ -170,8 +172,8 @@ class AgentRunLoop(
             require(saved != null && saved.id == policy.resumeCheckpointId && saved.kind == "CONTINUATION")
             require(saved.identity() == identity && saved.goal == policy.goal && !saved.serverUnresolved)
             require(saved.catalog == tools.definitions.sortedBy { it.modelName }) { "Checkpoint catalog changed" }
-            require(saved.matches(source, settingsKey(target.id, config, target.provider.contextConfigurationKey()))) { "Stale checkpoint or changed run settings" }
-            val records = tools.checkpointRecords(source.messages)
+            require(matches(saved, source, settingsKey(target.id, config, target.provider.contextConfigurationKey()))) { "Stale checkpoint or changed run settings" }
+            val records = tools.currentCheckpointRecords(sourceRecords)
             require(records.map { it.atLedgerPrecision() } == saved.ledger.map { it.atLedgerPrecision() } && !tools.checkpointBlocked(records))
             // Counter restoration above uses this checkpoint only for legacy sessions.
             // The continuation's initial summary is a stable view; future appends keep it valid.
@@ -185,8 +187,8 @@ class AgentRunLoop(
             val view = disk.loadView() ?: saved?.takeIf { it.kind == "VIEW" }
             if (view != null && view.sourceCount <= policy.priorMessageCount &&
                 view.catalog == tools.definitions.sortedBy { it.modelName } &&
-                view.matches(source, settingsKey(target.id, config, target.provider.contextConfigurationKey()))) {
-                val records = tools.checkpointRecords(source.messages)
+                matches(view, source, settingsKey(target.id, config, target.provider.contextConfigurationKey()))) {
+                val records = tools.currentCheckpointRecords(sourceRecords)
                 // Ordinary prior-history compaction (2.11) is not checkpoint continuation: after
                 // actual exit and a recorded decision, the ledger keeps enforcing UNKNOWN approvals.
                 if (tools.compactionBlocked(records)) return
@@ -199,7 +201,18 @@ class AgentRunLoop(
         }
     }
 
-    private suspend fun summarize(source: List<Message>, reference: String): String? {
+    private fun sourceDigestOf(source: HistorySnapshot, count: Int): String =
+        (history as? SqliteRunHistory)?.verifiedSourceDigest(source, count)
+            ?: sourceDigest(source.messages.subList(0, count))
+
+    private fun matches(checkpoint: ContextCheckpoint, source: HistorySnapshot, key: String): Boolean =
+        checkpoint.version == 1 && checkpoint.settingsKey == key && checkpoint.sourceRevision <= source.revision &&
+            checkpoint.sourceCount in 0..source.messages.size &&
+            (checkpoint.kind == "VIEW" || checkpoint.sourceRevision == source.revision && checkpoint.sourceCount == source.messages.size) &&
+            checkpoint.sourceDigest == sourceDigestOf(source, checkpoint.sourceCount)
+
+    private suspend fun summarize(snapshot: HistorySnapshot, source: List<Message>,
+        records: List<InvocationRecord>, reference: String): String? {
         val model = contextPolicy?.summaryModel ?: return null
         val disk = history as? SqliteRunHistory ?: return null
         return ContextSummarizer(model, journal, timeouts, disk::createSummarySpool) {
@@ -207,11 +220,12 @@ class AgentRunLoop(
             else {
                 beforeModelSubmit()
                 currentCoroutineContext().ensureActive()
+                check(history.revision() == snapshot.revision) { "History changed during active run" }
                 steps++; retries++
                 persistAccounting()
-                val snapshot = history.runSnapshot()
-                (history as? SqliteRunHistory)?.saveCheckpoint(checkpoint(snapshot, snapshot.messages.size,
-                    null, "PAUSED", "Summary attempt reserved; interrupted work requires review", false)
+                disk.saveCheckpoint(checkpoint(snapshot, snapshot.messages.size,
+                    null, "PAUSED", "Summary attempt reserved; interrupted work requires review", false,
+                    tools.currentCheckpointRecords(records))
                     .copy(pauseClass = "SUMMARY_RESERVED"))
                 true
             }
@@ -219,15 +233,16 @@ class AgentRunLoop(
     }
 
     private fun checkpoint(source: HistorySnapshot, count: Int, summary: String?, kind: String,
-                           reason: String, blocked: Boolean): ContextCheckpoint {
+                           reason: String, blocked: Boolean,
+                           records: List<InvocationRecord> = tools.checkpointRecords(source.messages)): ContextCheckpoint {
         val policy = requireNotNull(contextPolicy)
         return ContextCheckpoint(id = UUID.randomUUID().toString(), sessionId = identity.sessionId,
             taskChainId = identity.taskChainId, runId = identity.runId,
             nextRunId = if (kind == "CONTINUATION") UUID.randomUUID().toString() else null,
             unattended = identity.unattended, sourceRevision = source.revision, sourceCount = count,
-            sourceDigest = sourceDigest(source.messages.subList(0, count)), settingsKey = settingsKey(target.id, config, target.provider.contextConfigurationKey()),
+            sourceDigest = sourceDigestOf(source, count), settingsKey = settingsKey(target.id, config, target.provider.contextConfigurationKey()),
             goal = policy.goal, steps = steps, retries = retries, kind = kind, summary = summary,
-            reason = reason, serverUnresolved = blocked, ledger = tools.checkpointRecords(source.messages),
+            reason = reason, serverUnresolved = blocked, ledger = records,
             catalog = tools.definitions.sortedBy { it.modelName }, budgetKey = budgetKey())
     }
 
@@ -240,9 +255,10 @@ class AgentRunLoop(
         // Only live/undecided local execution blocks ordinary compaction; accepted UNKNOWN effects
         // stay in the ledger and still gate later writes. Checkpoint continuation remains stricter.
         if (tools.compactionBlocked(records)) return false
-        val summary = summarize(source.messages.subList(0, policy.priorMessageCount),
+        val summary = summarize(source, source.messages.subList(0, policy.priorMessageCount), records,
             "${identity.sessionId}@${source.revision}") ?: return false
-        val saved = checkpoint(source, policy.priorMessageCount, summary, "VIEW", "Prior history summary", false)
+        val saved = checkpoint(source, policy.priorMessageCount, summary, "VIEW", "Prior history summary", false,
+            tools.currentCheckpointRecords(records))
         val summarized = saved.messages(source.messages)
         if (!requestViewLimit.admits(summarized)) return false
         val after = budget.tokens(copyRequest(config, summarized))
@@ -261,17 +277,19 @@ class AgentRunLoop(
         val disk = history as? SqliteRunHistory
         if (contextPolicy == null || disk == null) return result(RunState.PAUSED, reason, serverUnknown)
         val remoteBlocked = serverUnknown || serverLoopOpen
-        val localBlocked = tools.checkpointBlocked(tools.checkpointRecords(source.messages))
+        val records = tools.checkpointRecords(source.messages)
+        val localBlocked = tools.checkpointBlocked(records)
         val blocked = remoteBlocked || localBlocked
         // Commit a resumable *record*, not a continuation, before any billable summary call.
-        disk.saveCheckpoint(checkpoint(source, source.messages.size, null, "PAUSED", reason, remoteBlocked)
+        disk.saveCheckpoint(checkpoint(source, source.messages.size, null, "PAUSED", reason, remoteBlocked, records)
             .copy(pauseClass = if (localBlocked && !remoteBlocked) "LOCAL_WAIT" else "REVIEW"))
         val summary = if (blocked || summaryFailed || irreducible(source)) null
-            else summarize(source.messages, "${identity.sessionId}@${source.revision}")
+            else summarize(source, source.messages, records, "${identity.sessionId}@${source.revision}")
         val budgetPause = !blocked && (reason.contains("budget", ignoreCase = true) || reason.contains("CONTEXT_TOO_LONG") ||
             reason.contains("Truncated response"))
         val saved = checkpoint(source, source.messages.size, summary,
-            if (summary == null) "PAUSED" else "CONTINUATION", reason, remoteBlocked)
+            if (summary == null) "PAUSED" else "CONTINUATION", reason, remoteBlocked,
+            tools.currentCheckpointRecords(records))
             .copy(pauseClass = if (localBlocked && !remoteBlocked) "LOCAL_WAIT" else if (budgetPause) "BUDGET" else "REVIEW")
         disk.saveCheckpoint(saved)
         return result(RunState.PAUSED, "$reason; checkpoint ${saved.id}" +
@@ -295,13 +313,14 @@ class AgentRunLoop(
                 UUID.randomUUID().toString()))
     }
 
-    private fun refreshCheckpoint(saved: ContextCheckpoint, source: HistorySnapshot) = saved.copy(
+    private fun refreshCheckpoint(saved: ContextCheckpoint, source: HistorySnapshot,
+        records: List<InvocationRecord> = tools.checkpointRecords(source.messages)) = saved.copy(
         id = UUID.randomUUID().toString(), sessionId = identity.sessionId, taskChainId = identity.taskChainId,
         runId = identity.runId, unattended = identity.unattended, nextRunId = null,
         sourceRevision = source.revision, sourceCount = source.messages.size,
-        sourceDigest = sourceDigest(source.messages), steps = steps, retries = retries,
+        sourceDigest = sourceDigestOf(source, source.messages.size), steps = steps, retries = retries,
         settingsKey = settingsKey(target.id, config, target.provider.contextConfigurationKey()),
-        ledger = tools.checkpointRecords(source.messages), catalog = tools.definitions.sortedBy { it.modelName },
+        ledger = records, catalog = tools.definitions.sortedBy { it.modelName },
         kind = "PAUSED", summary = null, serverUnresolved = false)
 
     private fun result(state: RunState, reason: String, unknown: Boolean = false): RunResult {
@@ -313,14 +332,15 @@ class AgentRunLoop(
         if (!unresolved && persistedPause == null && disk != null) {
             val saved = disk.loadCheckpoint()
             val source = history.runSnapshot()
-            val localBlocked = tools.localExecutionBlocked(tools.checkpointRecords(source.messages))
+            val records = tools.checkpointRecords(source.messages)
+            val localBlocked = tools.localExecutionBlocked(records)
             val settled = saved == null || saved.kind in setOf("VIEW", "COMPLETE") || disk.checkpointReconciled(saved) ||
                 saved.pauseClass == "ADMITTED" && (!admissionPending || confirmedGenerationResponse) ||
                 saved.pauseClass == "LOCAL_WAIT" && !localBlocked
             if (settled && !localBlocked) {
                 val completed = if (contextPolicy != null) checkpoint(source,
-                    source.messages.size, null, "COMPLETE", reason, false)
-                else saved?.let { refreshCheckpoint(it, source).copy(kind = "COMPLETE", pauseClass = "REVIEW", reason = reason) }
+                    source.messages.size, null, "COMPLETE", reason, false, records)
+                else saved?.let { refreshCheckpoint(it, source, records).copy(kind = "COMPLETE", pauseClass = "REVIEW", reason = reason) }
                 if (completed != null) disk.saveCheckpoint(completed)
             }
         }

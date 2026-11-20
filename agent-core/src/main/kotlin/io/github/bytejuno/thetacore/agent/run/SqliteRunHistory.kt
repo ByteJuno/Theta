@@ -51,6 +51,8 @@ open class SqliteRunHistory internal constructor(
     /** Test scheduling seam after releasing the SQL monitor, before frame/JSON decoding. */
     internal var afterReadChunk: () -> Unit = {}
     private var head = read<HistoryHead>("head")
+    private var verifiedChainHead: HistoryHead? = null
+    private val verifiedDigests = mutableMapOf<Int, String>()
     init {
         require(head.version == 1 && head.sessionId == sessionId && head.revision >= 0 && head.messageCount >= 0)
         require(head.revision == databaseRevision())
@@ -316,13 +318,28 @@ open class SqliteRunHistory internal constructor(
         return if (hasValue("view")) read<ContextCheckpoint>("view") else null
     }
 
+    @Synchronized internal fun verifiedSourceDigest(source: HistorySnapshot, count: Int): String {
+        ready()
+        require(count in 0..source.messages.size)
+        if (source.revision == head.revision && verifiedChainHead == head) {
+            verifiedDigests[count]?.let { return it }
+        }
+        val digest = sourceDigest(source.messages.subList(0, count))
+        if (source.revision == head.revision && verifiedChainHead == head) {
+            verifiedDigests[count] = digest
+        }
+        return digest
+    }
+
     /** Independent atomic derived-view commit under the SAME session lock. Never advances HEAD.
      * A stale checkpoint is not replayed; corrupt committed data fails closed and is retained. */
     @Synchronized internal fun saveCheckpoint(value: ContextCheckpoint) {
         ready()
-        val source = runSnapshot() // validates the chain without retaining the complete history
+        val source = runSnapshot() // validates the chain once per immutable head without retaining complete history
         require(value.sessionId == sessionId && value.sourceRevision == source.revision)
-        require(value.matches(source, value.settingsKey))
+        require(value.version == 1 && value.sourceCount in 0..source.messages.size)
+        require(value.kind == "VIEW" || value.sourceCount == source.messages.size)
+        require(value.sourceDigest == verifiedSourceDigest(source, value.sourceCount))
         require(value.steps >= 0 && value.retries >= 0 && value.goal.isNotBlank())
         require(value.kind in setOf("VIEW", "CONTINUATION", "PAUSED", "COMPLETE"))
         require((value.kind == "CONTINUATION") == (value.nextRunId != null))
@@ -349,7 +366,13 @@ open class SqliteRunHistory internal constructor(
     @Synchronized fun checkpointInfo(): CheckpointInfo? {
         ready()
         if (hasPendingIntent()) return null
-        return loadCheckpoint()?.takeIf { it.matches(runSnapshot(), it.settingsKey) }?.info()
+        val saved = loadCheckpoint() ?: return null
+        val source = runSnapshot()
+        val valid = saved.version == 1 && saved.sourceRevision <= source.revision &&
+            saved.sourceCount in 0..source.messages.size &&
+            (saved.kind == "VIEW" || saved.sourceRevision == source.revision && saved.sourceCount == source.messages.size) &&
+            saved.sourceDigest == verifiedSourceDigest(source, saved.sourceCount)
+        return if (valid) saved.info() else null
     }
 
     private inline fun <reified T> read(name: String): T {
@@ -396,11 +419,11 @@ open class SqliteRunHistory internal constructor(
             override fun read(b: ByteArray, off: Int, len: Int): Int = if (len == 0) 0 else if (next()) chunk.read(b, off, len) else -1
         }
     }
-    private fun batch(c: HistoryCursor, supplied: HistoryBatch? = null): Pair<HistoryBatch, List<Message>> {
+    private fun batch(c: HistoryCursor, supplied: HistoryBatch? = null, hashVerified: Boolean = false): Pair<HistoryBatch, List<Message>> {
         require(c.sessionId == sessionId && c.revision in 1..head.revision && c.messageCount > 0)
         val value = supplied ?: read<HistoryBatch>(batchPath(c.revision))
         require(value.version == 1 && value.sessionId == sessionId && value.revision == c.revision)
-        require(hash(value) == c.hash) { "History chain mismatch" }
+        if (!hashVerified) require(hash(value) == c.hash) { "History chain mismatch" }
         val messages = freezeMessages(value.messages.map(HistoryCodec::decodeMessage))
         messagesDecoded += messages.size
         validateHistory(messages)
@@ -443,10 +466,14 @@ open class SqliteRunHistory internal constructor(
             checkRuntimeBatchSize(c.revision)
             return batch(c)
         }
-        var c = boundary
-        while (c.revision > 0) {
-            val (value, _) = checkedBatch(c)
-            c = HistoryCursor(sessionId, c.revision - 1, value.previousHash, value.previousCount)
+        if (verifiedChainHead != head) {
+            var c = boundary
+            while (c.revision > 0) {
+                val (value, _) = checkedBatch(c)
+                c = HistoryCursor(sessionId, c.revision - 1, value.previousHash, value.previousCount)
+            }
+            verifiedChainHead = head
+            verifiedDigests.clear()
         }
         val messages = object : AbstractList<Message>() {
             override val size = boundary.messageCount.toInt()
@@ -469,7 +496,7 @@ open class SqliteRunHistory internal constructor(
                     val hash = hash(value)
                     val count = Math.addExact(nextCount, value.messages.size.toLong())
                     val cursor = HistoryCursor(sessionId, nextRevision, hash, count)
-                    loaded = batch(cursor, value).second
+                    loaded = batch(cursor, value, hashVerified = true).second
                     start = nextCount.toInt()
                     nextCount = count; nextHash = hash; nextRevision++
                     if (nextRevision > boundary.revision) require(cursor == boundary) { "History boundary changed" }
@@ -643,6 +670,8 @@ open class SqliteRunHistory internal constructor(
             }
         }
         head = newHead
+        verifiedChainHead = null
+        verifiedDigests.clear()
         if (pending != null) clearPending()
     }
 
@@ -787,6 +816,8 @@ open class SqliteRunHistory internal constructor(
     @Synchronized override fun close() {
         if (!closed) {
             check(!runActive && summarySpools == 0) { "Cannot close history with an active run or summary spool" }
+            verifiedChainHead = null
+            verifiedDigests.clear()
             closed = true; database.releaseSession(sessionId)
         }
     }
