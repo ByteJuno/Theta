@@ -4,6 +4,7 @@ import io.github.bytejuno.thetacore.agent.ledger.*
 import io.github.bytejuno.thetacore.agent.protocol.*
 import io.github.bytejuno.thetacore.agent.provider.openai.*
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.toList
 import io.github.bytejuno.thetacore.agent.transport.*
@@ -16,6 +17,47 @@ import java.nio.file.Path
 import kotlin.test.*
 
 class ContextPolicyTest {
+    @Test fun summaryAdmissionPrecedesReservationAndSubmissionAndCanRetry() = runTest {
+        val fixture = RunFixture()
+        val provider = ScriptProvider(listOf(answer()))
+        val summarizer = ScriptProvider(listOf(answer("retained history")))
+        TestRunHistory.create(root.resolve("summary-admission"), "session", durability).use { history ->
+            history.append(0, listOf(user("old".repeat(1000)), user("goal")))
+            val entered = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val release = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val run = async {
+                runCatching {
+                    AgentRunLoop(identity, ModelTarget("provider", provider, Credentials { "test" }),
+                        fixture.request(), history,
+                        LedgerToolExecutor(fixture.ledger, fixture.gate, fixture.definitions, fixture.bridge,
+                            RunApprovals { Decision.ALLOW_ONCE }), fixture.journal, budget = budget(),
+                        contextPolicy = ContextPolicy("goal", 1, summary(summarizer)),
+                        beforeModelSubmit = { entered.complete(Unit); release.await(); error("admission rejected") }).run()
+                }
+            }
+            entered.await()
+            assertTrue(provider.requests.isEmpty())
+            assertTrue(summarizer.requests.isEmpty())
+            assertTrue(fixture.journal.submissions().isEmpty())
+            assertNull(history.loadCheckpoint())
+            assertEquals(0, history.loadAccounting("chain")!!.steps)
+            release.complete(Unit)
+            assertEquals("admission rejected", run.await().exceptionOrNull()?.message)
+            assertTrue(fixture.journal.attempts().isEmpty())
+            var admissions = 0
+            val result = AgentRunLoop(identity.copy(runId = "retry"),
+                ModelTarget("provider", provider, Credentials { "test" }), fixture.request(), history,
+                LedgerToolExecutor(fixture.ledger, fixture.gate, fixture.definitions, fixture.bridge,
+                    RunApprovals { Decision.ALLOW_ONCE }), fixture.journal, budget = budget(),
+                contextPolicy = ContextPolicy("goal", 1, summary(summarizer)),
+                beforeModelSubmit = { admissions++ }).run()
+            assertEquals(RunState.COMPLETED, result.state)
+            assertTrue(summarizer.requests.isNotEmpty())
+            assertEquals(summarizer.requests.size + provider.requests.size, admissions)
+            assertEquals(admissions, fixture.journal.submissions().size)
+        }
+    }
+
     @get:Rule val temporary = TemporaryFolder()
     private val root: Path get() = temporary.root.toPath()
     private val durability = Durability.PROCESS_CRASH_ONLY

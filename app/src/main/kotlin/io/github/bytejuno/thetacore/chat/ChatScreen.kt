@@ -40,6 +40,7 @@ internal fun showApproval(record: InvocationRecord): Boolean = record.pending !=
 internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
     val strings = uiStrings()
     val owner = remember(host) { host.chat }
+    val launchTask = rememberChatTaskLauncher(host)
     val state by owner.state.collectAsState()
     var input by rememberSaveable(state.sessionId) { mutableStateOf("") }
     var settings by rememberSaveable { mutableStateOf(false) }
@@ -89,7 +90,7 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
                     message.parts.forEach { part -> when (part) {
                         is ContentPart.Text -> SelectionContainer { Text(part.text) }
                         is ContentPart.Reasoning -> part.summary?.let { SelectionContainer { Text(it, style = MaterialTheme.typography.bodySmall) } }
-                        is ContentPart.ToolCall -> ToolCard(part, state.records[part.binding.callId], state.recoveries[part.binding.callId], owner)
+                        is ContentPart.ToolCall -> ToolCard(part, state.records[part.binding.callId], state.recoveries[part.binding.callId], owner, launchTask)
                         is ContentPart.ToolResult -> Unit // result lives inside the associated tool row
                     } }
                 }
@@ -113,7 +114,9 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
             }
             if (!state.active && !state.pending && (state.checkpoint != null || state.reconciliation != null ||
                     state.result?.state in setOf(RunState.PAUSED, RunState.FAILED))) item {
-                ChatRecoveryCard(state) { token, action, window, confirmed -> owner.recover(token, action, window, confirmed) }
+                ChatRecoveryCard(state) { token, action, window, confirmed ->
+                    launchTask { owner.recover(token, action, window, confirmed) }
+                }
             }
             if (stream.isNotEmpty()) item {
                 Text(strings.get(R.string.chat_assistant), style = MaterialTheme.typography.labelLarge)
@@ -123,13 +126,13 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
                 R.string.chat_tool_approval else R.string.chat_running)) }
         }
         if (state.pending && !state.active && state.records.values.none { it.pending != null }) {
-            TextButton(onClick = { owner.continueSavedStep() }) { Text(strings.get(R.string.chat_finish_saved)) }
+            TextButton(onClick = { launchTask { owner.continueSavedStep() } }) { Text(strings.get(R.string.chat_finish_saved)) }
         }
         if (state.active || state.pending) TextButton(onClick = { owner.stop() }) { Text(strings.get(R.string.chat_stop)) }
         OutlinedTextField(value = input, onValueChange = { if (it.length <= 32_000) input = it },
             label = { Text(strings.get(R.string.chat_message)) }, modifier = Modifier.fillMaxWidth(),
             minLines = 1, maxLines = 5, enabled = !state.loading && !state.active && !state.pending)
-        Button(onClick = { owner.send(input) }, enabled = input.isNotBlank() && !state.loading && !state.active && !state.pending,
+        Button(onClick = { val text = input; launchTask { owner.send(text) } }, enabled = input.isNotBlank() && !state.loading && !state.active && !state.pending,
             modifier = Modifier.fillMaxWidth()) { Text(strings.get(R.string.chat_send)) }
     }
     if (settings) ProviderScreen(host) { settings = false }
@@ -153,7 +156,8 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
 }
 
 @Composable
-private fun ToolCard(call: ContentPart.ToolCall, record: InvocationRecord?, recovery: RecoveryRequest?, owner: ChatSessionOwner) {
+private fun ToolCard(call: ContentPart.ToolCall, record: InvocationRecord?, recovery: RecoveryRequest?, owner: ChatSessionOwner,
+    launchTask: (() -> Unit) -> Unit) {
     val strings = uiStrings()
     var expanded by rememberSaveable(call.binding.callId) { mutableStateOf(false) }
     OutlinedCard(Modifier.fillMaxWidth()) {
@@ -177,8 +181,8 @@ private fun ToolCard(call: ContentPart.ToolCall, record: InvocationRecord?, reco
                 SelectionContainer { Text(approval.summary.ifBlank { call.argsJson }) }
                 if (approval.unknownCalls.isNotEmpty()) Text(strings.get(R.string.chat_unknown_warning), color = MaterialTheme.colorScheme.error)
                 FlowRow {
-                    Button(onClick = { owner.decide(record.callId, approval.id, Decision.ALLOW_ONCE) }) { Text(strings.get(R.string.chat_allow)) }
-                    TextButton(onClick = { owner.decide(record.callId, approval.id, Decision.DENY) }) { Text(strings.get(R.string.chat_deny)) }
+                    Button(onClick = { launchTask { owner.decide(record.callId, approval.id, Decision.ALLOW_ONCE) } }) { Text(strings.get(R.string.chat_allow)) }
+                    TextButton(onClick = { launchTask { owner.decide(record.callId, approval.id, Decision.DENY) } }) { Text(strings.get(R.string.chat_deny)) }
                 }
             }
             if (recovery != null && record != null && !record.input.unattended) {

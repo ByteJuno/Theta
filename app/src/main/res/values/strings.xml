@@ -316,4 +316,18 @@
     <string name="chat_image_unavailable">Saved image is missing or invalid. No new generation request was sent.</string>
     <string name="chat_image_description">Image generated for this conversation</string>
     <string name="chat_delete_recovery_required">This conversation still has work or an unknown result to resolve. Review its recovery actions (including older messages) before deleting.</string>
+    <string name="chat_task_channel">Running tasks</string>
+    <string name="chat_attention_channel">Task decisions</string>
+    <string name="chat_task_model">Waiting for the model reply</string>
+    <string name="chat_task_tool">Running tool: %1$s</string>
+    <string name="chat_task_approval">Approval needed. Open Theta to allow or deny the tool.</string>
+    <string name="chat_task_recovery">Task paused. Open Theta to review an uncertain result.</string>
+    <string name="chat_background_failed">Background service unavailable. Return to Theta and explicitly retry the task.</string>
+    <string name="chat_background_title">Run tasks in the background</string>
+    <string name="chat_background_explanation">Allow Theta to run without battery optimization in system settings so tasks can continue when you leave the app or lock the screen. This does not guarantee survival on every device. You can skip this; we will not ask again.</string>
+    <string name="chat_background_settings">Open battery settings</string>
+    <string name="chat_background_continue">Continue</string>
+    <string name="chat_background_settings_failed">Battery settings are unavailable. You can change battery restrictions later in system App info.</string>
+    <string name="chat_notifications_title">Notifications are off</string>
+    <string name="chat_notifications_denied">Tasks can still run, but task progress, the notification Stop button and approval reminders may be hidden. Use Stop in the chat. You can enable notifications later in system App info.</string>
 </resources>

@@ -57,6 +57,7 @@ internal class PluginExecutionBudget(
         val onExit: () -> Unit,
     ) {
         val actualExited = CompletableDeferred<Unit>()
+        val cancellationDelivered = CompletableDeferred<Unit>()
         internal var submitted = false
         internal var pendingAction: (suspend CoroutineScope.() -> Unit)? = null
         internal var executionExited = false
@@ -193,6 +194,7 @@ internal class PluginExecutionBudget(
                             releaseIfFinished(lease)
                             pumpCancellation()
                         }
+                        lease.cancellationDelivered.complete(Unit)
                     }
                 }
             } catch (_: RejectedExecutionException) {

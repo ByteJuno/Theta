@@ -316,4 +316,18 @@
     <string name="chat_image_unavailable">保存的图片缺失或无效；未重新发起生图请求。</string>
     <string name="chat_image_description">为当前会话生成的图片</string>
     <string name="chat_delete_recovery_required">此会话仍有待处理任务或结果未知的调用。请先处理恢复操作（包括较早消息），再删除会话。</string>
+    <string name="chat_task_channel">正在运行的任务</string>
+    <string name="chat_attention_channel">待处理的任务决定</string>
+    <string name="chat_task_model">正在等待模型回复</string>
+    <string name="chat_task_tool">正在执行工具：%1$s</string>
+    <string name="chat_task_approval">需要审批，请打开 Theta 批准或拒绝工具调用。</string>
+    <string name="chat_task_recovery">任务已暂停，请打开 Theta 核对结果不确定的调用。</string>
+    <string name="chat_background_failed">无法启用后台服务。请返回 Theta，确认后重试任务。</string>
+    <string name="chat_background_title">允许任务在后台运行</string>
+    <string name="chat_background_explanation">请在系统设置中关闭 Theta 的电池优化，让离开应用或锁屏后的任务可以继续。这不保证所有设备都不会终止任务。你可以跳过，我们不会再次打扰。</string>
+    <string name="chat_background_settings">打开电池设置</string>
+    <string name="chat_background_continue">继续</string>
+    <string name="chat_background_settings_failed">无法打开电池设置。你可以稍后在系统应用信息中调整电池限制。</string>
+    <string name="chat_notifications_title">通知未开启</string>
+    <string name="chat_notifications_denied">任务仍可运行，但通知进度、通知中的停止按钮和审批提醒可能不可见。请使用聊天页的停止按钮。你可以稍后在系统应用信息中开启通知。</string>
 </resources>
