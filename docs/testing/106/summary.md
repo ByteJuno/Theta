@@ -1,5 +1,12 @@
 # Issue 106 — Chat image generation
 
+## Independent review, round 2
+
+- Reviewed head `88686f74a23c4e76fcedc2acc9c35133783a0bfa` against main `265344cbe8d59e80109e7a162d15f76b13e954ed`. Its only difference from the source-bound integration test commit is this summary. The previous single return and failure history below remain unchanged.
+- GPU probe reproduced an automatic download follow-up: a signed-image GET receiving HTTP 503 with `Retry-After: 0` produced two download requests despite `retryOnConnectionFailure(false)`; generation POST count stayed one. Repair `b528dc0d7e1843df051a16595120ac3cd82f350d` adds a per-fetch network-exchange guard and a regression assertion in the existing TLS fixture. The repaired probe reports one generation request, one download request and failure without replay.
+- Via the prescribed `theta-gpu-test` entry: `OpenAiImageClientTest` plus `ImageTransportProbe` passed 10/10, `GRADLE_EXIT=0`. Cancellation during blocked response-body reading completed in 4 ms with one request. A separate legacy-session deletion probe passed 1/1 and retained both adjacent valid session attachments. Probe files and raw output remain outside Git. Dependency POM metadata identifies both new test artifacts (`mockwebserver3:5.5.1`, `okhttp-tls:5.5.1`) as Apache 2.0.
+- No APK was built or device/visual acceptance performed after this repair. Earlier APK hashes are historical; the outer controller must build and run final-commit CI and prescribed emulator regression, including image rendering/reopen/delete and bilingual UI states, before merge.
+
 ## Latest main-conflict integration
 
 - Verified OWNER RETURN `IC_kwDOVkrS_s8AAAABo1KnPQ` against PR107 `f7f82603c3a7b87091dea1fa05e7b42e97247c4c`; explicit `git pull --ff-only origin auto/106-chat-image-generation` succeeded before integrating main `265344cbe8d59e80109e7a162d15f76b13e954ed`. PR104 is remotely merged, with both exact-head CI checks successful; its full emulator pass is reviewer-reported and is not evidence for this new APK.
