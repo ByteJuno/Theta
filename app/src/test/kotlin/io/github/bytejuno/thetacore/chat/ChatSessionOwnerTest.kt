@@ -393,7 +393,9 @@ class ChatSessionOwnerTest {
             cold.owner.open().join()
             assertEquals("BUDGET", cold.owner.state.value.checkpoint!!.pauseClass)
             assertTrue(requests.isEmpty())
-            cold.owner.resume(summaryWindowTokens = 1_000_000).join(); await { !cold.owner.state.value.active }
+            val selection = requireNotNull(cold.owner.state.value.recovery)
+            cold.owner.recover(selection, ChatRecoveryAction.SUMMARIZE, 1_000_000, confirmed = true).join()
+            await { !cold.owner.state.value.active }
             assertEquals(cold.failures.toString(), R.string.chat_complete, cold.owner.state.value.notice)
             assertTrue(requests.any { it.tools.isEmpty() })
             assertTrue(requests.last().tools.isNotEmpty())
@@ -442,10 +444,12 @@ class ChatSessionOwnerTest {
             assertTrue(fixture.owner.state.value.active)
             assertNull(fixture.owner.state.value.checkpoint)
             assertNull(fixture.owner.state.value.reconciliation)
+            assertNull(fixture.owner.state.value.recovery)
             fixture.owner.stop().join()
             await { !fixture.owner.state.value.active }
             assertNotNull(fixture.owner.state.value.checkpoint)
             assertNotNull(fixture.owner.state.value.reconciliation)
+            assertNotNull(fixture.owner.state.value.recovery)
             assertTrue(fixture.failures.toString(), fixture.failures.isEmpty())
         } finally {
             fixture.close()
@@ -472,16 +476,118 @@ class ChatSessionOwnerTest {
             assertTrue(first.failures.toString(), checkpoint.canContinue)
             val count = requests.get()
             first.close()
-            val cold = fixture(root, AtomicInteger(), model)
+            val presence = RecordingPresence().also { it.admitted = CompletableDeferred() }
+            val cold = fixture(root, AtomicInteger(), model, presence = presence)
             cold.owner.open().join()
             assertEquals(count, requests.get())
             assertEquals(checkpoint.id, cold.owner.state.value.checkpoint!!.id)
-            cold.owner.resume().join(); await { !cold.owner.state.value.active }
+            val selection = requireNotNull(cold.owner.state.value.recovery)
+            cold.owner.recover(selection, ChatRecoveryAction.CONTINUE_SUMMARY, confirmed = false).join()
+            assertEquals(count, requests.get())
+            cold.owner.recover(selection, ChatRecoveryAction.CONTINUE_SUMMARY, confirmed = true).join()
+            await { presence.events.isNotEmpty() }
+            assertEquals(ChatTaskProgress.Model, presence.events.first().second)
+            assertEquals(count, requests.get())
+            presence.admitted!!.complete(Unit)
+            await { !cold.owner.state.value.active }
+            assertNull(presence.events.last().second)
             assertEquals(cold.failures.toString(), R.string.chat_complete, cold.owner.state.value.notice)
             assertTrue(cold.owner.state.value.result!!.steps > checkpoint.steps)
-            assertTrue(cold.failures.toString(), cold.failures.isEmpty())
+            assertEquals(1, cold.failures.size)
+            cold.owner.recover(selection, ChatRecoveryAction.CONTINUE_SUMMARY, confirmed = true).join()
+            assertEquals(count + 1, requests.get())
             cold.close()
         } finally { root.deleteRecursively() }
+    }
+
+    @Test fun largerWindowReadmissionPreservesRawHistoryWithoutSummaryCalls() = runBlocking {
+        val root = Files.createTempDirectory("chat-window-readmit").toFile()
+        val requests = AtomicInteger()
+        val presence = RecordingPresence()
+        try {
+            val first = fixture(root, AtomicInteger(), countingProvider(requests) { FinishReason.STOP }, presence = presence)
+            first.store.createHistory("session").use { disk ->
+                disk.saveChatContext(ChatTaskContext("session", "goal", 0, null, 1024))
+            }
+            first.owner.open().join(); first.owner.send("goal ".repeat(400)).join()
+            await { !first.owner.state.value.active }
+            assertEquals(0, requests.get())
+            assertEquals("BUDGET", first.owner.state.value.checkpoint!!.pauseClass)
+            val token = requireNotNull(first.owner.state.value.recovery)
+            first.owner.recover(token, ChatRecoveryAction.READMIT, 1024, true).join()
+            assertEquals(0, requests.get())
+            presence.events.clear()
+            presence.admitted = CompletableDeferred()
+            first.owner.recover(token, ChatRecoveryAction.READMIT, 8192, true).join()
+            await { presence.events.isNotEmpty() }
+            assertEquals(ChatTaskProgress.Model, presence.events.first().second)
+            assertEquals(0, requests.get())
+            presence.admitted!!.complete(Unit)
+            await { !first.owner.state.value.active }
+            assertNull(presence.events.last().second)
+            assertEquals(1, requests.get())
+            assertEquals(R.string.chat_complete, first.owner.state.value.notice)
+            assertEquals("goal ".repeat(400), (first.owner.state.value.messages.first().parts.single() as ContentPart.Text).text)
+            first.owner.recover(token, ChatRecoveryAction.READMIT, 8192, true).join()
+            assertEquals(1, requests.get())
+            first.close()
+            val reopened = fixture(root, AtomicInteger(), countingProvider(requests) { FinishReason.STOP })
+            reopened.store.openHistory("session").use { disk ->
+                assertNull(disk.chatSummaryWindow())
+                assertEquals(8192L, disk.chatContextWindow())
+            }
+            reopened.close()
+        } finally { root.deleteRecursively() }
+    }
+
+    @Test fun coldUnattendedRunsCannotBePromotedByUiOrDirectResume() = runBlocking {
+        for (uncertain in listOf(false, true)) {
+            val root = Files.createTempDirectory("chat-unattended-recovery").toFile()
+            val requests = AtomicInteger()
+            val model = object : ModelProvider {
+                override fun executionMode(request: ChatRequest) = ModelExecutionMode.MAY_EXECUTE_SERVER_TOOLS
+                override fun chat(request: ChatRequest, auth: Credentials): Flow<ModelEvent> = flow {
+                    requests.incrementAndGet()
+                    emit(Events.started("uncertain", "model"))
+                    throw java.io.IOException("unknown outcome")
+                }
+            }
+            try {
+                val seed = fixture(root, AtomicInteger(), model)
+                seed.store.createHistory("session").use { disk ->
+                    disk.saveChatContext(ChatTaskContext("session", "goal", 0))
+                    disk.append(0, listOf(message(Role.USER, textPart("goal"))))
+                    val identity = RunIdentity("session", "session", "unattended", true)
+                    val definitions = seed.host.catalog.freeze(identity.runId).values.toList()
+                    val result = AgentRunLoop(identity, ModelTarget("test", model, Credentials { "test" }),
+                        chatRequest("model") {
+                            maxOutputTokens = 100
+                            tools = definitions.map { modelTool(it.modelName, it.description, Json.parseToJsonElement(it.inputSchema).jsonObject) }
+                        }, disk,
+                        LedgerToolExecutor(seed.host.ledger, seed.host.catalog.gate, definitions,
+                            seed.host.runBridge(), RunApprovals { error("No tool should request approval") }),
+                        journal = StoredRunJournal(disk),
+                        budget = ContextBudget({ 100L }, { if (uncertain) 8192L else 10L }),
+                        contextPolicy = ContextPolicy("goal")).runChatTask()
+                    disk.saveChatResult(result)
+                }
+                val submitted = requests.get()
+                seed.close()
+                val cold = fixture(root, AtomicInteger(), model)
+                cold.owner.open().join()
+                val token = requireNotNull(cold.owner.state.value.recovery)
+                assertTrue(token.identity.unattended)
+                assertTrue(recoveryActions(cold.owner.state.value).isEmpty())
+                val action = if (uncertain) ChatRecoveryAction.RETRY else ChatRecoveryAction.READMIT
+                cold.owner.recover(token, action, 8192, true).join()
+                cold.owner.recover(token.copy(identity = token.identity.copy(unattended = false)), action, 8192, true).join()
+                cold.owner.resume(summaryWindowTokens = 8192, reconcileId = token.reconciliation?.id).join()
+                cold.owner.send("continue this unattended task").join()
+                assertEquals(submitted, requests.get())
+                assertEquals(token, cold.owner.state.value.recovery)
+                cold.close()
+            } finally { root.deleteRecursively() }
+        }
     }
 
     @Test fun cancellationRetainsPartialReplyAndJournalPagingSurvivesReopen() = runBlocking {
@@ -541,17 +647,85 @@ class ChatSessionOwnerTest {
             val completedSteps = first.owner.state.value.result!!.steps
             assertEquals(R.string.chat_pause_reconcile, chatOutcome(first.owner.state.value.result!!))
             first.close()
-            val cold = fixture(root, AtomicInteger(), model)
+            val presence = RecordingPresence().also { it.admitted = CompletableDeferred() }
+            val cold = fixture(root, AtomicInteger(), model, presence = presence)
             cold.owner.open().join(); cold.owner.resume().join()
             assertEquals(1, requests.get())
             cold.owner.resume(reconcileId = "stale").join()
             assertEquals(receipt.id, cold.owner.state.value.reconciliation!!.id)
-            cold.owner.resume(reconcileId = receipt.id).join(); await { !cold.owner.state.value.active }
+            val selection = requireNotNull(cold.owner.state.value.recovery)
+            cold.owner.recover(selection, ChatRecoveryAction.RETRY, confirmed = false).join()
+            assertEquals(1, requests.get())
+            cold.owner.recover(selection.copy(revision = selection.revision - 1), ChatRecoveryAction.RETRY, confirmed = true).join()
+            assertEquals(receipt.id, cold.owner.state.value.reconciliation!!.id)
+            cold.owner.recover(selection, ChatRecoveryAction.RETRY, confirmed = true).join()
+            await { presence.events.isNotEmpty() }
+            assertEquals(ChatTaskProgress.Model, presence.events.first().second)
+            assertEquals(1, requests.get())
+            presence.admitted!!.complete(Unit)
+            await { !cold.owner.state.value.active }
+            assertNull(presence.events.last().second)
             assertEquals(2, requests.get())
             assertEquals(R.string.chat_complete, cold.owner.state.value.notice)
             assertNull(cold.owner.state.value.reconciliation)
             assertEquals(completedSteps + 1, cold.owner.state.value.result!!.steps)
+            cold.owner.recover(selection, ChatRecoveryAction.RETRY, confirmed = true).join()
+            assertEquals(2, requests.get())
             cold.close()
+        } finally { root.deleteRecursively() }
+    }
+
+    @Test fun coldFirstUncertainRequestRetainsRecoveryIdentity() = runBlocking { crashWhileSubmitted(false) }
+    @Test fun coldUncertainRequestAfterCompletedTurnRemainsRecoverable() = runBlocking { crashWhileSubmitted(true) }
+
+    private suspend fun crashWhileSubmitted(priorCompleted: Boolean) {
+        val root = Files.createTempDirectory("chat-cold-recovery").toFile()
+        val entered = CompletableDeferred<Unit>()
+        val requests = AtomicInteger()
+        val model = object : ModelProvider {
+            override fun executionMode(request: ChatRequest) = ModelExecutionMode.MAY_EXECUTE_SERVER_TOOLS
+            override fun chat(request: ChatRequest, auth: Credentials): Flow<ModelEvent> = flow {
+                val count = requests.incrementAndGet()
+                emit(Events.started("cold-$count", "model"))
+                if (count == if (priorCompleted) 2 else 1) {
+                    entered.complete(Unit)
+                    awaitCancellation()
+                } else {
+                    emit(Events.text(0, "answer")); emit(Events.end(0)); emit(Events.finished(FinishReason.STOP))
+                }
+            }
+        }
+        try {
+            val live = File(root, "live").also { it.mkdir() }
+            val saved = File(root, "saved").also { it.mkdir() }
+            val seed = fixture(live, AtomicInteger(), model)
+            try {
+                seed.owner.open().join()
+                if (priorCompleted) {
+                    seed.owner.send("completed goal").join(); await { !seed.owner.state.value.active }
+                    assertEquals(RunState.COMPLETED, seed.owner.state.value.result!!.state)
+                }
+                seed.owner.send("uncertain goal").join()
+                withTimeout(10_000) { entered.await() }
+                BundledSQLiteDriver().open(File(live, AgentDatabase.FILE_NAME).path).use { db ->
+                    db.prepare("VACUUM INTO ?").use {
+                        it.bindText(1, File(saved, AgentDatabase.FILE_NAME).path); it.step()
+                    }
+                }
+            } finally { seed.close() }
+            val cold = fixture(saved, AtomicInteger(), model)
+            try {
+                cold.owner.open().join()
+                val state = cold.owner.state.value
+                assertNotNull("Unknown server result must remain pending", state.reconciliation)
+                assertNotNull("Fresh attended submission must retain its recovery identity", state.recovery)
+                assertEquals(setOf(ChatRecoveryAction.RETRY), recoveryActions(state))
+                val count = requests.get()
+                cold.owner.recover(state.recovery!!, ChatRecoveryAction.RETRY, confirmed = true).join()
+                await { !cold.owner.state.value.active }
+                assertEquals(count + 1, requests.get())
+                assertEquals(RunState.COMPLETED, cold.owner.state.value.result!!.state)
+            } finally { cold.close() }
         } finally { root.deleteRecursively() }
     }
 

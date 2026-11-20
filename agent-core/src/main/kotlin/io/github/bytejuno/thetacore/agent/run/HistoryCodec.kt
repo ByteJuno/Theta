@@ -103,7 +103,7 @@ internal data class CallLocation(val callId: String, val revision: Long, val bat
 /** Accounting is independent of context admission and remains writable with pending tool intent. */
 @Serializable
 internal data class RunAccounting(val sessionId: String, val taskChainId: String, val runId: String,
-    val steps: Int, val retries: Int)
+    val steps: Int, val retries: Int, val unattended: Boolean? = null)
 @Serializable
 internal data class CheckedHistoryValue(val payload: String, val sha256: String)
 
@@ -178,7 +178,7 @@ internal object HistoryCodec {
             is StoredReplay -> fields("protocol" to v.protocol, "model" to v.model, "payload" to v.payload)
             is Enum<*> -> quoted(v.name)
             is RunAccounting -> fields("sessionId" to v.sessionId, "taskChainId" to v.taskChainId,
-                "runId" to v.runId, "steps" to v.steps, "retries" to v.retries)
+                "runId" to v.runId, "steps" to v.steps, "retries" to v.retries, "unattended" to v.unattended)
             is ExecutionBarrier -> fields("sessionId" to v.sessionId, "taskChainId" to v.taskChainId,
                 "runId" to v.runId, "reason" to v.reason, "steps" to v.steps, "retries" to v.retries, "id" to v.id)
             is RetryReceipt -> fields("id" to v.id, "sessionId" to v.sessionId, "callerRunId" to v.callerRunId,

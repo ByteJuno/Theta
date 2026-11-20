@@ -74,7 +74,7 @@ class AgentRunLoop(
 
     private fun persistAccounting() {
         if (accountingActive) (history as? SqliteRunHistory)?.saveAccounting(
-            RunAccounting(identity.sessionId, identity.taskChainId, identity.runId, steps, retries))
+            RunAccounting(identity.sessionId, identity.taskChainId, identity.runId, steps, retries, identity.unattended))
     }
 
     private fun irreducible(source: HistorySnapshot): Boolean {
@@ -363,6 +363,11 @@ class AgentRunLoop(
         restoreContext(view)
         persistedPause?.let { return result(RunState.PAUSED, it, serverUnknown) }
         accountingActive = true
+        // Cold recovery must know attendance even if the process dies during the first request.
+        persistAccounting()
+        // A newer interrupted task must not inherit the previous turn's completed status.
+        if (chatTask) (history as SqliteRunHistory).saveChatResult(RunResult(RunState.PAUSED,
+            "Run admitted; awaiting durable completion", steps, retries))
         if (rejectedContextReadmission && !compactPrior(view))
             return pauseContext(view, "Model error: CONTEXT_TOO_LONG")
         val causes = mutableMapOf<String, Int>()
@@ -541,7 +546,7 @@ class AgentRunLoop(
                     val batch = if (calls.isEmpty()) listOf(assistant)
                         else listOf(assistant, tools.results(identity, step, calls))
                     if (finalAnswer) requireNotNull(chatDisk).appendChatAnswer(view.revision, assistant,
-                        RunAccounting(identity.sessionId, identity.taskChainId, identity.runId, steps, retries),
+                        RunAccounting(identity.sessionId, identity.taskChainId, identity.runId, steps, retries, identity.unattended),
                         tools.canRetireChatChain(identity))
                     else history.append(view.revision, batch)
                     if (finalAnswer) accountingActive = false // Final counters committed with the answer.

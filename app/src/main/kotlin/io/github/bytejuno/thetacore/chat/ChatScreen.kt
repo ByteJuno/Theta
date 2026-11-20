@@ -55,9 +55,6 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
             listState.animateScrollToItem(listState.layoutInfo.totalItemsCount - 1)
     }
     var sessions by remember { mutableStateOf(false) }
-    var summaryWindow by rememberSaveable(state.sessionId, state.summaryWindowTokens) {
-        mutableStateOf(state.summaryWindowTokens?.toString() ?: "")
-    }
     LaunchedEffect(owner) { owner.open() }
     LaunchedEffect(state.acceptedMessages) { if (state.acceptedMessages > 0) input = "" }
     Column(Modifier.fillMaxSize().imePadding().padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -113,31 +110,8 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
             }
             if (!state.active && !state.pending && (state.checkpoint != null || state.reconciliation != null ||
                     state.result?.state in setOf(RunState.PAUSED, RunState.FAILED))) item {
-                OutlinedCard(Modifier.fillMaxWidth()) {
-                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        state.result?.let { Text(strings.get(chatOutcome(it))) }
-                        state.checkpoint?.let { Text(strings.get(R.string.chat_checkpoint_counts, it.steps, it.retries)) }
-                        if (state.reconciliation != null) {
-                            Text(strings.get(R.string.chat_retry_warning))
-                            Button(onClick = { val token = state.reconciliation!!.id; launchTask { owner.resume(reconcileId = token) } }) {
-                                Text(strings.get(R.string.chat_retry_confirm))
-                            }
-                        } else {
-                            Text(strings.get(R.string.chat_summary_notice))
-                            OutlinedTextField(summaryWindow, { summaryWindow = it.filter(Char::isDigit).take(7) },
-                                label = { Text(strings.get(R.string.chat_summary_window)) }, singleLine = true,
-                                modifier = Modifier.fillMaxWidth())
-                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Button(onClick = { val window = summaryWindow.toLongOrNull(); launchTask { owner.resume(window) } },
-                                    enabled = summaryWindow.toLongOrNull()?.let { it in 1024..1_000_000 } == true) {
-                                    Text(strings.get(R.string.chat_summary_resume))
-                                }
-                                TextButton(onClick = { launchTask { owner.resume() } }, enabled = !needsBudgetReadmission(state.checkpoint)) {
-                                    Text(strings.get(if (state.checkpoint?.canContinue == true) R.string.chat_checkpoint_resume else R.string.chat_retry))
-                                }
-                            }
-                        }
-                    }
+                ChatRecoveryCard(state) { token, action, window, confirmed ->
+                    launchTask { owner.recover(token, action, window, confirmed) }
                 }
             }
             if (stream.isNotEmpty()) item {
