@@ -88,7 +88,8 @@ internal class HostToolExecutionService(
             }
         }
 
-    private suspend fun requestRuntimeApproval(ticket: ExecutionTicket, summary: String, risk: Risk): Boolean =
+    private suspend fun requestRuntimeApproval(ticket: ExecutionTicket, summary: String, risk: Risk,
+        beforeResume: suspend (String) -> Unit): Boolean =
         withContext(Dispatchers.IO) {
             var owned: ApprovalWaiter? = null
             var immediateRisk = risk
@@ -143,12 +144,24 @@ internal class HostToolExecutionService(
                 }
                 @Suppress("UNREACHABLE_CODE") false
             } finally {
-                gate.withGate {
-                    owned?.let { waiter ->
-                        if (approvalWaiters[ticket.callId] === waiter) {
-                            active[ticket.callId]?.setHumanApprovalWaiting(false)
+                withContext(NonCancellable) {
+                    val resuming = gate.withGate {
+                        owned?.let { waiter ->
+                            if (approvalWaiters[ticket.callId] !== waiter) return@let null
+                            val invocation = active[ticket.callId]
+                            invocation?.setHumanApprovalWaiting(false)
                             approvalWaiters.remove(ticket.callId)
                             observe(ledger.withdrawRiskUpgrade(ticket.callId, ticket.attemptId, waiter.requestId))
+                            val current = ledger.get(ticket.callId)
+                            invocation?.takeIf { !storageFailed && !it.terminal.isCompleted &&
+                                current?.state == Status.RUNNING && current.instance?.attemptId == ticket.attemptId }
+                        }
+                    }
+                    if (resuming != null) {
+                        try { beforeResume(ticket.callId) }
+                        catch (error: Throwable) {
+                            resuming.cancelAndAwaitDelivery()
+                            throw error
                         }
                     }
                 }
@@ -168,7 +181,8 @@ internal class HostToolExecutionService(
     /** Reserving capacity runs no tool code. Claim must be acknowledged before commit. */
     suspend fun dispatch(callId: String): Mutation = withContext(Dispatchers.IO) { dispatchLocked(callId) }
 
-    private fun dispatchLocked(callId: String, expectedRevision: Long? = null): Mutation = gate.withGate {
+    private fun dispatchLocked(callId: String, expectedRevision: Long? = null,
+        beforeResume: suspend (String) -> Unit = {}): Mutation = gate.withGate {
         if (expectedRevision != null && ledger.get(callId)?.revision != expectedRevision)
             return@withGate Mutation.Conflict("Claim revision changed")
 
@@ -197,19 +211,20 @@ internal class HostToolExecutionService(
         } catch (error: Throwable) { reservation.abandon(); closeSubmissions(); throw error }
         val ticket = (claimed as? Mutation.Applied)?.ticket
         if (ticket == null) { reservation.abandon(); return@withGate claimed }
-        invocation = prepareClaimed(ticket, record, entry, reservation)
+        invocation = prepareClaimed(ticket, record, entry, reservation, beforeResume)
         invocation.start()
         claimed
     }
 
 
     private fun prepareClaimed(ticket: ExecutionTicket, record: InvocationRecord,
-        entry: FrozenToolCatalog.Entry, reservation: PluginExecutionBudget.Lease): PluginInvocation {
+        entry: FrozenToolCatalog.Entry, reservation: PluginExecutionBudget.Lease,
+        beforeResume: suspend (String) -> Unit): PluginInvocation {
         val executionDomain = entry.definition.builtinToolKey ?: entry.definition.owner
         val invocation = PluginInvocation(budget, executionDomain, owner, entry.tool,
             Json.parseToJsonElement(ticket.argsJson).jsonObject,
             ToolInvocationRequest(record.input.runId, record.input.sessionId, ticket.callId, record.input.unattended),
-            requestApproval = { summary, risk -> requestRuntimeApproval(ticket, summary, Risk.valueOf(risk.name)) },
+            requestApproval = { summary, risk -> requestRuntimeApproval(ticket, summary, Risk.valueOf(risk.name), beforeResume) },
             frozenSpec = entry.spec, reservation = reservation, unattendedApprovalPolicy = true, clock = invocationClock,
             beforeExecution = {
                 gate.withGate {
@@ -226,10 +241,10 @@ internal class HostToolExecutionService(
     }
 
     /** AgentRunLoop delegates atomic reservation, claim and submission to this host. */
-    fun runBridge(): io.github.bytejuno.thetacore.agent.run.ToolExecutionBridge =
+    fun runBridge(beforeResume: suspend (String) -> Unit = {}): io.github.bytejuno.thetacore.agent.run.ToolExecutionBridge =
         object : io.github.bytejuno.thetacore.agent.run.ToolExecutionBridge {
             override fun claimAndSubmit(callId: String, expectedRevision: Long): Mutation =
-                dispatchLocked(callId, expectedRevision)
+                dispatchLocked(callId, expectedRevision, beforeResume)
             override fun submit(ticket: ExecutionTicket) { error("Host bridge reserves before claim") }
             override suspend fun awaitTerminal(callId: String) {
                 val completion = gate.withGate { logicalResults[callId] }

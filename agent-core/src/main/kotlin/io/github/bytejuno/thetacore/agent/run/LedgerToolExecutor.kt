@@ -13,6 +13,7 @@ import kotlinx.coroutines.ensureActive
  * A thrown submit may have submitted work: the claimed invocation remains real and uncertain.
  */
 interface ToolExecutionBridge {
+    suspend fun beforeSubmit(callId: String) = Unit
     /** Optional host reservation + durable claim + scheduling, all under the shared gate.
      * Null delegates to the default ledger claim path; a non-null result owns submission. */
     fun claimAndSubmit(callId: String, expectedRevision: Long): Mutation? = null
@@ -165,6 +166,7 @@ class LedgerToolExecutor(
             val context = currentCoroutineContext()
             var claimed: InvocationRecord
             while (true) {
+                bridge.beforeSubmit(r.callId)
                 claimed = gate.withGate {
                     // Approval/barrier callbacks may cancel and still return normally. Check inside
                     // the scheduling gate, before a durable claim can make this an executed call.

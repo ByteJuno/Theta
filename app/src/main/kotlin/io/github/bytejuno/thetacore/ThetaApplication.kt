@@ -29,11 +29,12 @@ import kotlinx.coroutines.async
 class ThetaApplication : Application() {
     internal val plugins by lazy { PluginManager(this) }
     internal val providerSettings by lazy { io.github.bytejuno.thetacore.provider.OpenAiSettingsStore.android(this) }
+    internal val chatTaskPresence by lazy { io.github.bytejuno.thetacore.chat.AndroidChatTaskPresence(this) }
     internal val chat by lazy {
         io.github.bytejuno.thetacore.chat.ChatSessionOwner(hostToolsOwner, ::hostTools,
             providerSettings::snapshotForNewRun, diagnostic = { error ->
             Log.e("ThetaChat", "Chat operation failed: ${error.javaClass.simpleName}")
-        })
+        }, presence = chatTaskPresence)
     }
     private val hostToolsOwner = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private lateinit var hostToolsStartup: Deferred<HostToolExecutionService>

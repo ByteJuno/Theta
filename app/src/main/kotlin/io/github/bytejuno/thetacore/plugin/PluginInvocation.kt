@@ -285,5 +285,9 @@ internal class PluginInvocation(
         if (lease == null && (reservation == null || reservation.actualExited.isCompleted)) exited.complete(Unit)
         requireNotNull(terminalStatus)
     }
+    suspend fun cancelAndAwaitDelivery() {
+        cancel()
+        lease?.cancellationDelivered?.await()
+    }
     override fun close() { cancel() }
 }

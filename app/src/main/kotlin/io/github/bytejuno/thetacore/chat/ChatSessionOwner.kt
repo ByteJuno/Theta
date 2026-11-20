@@ -41,6 +41,7 @@ internal data class ChatState(
     val reconciliation: RetryReconciliation? = null,
     val result: RunResult? = null,
     val summaryWindowTokens: Long? = null,
+    val executionId: String? = null,
     val contextWindowTokens: Long? = null,
     val recovery: ChatRecoveryToken? = null,
 )
@@ -53,6 +54,7 @@ internal class ChatSessionOwner(
     private val configuration: () -> OpenAiRunSnapshot,
     private val diagnostic: (Throwable) -> Unit = {},
     private val targetForRun: (OpenAiRunSnapshot) -> ModelTarget = { it.target() },
+    private val presence: ChatTaskPresence = ChatTaskPresence.None,
 ) {
     private val mutable = MutableStateFlow(ChatState())
     val state = mutable.asStateFlow()
@@ -60,6 +62,7 @@ internal class ChatSessionOwner(
     private var history: SqliteRunHistory? = null
     private var tools: HostToolExecutionService? = null
     private var active: Job? = null
+    private var activeRunId: String? = null
     private var observedRequest: String? = null
     private val previewLock = Any()
     private val preview = StringBuilder()
@@ -75,6 +78,7 @@ internal class ChatSessionOwner(
     private fun report(error: Exception) {
         diagnostic(error)
         val label = when (error) {
+            is ChatTaskPresenceException -> R.string.chat_background_failed
             is ProviderSettingsException -> when (error.failure) {
                 ProviderSettingsException.Failure.NOT_CONFIGURED -> R.string.chat_configure_first
                 ProviderSettingsException.Failure.DECRYPT_FAILED -> R.string.chat_credentials_unavailable
@@ -104,7 +108,7 @@ internal class ChatSessionOwner(
         val next = requireNotNull(tools!!.sessionStore).sessionIds(previous.lastOrNull())
         mutable.update { it.copy(sessions = (previous + next).distinct()) }
     }
-    private fun selectInternal(id: String?, sessions: List<String>) {
+    private suspend fun selectInternal(id: String?, sessions: List<String>) {
         val host = requireNotNull(tools)
         val store = requireNotNull(host.sessionStore)
         history?.close()
@@ -133,7 +137,7 @@ internal class ChatSessionOwner(
                 (pending.records.mapNotNull { it.input.definition } + listOfNotNull(pending.resultReader)).distinct())
         }
     }
-    private fun refresh(before: HistoryCursor? = null) {
+    private suspend fun refresh(before: HistoryCursor? = null) {
         val disk = requireNotNull(history)
         val host = requireNotNull(tools)
         val page = disk.page(before, 40)
@@ -142,8 +146,8 @@ internal class ChatSessionOwner(
         val records = messages.flatMap { it.parts.filterIsInstance<ContentPart.ToolCall>() }
             .mapNotNull { host.ledger.get(it.binding.callId) }.associateBy { it.callId }
         val journal = disk.journalPage(includeUnfinished = active == null)
-        val checkpoint = disk.checkpointInfo()
-        val reconciliation = disk.retryReconciliation()
+        val checkpoint = if (active == null) disk.checkpointInfo() else null
+        val reconciliation = if (active == null) disk.retryReconciliation() else null
         mutable.update { it.copy(messages = messages, records = records,
             recoveries = host.ledger.pendingRecoveries().filter { it.callId in records }.associateBy { it.callId }, older = page.older,
             showingOlder = before != null, pending = pending != null,
@@ -152,6 +156,9 @@ internal class ChatSessionOwner(
             reconciliation = reconciliation, result = disk.chatResult(),
             summaryWindowTokens = disk.chatSummaryWindow(), contextWindowTokens = disk.chatContextWindow(),
             recovery = if (active == null) recoveryToken(disk, checkpoint, reconciliation) else null) }
+        if (active != null) mutable.value.executionId?.let { executionId ->
+            presence.update(executionId, taskProgress(records.values.filter { it.input.runId == activeRunId }))
+        }
     }
     private fun recoveryToken(disk: SqliteRunHistory, checkpoint: CheckpointInfo? = disk.checkpointInfo(),
         reconciliation: RetryReconciliation? = disk.retryReconciliation()): ChatRecoveryToken? {
@@ -209,9 +216,10 @@ internal class ChatSessionOwner(
         val chain = disk.chatTaskChainId() // Capture checkpoint identity before the history revision advances.
         if (disk.chatContext() == null) disk.saveChatContext(ChatTaskContext(chain, text,
             Math.toIntExact(disk.page(null, 1).totalMessages), disk.chatSummaryWindow(), disk.chatContextWindow()))
-        disk.append(disk.revision(), listOf(message(Role.USER, textPart(text))))
+        val identity = RunIdentity(chain, disk.sessionId, UUID.randomUUID().toString())
+        disk.appendChatInput(disk.revision(), message(Role.USER, textPart(text)), identity)
         mutable.update { it.copy(acceptedMessages = it.acceptedMessages + 1) }
-        start(snapshot, null, RunIdentity(chain, disk.sessionId, UUID.randomUUID().toString()))
+        start(snapshot, null, identity)
     }
     fun resume(summaryWindowTokens: Long? = null, reconcileId: String? = null) = launchOperation {
         resumeInternal(summaryWindowTokens, reconcileId)
@@ -264,14 +272,24 @@ internal class ChatSessionOwner(
         val host = requireNotNull(tools)
         val r = requireNotNull(host.ledger.get(callId))
         require(r.input.sessionId == history!!.sessionId && !r.input.unattended)
-        when (host.decide(callId, requestId, decision)) {
-            is Mutation.Applied, is Mutation.AlreadyApplied -> Unit
-            else -> error("Approval changed or unavailable")
-        }
-        refresh()
-        if (active == null) {
-            val pending = history!!.pendingStep(host.ledger)
-            if (pending != null) start(null, pending) // finish existing calls only, no model replay
+        val coldToken = if (active == null && r.pending?.id == requestId) UUID.randomUUID().toString() else null
+        try {
+            if (r.pending?.id == requestId) {
+                presence.update(requireNotNull(coldToken ?: mutable.value.executionId), ChatTaskProgress.Model)
+            }
+            when (host.decide(callId, requestId, decision)) {
+                is Mutation.Applied, is Mutation.AlreadyApplied -> Unit
+                else -> error("Approval changed or unavailable")
+            }
+            refresh()
+            if (active == null) {
+                val pending = history!!.pendingStep(host.ledger)
+                if (pending != null) start(null, pending, executionId = coldToken ?: UUID.randomUUID().toString())
+                else coldToken?.let { presence.finish(it, null) }
+            }
+        } catch (error: Exception) {
+            if (coldToken != null) withContext(NonCancellable) { presence.finish(coldToken, ChatTaskProgress.Approval) }
+            throw error
         }
     }
     fun recover(callId: String, requestId: String, resolution: RecoveryResolution) = launchOperation {
@@ -284,7 +302,8 @@ internal class ChatSessionOwner(
         }
         refresh()
     }
-    fun stop() = launchOperation {
+    fun stop(expectedExecutionId: String? = null) = launchOperation {
+        if (expectedExecutionId != null && expectedExecutionId != mutable.value.executionId) return@launchOperation
         active?.cancel()
         if (active == null) {
             val pending = history?.pendingStep(tools!!.ledger)
@@ -307,8 +326,31 @@ internal class ChatSessionOwner(
             delay(50)
         }
     }
-    private fun executor(definitions: List<FrozenDefinition>) = LedgerToolExecutor(tools!!.ledger,
-        tools!!.catalog.gate, definitions, tools!!.runBridge(), RunApprovals(::approval))
+    private fun executor(definitions: List<FrozenDefinition>): LedgerToolExecutor {
+        val host = requireNotNull(tools)
+        val executionId = requireNotNull(mutable.value.executionId)
+        val bridge = object : ToolExecutionBridge by host.runBridge(beforeResume = { callId ->
+            gate.withLock {
+                check(active?.isActive == true && mutable.value.executionId == executionId)
+                val record = requireNotNull(host.ledger.get(callId))
+                check(record.input.runId == activeRunId && record.input.sessionId == history!!.sessionId)
+                try { presence.update(executionId, ChatTaskProgress.Tool(record.input.definition?.modelName.orEmpty())) }
+                catch (error: Exception) {
+                    report(error)
+                    active?.cancel(CancellationException("Tool foreground admission failed", error))
+                    throw error
+                }
+            }
+        }) {
+            override suspend fun beforeSubmit(callId: String) = gate.withLock {
+                currentCoroutineContext().ensureActive()
+                val record = requireNotNull(host.ledger.get(callId))
+                check(record.input.runId == activeRunId && record.input.sessionId == history!!.sessionId)
+                presence.update(requireNotNull(mutable.value.executionId), ChatTaskProgress.Model)
+            }
+        }
+        return LedgerToolExecutor(host.ledger, host.catalog.gate, definitions, bridge, RunApprovals(::approval))
+    }
 
     private suspend fun withStatusUpdates(action: suspend () -> Int): Int = coroutineScope {
         val ticker = launch {
@@ -321,19 +363,28 @@ internal class ChatSessionOwner(
     }
 
     private fun start(snapshot: OpenAiRunSnapshot?, pending: PendingHistoryStep?, identity: RunIdentity? = null,
-        resumeId: String? = null, readmitId: String? = null) {
+        resumeId: String? = null, readmitId: String? = null, executionId: String = UUID.randomUUID().toString()) {
         check(active == null)
-        mutable.update { it.copy(active = true, error = null, notice = null, draft = "") }
+        activeRunId = requireNotNull(identity ?: pending?.identity).runId
+        mutable.update { it.copy(active = true, error = null, notice = null, draft = "", executionId = executionId) }
         active = scope.launch(Dispatchers.IO, start = CoroutineStart.LAZY) {
             var notice = R.string.chat_complete
             try {
+                presence.update(executionId, ChatTaskProgress.Model)
                 notice = withStatusUpdates { executeChat(snapshot, pending, identity, resumeId, readmitId) }
             } catch (error: CancellationException) {
                 notice = R.string.chat_stopped
                 try { history?.saveChatInterruption() }
                 catch (error: Exception) { report(error) }
             }
-            catch (error: Exception) { report(error); notice = R.string.chat_paused }
+            catch (error: Exception) {
+                report(error)
+                notice = R.string.chat_paused
+                if (error is ChatTaskPresenceException) {
+                    try { history?.saveChatInterruption() }
+                    catch (storageError: Exception) { report(storageError) }
+                }
+            }
             finally {
                 withContext(NonCancellable) {
                     gate.withLock {
@@ -346,7 +397,12 @@ internal class ChatSessionOwner(
                             refresh()
                             observeLateExits(host, runId)
                         } catch (error: Exception) { report(error) }
-                        mutable.update { it.copy(active = false, draft = "", notice = notice) }
+                        val waiting = taskProgress(mutable.value.records.values.filter { it.input.runId == activeRunId })
+                            .takeIf { it == ChatTaskProgress.Approval || it == ChatTaskProgress.Recovery }
+                        try { presence.finish(executionId, waiting) }
+                        catch (error: Exception) { report(error) }
+                        activeRunId = null
+                        mutable.update { it.copy(active = false, draft = "", notice = notice, executionId = null) }
                     }
                 }
             }
@@ -403,6 +459,10 @@ internal class ChatSessionOwner(
                 journal = StoredRunJournal(disk),
                 budget = requestBudget,
                 contextPolicy = ContextPolicy(context.goal, context.priorMessageCount, summary, resumeId, readmitId),
+                beforeModelSubmit = { gate.withLock {
+                    currentCoroutineContext().ensureActive()
+                    presence.update(requireNotNull(mutable.value.executionId), ChatTaskProgress.Model)
+                } },
                 onEvent = { requestId, event -> synchronized(previewLock) {
                     if (requestId != observedRequest) { observedRequest = requestId; preview.setLength(0) }
                     if (event is ModelEvent.TextDelta) {

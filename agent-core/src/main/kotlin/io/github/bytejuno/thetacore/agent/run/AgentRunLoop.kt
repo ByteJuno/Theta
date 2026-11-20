@@ -50,6 +50,7 @@ class AgentRunLoop(
     private val contextPolicy: ContextPolicy? = null,
     private val requestViewLimit: RequestViewLimit = RequestViewLimit(),
     private val onEvent: (String, ModelEvent) -> Unit = { _, _ -> },
+    private val beforeModelSubmit: suspend () -> Unit = {},
 ) {
     private var target = target.copy()
     private var config = copyRequest(request, emptyList())
@@ -204,6 +205,8 @@ class AgentRunLoop(
         return ContextSummarizer(model, journal, timeouts, disk::createSummarySpool) {
             if (steps >= limits.maxSteps || retries >= limits.maxRetries) false
             else {
+                beforeModelSubmit()
+                currentCoroutineContext().ensureActive()
                 steps++; retries++
                 persistAccounting()
                 val snapshot = history.runSnapshot()
@@ -397,6 +400,8 @@ class AgentRunLoop(
             if (!compatible(target, request)) return pauseContext(view, "Replay incompatible; checkpoint required")
             val mode = target.provider.executionMode(request) // freeze BEFORE submission, including extraBody
             val reducer = ModelEventReducer(target.id, request.requestId)
+            beforeModelSubmit()
+            currentCoroutineContext().ensureActive()
             if (admissionPending) (history as? SqliteRunHistory)?.let { disk ->
                 val reserved = if (contextPolicy != null) checkpoint(view, view.messages.size,
                     null, "PAUSED", "Admitted request awaiting durable response", false)

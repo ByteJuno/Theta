@@ -31,19 +31,19 @@ class ChatSessionOwnerTest {
     }
     private suspend fun await(predicate: () -> Boolean) = withTimeout(10_000) { while (!predicate()) delay(10) }
     private suspend fun fixture(root: File, count: AtomicInteger, provider: ModelProvider, hostTool: Tool = tool(count),
-        fault: (SqliteWriteStage) -> Unit = {}): Fixture {
+        presence: ChatTaskPresence = ChatTaskPresence.None, fault: (SqliteWriteStage) -> Unit = {}): Fixture {
         val store = AndroidAgentStore.open(root, BundledSQLiteDriver(), fault)
         val budget = PluginExecutionBudget()
         val host = HostToolBridgeRoot(budget, hostTool).initialize { store }
-        return Fixture(store, budget, host, provider)
+        return Fixture(store, budget, host, provider, presence)
     }
     private inner class Fixture(val store: AndroidAgentStore, val budget: PluginExecutionBudget,
-        val host: HostToolExecutionService, provider: ModelProvider) {
+        val host: HostToolExecutionService, provider: ModelProvider, presence: ChatTaskPresence = ChatTaskPresence.None) {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         val failures = mutableListOf<Throwable>()
         val owner = ChatSessionOwner(scope, { host }, {
             OpenAiRunSnapshot(OpenAiProviderSettings("test", "https://example.invalid/v1", "model"), ApiKeyCredentials("test-key"))
-        }, { synchronized(failures) { failures += it } }, { ModelTarget("test", provider, Credentials { "test-key" }) })
+        }, { synchronized(failures) { failures += it } }, { ModelTarget("test", provider, Credentials { "test-key" }) }, presence)
         suspend fun close() {
             owner.stop().join()
             await { !owner.state.value.active }
@@ -67,6 +67,669 @@ class ChatSessionOwnerTest {
             }
         }
     }
+    private class RecordingPresence : ChatTaskPresence {
+        val events = java.util.concurrent.CopyOnWriteArrayList<Pair<String, ChatTaskProgress?>>()
+        var failure = false
+        var admitted: CompletableDeferred<Unit>? = null
+        override suspend fun update(executionId: String, progress: ChatTaskProgress) {
+            events += executionId to progress
+            if (failure) throw ChatTaskPresenceException(IllegalStateException("service rejected"))
+            admitted?.await()
+        }
+        override suspend fun finish(executionId: String, waiting: ChatTaskProgress?) {
+            events += executionId to waiting
+        }
+    }
+
+    @Test fun foregroundAdmissionPrecedesModelAndCompletionStopsPresence() = runBlocking {
+        val root = Files.createTempDirectory("chat83-").toFile()
+        val presence = RecordingPresence().also { it.admitted = CompletableDeferred() }
+        val model = provider(false)
+        val fixture = fixture(root, AtomicInteger(), model, presence = presence)
+        try {
+            fixture.owner.open().join(); fixture.owner.send("goal").join()
+            await { presence.events.isNotEmpty() }
+            assertEquals(0, model.requests)
+            presence.admitted!!.complete(Unit)
+            await { !fixture.owner.state.value.active }
+            assertEquals(1, model.requests)
+            assertEquals(ChatTaskProgress.Model, presence.events.first().second)
+            assertNull(presence.events.last().second)
+            assertEquals(1, presence.events.map { it.first }.distinct().size)
+        } finally { fixture.close(); root.deleteRecursively() }
+    }
+
+    @Test fun foregroundAdmissionFailureNeverSubmitsModelAndStopsPresence() = runBlocking {
+        val root = Files.createTempDirectory("chat83-").toFile()
+        val presence = RecordingPresence().also { it.failure = true }
+        val model = provider(false)
+        val fixture = fixture(root, AtomicInteger(), model, presence = presence)
+        try {
+            fixture.owner.open().join(); fixture.owner.send("goal").join()
+            await { !fixture.owner.state.value.active }
+            assertEquals(0, model.requests)
+            assertEquals(R.string.chat_background_failed, fixture.owner.state.value.error)
+            assertEquals(RunState.PAUSED, fixture.owner.state.value.result?.state)
+            assertNull(presence.events.last().second)
+            assertNotNull(fixture.owner.state.value.recovery)
+            assertTrue(ChatRecoveryAction.CONTINUE in recoveryActions(fixture.owner.state.value))
+        } finally { fixture.close(); root.deleteRecursively() }
+    }
+
+    @Test fun firstAdmissionFailureRetainsTrustedIdentityAcrossColdOpen() = runBlocking {
+        val root = Files.createTempDirectory("chat-first-admission").toFile()
+        val model = provider(false)
+        val first = fixture(root, AtomicInteger(), model, presence = RecordingPresence().also { it.failure = true })
+        val token: ChatRecoveryToken
+        try {
+            first.owner.open().join(); first.owner.send("original goal").join()
+            await { !first.owner.state.value.active }
+            token = requireNotNull(first.owner.state.value.recovery)
+            assertFalse(token.identity.unattended)
+            assertEquals(0, model.requests)
+        } finally { first.close() }
+        val admission = CompletableDeferred<Unit>()
+        val presence = RecordingPresence().also { it.admitted = admission }
+        val cold = fixture(root, AtomicInteger(), model, presence = presence)
+        try {
+            cold.owner.open().join()
+            assertEquals(token, cold.owner.state.value.recovery)
+            assertEquals(0, model.requests)
+            cold.owner.recover(token.copy(identity = token.identity.copy(runId = "forged")), ChatRecoveryAction.CONTINUE).join()
+            assertEquals(0, model.requests)
+            assertEquals(token, cold.owner.state.value.recovery)
+            cold.owner.recover(token, ChatRecoveryAction.CONTINUE).join()
+            await { presence.events.isNotEmpty() }
+            assertEquals(0, model.requests)
+            admission.complete(Unit)
+            await { !cold.owner.state.value.active }
+            assertEquals(1, model.requests)
+            assertEquals(RunState.COMPLETED, cold.owner.state.value.result?.state)
+            assertEquals(1, cold.owner.state.value.messages.count { it.role == Role.USER })
+            assertEquals("original goal", (cold.owner.state.value.messages.first().parts.single() as ContentPart.Text).text)
+        } finally { admission.complete(Unit); cold.close(); root.deleteRecursively() }
+    }
+
+    @Test fun parallelInternalApprovalAndApprovedToolWaitForDelayedAdmission() = runBlocking {
+        parallelApprovalAdmission(false)
+    }
+
+    @Test fun acceptedInputOnRetainedChainOffersColdContinuationWithoutToolReplay() = runBlocking {
+        val root = Files.createTempDirectory("chat-retained-chain-input").toFile()
+        val calls = AtomicInteger()
+        val model = provider()
+        val uncertainRead = object : Tool {
+            override val id = "read"
+            override val spec = ToolSpec(id, "uncertain read", schema, risk = ToolRisk.READ)
+            override suspend fun call(args: JsonObject, env: ToolEnv): ToolResult {
+                calls.incrementAndGet()
+                return ToolResult("uncertain result retained", effect = ToolEffect.UNKNOWN)
+            }
+        }
+        val first = fixture(root, calls, model, hostTool = uncertainRead)
+        val session: String
+        val original: InvocationRecord
+        try {
+            first.owner.open().join(); first.owner.send("first goal").join()
+            await { !first.owner.state.value.active }
+            val state = first.owner.state.value
+            session = requireNotNull(state.sessionId)
+            original = state.records.values.single()
+            assertEquals(RunState.COMPLETED, state.result?.state)
+            assertEquals(Effect.UNKNOWN, original.result!!.effect)
+            assertEquals(InstanceState.EXIT_CONFIRMED, original.instance!!.state)
+        } finally { first.close() }
+        try {
+            // Crash boundary: send's accepted input is durable, but foreground admission
+            // and creation of the next run have not happened yet.
+            AndroidAgentStore.open(root, BundledSQLiteDriver()).use { store ->
+                store.openHistory(session).use { disk ->
+                    assertNotNull(disk.chatRecoveryIdentity())
+                    disk.appendChatInput(disk.revision(), message(Role.USER, textPart("second goal")),
+                        RunIdentity(disk.chatTaskChainId(), session, "accepted-second-run"))
+                }
+            }
+            val cold = fixture(root, calls, model, hostTool = uncertainRead)
+            try {
+                cold.owner.open().join()
+                val state = cold.owner.state.value
+                assertEquals(RunState.PAUSED, state.result?.state)
+                assertEquals(2, model.requests)
+                assertEquals(1, calls.get())
+                assertEquals(original, cold.host.ledger.get(original.callId))
+                assertEquals(2, state.messages.count { it.role == Role.USER })
+                assertTrue(ChatRecoveryAction.CONTINUE in recoveryActions(state))
+                cold.owner.recover(requireNotNull(state.recovery), ChatRecoveryAction.CONTINUE).join()
+                await { !cold.owner.state.value.active }
+                assertEquals(3, model.requests)
+                assertEquals(1, calls.get())
+                assertEquals(original, cold.host.ledger.get(original.callId))
+                assertEquals(2, cold.owner.state.value.messages.count { it.role == Role.USER })
+                assertEquals(RunState.COMPLETED, cold.owner.state.value.result?.state)
+            } finally { cold.close() }
+        } finally { root.deleteRecursively() }
+    }
+
+    @Test fun parallelInternalApprovalAndApprovedToolRejectFailedAdmission() = runBlocking {
+        parallelApprovalAdmission(true)
+    }
+
+    private suspend fun parallelApprovalAdmission(reject: Boolean) {
+        val root = Files.createTempDirectory("chat-parallel-admission").toFile()
+        val restart = CompletableDeferred<Unit>()
+        val written = CompletableDeferred<Boolean>()
+        val release = CompletableDeferred<Unit>()
+        val read = object : Tool {
+            override val id = "read"
+            override val spec = ToolSpec(id, "internal approval", schema, risk = ToolRisk.READ, parallelSafe = true)
+            override suspend fun call(args: JsonObject, env: ToolEnv): ToolResult {
+                env.requestApproval("internal write", ToolRisk.WRITE)
+                return ToolResult("done", effect = ToolEffect.NONE)
+            }
+        }
+        val presence = object : ChatTaskPresence {
+            @Volatile var protected = false
+            @Volatile var waiting = false
+            @Volatile var restarting = false
+            @Volatile var rejectRestart = reject
+            @Volatile var approved = false
+            override suspend fun update(executionId: String, progress: ChatTaskProgress) {
+                if (progress == ChatTaskProgress.Approval) {
+                    protected = false
+                    waiting = true
+                    if (approved) withTimeout(5_000) { written.await() }
+                } else {
+                    if (!protected && waiting) {
+                        restarting = true
+                        restart.await()
+                        if (rejectRestart) throw ChatTaskPresenceException(IllegalStateException("restart rejected"))
+                    }
+                    protected = true
+                }
+            }
+            override suspend fun finish(executionId: String, waiting: ChatTaskProgress?) { protected = false }
+        }
+        val write = object : Tool {
+            override val id = "write"
+            override val spec = ToolSpec(id, "approved write", schema, risk = ToolRisk.WRITE, parallelSafe = true)
+            override suspend fun call(args: JsonObject, env: ToolEnv): ToolResult {
+                written.complete(presence.protected)
+                release.await()
+                return ToolResult("done", effect = ToolEffect.APPLIED)
+            }
+        }
+        val model = object : ModelProvider {
+            override fun executionMode(request: ChatRequest) = ModelExecutionMode.GENERATION_ONLY
+            override fun chat(request: ChatRequest, auth: Credentials): Flow<ModelEvent> = flow {
+                emit(Events.started("response", "model"))
+                for ((index, name) in listOf("host_clock", "host_write").withIndex()) {
+                    emit(Events.toolStart(index, "wire-$index", name)); emit(Events.toolDelta(index, "{}")); emit(Events.end(index))
+                }
+                emit(Events.finished(FinishReason.TOOL_CALLS))
+            }
+        }
+        val fixture = fixture(root, AtomicInteger(), model, hostTool = read, presence = presence)
+        try {
+            fixture.host.catalog.registerHost("host/write", "1", write)
+            val owner = fixture.owner
+            owner.open().join(); owner.send("goal").join()
+            await { owner.state.value.records.values.count { it.pending != null } == 2 && presence.waiting }
+            val external = owner.state.value.records.values.single { it.pending?.internal == false }
+            val decision = owner.decide(external.callId, external.pending!!.id, Decision.ALLOW_ONCE)
+            await { presence.restarting }
+            assertFalse(written.isCompleted)
+            assertEquals(external.pending, fixture.host.ledger.get(external.callId)!!.pending)
+            presence.approved = !reject
+            restart.complete(Unit)
+            decision.join()
+            if (reject) {
+                assertFalse(written.isCompleted)
+                assertEquals(external.pending, fixture.host.ledger.get(external.callId)!!.pending)
+                presence.rejectRestart = false
+                presence.approved = true
+                owner.decide(external.callId, external.pending!!.id, Decision.ALLOW_ONCE).join()
+            }
+            assertTrue("approved tool ran without foreground acknowledgement", withTimeout(5_000) { written.await() })
+            assertTrue(presence.protected)
+            assertTrue(fixture.host.ledger.get(external.callId)!!.receipts.any { it.decision == Decision.ALLOW_ONCE })
+        } finally {
+            presence.approved = false
+            restart.complete(Unit); release.complete(Unit)
+            fixture.close(); root.deleteRecursively()
+        }
+    }
+
+    @Test fun approvalStopsForegroundAndResumesBeforeToolExecution() = runBlocking {
+        val root = Files.createTempDirectory("chat83-").toFile()
+        val presence = RecordingPresence()
+        val count = AtomicInteger()
+        val fixture = fixture(root, count, provider(), presence = presence)
+        try {
+            fixture.owner.open().join(); fixture.owner.send("goal").join()
+            await { presence.events.any { it.second == ChatTaskProgress.Approval } }
+            assertEquals(0, count.get())
+            val record = fixture.owner.state.value.records.values.single()
+            val before = presence.events.size
+            fixture.owner.decide(record.callId, record.pending!!.id, Decision.ALLOW_ONCE).join()
+            await { !fixture.owner.state.value.active }
+            assertEquals(ChatTaskProgress.Model, presence.events[before].second)
+            assertEquals(1, count.get())
+            assertNull(presence.events.last().second)
+        } finally { fixture.close(); root.deleteRecursively() }
+    }
+
+    @Test fun failedForegroundRestartDoesNotApproveOrExecuteAndCanRetry() = runBlocking {
+        val root = Files.createTempDirectory("chat83-").toFile()
+        val presence = RecordingPresence()
+        val count = AtomicInteger()
+        val fixture = fixture(root, count, provider(), presence = presence)
+        try {
+            fixture.owner.open().join(); fixture.owner.send("goal").join()
+            await { presence.events.any { it.second == ChatTaskProgress.Approval } }
+            val record = fixture.owner.state.value.records.values.single()
+            presence.failure = true
+            fixture.owner.decide(record.callId, record.pending!!.id, Decision.ALLOW_ONCE).join()
+            assertEquals(0, count.get())
+            assertEquals(record.pending, fixture.host.ledger.get(record.callId)!!.pending)
+            assertTrue(fixture.host.ledger.get(record.callId)!!.receipts.isEmpty())
+            presence.failure = false
+            fixture.owner.decide(record.callId, record.pending!!.id, Decision.ALLOW_ONCE).join()
+            await { !fixture.owner.state.value.active }
+            assertEquals(1, count.get())
+            assertNull(presence.events.last().second)
+        } finally { fixture.close(); root.deleteRecursively() }
+    }
+
+    @Test fun internalApprovalSuspendsPresenceAndResumesBeforeAuthorizedWork() = runBlocking {
+        for (decision in listOf(Decision.ALLOW_ONCE, Decision.DENY)) {
+            val root = Files.createTempDirectory("chat-internal-presence").toFile()
+            val presence = RecordingPresence()
+            val writes = AtomicInteger()
+            val release = CompletableDeferred<Unit>()
+            val read = object : Tool {
+                override val id = "read"
+                override val spec = ToolSpec(id, "read with internal write", schema, risk = ToolRisk.READ)
+                override suspend fun call(args: JsonObject, env: ToolEnv): ToolResult {
+                    val allowed = env.requestApproval("write step", ToolRisk.WRITE)
+                    if (allowed) writes.incrementAndGet()
+                    release.await()
+                    return ToolResult("done", effect = if (allowed) ToolEffect.APPLIED else ToolEffect.NONE)
+                }
+            }
+            val fixture = fixture(root, AtomicInteger(), provider(), hostTool = read, presence = presence)
+            try {
+                val owner = fixture.owner
+                owner.open().join(); owner.send("goal").join()
+                await { owner.state.value.records.values.any { it.pending?.internal == true } }
+                owner.latest().join()
+                val record = owner.state.value.records.values.single()
+                assertEquals(Status.RUNNING, record.state)
+                assertEquals(InstanceState.UNCONFIRMED, record.instance!!.state)
+                assertEquals(ChatTaskProgress.Approval, presence.events.last().second)
+                assertEquals(0, writes.get())
+                val before = presence.events.size
+                owner.decide(record.callId, record.pending!!.id, decision).join()
+                await { presence.events.drop(before).any { it.second is ChatTaskProgress.Tool } }
+                assertEquals(ChatTaskProgress.Model,
+                    presence.events.drop(before).first { it.second != ChatTaskProgress.Approval }.second)
+                release.complete(Unit)
+                await { !owner.state.value.active }
+                assertEquals(if (decision == Decision.ALLOW_ONCE) 1 else 0, writes.get())
+                assertNull(presence.events.last().second)
+                assertTrue(fixture.failures.toString(), fixture.failures.isEmpty())
+            } finally { release.complete(Unit); fixture.close(); root.deleteRecursively() }
+        }
+    }
+
+    @Test fun withdrawnInternalApprovalWaitsBeforeSameToolContinues() = runBlocking {
+        withdrawnApprovalToolContinuation(false)
+    }
+
+    @Test fun withdrawnInternalApprovalFailureRetainsResultsAndWorkerLease() = runBlocking {
+        withdrawnApprovalToolContinuation(true)
+    }
+
+    private suspend fun withdrawnApprovalToolContinuation(reject: Boolean) {
+        val root = Files.createTempDirectory("chat-withdrawn-tool").toFile()
+        val withdraw = CompletableDeferred<Unit>()
+        val restartEntered = CompletableDeferred<Unit>()
+        val restart = CompletableDeferred<Unit>()
+        val cleanupEntered = CompletableDeferred<Unit>()
+        val cleanup = CompletableDeferred<Unit>()
+        val entered = AtomicInteger()
+        val continued = AtomicInteger()
+        val presence = object : ChatTaskPresence {
+            @Volatile var protected = false
+            @Volatile var suspended = false
+            override suspend fun update(executionId: String, progress: ChatTaskProgress) {
+                if (progress == ChatTaskProgress.Approval) {
+                    protected = false
+                    suspended = true
+                } else {
+                    if (!protected && suspended) {
+                        restartEntered.complete(Unit)
+                        restart.await()
+                        if (reject) throw ChatTaskPresenceException(IllegalStateException("tool restart rejected"))
+                    }
+                    protected = true
+                }
+            }
+            override suspend fun finish(executionId: String, waiting: ChatTaskProgress?) { protected = false }
+        }
+        val read = object : Tool {
+            override val id = "read"
+            override val spec = ToolSpec(id, "continued read", schema, risk = ToolRisk.READ, exclusiveResource = "continued-read")
+            override suspend fun call(args: JsonObject, env: ToolEnv): ToolResult = coroutineScope {
+                if (entered.incrementAndGet() == 1) return@coroutineScope ToolResult("first result retained", effect = ToolEffect.NONE)
+                try {
+                    val approval = launch { env.requestApproval("optional write", ToolRisk.WRITE) }
+                    withdraw.await()
+                    approval.cancelAndJoin()
+                    continued.incrementAndGet()
+                    assertTrue("tool continued without foreground acknowledgement", presence.protected)
+                    ToolResult("continued read result", effect = ToolEffect.NONE)
+                } finally {
+                    withContext(NonCancellable) { cleanupEntered.complete(Unit); cleanup.await() }
+                }
+            }
+        }
+        val model = provider(calls = 2)
+        val fixture = fixture(root, AtomicInteger(), model, hostTool = read, presence = presence)
+        var closed = false
+        fun journalBytes() = BundledSQLiteDriver().open(File(root, AgentDatabase.FILE_NAME).path).use { connection ->
+            connection.prepare("SELECT name, ordinal, hex(bytes) FROM history_chunks WHERE name LIKE 'journal/%' ORDER BY name, ordinal").use { query ->
+                buildList { while (query.step()) add("${query.getText(0)}:${query.getLong(1)}:${query.getText(2)}") }
+            }
+        }
+        try {
+            val owner = fixture.owner
+            owner.open().join(); owner.send("original goal").join()
+            await { presence.suspended && owner.state.value.records.values.any { it.pending?.internal == true } }
+            val waiting = owner.state.value.records.values.single { it.pending?.internal == true }
+            val originalJournal = journalBytes()
+            assertTrue(originalJournal.isNotEmpty())
+            withdraw.complete(Unit)
+            withTimeout(10_000) { restartEntered.await() }
+            delay(100)
+            assertEquals(0, continued.get())
+            assertEquals(1, model.requests)
+            assertEquals(originalJournal, journalBytes())
+            assertEquals(waiting.instance, fixture.host.ledger.get(waiting.callId)!!.instance)
+            assertTrue(fixture.budget.occupiedSlots() > 0)
+            restart.complete(Unit)
+            withTimeout(10_000) { cleanupEntered.await() }
+            if (reject) {
+                await { !owner.state.value.active }
+                assertEquals(0, continued.get())
+                assertEquals(1, model.requests)
+                assertEquals(2, entered.get())
+                assertEquals(originalJournal, journalBytes())
+                assertEquals(RunState.PAUSED, owner.state.value.result?.state)
+                assertEquals(R.string.chat_background_failed, owner.state.value.error)
+                val stopped = fixture.host.ledger.get(waiting.callId)!!
+                assertEquals(Status.CANCELLED, stopped.state)
+                assertEquals(waiting.instance, stopped.instance)
+                assertTrue(fixture.budget.occupiedSlots() > 0)
+                assertTrue(owner.state.value.messages.any { message -> message.parts.any {
+                    it is ContentPart.ToolResult && it.text.contains("first result retained")
+                } })
+            } else assertEquals(1, continued.get())
+            cleanup.complete(Unit)
+            fixture.host.awaitObservedExit(waiting.callId)
+            await { !owner.state.value.active }
+            assertEquals(InstanceState.EXIT_CONFIRMED, fixture.host.ledger.get(waiting.callId)!!.instance!!.state)
+            assertEquals(if (reject) 1 else 2, model.requests)
+            assertEquals(2, entered.get())
+            if (!reject) assertEquals(RunState.COMPLETED, owner.state.value.result?.state)
+            else {
+                fixture.close(); closed = true
+                val cold = fixture(root, AtomicInteger(), model, hostTool = read)
+                try {
+                    cold.owner.open().join()
+                    assertEquals(1, model.requests)
+                    assertEquals(2, entered.get())
+                    assertEquals(originalJournal, journalBytes())
+                    assertEquals(Status.CANCELLED, cold.owner.state.value.records.getValue(waiting.callId).state)
+                    assertTrue(cold.owner.state.value.messages.any { message -> message.parts.any {
+                        it is ContentPart.ToolResult && it.text.contains("first result retained")
+                    } })
+                } finally { cold.close() }
+            }
+        } finally {
+            withdraw.complete(Unit); restart.complete(Unit); cleanup.complete(Unit)
+            if (!closed) fixture.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test fun withdrawnInternalApprovalWaitsForModelAdmission() = runBlocking {
+        withdrawnApprovalModelAdmission(false)
+    }
+
+    @Test fun withdrawnInternalApprovalRejectsModelAndRetainsColdExplicitRetry() = runBlocking {
+        withdrawnApprovalModelAdmission(true)
+    }
+
+    private suspend fun withdrawnApprovalModelAdmission(reject: Boolean) {
+        val root = Files.createTempDirectory("chat-withdrawn-admission").toFile()
+        fun submittedJournal() = BundledSQLiteDriver().open(File(root, AgentDatabase.FILE_NAME).path).use { connection ->
+            connection.prepare("SELECT name, ordinal, hex(bytes) FROM history_chunks WHERE name LIKE 'journal/%' ORDER BY name, ordinal").use { query ->
+                buildList {
+                    while (query.step()) add("${query.getText(0)}:${query.getLong(1)}:${query.getText(2)}")
+                }
+            }
+        }
+        val withdraw = CompletableDeferred<Unit>()
+        val restartEntered = CompletableDeferred<Unit>()
+        val restart = CompletableDeferred<Unit>()
+        val toolCalls = AtomicInteger()
+        val requests = AtomicInteger()
+        val protectedRequests = java.util.concurrent.CopyOnWriteArrayList<Boolean>()
+        val presence = object : ChatTaskPresence {
+            @Volatile var protected = false
+            @Volatile var suspended = false
+            override suspend fun update(executionId: String, progress: ChatTaskProgress) {
+                if (progress == ChatTaskProgress.Approval) {
+                    protected = false
+                    suspended = true
+                } else {
+                    if (suspended && progress == ChatTaskProgress.Model) {
+                        restartEntered.complete(Unit)
+                        restart.await()
+                        if (reject) throw ChatTaskPresenceException(IllegalStateException("restart rejected"))
+                    }
+                    protected = true
+                }
+            }
+            override suspend fun finish(executionId: String, waiting: ChatTaskProgress?) { protected = false }
+        }
+        val read = object : Tool {
+            override val id = "read"
+            override val spec = ToolSpec(id, "withdrawn internal approval", schema, risk = ToolRisk.READ)
+            override suspend fun call(args: JsonObject, env: ToolEnv): ToolResult = coroutineScope {
+                toolCalls.incrementAndGet()
+                val approval = launch { env.requestApproval("optional write", ToolRisk.WRITE) }
+                withdraw.await()
+                approval.cancelAndJoin()
+                ToolResult("read result retained", effect = ToolEffect.NONE)
+            }
+        }
+        val model = object : ModelProvider {
+            override fun executionMode(request: ChatRequest) = ModelExecutionMode.GENERATION_ONLY
+            override fun chat(request: ChatRequest, auth: Credentials): Flow<ModelEvent> = flow {
+                protectedRequests += presence.protected
+                val count = requests.incrementAndGet()
+                emit(Events.started("response-$count", "model"))
+                if (count == 1) {
+                    emit(Events.toolStart(0, "wire", "host_clock")); emit(Events.toolDelta(0, "{}")); emit(Events.end(0))
+                    emit(Events.finished(FinishReason.TOOL_CALLS))
+                } else {
+                    assertTrue(request.messages.any { message -> message.parts.any {
+                        it is ContentPart.ToolResult && it.text.contains("read result retained")
+                    } })
+                    restart.await()
+                    emit(Events.text(0, "complete")); emit(Events.end(0)); emit(Events.finished(FinishReason.STOP))
+                }
+            }
+        }
+        val fixture = fixture(root, toolCalls, model, hostTool = read, presence = presence)
+        var closed = false
+        try {
+            val owner = fixture.owner
+            owner.open().join(); owner.send("original goal").join()
+            await { owner.state.value.records.values.any { it.pending?.internal == true } && presence.suspended }
+            val originalJournal = submittedJournal()
+            assertTrue(originalJournal.isNotEmpty())
+            withdraw.complete(Unit)
+            withTimeout(10_000) { restartEntered.await() }
+            delay(100)
+            assertEquals(1, requests.get())
+            assertEquals(listOf(true), protectedRequests.toList())
+            assertEquals(originalJournal, submittedJournal())
+            restart.complete(Unit)
+            await { !owner.state.value.active }
+            assertEquals(if (reject) 1 else 2, requests.get())
+            assertEquals(1, toolCalls.get())
+            assertEquals(Status.SUCCEEDED, owner.state.value.records.values.single().state)
+            assertTrue(owner.state.value.messages.any { message -> message.parts.any {
+                it is ContentPart.ToolResult && it.text.contains("read result retained")
+            } })
+            assertTrue(owner.state.value.journal.isEmpty())
+            if (reject) {
+                assertEquals(originalJournal, submittedJournal())
+                assertEquals(R.string.chat_background_failed, owner.state.value.error)
+                assertEquals(RunState.PAUSED, owner.state.value.result?.state)
+                val token = requireNotNull(owner.state.value.recovery)
+                assertTrue(ChatRecoveryAction.CONTINUE in recoveryActions(owner.state.value))
+                fixture.close(); closed = true
+                val cold = fixture(root, toolCalls, model, hostTool = read)
+                try {
+                    cold.owner.open().join()
+                    assertEquals(token, cold.owner.state.value.recovery)
+                    assertEquals(1, requests.get())
+                    assertEquals(originalJournal, submittedJournal())
+                    assertTrue(cold.owner.state.value.journal.isEmpty())
+                    cold.owner.recover(token, ChatRecoveryAction.CONTINUE).join()
+                    await { !cold.owner.state.value.active }
+                    assertEquals(2, requests.get())
+                    assertTrue(submittedJournal().containsAll(originalJournal))
+                    assertEquals(1, toolCalls.get())
+                    assertEquals(1, cold.owner.state.value.messages.count { it.role == Role.USER })
+                    assertEquals(RunState.COMPLETED, cold.owner.state.value.result?.state)
+                } finally { cold.close() }
+            } else {
+                assertEquals(listOf(true, true), protectedRequests.toList())
+                assertEquals(RunState.COMPLETED, owner.state.value.result?.state)
+                assertTrue(fixture.failures.toString(), fixture.failures.isEmpty())
+            }
+        } finally {
+            withdraw.complete(Unit); restart.complete(Unit)
+            if (!closed) fixture.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test fun internalApprovalKeepsForegroundUntilOtherParallelWorkerStops() = runBlocking {
+        val root = Files.createTempDirectory("chat-parallel-presence").toFile()
+        val presence = RecordingPresence()
+        val entered = AtomicInteger()
+        val release = CompletableDeferred<Unit>()
+        val read = object : Tool {
+            override val id = "read"
+            override val spec = ToolSpec(id, "parallel read", schema, risk = ToolRisk.READ, parallelSafe = true)
+            override suspend fun call(args: JsonObject, env: ToolEnv): ToolResult {
+                if (entered.incrementAndGet() == 1) release.await()
+                else env.requestApproval("write step", ToolRisk.WRITE)
+                return ToolResult("done", effect = ToolEffect.NONE)
+            }
+        }
+        val fixture = fixture(root, AtomicInteger(), provider(calls = 2), hostTool = read, presence = presence)
+        try {
+            val owner = fixture.owner
+            owner.open().join(); owner.send("goal").join()
+            await { owner.state.value.records.values.any { it.pending?.internal == true } }
+            owner.latest().join()
+            assertTrue(presence.events.last().second is ChatTaskProgress.Tool)
+            val working = owner.state.value.records.values.single { it.state == Status.RUNNING && it.pending == null }
+            release.complete(Unit)
+            fixture.host.awaitObservedExit(working.callId)
+            owner.latest().join()
+            assertEquals(ChatTaskProgress.Approval, presence.events.last().second)
+            val waiting = owner.state.value.records.values.single { it.pending != null }
+            assertEquals(InstanceState.UNCONFIRMED, waiting.instance!!.state)
+            owner.decide(waiting.callId, waiting.pending!!.id, Decision.DENY).join()
+            await { !owner.state.value.active }
+            assertNull(presence.events.last().second)
+            assertTrue(fixture.failures.toString(), fixture.failures.isEmpty())
+        } finally { release.complete(Unit); fixture.close(); root.deleteRecursively() }
+    }
+
+    @Test fun staleNotificationCannotCancelLaterExecutionAndCurrentStopSettles() = runBlocking {
+        val root = Files.createTempDirectory("chat83-").toFile()
+        val presence = RecordingPresence()
+        val hold = CompletableDeferred<Unit>()
+        val fixture = fixture(root, AtomicInteger(), provider(false, hold), presence = presence)
+        try {
+            fixture.owner.open().join(); fixture.owner.send("goal").join()
+            await { fixture.owner.previewText().isNotEmpty() }
+            fixture.owner.stop("old-execution").join()
+            assertTrue(fixture.owner.state.value.active)
+            fixture.owner.stop(fixture.owner.state.value.executionId!!).join()
+            await { !fixture.owner.state.value.active }
+            assertEquals(R.string.chat_stopped, fixture.owner.state.value.notice)
+            assertNull(presence.events.last().second)
+        } finally { fixture.close(); root.deleteRecursively() }
+    }
+
+    @Test fun modelFailureAndContextPauseBothStopForegroundPresence() = runBlocking {
+        for (reason in listOf(FinishReason.CONTENT_FILTER, FinishReason.CONTEXT_EXCEEDED)) {
+            val root = Files.createTempDirectory("chat83-").toFile()
+            val presence = RecordingPresence()
+            val model = object : ModelProvider {
+                override fun executionMode(request: ChatRequest) = ModelExecutionMode.GENERATION_ONLY
+                override fun chat(request: ChatRequest, auth: Credentials): Flow<ModelEvent> = flow {
+                    emit(Events.started("response", "model")); emit(Events.finished(reason))
+                }
+            }
+            val fixture = fixture(root, AtomicInteger(), model, presence = presence)
+            try {
+                fixture.owner.open().join(); fixture.owner.send("goal").join()
+                await { !fixture.owner.state.value.active }
+                assertNotEquals(R.string.chat_complete, fixture.owner.state.value.notice)
+                assertEquals(ChatTaskProgress.Model, presence.events.first().second)
+                assertNull(presence.events.last().second)
+            } finally { fixture.close(); root.deleteRecursively() }
+        }
+    }
+
+    @Test fun runningToolReportsProgressAndCancellationDoesNotReleaseWorkerResourcesEarly() = runBlocking {
+        val root = Files.createTempDirectory("chat83-").toFile()
+        val presence = RecordingPresence()
+        val release = CompletableDeferred<Unit>()
+        val count = AtomicInteger()
+        val held = object : Tool {
+            override val id = "held"
+            override val spec = ToolSpec("held", "test", schema, risk = ToolRisk.WRITE, timeoutMs = 5_000)
+            override suspend fun call(args: JsonObject, env: ToolEnv): ToolResult = withContext(NonCancellable) {
+                count.incrementAndGet(); release.await(); ToolResult("done", effect = ToolEffect.APPLIED)
+            }
+        }
+        val fixture = fixture(root, count, provider(), hostTool = held, presence = presence)
+        try {
+            fixture.owner.open().join(); fixture.owner.send("goal").join()
+            await { presence.events.any { it.second == ChatTaskProgress.Approval } }
+            val record = fixture.owner.state.value.records.values.single()
+            fixture.owner.decide(record.callId, record.pending!!.id, Decision.ALLOW_ONCE).join()
+            await { presence.events.any { it.second is ChatTaskProgress.Tool } }
+            fixture.owner.stop(fixture.owner.state.value.executionId!!).join()
+            await { !fixture.owner.state.value.active }
+            assertEquals(InstanceState.UNCONFIRMED, fixture.host.ledger.get(record.callId)!!.instance!!.state)
+            assertEquals(1, count.get())
+            release.complete(Unit)
+            fixture.host.awaitObservedExit(record.callId)
+        } finally { release.complete(Unit); fixture.close(); root.deleteRecursively() }
+    }
+
     @Test fun completedQuestionsHaveIndependentBudgetsInOnePersistentSession() = runBlocking {
         val root = Files.createTempDirectory("chat-budgets").toFile()
         val requests = AtomicInteger()
@@ -185,6 +848,48 @@ class ChatSessionOwnerTest {
         } finally { root.deleteRecursively() }
     }
 
+    @Test fun activeSummaryDefersRecoveryInspectionUntilStopped() = runBlocking {
+        val root = Files.createTempDirectory("chat-active-checkpoint").toFile()
+        val entered = CompletableDeferred<Unit>()
+        val model = object : ModelProvider {
+            override fun executionMode(request: ChatRequest) = ModelExecutionMode.GENERATION_ONLY
+            override fun chat(request: ChatRequest, auth: Credentials): Flow<ModelEvent> = flow {
+                assertTrue(request.tools.isEmpty())
+                entered.complete(Unit)
+                awaitCancellation()
+            }
+        }
+        val fixture = fixture(root, AtomicInteger(), model)
+        try {
+            fixture.store.createHistory("session").use { disk ->
+                repeat(34) {
+                    disk.append(disk.revision(), listOf(message(Role.USER, textPart("u".repeat(32_000))),
+                        message(Role.ASSISTANT, textPart("a".repeat(32_000)))))
+                }
+            }
+            fixture.owner.open().join()
+            fixture.owner.send("Continue this conversation").join()
+            await { !fixture.owner.state.value.active }
+            assertEquals("BUDGET", fixture.owner.state.value.checkpoint!!.pauseClass)
+            fixture.owner.resume(summaryWindowTokens = 8192).join()
+            withTimeout(10_000) { entered.await() }
+            fixture.owner.latest().join()
+            assertTrue(fixture.owner.state.value.active)
+            assertNull(fixture.owner.state.value.checkpoint)
+            assertNull(fixture.owner.state.value.reconciliation)
+            assertNull(fixture.owner.state.value.recovery)
+            fixture.owner.stop().join()
+            await { !fixture.owner.state.value.active }
+            assertNotNull(fixture.owner.state.value.checkpoint)
+            assertNotNull(fixture.owner.state.value.reconciliation)
+            assertNotNull(fixture.owner.state.value.recovery)
+            assertTrue(fixture.failures.toString(), fixture.failures.isEmpty())
+        } finally {
+            fixture.close()
+            root.deleteRecursively()
+        }
+    }
+
     @Test fun savedContextCheckpointRequiresSelectionAndPreservesTaskBudget() = runBlocking {
         val root = Files.createTempDirectory("chat-checkpoint").toFile()
         val requests = AtomicInteger()
@@ -204,7 +909,8 @@ class ChatSessionOwnerTest {
             assertTrue(first.failures.toString(), checkpoint.canContinue)
             val count = requests.get()
             first.close()
-            val cold = fixture(root, AtomicInteger(), model)
+            val presence = RecordingPresence().also { it.admitted = CompletableDeferred() }
+            val cold = fixture(root, AtomicInteger(), model, presence = presence)
             cold.owner.open().join()
             assertEquals(count, requests.get())
             assertEquals(checkpoint.id, cold.owner.state.value.checkpoint!!.id)
@@ -212,7 +918,12 @@ class ChatSessionOwnerTest {
             cold.owner.recover(selection, ChatRecoveryAction.CONTINUE_SUMMARY, confirmed = false).join()
             assertEquals(count, requests.get())
             cold.owner.recover(selection, ChatRecoveryAction.CONTINUE_SUMMARY, confirmed = true).join()
+            await { presence.events.isNotEmpty() }
+            assertEquals(ChatTaskProgress.Model, presence.events.first().second)
+            assertEquals(count, requests.get())
+            presence.admitted!!.complete(Unit)
             await { !cold.owner.state.value.active }
+            assertNull(presence.events.last().second)
             assertEquals(cold.failures.toString(), R.string.chat_complete, cold.owner.state.value.notice)
             assertTrue(cold.owner.state.value.result!!.steps > checkpoint.steps)
             assertEquals(1, cold.failures.size)
@@ -225,8 +936,9 @@ class ChatSessionOwnerTest {
     @Test fun largerWindowReadmissionPreservesRawHistoryWithoutSummaryCalls() = runBlocking {
         val root = Files.createTempDirectory("chat-window-readmit").toFile()
         val requests = AtomicInteger()
+        val presence = RecordingPresence()
         try {
-            val first = fixture(root, AtomicInteger(), countingProvider(requests) { FinishReason.STOP })
+            val first = fixture(root, AtomicInteger(), countingProvider(requests) { FinishReason.STOP }, presence = presence)
             first.store.createHistory("session").use { disk ->
                 disk.saveChatContext(ChatTaskContext("session", "goal", 0, null, 1024))
             }
@@ -237,8 +949,15 @@ class ChatSessionOwnerTest {
             val token = requireNotNull(first.owner.state.value.recovery)
             first.owner.recover(token, ChatRecoveryAction.READMIT, 1024, true).join()
             assertEquals(0, requests.get())
+            presence.events.clear()
+            presence.admitted = CompletableDeferred()
             first.owner.recover(token, ChatRecoveryAction.READMIT, 8192, true).join()
+            await { presence.events.isNotEmpty() }
+            assertEquals(ChatTaskProgress.Model, presence.events.first().second)
+            assertEquals(0, requests.get())
+            presence.admitted!!.complete(Unit)
             await { !first.owner.state.value.active }
+            assertNull(presence.events.last().second)
             assertEquals(1, requests.get())
             assertEquals(R.string.chat_complete, first.owner.state.value.notice)
             assertEquals("goal ".repeat(400), (first.owner.state.value.messages.first().parts.single() as ContentPart.Text).text)
@@ -361,7 +1080,8 @@ class ChatSessionOwnerTest {
             val completedSteps = first.owner.state.value.result!!.steps
             assertEquals(R.string.chat_pause_reconcile, chatOutcome(first.owner.state.value.result!!))
             first.close()
-            val cold = fixture(root, AtomicInteger(), model)
+            val presence = RecordingPresence().also { it.admitted = CompletableDeferred() }
+            val cold = fixture(root, AtomicInteger(), model, presence = presence)
             cold.owner.open().join(); cold.owner.resume().join()
             assertEquals(1, requests.get())
             cold.owner.resume(reconcileId = "stale").join()
@@ -371,7 +1091,13 @@ class ChatSessionOwnerTest {
             assertEquals(1, requests.get())
             cold.owner.recover(selection.copy(revision = selection.revision - 1), ChatRecoveryAction.RETRY, confirmed = true).join()
             assertEquals(receipt.id, cold.owner.state.value.reconciliation!!.id)
-            cold.owner.recover(selection, ChatRecoveryAction.RETRY, confirmed = true).join(); await { !cold.owner.state.value.active }
+            cold.owner.recover(selection, ChatRecoveryAction.RETRY, confirmed = true).join()
+            await { presence.events.isNotEmpty() }
+            assertEquals(ChatTaskProgress.Model, presence.events.first().second)
+            assertEquals(1, requests.get())
+            presence.admitted!!.complete(Unit)
+            await { !cold.owner.state.value.active }
+            assertNull(presence.events.last().second)
             assertEquals(2, requests.get())
             assertEquals(R.string.chat_complete, cold.owner.state.value.notice)
             assertNull(cold.owner.state.value.reconciliation)
@@ -743,13 +1469,17 @@ class ChatSessionOwnerTest {
                 }
                 val original = seed.host.ledger.get(binding.callId)!!
                 seed.close()
-                val cold = fixture(root, count, provider(false)); cold.owner.open().join()
+                val presence = RecordingPresence()
+                val cold = fixture(root, count, provider(false), presence = presence); cold.owner.open().join()
+                assertTrue(presence.events.isEmpty())
                 assertEquals(original, cold.host.ledger.get(binding.callId)); assertEquals(0, count.get())
                 assertTrue(cold.owner.state.value.pending)
                 assertTrue(showApproval(cold.owner.state.value.records.getValue(binding.callId)))
                 assertEquals(R.string.chat_tool_approval, toolState(cold.owner.state.value.records[binding.callId]))
                 cold.owner.decide(binding.callId, original.pending!!.id, decision).join()
                 await { !cold.owner.state.value.active }
+                assertEquals(ChatTaskProgress.Model, presence.events.first().second)
+                assertNull(presence.events.last().second)
                 assertEquals(if (decision == Decision.DENY) 0 else 1, count.get())
                 assertEquals(decision, cold.host.ledger.get(binding.callId)!!.receipts.single().decision)
                 assertFalse(cold.owner.state.value.pending)
