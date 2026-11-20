@@ -154,6 +154,62 @@ class ChatSessionOwnerTest {
         parallelApprovalAdmission(false)
     }
 
+    @Test fun acceptedInputOnRetainedChainOffersColdContinuationWithoutToolReplay() = runBlocking {
+        val root = Files.createTempDirectory("chat-retained-chain-input").toFile()
+        val calls = AtomicInteger()
+        val model = provider()
+        val uncertainRead = object : Tool {
+            override val id = "read"
+            override val spec = ToolSpec(id, "uncertain read", schema, risk = ToolRisk.READ)
+            override suspend fun call(args: JsonObject, env: ToolEnv): ToolResult {
+                calls.incrementAndGet()
+                return ToolResult("uncertain result retained", effect = ToolEffect.UNKNOWN)
+            }
+        }
+        val first = fixture(root, calls, model, hostTool = uncertainRead)
+        val session: String
+        val original: InvocationRecord
+        try {
+            first.owner.open().join(); first.owner.send("first goal").join()
+            await { !first.owner.state.value.active }
+            val state = first.owner.state.value
+            session = requireNotNull(state.sessionId)
+            original = state.records.values.single()
+            assertEquals(RunState.COMPLETED, state.result?.state)
+            assertEquals(Effect.UNKNOWN, original.result!!.effect)
+            assertEquals(InstanceState.EXIT_CONFIRMED, original.instance!!.state)
+        } finally { first.close() }
+        try {
+            // Crash boundary: send's accepted input is durable, but foreground admission
+            // and creation of the next run have not happened yet.
+            AndroidAgentStore.open(root, BundledSQLiteDriver()).use { store ->
+                store.openHistory(session).use { disk ->
+                    assertNotNull(disk.chatRecoveryIdentity())
+                    disk.appendChatInput(disk.revision(), message(Role.USER, textPart("second goal")),
+                        RunIdentity(disk.chatTaskChainId(), session, "accepted-second-run"))
+                }
+            }
+            val cold = fixture(root, calls, model, hostTool = uncertainRead)
+            try {
+                cold.owner.open().join()
+                val state = cold.owner.state.value
+                assertEquals(RunState.PAUSED, state.result?.state)
+                assertEquals(2, model.requests)
+                assertEquals(1, calls.get())
+                assertEquals(original, cold.host.ledger.get(original.callId))
+                assertEquals(2, state.messages.count { it.role == Role.USER })
+                assertTrue(ChatRecoveryAction.CONTINUE in recoveryActions(state))
+                cold.owner.recover(requireNotNull(state.recovery), ChatRecoveryAction.CONTINUE).join()
+                await { !cold.owner.state.value.active }
+                assertEquals(3, model.requests)
+                assertEquals(1, calls.get())
+                assertEquals(original, cold.host.ledger.get(original.callId))
+                assertEquals(2, cold.owner.state.value.messages.count { it.role == Role.USER })
+                assertEquals(RunState.COMPLETED, cold.owner.state.value.result?.state)
+            } finally { cold.close() }
+        } finally { root.deleteRecursively() }
+    }
+
     @Test fun parallelInternalApprovalAndApprovedToolRejectFailedAdmission() = runBlocking {
         parallelApprovalAdmission(true)
     }

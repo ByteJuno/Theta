@@ -580,7 +580,10 @@ open class SqliteRunHistory internal constructor(
                 loadCheckpoint()?.kind !in setOf("PAUSED", "CONTINUATION", "SUMMARY_RESERVED"))
             RunAccounting(sessionId, identity.taskChainId, identity.runId, 0, 0, identity.unattended)
         }
-        appendBatch(expectedRevision, listOf(input), null, false, admission)
+        val reason = "Input accepted; awaiting foreground admission"
+        val acceptedResult = if (admission != null) RunResult(RunState.PAUSED, reason, admission.steps, admission.retries)
+            else chatResult()?.copy(state = RunState.PAUSED, reason = reason)
+        appendBatch(expectedRevision, listOf(input), null, false, admission, acceptedResult)
     }
 
     /** The loop selects this path only after the final model event has been validated. */
@@ -593,7 +596,7 @@ open class SqliteRunHistory internal constructor(
     }
 
     private fun appendBatch(expectedRevision: Long, messages: List<Message>, completion: RunAccounting?, rotateChain: Boolean,
-        admission: RunAccounting? = null) {
+        admission: RunAccounting? = null, acceptedResult: RunResult? = null) {
         ready(); check(expectedRevision == head.revision) { "History changed during run" }
         val next = freezeMessages(messages)
         require(next.isNotEmpty()); validateHistory(next) // only the new, complete transaction
@@ -626,9 +629,8 @@ open class SqliteRunHistory internal constructor(
             writeValue("head", newHead)
             if (admission != null) {
                 writeValue(accountingPath(admission.taskChainId), admission)
-                writeValue("chat-result", HistoryCodec.json.encodeToString(RunResult(RunState.PAUSED,
-                    "Input accepted; awaiting foreground admission", admission.steps, admission.retries)))
             }
+            if (acceptedResult != null) writeValue("chat-result", HistoryCodec.json.encodeToString(acceptedResult))
             if (completion != null) {
                 writeValue(accountingPath(completion.taskChainId), completion)
                 if (rotateChain) {

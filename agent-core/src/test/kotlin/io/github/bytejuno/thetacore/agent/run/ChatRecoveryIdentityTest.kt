@@ -55,6 +55,38 @@ class ChatRecoveryIdentityTest {
         }
     }
 
+    @Test fun retainedChainInputAndPausedResultCommitAtomicallyWithoutChangingAccounting() {
+        for (stage in HistoryWriteStage.entries) {
+            val root = Files.createTempDirectory("chat-retained-admission")
+            val prior = RunAccounting("session", "session", "original", 7, 3, false)
+            val result = RunResult(RunState.COMPLETED, "previous answer", 7, 3)
+            TestRunHistory.create(root, "session", durability).use { disk ->
+                disk.saveChatContext(ChatTaskContext("session", "goal", 0))
+                disk.saveAccounting(prior)
+                disk.saveChatResult(result)
+            }
+            TestRunHistory.open(root, durability) {
+                val file = if (stage in setOf(HistoryWriteStage.AFTER_CHUNK, HistoryWriteStage.AFTER_VALUE))
+                    "chat-result" else "append"
+                if (it.file == file && it.stage == stage) throw java.io.IOException("retained admission fault")
+            }.use { disk ->
+                assertFailsWith<HistoryStorageException> {
+                    disk.appendChatInput(0, message(Role.USER, textPart("next goal")),
+                        RunIdentity("session", "session", "accepted"))
+                }
+            }
+            TestRunHistory.open(root, durability).use { disk ->
+                val committed = stage == HistoryWriteStage.AFTER_COMMIT
+                assertEquals(if (committed) 1L else 0L, disk.revision(), stage.name)
+                assertEquals(prior, disk.loadAccounting("session"), stage.name)
+                assertEquals(RunIdentity("session", "session", "original"), disk.chatRecoveryIdentity(), stage.name)
+                assertEquals(if (committed) RunState.PAUSED else RunState.COMPLETED, disk.chatResult()?.state, stage.name)
+                assertEquals(7, disk.chatResult()?.steps, stage.name)
+                assertEquals(3, disk.chatResult()?.retries, stage.name)
+            }
+        }
+    }
+
     @Test fun identitySurvivesAccountingCodecAndColdOpenWithoutAttendancePromotion() {
         for (unattended in listOf(false, true)) {
             val root = Files.createTempDirectory("chat-recovery-identity")
