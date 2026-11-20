@@ -31,10 +31,12 @@ class ProviderSettingsException(val failure: Failure) : Exception(when (failure)
  * IO-worker API, not Main. No plaintext temporary files and no plugin-data/ledger integration.
  * Synchronization covers all instances in this process; no cross-process writers are supported.
  */
-class OpenAiSettingsStore internal constructor(noBackupDirectory: File, private val cipher: SecretCipher) {
+class OpenAiSettingsStore internal constructor(noBackupDirectory: File, private val cipher: SecretCipher,
+    private val recordName: String = "active.bin") {
     private val root = noBackupDirectory.absoluteFile.toPath().normalize()
     private val directory = root.resolve(DIRECTORY)
-    private val file = directory.resolve("active.bin")
+    init { require(recordName in setOf("active.bin", "images.bin")) }
+    private val file = directory.resolve(recordName)
     private val lock = locks[(file.toString().hashCode() and Int.MAX_VALUE) % locks.size]
 
     /** Explicit replacement repairs corrupt records/missing keys; old snapshots remain independent.
@@ -90,7 +92,10 @@ class OpenAiSettingsStore internal constructor(noBackupDirectory: File, private 
         if (Files.notExists(directory, NOFOLLOW_LINKS)) return
         Files.newDirectoryStream(directory).use { entries ->
             for (entry in entries) {
-                if (entry.fileName.toString().endsWith(".tmp") && Files.isRegularFile(entry, NOFOLLOW_LINKS)) {
+                val name = entry.fileName.toString()
+                if (name.endsWith(".tmp") && (name.startsWith("$recordName-") ||
+                        (recordName == "active.bin" && !name.startsWith("images.bin-"))) &&
+                    Files.isRegularFile(entry, NOFOLLOW_LINKS)) {
                     Files.deleteIfExists(entry)
                 }
             }
@@ -111,7 +116,7 @@ class OpenAiSettingsStore internal constructor(noBackupDirectory: File, private 
         Files.createDirectories(directory)
         check(Files.notExists(file, NOFOLLOW_LINKS) || Files.isRegularFile(file, NOFOLLOW_LINKS))
         removeAbandonedTemps()
-        val temp = directory.resolve("${UUID.randomUUID()}.tmp")
+        val temp = directory.resolve("$recordName-${UUID.randomUUID()}.tmp")
         try {
             FileChannel.open(temp, WRITE, CREATE_NEW, NOFOLLOW_LINKS).use { channel ->
                 val buffer = ByteBuffer.wrap(bytes)
@@ -139,6 +144,11 @@ class OpenAiSettingsStore internal constructor(noBackupDirectory: File, private 
         fun android(context: Context): OpenAiSettingsStore = OpenAiSettingsStore(
             context.noBackupFilesDir,
             androidSecretCipher("theta.provider.credentials.v1", "theta-provider-credentials-v1"),
+        )
+        fun images(context: Context): OpenAiSettingsStore = OpenAiSettingsStore(
+            context.noBackupFilesDir,
+            androidSecretCipher("theta.provider.images.v1", "theta-provider-images-v1"),
+            "images.bin",
         )
     }
 }

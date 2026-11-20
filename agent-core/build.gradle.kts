@@ -23,4 +23,6 @@ dependencies {
     implementation("com.networknt:json-schema-validator:1.5.3")
     testImplementation(kotlin("test-junit"))
     testImplementation(libs.kotlinx.coroutines.test)
+    testImplementation("com.squareup.okhttp3:mockwebserver3:5.5.1")
+    testImplementation("com.squareup.okhttp3:okhttp-tls:5.5.1")
 }

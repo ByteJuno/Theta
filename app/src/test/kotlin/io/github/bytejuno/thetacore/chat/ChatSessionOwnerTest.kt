@@ -21,6 +21,77 @@ import java.nio.file.Files
 import java.util.concurrent.atomic.AtomicInteger
 
 class ChatSessionOwnerTest {
+    @Test fun imageToolUsesNormalApprovalStoresPrivatelyAndColdOpenDoesNotGenerate() = runBlocking {
+        val root = Files.createTempDirectory("chat-images").toFile()
+        val executions = AtomicInteger()
+        val payload = byteArrayOf(1, 2, 3)
+        val attachments = ImageAttachments(root)
+        val imageTool = io.github.bytejuno.thetacore.plugin.tools.HostImageGenerationTool({
+            OpenAiRunSnapshot(OpenAiProviderSettings("images", "https://example.invalid/v1", "images"), ApiKeyCredentials("image-key"))
+        }, attachments, { _, prompt ->
+            assertEquals("画一只在窗边睡觉的猫", prompt)
+            executions.incrementAndGet(); payload
+        }, { it })
+        val requests = AtomicInteger()
+        val model = object : ModelProvider {
+            override fun executionMode(request: ChatRequest) = ModelExecutionMode.GENERATION_ONLY
+            override fun chat(request: ChatRequest, auth: Credentials): Flow<ModelEvent> = flow {
+                val index = requests.incrementAndGet()
+                emit(Events.started("image-response-$index", "model"))
+                if (index == 1) {
+                    emit(Events.toolStart(0, "image-wire", "host_generate_image"))
+                    emit(Events.toolDelta(0, """{"prompt":"画一只在窗边睡觉的猫"}"""))
+                    emit(Events.end(0)); emit(Events.finished(FinishReason.TOOL_CALLS))
+                } else {
+                    emit(Events.text(0, "done")); emit(Events.end(0)); emit(Events.finished(FinishReason.STOP))
+                }
+            }
+        }
+        try {
+            val first = fixture(root, executions, model)
+            first.host.catalog.registerHost(IMAGE_TOOL_KEY, "1", imageTool)
+            first.owner.open().join(); first.owner.send("画一只在窗边睡觉的猫").join()
+            await { first.owner.state.value.records.values.any { it.pending != null } }
+            val call = first.owner.state.value.records.values.single()
+            assertEquals(0, executions.get())
+            first.owner.decide(call.callId, call.pending!!.id, Decision.ALLOW_ONCE).join()
+            await { !first.owner.state.value.active }
+            assertEquals(1, executions.get())
+            assertEquals(IMAGE_COMPLETE, first.owner.state.value.records.getValue(call.callId).result!!.text)
+            val sessionId = first.owner.state.value.sessionId!!
+            assertArrayEquals(payload, attachments.read(sessionId, call.callId))
+            assertTrue(first.failures.toString(), first.failures.isEmpty())
+            first.close()
+            val cold = fixture(root, executions, model)
+            cold.owner.open().join()
+            assertEquals(sessionId, cold.owner.state.value.sessionId)
+            assertEquals(2, requests.get()); assertEquals(1, executions.get())
+            assertEquals(IMAGE_COMPLETE, cold.owner.state.value.records.getValue(call.callId).result!!.text)
+            assertArrayEquals(payload, ImageAttachments(root).read(sessionId, call.callId))
+            cold.owner.deleteCurrentSession().join()
+            assertFalse(cold.store.sessionIds().contains(sessionId))
+            assertNull(ImageAttachments(root).read(sessionId, call.callId))
+            assertTrue(cold.failures.toString(), cold.failures.isEmpty())
+            cold.close()
+        } finally { root.deleteRecursively() }
+    }
+
+    @Test fun ordinaryPromptWritingAndApiQuestionsDoNotGenerateWithoutModelToolCalls() = runBlocking {
+        val root = Files.createTempDirectory("chat-image-text").toFile()
+        val executions = AtomicInteger()
+        try {
+            val fixture = fixture(root, executions, provider(false))
+            fixture.host.catalog.registerHost(IMAGE_TOOL_KEY, "1", tool(executions))
+            fixture.owner.open().join()
+            for (text in listOf("帮我写一个画猫的提示词", "解释生图 API")) {
+                fixture.owner.send(text).join(); await { !fixture.owner.state.value.active }
+                assertEquals(R.string.chat_complete, fixture.owner.state.value.notice)
+            }
+            assertEquals(0, executions.get())
+            assertTrue(fixture.owner.state.value.records.isEmpty())
+            fixture.close()
+        } finally { root.deleteRecursively() }
+    }
     private val schema = Json.parseToJsonElement("""{"type":"object","additionalProperties":false}""").jsonObject
     private fun tool(count: AtomicInteger, output: ToolResult = ToolResult("done", effect = ToolEffect.APPLIED)) = object : Tool {
         override val id = "write"
@@ -35,15 +106,15 @@ class ChatSessionOwnerTest {
         val store = AndroidAgentStore.open(root, BundledSQLiteDriver(), fault)
         val budget = PluginExecutionBudget()
         val host = HostToolBridgeRoot(budget, hostTool).initialize { store }
-        return Fixture(store, budget, host, provider)
+        return Fixture(store, budget, host, provider, ImageAttachments(root))
     }
     private inner class Fixture(val store: AndroidAgentStore, val budget: PluginExecutionBudget,
-        val host: HostToolExecutionService, provider: ModelProvider) {
+        val host: HostToolExecutionService, provider: ModelProvider, images: ImageAttachments) {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         val failures = mutableListOf<Throwable>()
         val owner = ChatSessionOwner(scope, { host }, {
             OpenAiRunSnapshot(OpenAiProviderSettings("test", "https://example.invalid/v1", "model"), ApiKeyCredentials("test-key"))
-        }, { synchronized(failures) { failures += it } }, { ModelTarget("test", provider, Credentials { "test-key" }) })
+        }, { synchronized(failures) { failures += it } }, { ModelTarget("test", provider, Credentials { "test-key" }) }, images)
         suspend fun close() {
             owner.stop().join()
             await { !owner.state.value.active }

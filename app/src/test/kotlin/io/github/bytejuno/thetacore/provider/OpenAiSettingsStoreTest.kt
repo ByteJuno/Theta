@@ -23,6 +23,20 @@ import java.util.concurrent.TimeUnit
 import javax.crypto.KeyGenerator
 
 class OpenAiSettingsStoreTest {
+    @Test fun imageAndChatProfilesRemainIndependentAcrossReopenAndClear() {
+        val root = temp.newFolder()
+        val cipher = cipher()
+        val chat = OpenAiSettingsStore(root, cipher)
+        val images = OpenAiSettingsStore(root, cipher, "images.bin")
+        chat.replace(settings(1), "chat-key")
+        images.replace(settings(2), "image-key")
+        assertEquals("model1", chat.snapshotForNewRun().settings.model)
+        assertEquals("model2", OpenAiSettingsStore(root, cipher, "images.bin").snapshotForNewRun().settings.model)
+        assertEquals("chat-key", token(chat.snapshotForNewRun()))
+        assertEquals("image-key", token(images.snapshotForNewRun()))
+        chat.clear()
+        assertEquals("image-key", token(images.snapshotForNewRun()))
+    }
     @get:Rule val temp = TemporaryFolder()
     private val secret = "synthetic-key-issue18"
     private fun key() = KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()

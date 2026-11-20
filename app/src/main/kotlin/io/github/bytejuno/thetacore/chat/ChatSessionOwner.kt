@@ -53,6 +53,7 @@ internal class ChatSessionOwner(
     private val configuration: () -> OpenAiRunSnapshot,
     private val diagnostic: (Throwable) -> Unit = {},
     private val targetForRun: (OpenAiRunSnapshot) -> ModelTarget = { it.target() },
+    private val imageAttachments: ImageAttachments? = null,
 ) {
     private val mutable = MutableStateFlow(ChatState())
     val state = mutable.asStateFlow()
@@ -89,6 +90,15 @@ internal class ChatSessionOwner(
         tools = service()
         val store = requireNotNull(tools!!.sessionStore)
         val sessions = store.sessionIds()
+        if (imageAttachments != null) {
+            val retained = sessions.toMutableSet()
+            var page = sessions
+            while (page.isNotEmpty()) {
+                page = store.sessionIds(page.last())
+                retained.addAll(page)
+            }
+            imageAttachments.removeDeletedSessions(retained)
+        }
         selectInternal(sessions.firstOrNull(), sessions)
     }
     fun newSession() = launchOperation {
@@ -103,6 +113,31 @@ internal class ChatSessionOwner(
         val previous = mutable.value.sessions
         val next = requireNotNull(tools!!.sessionStore).sessionIds(previous.lastOrNull())
         mutable.update { it.copy(sessions = (previous + next).distinct()) }
+    }
+    suspend fun image(sessionId: String, callId: String): ByteArray? = withContext(Dispatchers.IO) {
+        gate.withLock {
+            check(sessionId == mutable.value.sessionId)
+            val record = requireNotNull(tools).ledger.get(callId)
+            check(record?.input?.sessionId == sessionId && record.input.definition?.toolKey == IMAGE_TOOL_KEY)
+            imageAttachments?.read(sessionId, callId)
+        }
+    }
+    fun deleteCurrentSession() = launchOperation {
+        check(active == null && !mutable.value.pending)
+        val id = requireNotNull(mutable.value.sessionId)
+        val host = requireNotNull(tools)
+        check(mutable.value.records.values.none { it.instance?.state == InstanceState.UNCONFIRMED })
+        imageAttachments?.prepareDelete(id)
+        history?.close()
+        history = null
+        try { host.ledger.deleteSession(id) }
+        catch (error: Exception) {
+            history = requireNotNull(host.sessionStore).openHistory(id)
+            throw error
+        }
+        imageAttachments?.deleteSession(id)
+        val sessions = requireNotNull(host.sessionStore).sessionIds()
+        selectInternal(sessions.firstOrNull(), sessions)
     }
     private fun selectInternal(id: String?, sessions: List<String>) {
         val host = requireNotNull(tools)

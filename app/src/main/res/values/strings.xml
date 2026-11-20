@@ -237,7 +237,7 @@
     <string name="chat_operation_failed">The operation could not finish. Your stored history is retained. Restart the app if storage is unavailable.</string>
     <string name="chat_complete">Reply complete</string>
     <string name="chat_paused">Task paused. Review tool states before continuing.</string>
-    <string name="chat_model_failed">The model request failed. Check model settings or try a new message.</string>
+    <string name="chat_model_failed">The model request failed. Check the chat model and endpoint settings; this chat requires tool-call support. Review the previous outcome before retrying.</string>
     <string name="chat_stopped">Stopped</string>
     <string name="chat_recovered_step">Saved tool step resolved. Send a new message to continue; nothing was replayed automatically.</string>
     <string name="chat_tool_pending">Waiting to run</string>
@@ -303,4 +303,16 @@
     <string name="chat_retry">Continue current task</string>
     <string name="chat_retry_warning">Retry only after checking the previous request. It may have run remotely; accepting retry can duplicate remote effects. This does not approve local tools or release their resources.</string>
     <string name="chat_retry_confirm">I reviewed the outcome; accept retry</string>
+    <string name="chat_delete_session">Delete session</string>
+    <string name="chat_delete_session_confirm">Delete this session and its saved images? This cannot be undone.</string>
+    <string name="chat_text_profile">Chat model</string>
+    <string name="chat_image_profile">Image model</string>
+    <string name="chat_image_settings_notice">Saved separately from chat. Enter an OpenAI-compatible base URL, image model and key. Ask to draw in the normal chat box; no image mode is needed. The chat endpoint must support tool calls. Prompt writing and API questions should stay text-only.</string>
+    <string name="chat_image_title">Generate image</string>
+    <string name="chat_image_complete">Image saved in this session.</string>
+    <string name="chat_image_configure">Configure the image model, base URL and key in Model settings, then explicitly request a new image.</string>
+    <string name="chat_image_already_attempted">This call was already attempted and will not be submitted again. Check the previous result before requesting a new image; it may be charged.</string>
+    <string name="chat_image_failed">Image generation stopped or failed. Check model settings and service availability. No automatic retry; the service may already have charged this request.</string>
+    <string name="chat_image_unavailable">Saved image is missing or invalid. No new generation request was sent.</string>
+    <string name="chat_image_description">Image generated for this conversation</string>
 </resources>
