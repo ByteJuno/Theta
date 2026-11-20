@@ -155,6 +155,82 @@ class ChatSessionOwnerTest {
         } finally { fixture.close(); root.deleteRecursively() }
     }
 
+    @Test fun internalApprovalSuspendsPresenceAndResumesBeforeAuthorizedWork() = runBlocking {
+        for (decision in listOf(Decision.ALLOW_ONCE, Decision.DENY)) {
+            val root = Files.createTempDirectory("chat-internal-presence").toFile()
+            val presence = RecordingPresence()
+            val writes = AtomicInteger()
+            val release = CompletableDeferred<Unit>()
+            val read = object : Tool {
+                override val id = "read"
+                override val spec = ToolSpec(id, "read with internal write", schema, risk = ToolRisk.READ)
+                override suspend fun call(args: JsonObject, env: ToolEnv): ToolResult {
+                    val allowed = env.requestApproval("write step", ToolRisk.WRITE)
+                    if (allowed) writes.incrementAndGet()
+                    release.await()
+                    return ToolResult("done", effect = if (allowed) ToolEffect.APPLIED else ToolEffect.NONE)
+                }
+            }
+            val fixture = fixture(root, AtomicInteger(), provider(), hostTool = read, presence = presence)
+            try {
+                val owner = fixture.owner
+                owner.open().join(); owner.send("goal").join()
+                await { owner.state.value.records.values.any { it.pending?.internal == true } }
+                owner.latest().join()
+                val record = owner.state.value.records.values.single()
+                assertEquals(Status.RUNNING, record.state)
+                assertEquals(InstanceState.UNCONFIRMED, record.instance!!.state)
+                assertEquals(ChatTaskProgress.Approval, presence.events.last().second)
+                assertEquals(0, writes.get())
+                val before = presence.events.size
+                owner.decide(record.callId, record.pending!!.id, decision).join()
+                await { presence.events.drop(before).any { it.second is ChatTaskProgress.Tool } }
+                assertEquals(ChatTaskProgress.Model,
+                    presence.events.drop(before).first { it.second != ChatTaskProgress.Approval }.second)
+                release.complete(Unit)
+                await { !owner.state.value.active }
+                assertEquals(if (decision == Decision.ALLOW_ONCE) 1 else 0, writes.get())
+                assertNull(presence.events.last().second)
+                assertTrue(fixture.failures.toString(), fixture.failures.isEmpty())
+            } finally { release.complete(Unit); fixture.close(); root.deleteRecursively() }
+        }
+    }
+
+    @Test fun internalApprovalKeepsForegroundUntilOtherParallelWorkerStops() = runBlocking {
+        val root = Files.createTempDirectory("chat-parallel-presence").toFile()
+        val presence = RecordingPresence()
+        val entered = AtomicInteger()
+        val release = CompletableDeferred<Unit>()
+        val read = object : Tool {
+            override val id = "read"
+            override val spec = ToolSpec(id, "parallel read", schema, risk = ToolRisk.READ, parallelSafe = true)
+            override suspend fun call(args: JsonObject, env: ToolEnv): ToolResult {
+                if (entered.incrementAndGet() == 1) release.await()
+                else env.requestApproval("write step", ToolRisk.WRITE)
+                return ToolResult("done", effect = ToolEffect.NONE)
+            }
+        }
+        val fixture = fixture(root, AtomicInteger(), provider(calls = 2), hostTool = read, presence = presence)
+        try {
+            val owner = fixture.owner
+            owner.open().join(); owner.send("goal").join()
+            await { owner.state.value.records.values.any { it.pending?.internal == true } }
+            owner.latest().join()
+            assertTrue(presence.events.last().second is ChatTaskProgress.Tool)
+            val working = owner.state.value.records.values.single { it.state == Status.RUNNING && it.pending == null }
+            release.complete(Unit)
+            fixture.host.awaitObservedExit(working.callId)
+            owner.latest().join()
+            assertEquals(ChatTaskProgress.Approval, presence.events.last().second)
+            val waiting = owner.state.value.records.values.single { it.pending != null }
+            assertEquals(InstanceState.UNCONFIRMED, waiting.instance!!.state)
+            owner.decide(waiting.callId, waiting.pending!!.id, Decision.DENY).join()
+            await { !owner.state.value.active }
+            assertNull(presence.events.last().second)
+            assertTrue(fixture.failures.toString(), fixture.failures.isEmpty())
+        } finally { release.complete(Unit); fixture.close(); root.deleteRecursively() }
+    }
+
     @Test fun staleNotificationCannotCancelLaterExecutionAndCurrentStopSettles() = runBlocking {
         val root = Files.createTempDirectory("chat83-").toFile()
         val presence = RecordingPresence()

@@ -11,8 +11,10 @@ internal sealed interface ChatTaskProgress {
 }
 
 internal fun taskProgress(records: Collection<InvocationRecord>): ChatTaskProgress = when {
-    records.any { it.state == Status.RUNNING } -> ChatTaskProgress.Tool(
-        records.first { it.state == Status.RUNNING }.input.definition?.modelName.orEmpty())
+    // Internal approvals keep RUNNING and the instance lease while the worker waits.
+    // Keep foreground presence only if some worker is still doing work.
+    records.any { it.state == Status.RUNNING && it.pending == null } -> ChatTaskProgress.Tool(
+        records.first { it.state == Status.RUNNING && it.pending == null }.input.definition?.modelName.orEmpty())
     records.any { it.pending != null } -> ChatTaskProgress.Approval
     records.any { it.recoveryPending } -> ChatTaskProgress.Recovery
     else -> ChatTaskProgress.Model
