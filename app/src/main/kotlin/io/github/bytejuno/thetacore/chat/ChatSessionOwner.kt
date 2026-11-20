@@ -328,7 +328,20 @@ internal class ChatSessionOwner(
     }
     private fun executor(definitions: List<FrozenDefinition>): LedgerToolExecutor {
         val host = requireNotNull(tools)
-        val bridge = object : ToolExecutionBridge by host.runBridge() {
+        val executionId = requireNotNull(mutable.value.executionId)
+        val bridge = object : ToolExecutionBridge by host.runBridge(beforeResume = { callId ->
+            gate.withLock {
+                check(active?.isActive == true && mutable.value.executionId == executionId)
+                val record = requireNotNull(host.ledger.get(callId))
+                check(record.input.runId == activeRunId && record.input.sessionId == history!!.sessionId)
+                try { presence.update(executionId, ChatTaskProgress.Tool(record.input.definition?.modelName.orEmpty())) }
+                catch (error: Exception) {
+                    report(error)
+                    active?.cancel(CancellationException("Tool foreground admission failed", error))
+                    throw error
+                }
+            }
+        }) {
             override suspend fun beforeSubmit(callId: String) = gate.withLock {
                 currentCoroutineContext().ensureActive()
                 val record = requireNotNull(host.ledger.get(callId))
