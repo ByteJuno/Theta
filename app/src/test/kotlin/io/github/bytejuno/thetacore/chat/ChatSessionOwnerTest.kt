@@ -413,6 +413,46 @@ class ChatSessionOwnerTest {
         } finally { root.deleteRecursively() }
     }
 
+    @Test fun activeSummaryDefersRecoveryInspectionUntilStopped() = runBlocking {
+        val root = Files.createTempDirectory("chat-active-checkpoint").toFile()
+        val entered = CompletableDeferred<Unit>()
+        val model = object : ModelProvider {
+            override fun executionMode(request: ChatRequest) = ModelExecutionMode.GENERATION_ONLY
+            override fun chat(request: ChatRequest, auth: Credentials): Flow<ModelEvent> = flow {
+                assertTrue(request.tools.isEmpty())
+                entered.complete(Unit)
+                awaitCancellation()
+            }
+        }
+        val fixture = fixture(root, AtomicInteger(), model)
+        try {
+            fixture.store.createHistory("session").use { disk ->
+                repeat(34) {
+                    disk.append(disk.revision(), listOf(message(Role.USER, textPart("u".repeat(32_000))),
+                        message(Role.ASSISTANT, textPart("a".repeat(32_000)))))
+                }
+            }
+            fixture.owner.open().join()
+            fixture.owner.send("Continue this conversation").join()
+            await { !fixture.owner.state.value.active }
+            assertEquals("BUDGET", fixture.owner.state.value.checkpoint!!.pauseClass)
+            fixture.owner.resume(summaryWindowTokens = 8192).join()
+            withTimeout(10_000) { entered.await() }
+            fixture.owner.latest().join()
+            assertTrue(fixture.owner.state.value.active)
+            assertNull(fixture.owner.state.value.checkpoint)
+            assertNull(fixture.owner.state.value.reconciliation)
+            fixture.owner.stop().join()
+            await { !fixture.owner.state.value.active }
+            assertNotNull(fixture.owner.state.value.checkpoint)
+            assertNotNull(fixture.owner.state.value.reconciliation)
+            assertTrue(fixture.failures.toString(), fixture.failures.isEmpty())
+        } finally {
+            fixture.close()
+            root.deleteRecursively()
+        }
+    }
+
     @Test fun savedContextCheckpointRequiresSelectionAndPreservesTaskBudget() = runBlocking {
         val root = Files.createTempDirectory("chat-checkpoint").toFile()
         val requests = AtomicInteger()

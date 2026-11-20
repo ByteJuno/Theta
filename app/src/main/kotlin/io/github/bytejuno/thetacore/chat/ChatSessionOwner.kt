@@ -144,12 +144,14 @@ internal class ChatSessionOwner(
         val records = messages.flatMap { it.parts.filterIsInstance<ContentPart.ToolCall>() }
             .mapNotNull { host.ledger.get(it.binding.callId) }.associateBy { it.callId }
         val journal = disk.journalPage(includeUnfinished = active == null)
+        val checkpoint = if (active == null) disk.checkpointInfo() else null
+        val reconciliation = if (active == null) disk.retryReconciliation() else null
         mutable.update { it.copy(messages = messages, records = records,
             recoveries = host.ledger.pendingRecoveries().filter { it.callId in records }.associateBy { it.callId }, older = page.older,
             showingOlder = before != null, pending = pending != null,
             draft = previewText(), journal = journal.replies, olderJournal = journal.older,
-            checkpoint = disk.checkpointInfo()?.takeUnless { checkpoint -> checkpoint.kind in setOf("VIEW", "COMPLETE") },
-            reconciliation = disk.retryReconciliation(), result = disk.chatResult(),
+            checkpoint = checkpoint?.takeUnless { it.kind in setOf("VIEW", "COMPLETE") },
+            reconciliation = reconciliation, result = disk.chatResult(),
             summaryWindowTokens = disk.chatSummaryWindow()) }
         if (active != null) mutable.value.executionId?.let { executionId ->
             presence.update(executionId, taskProgress(records.values.filter { it.input.runId == activeRunId }))
