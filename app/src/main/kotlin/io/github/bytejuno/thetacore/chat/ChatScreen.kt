@@ -55,6 +55,7 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
             listState.animateScrollToItem(listState.layoutInfo.totalItemsCount - 1)
     }
     var sessions by remember { mutableStateOf(false) }
+    var deleting by remember { mutableStateOf(false) }
     LaunchedEffect(owner) { owner.open() }
     LaunchedEffect(state.acceptedMessages) { if (state.acceptedMessages > 0) input = "" }
     Column(Modifier.fillMaxSize().imePadding().padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -65,6 +66,9 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
             TextButton(onClick = { settings = true }) { Text(strings.get(R.string.chat_provider)) }
             TextButton(onClick = { sessions = true }, enabled = !state.active && !state.loading) { Text(strings.get(R.string.chat_sessions)) }
             TextButton(onClick = { owner.newSession() }, enabled = !state.active && !state.loading) { Text(strings.get(R.string.chat_new)) }
+            TextButton(onClick = { deleting = true }, enabled = !state.active && !state.pending && !state.loading) {
+                Text(strings.get(R.string.chat_delete_session))
+            }
         }
         if (state.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
         state.error?.let { Text(strings.get(it), color = MaterialTheme.colorScheme.error) }
@@ -132,6 +136,12 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
             modifier = Modifier.fillMaxWidth()) { Text(strings.get(R.string.chat_send)) }
     }
     if (settings) ProviderScreen(host) { settings = false }
+    if (deleting) AlertDialog(onDismissRequest = { deleting = false },
+        title = { Text(strings.get(R.string.chat_delete_session)) },
+        text = { Text(strings.get(R.string.chat_delete_session_confirm)) },
+        confirmButton = { TextButton(onClick = { deleting = false; owner.deleteCurrentSession() }) {
+            Text(strings.get(R.string.chat_delete_session))
+        } }, dismissButton = { TextButton(onClick = { deleting = false }) { Text(strings.get(R.string.chat_close)) } })
     if (sessions) AlertDialog(onDismissRequest = { sessions = false }, title = { Text(strings.get(R.string.chat_sessions)) },
         text = {
             LazyColumn(Modifier.heightIn(max = 400.dp)) {
@@ -152,8 +162,13 @@ private fun ToolCard(call: ContentPart.ToolCall, record: InvocationRecord?, reco
     var expanded by rememberSaveable(call.binding.callId) { mutableStateOf(false) }
     OutlinedCard(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(call.name, style = MaterialTheme.typography.titleSmall)
+            val imageCall = record?.input?.definition?.toolKey == IMAGE_TOOL_KEY
+            Text(if (imageCall) strings.get(R.string.chat_image_title) else call.name, style = MaterialTheme.typography.titleSmall)
             Text(strings.get(toolState(record))) // never hidden by collapsing details
+            if (imageCall && record != null) {
+                record.result?.let { Text(strings.get(imageResultLabel(it.text))) }
+                if (record.state.terminal) ChatImage(record, owner)
+            }
             if (record != null && showApproval(record)) {
                 val approval = requireNotNull(record.pending)
                 Text(strings.get(R.string.chat_approval_warning))
@@ -187,7 +202,7 @@ private fun ToolCard(call: ContentPart.ToolCall, record: InvocationRecord?, reco
                 SelectionContainer { Text(call.argsJson) }
                 record?.result?.let {
                     Text(strings.get(R.string.chat_result), style = MaterialTheme.typography.labelLarge)
-                    SelectionContainer { Text(it.text) }
+                    SelectionContainer { Text(if (imageCall) strings.get(imageResultLabel(it.text)) else it.text) }
                 }
             }
         }
@@ -204,9 +219,21 @@ private fun ProviderScreen(host: ThetaApplication, onClose: () -> Unit) {
     var secret by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf(false) }
+    var imageProfile by remember { mutableStateOf(false) }
     AlertDialog(onDismissRequest = { if (!busy) onClose() }, title = { Text(strings.get(R.string.chat_provider)) }, text = {
         Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(strings.get(R.string.chat_provider_notice))
+            FlowRow {
+                TextButton(enabled = !busy, onClick = { imageProfile = false; endpoint = ""; model = ""; secret = ""; error = false }) {
+                    Text(strings.get(R.string.chat_text_profile))
+                }
+                TextButton(enabled = !busy, onClick = { imageProfile = true; endpoint = ""; model = ""; secret = ""; error = false }) {
+                    Text(strings.get(R.string.chat_image_profile))
+                }
+            }
+            Text(strings.get(if (imageProfile) R.string.chat_image_profile else R.string.chat_text_profile),
+                style = MaterialTheme.typography.titleMedium)
+            if (imageProfile) Text(strings.get(R.string.chat_image_settings_notice))
             OutlinedTextField(endpoint, { endpoint = it }, label = { Text(strings.get(R.string.chat_endpoint)) })
             OutlinedTextField(model, { model = it }, label = { Text(strings.get(R.string.chat_model)) })
             OutlinedTextField(secret, { secret = it }, label = { Text(strings.get(R.string.chat_key)) }, visualTransformation = PasswordVisualTransformation())
@@ -218,7 +245,10 @@ private fun ProviderScreen(host: ThetaApplication, onClose: () -> Unit) {
             busy = true; error = false
             scope.launch {
                 try {
-                    withContext(Dispatchers.IO) { host.providerSettings.replace(OpenAiProviderSettings(CHAT_PROVIDER_ID, endpoint.trim(), model.trim()), secret) }
+                    withContext(Dispatchers.IO) {
+                        val store = if (imageProfile) host.imageSettings else host.providerSettings
+                        store.replace(OpenAiProviderSettings(if (imageProfile) IMAGE_PROVIDER_ID else CHAT_PROVIDER_ID, endpoint.trim(), model.trim()), secret)
+                    }
                     secret = ""; onClose()
                 } catch (_: Exception) { error = true }
                 finally { busy = false }

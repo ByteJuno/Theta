@@ -314,6 +314,9 @@ class SqliteInvocationStore private constructor(
             database.transaction {
                 fault(SqliteWriteStage.AFTER_BEGIN)
                 database.markSessionDeleted(sessionId)
+                db.prepare("DELETE FROM private_image_attempts WHERE session_id=?").use {
+                    it.bindText(1, sessionId); it.step()
+                }
                 db.prepare("DELETE FROM invocation_contents WHERE call_id=?").use { statement ->
                     members.forEach { statement.bindText(1, it.callId); statement.step(); statement.reset() }
                 }

@@ -54,6 +54,7 @@ internal class ChatSessionOwner(
     private val configuration: () -> OpenAiRunSnapshot,
     private val diagnostic: (Throwable) -> Unit = {},
     private val targetForRun: (OpenAiRunSnapshot) -> ModelTarget = { it.target() },
+    private val imageAttachments: ImageAttachments? = null,
     private val presence: ChatTaskPresence = ChatTaskPresence.None,
 ) {
     private val mutable = MutableStateFlow(ChatState())
@@ -107,6 +108,36 @@ internal class ChatSessionOwner(
         val previous = mutable.value.sessions
         val next = requireNotNull(tools!!.sessionStore).sessionIds(previous.lastOrNull())
         mutable.update { it.copy(sessions = (previous + next).distinct()) }
+    }
+    suspend fun image(sessionId: String, callId: String): ByteArray? = withContext(Dispatchers.IO) {
+        gate.withLock {
+            check(sessionId == mutable.value.sessionId)
+            val record = requireNotNull(tools).ledger.get(callId)
+            check(record?.input?.sessionId == sessionId && record.input.definition?.toolKey == IMAGE_TOOL_KEY)
+            imageAttachments?.read(sessionId, callId)
+                ?: requireNotNull(tools!!.sessionStore).privateImages.read(sessionId, callId)
+        }
+    }
+    fun deleteCurrentSession() = launchOperation {
+        check(active == null && !mutable.value.pending)
+        val id = requireNotNull(mutable.value.sessionId)
+        val host = requireNotNull(tools)
+        val disk = requireNotNull(history)
+        if (host.ledger.sessionDeletionBlocked(id) || disk.hasPendingIntent() ||
+            disk.retryReconciliation() != null || recoveryToken(disk) != null ||
+            disk.checkpointInfo()?.kind?.let { it !in setOf("VIEW", "COMPLETE") } == true) {
+            mutable.update { it.copy(error = R.string.chat_delete_recovery_required) }
+            return@launchOperation
+        }
+        history?.close()
+        history = null
+        try { host.ledger.deleteSession(id) }
+        catch (error: Exception) {
+            history = requireNotNull(host.sessionStore).openHistory(id)
+            throw error
+        }
+        val sessions = requireNotNull(host.sessionStore).sessionIds()
+        selectInternal(sessions.firstOrNull(), sessions)
     }
     private suspend fun selectInternal(id: String?, sessions: List<String>) {
         val host = requireNotNull(tools)

@@ -29,6 +29,7 @@ import kotlinx.coroutines.async
 class ThetaApplication : Application() {
     internal val plugins by lazy { PluginManager(this) }
     internal val providerSettings by lazy { io.github.bytejuno.thetacore.provider.OpenAiSettingsStore.android(this) }
+    internal val imageSettings by lazy { io.github.bytejuno.thetacore.provider.OpenAiSettingsStore.images(this) }
     internal val chatTaskPresence by lazy { io.github.bytejuno.thetacore.chat.AndroidChatTaskPresence(this) }
     internal val chat by lazy {
         io.github.bytejuno.thetacore.chat.ChatSessionOwner(hostToolsOwner, ::hostTools,

@@ -21,6 +21,131 @@ import java.nio.file.Files
 import java.util.concurrent.atomic.AtomicInteger
 
 class ChatSessionOwnerTest {
+    @Test fun deletionRetainsUnknownEffectRecoveryAcrossPagesAndColdOpen() = runBlocking {
+        val root = Files.createTempDirectory("chat-delete-recovery").toFile()
+        val executions = AtomicInteger()
+        try {
+            val first = fixture(root, executions, provider(), tool(executions, ToolResult("unknown", effect = ToolEffect.UNKNOWN)))
+            first.owner.open().join(); first.owner.send("execute").join()
+            await { first.owner.state.value.records.values.any { it.pending != null } }
+            val call = first.owner.state.value.records.values.single()
+            first.owner.decide(call.callId, call.pending!!.id, Decision.ALLOW_ONCE).join()
+            await { !first.owner.state.value.active }
+            val sessionId = first.owner.state.value.sessionId!!
+            assertEquals(1, first.owner.state.value.recoveries.size)
+            first.owner.deleteCurrentSession().join()
+            assertTrue(first.store.sessionIds().contains(sessionId))
+            assertEquals(sessionId, first.owner.state.value.sessionId)
+            assertEquals(1, first.host.ledger.pendingRecoveries().size)
+            first.close()
+            val cold = fixture(root, executions, provider(false))
+            cold.owner.open().join()
+            repeat(22) {
+                cold.owner.send("text only").join(); await { !cold.owner.state.value.active }
+            }
+            assertFalse(cold.owner.state.value.records.containsKey(call.callId))
+            cold.owner.deleteCurrentSession().join()
+            assertTrue(cold.store.sessionIds().contains(sessionId))
+            assertEquals(1, cold.host.ledger.pendingRecoveries().size)
+            while (call.callId !in cold.owner.state.value.records && cold.owner.state.value.older != null)
+                cold.owner.older().join()
+            assertTrue(cold.owner.state.value.recoveries.containsKey(call.callId))
+            assertEquals(Effect.UNKNOWN, cold.host.ledger.get(call.callId)!!.result!!.effect)
+            assertEquals(1, executions.get())
+            cold.close()
+        } finally { root.deleteRecursively() }
+    }
+    @Test fun imageToolUsesNormalApprovalStoresPrivatelyAndColdOpenDoesNotGenerate() = runBlocking {
+        val root = Files.createTempDirectory("chat-images").toFile()
+        val executions = AtomicInteger()
+        val payload = byteArrayOf(1, 2, 3)
+        val toolAdmissionStarted = CompletableDeferred<Unit>()
+        val toolAdmitted = CompletableDeferred<Unit>()
+        val presence = object : ChatTaskPresence {
+            @Volatile var ready: () -> Boolean = { false }
+            override suspend fun update(executionId: String, progress: ChatTaskProgress) {
+                if (progress == ChatTaskProgress.Model && ready()) {
+                    toolAdmissionStarted.complete(Unit)
+                    toolAdmitted.await()
+                }
+            }
+            override suspend fun finish(executionId: String, waiting: ChatTaskProgress?) = Unit
+        }
+        fun imageTool(attachments: ImageAttachments) = io.github.bytejuno.thetacore.plugin.tools.HostImageGenerationTool({
+            OpenAiRunSnapshot(OpenAiProviderSettings("images", "https://example.invalid/v1", "images"), ApiKeyCredentials("image-key"))
+        }, attachments, { _, prompt ->
+            assertEquals("画一只在窗边睡觉的猫", prompt)
+            executions.incrementAndGet(); payload
+        }, { it })
+        val requests = AtomicInteger()
+        val model = object : ModelProvider {
+            override fun executionMode(request: ChatRequest) = ModelExecutionMode.GENERATION_ONLY
+            override fun chat(request: ChatRequest, auth: Credentials): Flow<ModelEvent> = flow {
+                val index = requests.incrementAndGet()
+                emit(Events.started("image-response-$index", "model"))
+                if (index == 1) {
+                    emit(Events.toolStart(0, "image-wire", "host_generate_image"))
+                    emit(Events.toolDelta(0, """{"prompt":"画一只在窗边睡觉的猫"}"""))
+                    emit(Events.end(0)); emit(Events.finished(FinishReason.TOOL_CALLS))
+                } else {
+                    emit(Events.text(0, "done")); emit(Events.end(0)); emit(Events.finished(FinishReason.STOP))
+                }
+            }
+        }
+        try {
+            val first = fixture(root, executions, model, presence = presence)
+            val attachments = ImageAttachments(first.store.privateImages)
+            first.host.catalog.registerHost(IMAGE_TOOL_KEY, "1", imageTool(attachments))
+            first.owner.open().join(); first.owner.send("画一只在窗边睡觉的猫").join()
+            await { first.owner.state.value.records.values.any { it.pending != null } }
+            val call = first.owner.state.value.records.values.single()
+            assertEquals(0, executions.get())
+            presence.ready = { first.host.ledger.get(call.callId)?.state == Status.READY }
+            val approval = first.owner.decide(call.callId, call.pending!!.id, Decision.ALLOW_ONCE)
+            try {
+                withTimeout(10_000) { toolAdmissionStarted.await() }
+                assertEquals(0, executions.get())
+                assertEquals(1, requests.get())
+                assertNull(attachments.read(first.owner.state.value.sessionId!!, call.callId))
+            } finally { toolAdmitted.complete(Unit) }
+            approval.join()
+            await { !first.owner.state.value.active }
+            assertEquals(1, executions.get())
+            assertEquals(IMAGE_COMPLETE, first.owner.state.value.records.getValue(call.callId).result!!.text)
+            val sessionId = first.owner.state.value.sessionId!!
+            assertArrayEquals(payload, attachments.read(sessionId, call.callId))
+            assertTrue(first.failures.toString(), first.failures.isEmpty())
+            first.close()
+            val cold = fixture(root, executions, model)
+            cold.owner.open().join()
+            assertEquals(sessionId, cold.owner.state.value.sessionId)
+            assertEquals(2, requests.get()); assertEquals(1, executions.get())
+            assertEquals(IMAGE_COMPLETE, cold.owner.state.value.records.getValue(call.callId).result!!.text)
+            assertArrayEquals(payload, ImageAttachments(cold.store.privateImages).read(sessionId, call.callId))
+            cold.owner.deleteCurrentSession().join()
+            assertFalse(cold.store.sessionIds().contains(sessionId))
+            assertNull(ImageAttachments(cold.store.privateImages).read(sessionId, call.callId))
+            assertTrue(cold.failures.toString(), cold.failures.isEmpty())
+            cold.close()
+        } finally { root.deleteRecursively() }
+    }
+
+    @Test fun ordinaryPromptWritingAndApiQuestionsDoNotGenerateWithoutModelToolCalls() = runBlocking {
+        val root = Files.createTempDirectory("chat-image-text").toFile()
+        val executions = AtomicInteger()
+        try {
+            val fixture = fixture(root, executions, provider(false))
+            fixture.host.catalog.registerHost(IMAGE_TOOL_KEY, "1", tool(executions))
+            fixture.owner.open().join()
+            for (text in listOf("帮我写一个画猫的提示词", "解释生图 API")) {
+                fixture.owner.send(text).join(); await { !fixture.owner.state.value.active }
+                assertEquals(R.string.chat_complete, fixture.owner.state.value.notice)
+            }
+            assertEquals(0, executions.get())
+            assertTrue(fixture.owner.state.value.records.isEmpty())
+            fixture.close()
+        } finally { root.deleteRecursively() }
+    }
     private val schema = Json.parseToJsonElement("""{"type":"object","additionalProperties":false}""").jsonObject
     private fun tool(count: AtomicInteger, output: ToolResult = ToolResult("done", effect = ToolEffect.APPLIED)) = object : Tool {
         override val id = "write"
@@ -35,15 +160,17 @@ class ChatSessionOwnerTest {
         val store = AndroidAgentStore.open(root, BundledSQLiteDriver(), fault)
         val budget = PluginExecutionBudget()
         val host = HostToolBridgeRoot(budget, hostTool).initialize { store }
-        return Fixture(store, budget, host, provider, presence)
+        return Fixture(store, budget, host, provider, ImageAttachments(store.privateImages), presence)
     }
     private inner class Fixture(val store: AndroidAgentStore, val budget: PluginExecutionBudget,
-        val host: HostToolExecutionService, provider: ModelProvider, presence: ChatTaskPresence = ChatTaskPresence.None) {
+        val host: HostToolExecutionService, provider: ModelProvider, images: ImageAttachments,
+        presence: ChatTaskPresence = ChatTaskPresence.None) {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         val failures = mutableListOf<Throwable>()
         val owner = ChatSessionOwner(scope, { host }, {
             OpenAiRunSnapshot(OpenAiProviderSettings("test", "https://example.invalid/v1", "model"), ApiKeyCredentials("test-key"))
-        }, { synchronized(failures) { failures += it } }, { ModelTarget("test", provider, Credentials { "test-key" }) }, presence)
+        }, { synchronized(failures) { failures += it } }, { ModelTarget("test", provider, Credentials { "test-key" }) },
+            imageAttachments = images, presence = presence)
         suspend fun close() {
             owner.stop().join()
             await { !owner.state.value.active }
@@ -915,6 +1042,12 @@ class ChatSessionOwnerTest {
             assertEquals(count, requests.get())
             assertEquals(checkpoint.id, cold.owner.state.value.checkpoint!!.id)
             val selection = requireNotNull(cold.owner.state.value.recovery)
+            val retainedSession = cold.owner.state.value.sessionId!!
+            cold.owner.deleteCurrentSession().join()
+            assertTrue(cold.store.sessionIds().contains(retainedSession))
+            assertEquals(selection, cold.owner.state.value.recovery)
+            assertEquals(R.string.chat_delete_recovery_required, cold.owner.state.value.error)
+            assertEquals(count, requests.get())
             cold.owner.recover(selection, ChatRecoveryAction.CONTINUE_SUMMARY, confirmed = false).join()
             assertEquals(count, requests.get())
             cold.owner.recover(selection, ChatRecoveryAction.CONTINUE_SUMMARY, confirmed = true).join()

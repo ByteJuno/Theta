@@ -461,9 +461,15 @@ class InvocationLedger(
     }
 
     /** Caller must first stop the session and close its history handles. Safety records remain. */
+    fun sessionDeletionBlocked(sessionId: String): Boolean = gate.withGate {
+        all().any { it.input.sessionId == sessionId && (!it.state.terminal ||
+            it.instance?.state == InstanceState.UNCONFIRMED || it.recoveryPending || denialPending(it) ||
+            (it.isolation != null && it.isolation.resolution != RecoveryResolution.VERIFIED_CLEAR)) }
+    }
     fun deleteSession(sessionId: String) = gate.withGate {
         require(sessionId.isNotBlank())
         check(!halted) { "Reopen storage required" }
+        require(!sessionDeletionBlocked(sessionId)) { "Session has unresolved execution or recovery" }
         try {
             val delete = deleteStoredSession ?: throw StoreException("Session deletion is not supported")
             delete(sessionId)

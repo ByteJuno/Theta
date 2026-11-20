@@ -23,6 +23,7 @@ import java.io.File
 internal class AndroidAgentStore private constructor(
     private val database: AgentDatabase, private val delegate: InvocationStore,
 ) : InvocationStore by delegate {
+    val privateImages = io.github.bytejuno.thetacore.agent.ledger.PrivateImageStore(database)
     fun sessionIds(before: String? = null) = database.sessionIds(before)
     fun createHistory(sessionId: String) = io.github.bytejuno.thetacore.agent.run.SqliteRunHistory.create(database, sessionId)
     fun openHistory(sessionId: String) = io.github.bytejuno.thetacore.agent.run.SqliteRunHistory.open(database, sessionId)

@@ -165,6 +165,8 @@ class SharedHistoryDatabaseTest {
         val file = root.resolve(AgentDatabase.FILE_NAME)
         AgentDatabase.open(file, BundledSQLiteDriver()).close()
         BundledSQLiteDriver().open(file.toString()).use { sql ->
+            sql.execute("DROP TABLE private_image_chunks")
+            sql.execute("DROP TABLE private_image_attempts")
             sql.execute("DROP TABLE history_chunks")
             sql.execute("DROP TABLE history_values")
             sql.execute("DROP TABLE sessions")
