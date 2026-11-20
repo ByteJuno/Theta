@@ -9,6 +9,37 @@ import org.junit.Test
 import kotlin.test.*
 
 class AgentRunLoopTest {
+    @Test fun toolAdmissionWaitsBeforeClaimAndFailureNeverSubmits() = runTest {
+        for (reject in listOf(false, true)) {
+            val fixture = RunFixture(listOf(testDefinition(risk = Risk.WRITE)))
+            val ready = CompletableDeferred<Unit>()
+            val release = CompletableDeferred<Unit>()
+            val bridge = object : ToolExecutionBridge by fixture.bridge {
+                override suspend fun beforeSubmit(callId: String) {
+                    assertEquals(Status.READY, fixture.ledger.get(callId)!!.state)
+                    ready.complete(Unit)
+                    release.await()
+                    if (reject) error("foreground rejected")
+                }
+            }
+            val model = ScriptProvider(listOf(calls("tool"), answer()))
+            val executor = LedgerToolExecutor(fixture.ledger, fixture.gate, fixture.definitions, bridge,
+                RunApprovals { Decision.ALLOW_ONCE })
+            val run = async { AgentRunLoop(RunIdentity("chain", "session", "run"),
+                ModelTarget("provider", model, Credentials { "test" }), fixture.request(), fixture.history, executor).run() }
+            ready.await()
+            assertTrue(fixture.submitted.isEmpty())
+            assertEquals(Status.READY, fixture.store.records().single().state)
+            release.complete(Unit)
+            assertEquals(if (reject) RunState.PAUSED else RunState.COMPLETED, run.await().state)
+            assertEquals(if (reject) 0 else 1, fixture.submitted.size)
+            if (reject) {
+                assertEquals(Status.CANCELLED, fixture.store.records().single().state)
+                assertEquals(Effect.NONE, fixture.store.records().single().result!!.effect)
+            }
+        }
+    }
+
     @Test fun multipleStepsAndStopCallsUseInternalIdsAndPairedHistory() = runTest {
         val f = RunFixture(listOf(testDefinition("a"), testDefinition("b")))
         val p = ScriptProvider(listOf(calls("a", "b", reason = FinishReason.STOP), calls("b"), answer()))

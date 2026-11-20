@@ -567,6 +567,22 @@ open class SqliteRunHistory internal constructor(
     @Synchronized override fun append(expectedRevision: Long, messages: List<Message>) =
         appendBatch(expectedRevision, messages, null, false)
 
+    @Synchronized fun appendChatInput(expectedRevision: Long, input: Message, identity: RunIdentity) {
+        ready()
+        require(input.role == Role.USER && identity.sessionId == sessionId && identity.runId.isNotBlank())
+        require(identity.taskChainId == chatTaskChainId() && chatContext() != null && !hasPendingIntent())
+        val previous = chatRecoveryIdentity()
+        val admission = if (previous != null) {
+            require(previous.unattended == identity.unattended)
+            null
+        } else {
+            require(loadAccounting(identity.taskChainId) == null && loadBarrier() == null &&
+                loadCheckpoint()?.kind !in setOf("PAUSED", "CONTINUATION", "SUMMARY_RESERVED"))
+            RunAccounting(sessionId, identity.taskChainId, identity.runId, 0, 0, identity.unattended)
+        }
+        appendBatch(expectedRevision, listOf(input), null, false, admission)
+    }
+
     /** The loop selects this path only after the final model event has been validated. */
     @Synchronized internal fun appendChatAnswer(expectedRevision: Long, answer: Message, accounting: RunAccounting,
         rotateChain: Boolean) {
@@ -576,7 +592,8 @@ open class SqliteRunHistory internal constructor(
         appendBatch(expectedRevision, listOf(answer), accounting, rotateChain)
     }
 
-    private fun appendBatch(expectedRevision: Long, messages: List<Message>, completion: RunAccounting?, rotateChain: Boolean) {
+    private fun appendBatch(expectedRevision: Long, messages: List<Message>, completion: RunAccounting?, rotateChain: Boolean,
+        admission: RunAccounting? = null) {
         ready(); check(expectedRevision == head.revision) { "History changed during run" }
         val next = freezeMessages(messages)
         require(next.isNotEmpty()); validateHistory(next) // only the new, complete transaction
@@ -607,6 +624,11 @@ open class SqliteRunHistory internal constructor(
             writeValue(batchPath(value.revision), value)
             for (id in calls) writeValue(callPath(id), CallLocation(id, value.revision, hash))
             writeValue("head", newHead)
+            if (admission != null) {
+                writeValue(accountingPath(admission.taskChainId), admission)
+                writeValue("chat-result", HistoryCodec.json.encodeToString(RunResult(RunState.PAUSED,
+                    "Input accepted; awaiting foreground admission", admission.steps, admission.retries)))
+            }
             if (completion != null) {
                 writeValue(accountingPath(completion.taskChainId), completion)
                 if (rotateChain) {

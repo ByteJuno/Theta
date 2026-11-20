@@ -216,9 +216,10 @@ internal class ChatSessionOwner(
         val chain = disk.chatTaskChainId() // Capture checkpoint identity before the history revision advances.
         if (disk.chatContext() == null) disk.saveChatContext(ChatTaskContext(chain, text,
             Math.toIntExact(disk.page(null, 1).totalMessages), disk.chatSummaryWindow(), disk.chatContextWindow()))
-        disk.append(disk.revision(), listOf(message(Role.USER, textPart(text))))
+        val identity = RunIdentity(chain, disk.sessionId, UUID.randomUUID().toString())
+        disk.appendChatInput(disk.revision(), message(Role.USER, textPart(text)), identity)
         mutable.update { it.copy(acceptedMessages = it.acceptedMessages + 1) }
-        start(snapshot, null, RunIdentity(chain, disk.sessionId, UUID.randomUUID().toString()))
+        start(snapshot, null, identity)
     }
     fun resume(summaryWindowTokens: Long? = null, reconcileId: String? = null) = launchOperation {
         resumeInternal(summaryWindowTokens, reconcileId)
@@ -325,8 +326,18 @@ internal class ChatSessionOwner(
             delay(50)
         }
     }
-    private fun executor(definitions: List<FrozenDefinition>) = LedgerToolExecutor(tools!!.ledger,
-        tools!!.catalog.gate, definitions, tools!!.runBridge(), RunApprovals(::approval))
+    private fun executor(definitions: List<FrozenDefinition>): LedgerToolExecutor {
+        val host = requireNotNull(tools)
+        val bridge = object : ToolExecutionBridge by host.runBridge() {
+            override suspend fun beforeSubmit(callId: String) = gate.withLock {
+                currentCoroutineContext().ensureActive()
+                val record = requireNotNull(host.ledger.get(callId))
+                check(record.input.runId == activeRunId && record.input.sessionId == history!!.sessionId)
+                presence.update(requireNotNull(mutable.value.executionId), ChatTaskProgress.Model)
+            }
+        }
+        return LedgerToolExecutor(host.ledger, host.catalog.gate, definitions, bridge, RunApprovals(::approval))
+    }
 
     private suspend fun withStatusUpdates(action: suspend () -> Int): Int = coroutineScope {
         val ticker = launch {
