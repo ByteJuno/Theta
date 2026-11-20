@@ -90,15 +90,6 @@ internal class ChatSessionOwner(
         tools = service()
         val store = requireNotNull(tools!!.sessionStore)
         val sessions = store.sessionIds()
-        if (imageAttachments != null) {
-            val retained = sessions.toMutableSet()
-            var page = sessions
-            while (page.isNotEmpty()) {
-                page = store.sessionIds(page.last())
-                retained.addAll(page)
-            }
-            imageAttachments.removeDeletedSessions(retained)
-        }
         selectInternal(sessions.firstOrNull(), sessions)
     }
     fun newSession() = launchOperation {
@@ -120,14 +111,20 @@ internal class ChatSessionOwner(
             val record = requireNotNull(tools).ledger.get(callId)
             check(record?.input?.sessionId == sessionId && record.input.definition?.toolKey == IMAGE_TOOL_KEY)
             imageAttachments?.read(sessionId, callId)
+                ?: requireNotNull(tools!!.sessionStore).privateImages.read(sessionId, callId)
         }
     }
     fun deleteCurrentSession() = launchOperation {
         check(active == null && !mutable.value.pending)
         val id = requireNotNull(mutable.value.sessionId)
         val host = requireNotNull(tools)
-        check(mutable.value.records.values.none { it.instance?.state == InstanceState.UNCONFIRMED })
-        imageAttachments?.prepareDelete(id)
+        val disk = requireNotNull(history)
+        if (host.ledger.sessionDeletionBlocked(id) || disk.hasPendingIntent() ||
+            disk.retryReconciliation() != null || recoveryToken(disk) != null ||
+            disk.checkpointInfo()?.kind?.let { it !in setOf("VIEW", "COMPLETE") } == true) {
+            mutable.update { it.copy(error = R.string.chat_delete_recovery_required) }
+            return@launchOperation
+        }
         history?.close()
         history = null
         try { host.ledger.deleteSession(id) }
@@ -135,7 +132,6 @@ internal class ChatSessionOwner(
             history = requireNotNull(host.sessionStore).openHistory(id)
             throw error
         }
-        imageAttachments?.deleteSession(id)
         val sessions = requireNotNull(host.sessionStore).sessionIds()
         selectInternal(sessions.firstOrNull(), sessions)
     }

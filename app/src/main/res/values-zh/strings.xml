@@ -315,4 +315,5 @@
     <string name="chat_image_failed">生图已停止或失败。请检查模型配置和服务状态。不会自动重试；服务端可能已计费。</string>
     <string name="chat_image_unavailable">保存的图片缺失或无效；未重新发起生图请求。</string>
     <string name="chat_image_description">为当前会话生成的图片</string>
+    <string name="chat_delete_recovery_required">此会话仍有待处理任务或结果未知的调用。请先处理恢复操作（包括较早消息），再删除会话。</string>
 </resources>

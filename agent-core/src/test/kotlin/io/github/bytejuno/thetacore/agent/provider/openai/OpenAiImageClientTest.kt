@@ -16,6 +16,19 @@ import java.util.Base64
 import java.util.concurrent.TimeUnit
 
 class OpenAiImageClientTest {
+    @Test fun publicAddressRangesDoNotRejectAdjacentPublicNetworks() {
+        for (host in listOf("192.0.78.24", "198.51.1.1", "203.0.114.1", "8.8.8.8",
+            "192.0.0.9", "192.0.0.10", "192.0.1.1", "192.0.3.1", "198.51.99.255", "198.51.101.0",
+            "203.0.112.255", "203.0.114.0", "2001:4860:4860::8888", "2606:4700:4700::1111",
+            "2001:1::1", "2001:3::1", "2001:4:112::1", "2001:20::1", "2001:30::1", "3fff:1000::1")) {
+            assertTrue(host, publicImageAddress(InetAddress.getByName(host)))
+            assertEquals(listOf(InetAddress.getByName(host)), PublicImageDns(Dns { listOf(InetAddress.getByName(host)) }).lookup("image.test"))
+        }
+        for (host in listOf("192.0.0.8", "192.0.2.1", "198.51.100.1", "203.0.113.1",
+            "192.0.2.255", "198.51.100.255", "203.0.113.255", "2001:db8::1",
+            "2001:2::1", "2001:1::4", "2001:10::1", "2002:7f00:1::1", "3fff::1", "3fff:fff::1"))
+            assertFalse(host, publicImageAddress(InetAddress.getByName(host)))
+    }
     private val bytes = byteArrayOf(1, 2, 3, 4)
     private fun snapshot(base: String) = OpenAiRunSnapshot(OpenAiProviderSettings("image", base, "image-model"), ApiKeyCredentials("synthetic-image-key"))
     private fun response(body: String, code: Int = 200) = MockResponse.Builder().code(code).body(body).build()

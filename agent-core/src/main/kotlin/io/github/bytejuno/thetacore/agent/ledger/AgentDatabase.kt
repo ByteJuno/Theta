@@ -125,7 +125,7 @@ class AgentDatabase private constructor(
 
     companion object {
         const val FILE_NAME = "agent.db"
-        const val SCHEMA_VERSION = 4
+        const val SCHEMA_VERSION = 5
         private const val APPLICATION_ID = 0x54485441
         // On POSIX, closing ANY descriptor of a locked file can drop this process's lock.
         // Reject duplicate instances before even opening a second descriptor.
@@ -150,6 +150,7 @@ class AgentDatabase private constructor(
             createHistorySchema(connection)
             createDeletionSchema(connection)
             createQuarantineSchema(connection)
+            createPrivateImageSchema(connection)
             connection.execute("PRAGMA application_id=$APPLICATION_ID")
             connection.execute("PRAGMA user_version=$SCHEMA_VERSION")
         }
@@ -166,6 +167,10 @@ class AgentDatabase private constructor(
             // A missing contents row must still be able to carry a durable quarantine.
             connection.execute("CREATE TABLE quarantined_contents (hash TEXT PRIMARY KEY NOT NULL) WITHOUT ROWID")
         }
+        private fun createPrivateImageSchema(connection: SQLiteConnection) {
+            connection.execute("CREATE TABLE private_image_attempts (session_id TEXT NOT NULL, call_id TEXT NOT NULL, size INTEGER, hash TEXT, PRIMARY KEY(session_id,call_id)) WITHOUT ROWID")
+            connection.execute("CREATE TABLE private_image_chunks (session_id TEXT NOT NULL, call_id TEXT NOT NULL, ordinal INTEGER NOT NULL, bytes BLOB NOT NULL, PRIMARY KEY(session_id,call_id,ordinal), FOREIGN KEY(session_id,call_id) REFERENCES private_image_attempts(session_id,call_id) ON DELETE CASCADE) WITHOUT ROWID")
+        }
         /** Only recognized SQLite schemas are upgraded; legacy files are never imported. */
         fun upgradeSchema(connection: SQLiteConnection, oldVersion: Int, newVersion: Int) {
             connection.verifyWriteConfiguration()
@@ -173,7 +178,8 @@ class AgentDatabase private constructor(
                 connection.longValue("PRAGMA application_id") == APPLICATION_ID.toLong())
             if (oldVersion == 1) createHistorySchema(connection)
             if (oldVersion < 3) createDeletionSchema(connection)
-            createQuarantineSchema(connection)
+            if (oldVersion < 4) createQuarantineSchema(connection)
+            createPrivateImageSchema(connection)
             connection.execute("PRAGMA user_version=$SCHEMA_VERSION")
         }
 

@@ -21,12 +21,45 @@ import java.nio.file.Files
 import java.util.concurrent.atomic.AtomicInteger
 
 class ChatSessionOwnerTest {
+    @Test fun deletionRetainsUnknownEffectRecoveryAcrossPagesAndColdOpen() = runBlocking {
+        val root = Files.createTempDirectory("chat-delete-recovery").toFile()
+        val executions = AtomicInteger()
+        try {
+            val first = fixture(root, executions, provider(), tool(executions, ToolResult("unknown", effect = ToolEffect.UNKNOWN)))
+            first.owner.open().join(); first.owner.send("execute").join()
+            await { first.owner.state.value.records.values.any { it.pending != null } }
+            val call = first.owner.state.value.records.values.single()
+            first.owner.decide(call.callId, call.pending!!.id, Decision.ALLOW_ONCE).join()
+            await { !first.owner.state.value.active }
+            val sessionId = first.owner.state.value.sessionId!!
+            assertEquals(1, first.owner.state.value.recoveries.size)
+            first.owner.deleteCurrentSession().join()
+            assertTrue(first.store.sessionIds().contains(sessionId))
+            assertEquals(sessionId, first.owner.state.value.sessionId)
+            assertEquals(1, first.host.ledger.pendingRecoveries().size)
+            first.close()
+            val cold = fixture(root, executions, provider(false))
+            cold.owner.open().join()
+            repeat(22) {
+                cold.owner.send("text only").join(); await { !cold.owner.state.value.active }
+            }
+            assertFalse(cold.owner.state.value.records.containsKey(call.callId))
+            cold.owner.deleteCurrentSession().join()
+            assertTrue(cold.store.sessionIds().contains(sessionId))
+            assertEquals(1, cold.host.ledger.pendingRecoveries().size)
+            while (call.callId !in cold.owner.state.value.records && cold.owner.state.value.older != null)
+                cold.owner.older().join()
+            assertTrue(cold.owner.state.value.recoveries.containsKey(call.callId))
+            assertEquals(Effect.UNKNOWN, cold.host.ledger.get(call.callId)!!.result!!.effect)
+            assertEquals(1, executions.get())
+            cold.close()
+        } finally { root.deleteRecursively() }
+    }
     @Test fun imageToolUsesNormalApprovalStoresPrivatelyAndColdOpenDoesNotGenerate() = runBlocking {
         val root = Files.createTempDirectory("chat-images").toFile()
         val executions = AtomicInteger()
         val payload = byteArrayOf(1, 2, 3)
-        val attachments = ImageAttachments(root)
-        val imageTool = io.github.bytejuno.thetacore.plugin.tools.HostImageGenerationTool({
+        fun imageTool(attachments: ImageAttachments) = io.github.bytejuno.thetacore.plugin.tools.HostImageGenerationTool({
             OpenAiRunSnapshot(OpenAiProviderSettings("images", "https://example.invalid/v1", "images"), ApiKeyCredentials("image-key"))
         }, attachments, { _, prompt ->
             assertEquals("画一只在窗边睡觉的猫", prompt)
@@ -49,7 +82,8 @@ class ChatSessionOwnerTest {
         }
         try {
             val first = fixture(root, executions, model)
-            first.host.catalog.registerHost(IMAGE_TOOL_KEY, "1", imageTool)
+            val attachments = ImageAttachments(first.store.privateImages)
+            first.host.catalog.registerHost(IMAGE_TOOL_KEY, "1", imageTool(attachments))
             first.owner.open().join(); first.owner.send("画一只在窗边睡觉的猫").join()
             await { first.owner.state.value.records.values.any { it.pending != null } }
             val call = first.owner.state.value.records.values.single()
@@ -67,10 +101,10 @@ class ChatSessionOwnerTest {
             assertEquals(sessionId, cold.owner.state.value.sessionId)
             assertEquals(2, requests.get()); assertEquals(1, executions.get())
             assertEquals(IMAGE_COMPLETE, cold.owner.state.value.records.getValue(call.callId).result!!.text)
-            assertArrayEquals(payload, ImageAttachments(root).read(sessionId, call.callId))
+            assertArrayEquals(payload, ImageAttachments(cold.store.privateImages).read(sessionId, call.callId))
             cold.owner.deleteCurrentSession().join()
             assertFalse(cold.store.sessionIds().contains(sessionId))
-            assertNull(ImageAttachments(root).read(sessionId, call.callId))
+            assertNull(ImageAttachments(cold.store.privateImages).read(sessionId, call.callId))
             assertTrue(cold.failures.toString(), cold.failures.isEmpty())
             cold.close()
         } finally { root.deleteRecursively() }
@@ -106,7 +140,7 @@ class ChatSessionOwnerTest {
         val store = AndroidAgentStore.open(root, BundledSQLiteDriver(), fault)
         val budget = PluginExecutionBudget()
         val host = HostToolBridgeRoot(budget, hostTool).initialize { store }
-        return Fixture(store, budget, host, provider, ImageAttachments(root))
+        return Fixture(store, budget, host, provider, ImageAttachments(store.privateImages))
     }
     private inner class Fixture(val store: AndroidAgentStore, val budget: PluginExecutionBudget,
         val host: HostToolExecutionService, provider: ModelProvider, images: ImageAttachments) {
@@ -280,6 +314,12 @@ class ChatSessionOwnerTest {
             assertEquals(count, requests.get())
             assertEquals(checkpoint.id, cold.owner.state.value.checkpoint!!.id)
             val selection = requireNotNull(cold.owner.state.value.recovery)
+            val retainedSession = cold.owner.state.value.sessionId!!
+            cold.owner.deleteCurrentSession().join()
+            assertTrue(cold.store.sessionIds().contains(retainedSession))
+            assertEquals(selection, cold.owner.state.value.recovery)
+            assertEquals(R.string.chat_delete_recovery_required, cold.owner.state.value.error)
+            assertEquals(count, requests.get())
             cold.owner.recover(selection, ChatRecoveryAction.CONTINUE_SUMMARY, confirmed = false).join()
             assertEquals(count, requests.get())
             cold.owner.recover(selection, ChatRecoveryAction.CONTINUE_SUMMARY, confirmed = true).join()

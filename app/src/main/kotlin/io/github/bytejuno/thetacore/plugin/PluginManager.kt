@@ -96,9 +96,9 @@ internal class PluginManager(context: Context) {
     suspend fun initializeHostTools(): HostToolExecutionService =
         hostToolBridge.initialize(io.github.bytejuno.thetacore.plugin.tools.AndroidScreenBackend(app),
             AndroidInvocationClock(app, executionBudget),
-            imageTool = io.github.bytejuno.thetacore.plugin.tools.HostImageGenerationTool(
+            imageTool = { store -> io.github.bytejuno.thetacore.plugin.tools.HostImageGenerationTool(
                 io.github.bytejuno.thetacore.provider.OpenAiSettingsStore.images(app)::snapshotForNewRun,
-                io.github.bytejuno.thetacore.chat.ImageAttachments(app.noBackupFilesDir))) {
+                io.github.bytejuno.thetacore.chat.ImageAttachments((store as AndroidAgentStore).privateImages)) }) {
             AndroidAgentStore.open(app)
         }
     private val stageCleanup = PluginStageCleanup()

@@ -95,7 +95,7 @@ class SessionBlobTest {
         assertFailsWith<IllegalArgumentException> { f.ledger.deleteSession("session") }
         f.ledger.recordActualExit(ready.callId, claim.ticket!!.attemptId, "exited")
         val before = f.ledger.get(ready.callId)!!
-        f.ledger.deleteSession("session")
+        assertFailsWith<IllegalArgumentException> { f.ledger.deleteSession("session") }
         f.reopen()
         val after = f.ledger.get(ready.callId)!!
         assertEquals(before, after)
@@ -103,6 +103,7 @@ class SessionBlobTest {
         assertEquals("screen", after.isolation!!.resource)
         assertEquals(Decision.ALLOW_ALWAYS, after.receipts.single().decision)
         assertIs<Mutation.Applied>(f.ledger.resolveRecovery(after.callId, RecoveryResolution.VERIFIED_CLEAR))
+        f.ledger.deleteSession("session")
         f.reopen("epoch-3")
         assertEquals(Effect.UNKNOWN, f.ledger.get(after.callId)!!.result!!.effect)
         assertEquals(RecoveryResolution.VERIFIED_CLEAR, f.ledger.get(after.callId)!!.isolation!!.resolution)
@@ -241,7 +242,10 @@ class SessionBlobTest {
             assertEquals("screen", before.isolation!!.resource)
             assertEquals(Decision.ALLOW_ALWAYS, before.receipts.single().decision)
             f.store.close()
-            sql(f.directory) { it.execute("DROP TABLE quarantined_contents"); it.execute("PRAGMA user_version=3") }
+            sql(f.directory) {
+                it.execute("DROP TABLE private_image_chunks"); it.execute("DROP TABLE private_image_attempts")
+                it.execute("DROP TABLE quarantined_contents"); it.execute("PRAGMA user_version=3")
+            }
             val ref = output.stored.raw
             damageContent(f.directory, ref.contentHash, damage)
             repeat(2) { pass ->
@@ -258,7 +262,10 @@ class SessionBlobTest {
     @Test fun versionTwoUpgradePreservesContentAndEnablesDeletion(): Unit = Fixture().use { f ->
         val (record, ref) = publish(f)
         f.store.close()
-        sql(f.directory) { it.execute("DROP TABLE quarantined_contents"); it.execute("DROP TABLE deleted_sessions"); it.execute("PRAGMA user_version=2") }
+        sql(f.directory) {
+            it.execute("DROP TABLE private_image_chunks"); it.execute("DROP TABLE private_image_attempts")
+            it.execute("DROP TABLE quarantined_contents"); it.execute("DROP TABLE deleted_sessions"); it.execute("PRAGMA user_version=2")
+        }
         f.reopen()
         assertEquals(record, f.ledger.get(record.callId))
         assertTrue(f.ledger.readSessionBlob("session", ref.id, 0).second.isNotEmpty())

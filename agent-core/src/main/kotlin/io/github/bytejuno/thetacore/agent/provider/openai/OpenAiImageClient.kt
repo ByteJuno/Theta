@@ -39,12 +39,24 @@ internal fun publicImageAddress(address: InetAddress): Boolean {
         val first = bytes[0]; val second = bytes[1]
         return first !in setOf(0, 10, 127) && first < 224 &&
             !(first == 100 && second in 64..127) && !(first == 169 && second == 254) &&
-            !(first == 172 && second in 16..31) && !(first == 192 && second in setOf(0, 168)) &&
-            !(first == 198 && second in setOf(18, 19, 51)) && !(first == 203 && second == 0)
+            !(first == 172 && second in 16..31) && !(first == 192 && second == 168) &&
+            !(first == 192 && second == 0 && (bytes[2] == 2 ||
+                (bytes[2] == 0 && bytes[3] !in setOf(9, 10)))) &&
+            !(first == 192 && second == 88 && bytes[2] == 99) &&
+            !(first == 198 && (second in 18..19 || (second == 51 && bytes[2] == 100))) &&
+            !(first == 203 && second == 0 && bytes[2] == 113)
     }
-    return bytes.size == 16 && bytes[0] in 0x20..0x3f &&
-        !(bytes[0] == 0x20 && (bytes[1] == 0x02 || (bytes[1] == 0x01 &&
-            (bytes[2] <= 1 || (bytes[2] == 0x0d && bytes[3] == 0xb8)))))
+    if (bytes.size != 16 || bytes[0] !in 0x20..0x3f) return false
+    if (bytes[0] == 0x20 && bytes[1] == 0x01) {
+        if (bytes[2] == 0x0d && bytes[3] == 0xb8) return false
+        if (bytes[2] <= 1) return bytes[2] == 0 && (
+            bytes[3] == 3 ||
+                (bytes[3] == 4 && bytes[4] == 1 && bytes[5] == 0x12) ||
+                bytes[3] in 0x20..0x3f ||
+                (bytes[3] == 1 && bytes.subList(4, 15).all { it == 0 } && bytes[15] in 1..3))
+    }
+    return !(bytes[0] == 0x20 && bytes[1] == 0x02) &&
+        !(bytes[0] == 0x3f && bytes[1] == 0xff && bytes[2] < 0x10)
 }
 
 internal class PublicImageDns(private val delegate: Dns = Dns.SYSTEM) : Dns {

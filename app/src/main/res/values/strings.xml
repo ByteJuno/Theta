@@ -315,4 +315,5 @@
     <string name="chat_image_failed">Image generation stopped or failed. Check model settings and service availability. No automatic retry; the service may already have charged this request.</string>
     <string name="chat_image_unavailable">Saved image is missing or invalid. No new generation request was sent.</string>
     <string name="chat_image_description">Image generated for this conversation</string>
+    <string name="chat_delete_recovery_required">This conversation still has work or an unknown result to resolve. Review its recovery actions (including older messages) before deleting.</string>
 </resources>
