@@ -1,12 +1,12 @@
 # Issue 83 — foreground task execution
 
-## Source and artifact
+## Source and artifact (original writer validation)
 
 - Implementation: `1c8aa5dd29cc35541c814c092d6492bfefb48e42`.
 - Git tree: `06e9ca219b108f5822d23b61ff5a093c8dae124d`.
 - Base: `a9194436561fd2a3f3e581fd95f1e4af38012b90` (PR98 merged).
 - Debug APK SHA-256: `46839ec0a46bcca348c068fc781d599c420d6ac01b93a55678b718f72b2fe6ec`.
-- The following documentation-only commit does not change tested source or APK identity.
+- Writer documentation-only commit `f98f663e75f2920ad0c8acc90b1a6b5a367d77e4` did not change that tested source or APK identity. The reviewer correction below changes source; this APK hash does not validate the correction.
 
 ## Delivered scope
 
@@ -47,3 +47,12 @@ References informing this implementation:
 - Type-specific timeouts: https://developer.android.com/develop/background-work/services/fgs/timeout
 - Background-start restrictions: https://developer.android.com/develop/background-work/services/fgs/launch
 - Now in Android notification implementation (permission check, channels, immutable activity intent; adapted to platform notification APIs, not its WorkManager news-sync model): https://github.com/android/nowinandroid/blob/main/core/notifications/src/main/kotlin/com/google/samples/apps/nowinandroid/core/notifications/SystemTrayNotifier.kt
+
+## Reviewer correction (round 1)
+
+- Source commit: `9bc251dab98a5310f3a4ac1d6b3415a3d5bde6d0`; tree: `e5f28e6a0f411b5b0936de3d72c7f9a79ba9d145`.
+- A temporary JVM probe reproduced an internal approval with `state=RUNNING`, `pendingInternal=true`, and presence still `Tool(name=host_clock)`. The foreground service therefore did not switch to the approval notification while this worker waited. Progress now excludes workers with pending internal approvals from active work, while other running workers continue to retain foreground presence. Ledger state and execution leases are unchanged.
+- Added regression coverage for internal allow/deny and the transition from a working parallel sibling to only a waiting worker.
+- Validation through the authorized GPU entry: `/opt/homelab-report/theta-gpu-test :app:testDebugUnitTest --tests '*ChatSessionOwnerTest*'`; `GRADLE_EXIT=0`, `TESTS total=33 failed=0`. The commit contains exactly the production/test changes exercised by this run. This summary update is documentation only.
+- Probe history: the first attempt had a test-scaffold compilation error (suspend initialization in a property initializer), with zero tests executed. After correcting the scaffold, two probes ran: the internal-approval defect reproduced; the separate hypothesis that an ordinary UNKNOWN result stops foreground presence was disproved (`requests=2`, `EXIT_CONFIRMED`, `recoveryPending=false`, presence `Model`). That second probe's hypothesis assertion failed and is not counted as a passing check. No existing assertions or deadlines were relaxed.
+- Probes remain untracked; raw evidence is retained in the reviewer execution transcript. No corrected APK was built in this review. Final-build lifecycle/rendering/CI gates remain external; visual quality and device behavior are still unverified. Writer return count remains zero.
