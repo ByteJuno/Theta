@@ -1,7 +1,7 @@
 # Issue 111 — bounded chat diagnostics
 
-Implementation commit: `6c35b72d370f227ed4b1b05a21cba86027dd8814`. Base: `763da3f6d62a06aa0ec8361298653b57f44b9536`.
-The following documentation commit changes only this summary; all 346 tracked non-document source digests match the tested tree. Debug APK SHA-256: `49fa464d0d63815903639579f64243ff9bbeda7e0cf702eabfc3b6310e8fb34b`.
+Validated merge implementation: `7d59f6fd82ba0fa037baa197611a3f3573b6bdf3`, integrating main `029adaf75c8118e27a33cbe6aed6057f3b587b0b` into the original diagnostic implementation.
+The following documentation commit changes only this summary; all 350 tracked non-document source digests match the tested tree. Debug APK SHA-256: `a64166e18b8ccce1db4bf5c131b5f7b05f668a81acaf7cfd232ee65cbfbcab39`.
 
 ## Delivered behavior
 
@@ -13,15 +13,16 @@ Reasons over 512 UTF-16 code units are discarded before scanning or copying. Sho
 
 ## Verification
 
-Final command (strict configuration cache): `run-validation.py issue111-4b6decd9-final :app:testDebugUnitTest --tests '*ChatDiagnosticsTest' --tests '*ChatSessionOwnerTest.diagnosticsFollowFailureColdOpenSessionSwitchAndLaterSuccess' --tests '*ChatRecoveryTest' :app:assembleDebug :app:lintDebug`.
+Final command (strict configuration cache): `run-validation.py issue111-b155fe97-merge :app:testDebugUnitTest --tests '*ChatDiagnosticsTest' --tests '*ChatSessionOwnerTest.diagnosticsFollowFailureColdOpenSessionSwitchAndLaterSuccess' --tests '*ChatRecoveryTest' --tests '*ProviderModelsTest' :app:assembleDebug :app:lintDebug`.
 
-- **9 tests / 9 passed / 0 failures / 0 errors / 0 skipped**, in one final invocation; 48.22 seconds, configuration cache reused. Five formatter/projection cases include every model error code, both locales, bounded output and hostile key/header/body/stack inputs. Three existing recovery cases pass.
+- **13 tests / 13 passed / 0 failures / 0 errors / 0 skipped**, in one final invocation; 76.83 seconds, strict configuration cache stored. Five formatter/projection cases include every model error code, both locales, bounded output and hostile key/header/body/stack inputs. Three recovery and four provider model-list state cases pass.
 - One real SQLite/owner regression covers failure, cold reopen without a new request, switching to empty and failed sessions, hiding diagnostics during a blocked new request, later successful completion and reselecting the session. Provider responses are synthetic; this is not real-provider acceptance.
-- Debug APK built; bilingual Kotlin/XML guard passed for 369 keys. Lint: **0 errors / 28 warnings**.
-- Existing API33 direct-JDK scanner: **392 agent-core classes, 95 JDK classes, 246 members, 0 violations**. Compiler-linkage exclusions bound to this exact APK and compiled-class hashes. The agent-core sources are unchanged; this is neither API33 device execution nor whole-app certification. App API checks are included in Lint.
-- Initial failures preserved outside Git: the UI guard rejected protocol literals colocated with a composable; pure conversion was separated without weakening the guard. The next run exposed checkpoint-delimiter normalization returning the omission label; the mapping was corrected with the original assertion retained. Final checks pass.
+- Debug APK built; bilingual Kotlin/XML guard passed. Lint: **0 errors / 28 warnings**.
+- Existing API33 direct-JDK scanner: **401 agent-core classes, 97 JDK classes, 248 members, 0 violations**. Compiler-linkage exclusions bound to this exact APK and compiled-class hashes; this is neither API33 device execution nor whole-app certification. App API checks are included in Lint.
+- The reviewed RETURN was a merge conflict in both string files. Resolution retains the union of both parents' resource names and exact values (365 string entries per locale, no duplicates). An exact source comparison confirms the original ChatScreen chat/diagnostic body and main's ProviderScreen body are preserved. No diagnostic logic or existing assertion was changed.
+- Historical initial guard/mapping failures remain preserved outside Git. This round's first merge command rejected a missing committer identity before modifying the tree; the retry used the authorized command-local identity. Raw failure and conflict records are retained. All final checks pass.
 
-Raw logs, XML, source/class manifests and APK are under `event-runs/4b6decd9-6ca2-4bbf-87ce-3cd8f6f7dadf` and `validation-issue11/issue111-4b6decd9-*`, outside Git. No test deadline or assertion was weakened. No protected/build/workflow file changed.
+Current raw logs, XML, source/class manifests and APK are under `event-runs/b155fe97-b2d1-46c1-8452-bd6174802ae8` and `validation-issue11/issue111-b155fe97-merge`, outside Git. Historical evidence remains under the original `4b6decd9-6ca2-4bbf-87ce-3cd8f6f7dadf` run. No test deadline or assertion was weakened. No protected/build/workflow file changed.
 
 ## Remaining acceptance
 
