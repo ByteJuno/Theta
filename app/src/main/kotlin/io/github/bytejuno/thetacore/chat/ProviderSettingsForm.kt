@@ -2,6 +2,44 @@ package io.github.bytejuno.thetacore.chat
 
 import io.github.bytejuno.thetacore.agent.provider.openai.*
 import io.github.bytejuno.thetacore.R
+import androidx.compose.runtime.*
+import io.github.bytejuno.thetacore.provider.OpenAiSettingsStore
+import io.github.bytejuno.thetacore.provider.ProviderSettingsException
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+
+/** State shared by the profile UI and its load/recovery actions; contains no saved key. */
+internal class ProviderSettingsEditor {
+    var form by mutableStateOf(ProviderSettingsForm())
+    var loading by mutableStateOf(true)
+        private set
+    var loadError by mutableStateOf<Int?>(null)
+        private set
+    var replacingUnreadable by mutableStateOf(false)
+        private set
+    val editable: Boolean get() = !loading && loadError == null
+
+    suspend fun load(store: OpenAiSettingsStore) {
+        loading = true; loadError = null; replacingUnreadable = false
+        try {
+            form = withContext(Dispatchers.IO) { ProviderSettingsForm.loaded(store.readSettings()) }
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (failure: ProviderSettingsException) {
+            if (failure.failure == ProviderSettingsException.Failure.NOT_CONFIGURED) form = ProviderSettingsForm()
+            else loadError = providerFailureText(failure.failure)
+        } catch (_: Exception) { loadError = R.string.chat_provider_read_failed }
+        finally { loading = false }
+    }
+
+    /** Explicit UI action only. Disk is untouched until a new key is entered and saved. */
+    fun beginReplacement() {
+        if (loading || loadError == null) return
+        form = ProviderSettingsForm()
+        replacingUnreadable = true
+        loadError = null
+    }
+}
 
 internal enum class OutputTokenField(val wire: String, val label: Int) {
     COMPLETION("max_completion_tokens", R.string.chat_compat_completion_tokens),

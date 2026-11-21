@@ -40,12 +40,11 @@ private fun ProviderProfile(host: ThetaApplication, imageProfile: Boolean,
     val strings = uiStrings()
     val scope = rememberCoroutineScope()
     val store = if (imageProfile) host.imageSettings else host.providerSettings
-    var form by remember { mutableStateOf(ProviderSettingsForm()) }
+    val editor = remember { ProviderSettingsEditor() }
+    var form by editor::form
     // Only a newly typed key can enter this non-saveable field.
     var secret by remember { mutableStateOf("") }
-    var loading by remember { mutableStateOf(true) }
     var busy by remember { mutableStateOf(false) }
-    var loadError by remember { mutableStateOf<Int?>(null) }
     var error by remember { mutableStateOf<Int?>(null) }
     var reload by remember { mutableStateOf(0) }
     var advanced by remember { mutableStateOf(false) }
@@ -53,19 +52,9 @@ private fun ProviderProfile(host: ThetaApplication, imageProfile: Boolean,
     val modelLists = remember(scope, store) { ProviderModels(scope, store::fetchModels) }
     val discovery by modelLists.state.collectAsState()
     DisposableEffect(modelLists) { onDispose { modelLists.invalidate() } }
-    LaunchedEffect(store, reload) {
-        loading = true; loadError = null
-        try {
-            form = withContext(Dispatchers.IO) { ProviderSettingsForm.loaded(store.readSettings()) }
-        } catch (cancelled: CancellationException) { throw cancelled }
-        catch (failure: ProviderSettingsException) {
-            if (failure.failure == ProviderSettingsException.Failure.NOT_CONFIGURED) form = ProviderSettingsForm()
-            else loadError = providerFailureText(failure.failure)
-        } catch (_: Exception) { loadError = R.string.chat_provider_read_failed }
-        finally { loading = false }
-    }
+    LaunchedEffect(store, reload) { editor.load(store) }
     fun resetModels() { modelLists.invalidate(); filter = "" }
-    val editable = !busy && !loading && loadError == null
+    val editable = !busy && editor.editable
     val hasKey = secret.isNotEmpty() || form.canReuseKey
     AlertDialog(onDismissRequest = { if (!busy) { resetModels(); onClose() } }, title = {
         Text(strings.get(R.string.chat_provider))
@@ -83,14 +72,19 @@ private fun ProviderProfile(host: ThetaApplication, imageProfile: Boolean,
             Text(strings.get(if (imageProfile) R.string.chat_image_profile else R.string.chat_text_profile),
                 style = MaterialTheme.typography.titleMedium)
             if (imageProfile) Text(strings.get(R.string.chat_image_settings_notice))
-            if (loading) {
+            if (editor.loading) {
                 LinearProgressIndicator(Modifier.fillMaxWidth())
                 Text(strings.get(R.string.chat_provider_loading))
             }
-            loadError?.let {
+            editor.loadError?.let {
                 Text(strings.get(it), color = MaterialTheme.colorScheme.error)
                 TextButton(onClick = { reload++ }) { Text(strings.get(R.string.chat_provider_reload)) }
+                TextButton(onClick = {
+                    resetModels(); secret = ""; error = null; editor.beginReplacement()
+                }) { Text(strings.get(R.string.chat_provider_reenter)) }
             }
+            if (editor.replacingUnreadable) Text(strings.get(R.string.chat_provider_reenter_notice),
+                style = MaterialTheme.typography.bodySmall)
             OutlinedTextField(form.endpoint, { resetModels(); error = null; form = form.copy(endpoint = it) },
                 enabled = editable, modifier = Modifier.fillMaxWidth(), label = { Text(strings.get(R.string.chat_endpoint)) })
             OutlinedTextField(secret, { resetModels(); error = null; secret = it }, enabled = editable,
