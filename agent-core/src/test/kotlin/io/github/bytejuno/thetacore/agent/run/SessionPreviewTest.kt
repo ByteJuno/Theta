@@ -49,6 +49,38 @@ class SessionPreviewTest {
         assertEquals("x".repeat(59) + "…", compactSessionPreview(sequenceOf("x".repeat(61))))
     }
 
+    @Test fun shapingCharactersPreserveEmojiAndWordsAcrossColdOpen() {
+        val file = database()
+        val examples = listOf(
+            "👩\u200D💻",
+            "👨\u200D👩\u200D👧\u200D👦",
+            "\uD83C\uDFF4\uDB40\uDC67\uDB40\uDC62\uDB40\uDC65\uDB40\uDC6E\uDB40\uDC67\uDB40\uDC7F",
+            "می\u200Cروم",
+        )
+        AgentDatabase.open(file, BundledSQLiteDriver()).use { db ->
+            examples.forEachIndexed { index, text ->
+                SqliteRunHistory.create(db, "shaping-$index").use { h ->
+                    h.append(0, listOf(user("\n$text\t")))
+                }
+            }
+            SqliteRunHistory.create(db, "invisible").use { h ->
+                h.append(0, listOf(user("\u200C\u200D \uDB40\uDC67\uDB40\uDC7F")))
+                h.append(1, listOf(user("later text")))
+            }
+        }
+        AgentDatabase.open(file, BundledSQLiteDriver()).use { db ->
+            examples.forEachIndexed { index, text -> assertEquals(text, db.sessionPreview("shaping-$index").text) }
+            assertNull(db.sessionPreview("invisible").text)
+            assertEquals("1", db.sessionPreviewValue("invisible"))
+        }
+        assertEquals("a b", compactSessionPreview(sequenceOf("a\u202E\t\u200D b")))
+        val bounded = compactSessionPreview(sequenceOf("👩\u200D💻".repeat(100)))
+        assertEquals(60, bounded.codePointCount(0, bounded.length))
+        assertTrue(bounded.endsWith("…"))
+        assertEquals(bounded, compactSessionPreview(sequenceOf(bounded)))
+        assertTrue(HistoryCodec.isUtf8(bounded))
+    }
+
     @Test fun legacyOversizedFirstBatchAndUnreadCorruptHistoryAreNeverDecodedByList() {
         val file = database()
         AgentDatabase.open(file, BundledSQLiteDriver()).use { db ->

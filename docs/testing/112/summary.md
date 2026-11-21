@@ -1,13 +1,13 @@
 # Issue 112 — bounded conversation previews
 
-Implementation: `0715832bf22b3263e1adbda39c48653ef5dad0fd` (includes verified main `029adaf75c8118e27a33cbe6aed6057f3b587b0b`).
+Writer implementation: `0715832bf22b3263e1adbda39c48653ef5dad0fd` (includes verified main `029adaf75c8118e27a33cbe6aed6057f3b587b0b`). Reviewer correction and its separate evidence are recorded below.
 Debug APK SHA-256: `05c8faa0cb487c401485382c26394c1889dc04fcf12cd56a6ea97286668656a4`.
 
 The conversation list now shows up to 60 Unicode code points from the first USER text, collapses whitespace/control characters, preserves surrogate pairs, and adds an ellipsis when clipped. Rows use stable session-ID keys, one-line layout ellipsis, a bilingual current-conversation label and selected semantics. The existing numbered label remains for empty/legacy/unreadable previews. Pagination uses its own database cursor, independent of the selected row, and hides Load more after exhaustion.
 
 New sessions seed a tiny preview marker in the same create transaction. The first USER text updates that value in the same transaction as its history append; subsequent text never overwrites it. The shared schema remains version 5. Existing deletion removes the value/chunks atomically with history and retains tombstones. Old sessions without metadata deliberately retain numbered labels, even after a later append; no backfill/history decoding is attempted. A list page reads at most 50 preview values, each projected to at most 1025 bytes before CursorWindow, rejects oversize/type/ordinal/frame/checksum damage and returns fallback. No session handle or HEAD/batch is opened by preview reads.
 
-Validation on this exact source:
+Validation on that writer implementation:
 
 - 20/20 targeted cases passed in one final invocation: SessionPreviewTest 6, SqliteRunHistoryTest 9, HistoryChunkBoundsTest 3, ChatSessionOwnerTest 2. Zero failures/errors/skips. Commands selected these classes and the session preview/history paging owner methods under `:agent-core:test` and `:app:testDebugUnitTest`.
 - Covers cold reopen, first-vs-later input, blank text, 500000 emoji input, 55-session storage/53-session owner paging, switching, deletion/tombstone/new-session behavior and commit/rollback failure injection. A >8 MiB legacy first batch plus damaged HEAD remains listable with fallback. Listing does not change HistoryIo (including messagesDecoded); hostile metadata projection stays bounded.
@@ -20,3 +20,11 @@ Failures retained: initial fixture referenced nonexistent Role.SYSTEM (changed t
 Visual/device acceptance is **unverified**: no dedicated writer rendering lease/entry was confirmed; personal phone and shared emulators were not operated. Reviewer still needs the final APK's list/open/select/load-more/delete path, fallback/current labels, Chinese/English, narrow screen/large font and light/dark rendering, plus prescribed emulator regression and final-head CI. No Release/R8, physical power-loss or real-provider test. Writer has not merged this PR.
 
 AndroidX LazyDsl.kt's itemsIndexed key contract was inspected: stable unique Bundle-saveable session IDs keep item identity and scroll anchoring across list updates (https://github.com/androidx/androidx/blob/androidx-main/compose/foundation/foundation/src/commonMain/kotlin/androidx/compose/foundation/lazy/LazyDsl.kt). No new library or protected/build/workflow file was changed.
+
+## Review round 1 — 0 prior returns
+
+- The temporary `SessionPreviewUnicodeProbe` reproduced two failures on PR head `8988a83b3a836b22326ab403aeb603d86bce0a1b`: cold-open previews split woman-technologist/family emoji into separate glyphs, and England's flag lost all six tag code points. The authorized GPU entry returned `GRADLE_EXIT=1`, `TESTS total=2 failed=2`; both probes printed `identical=false`. The cause was treating shaping joiners and emoji tags as layout controls.
+- The correction preserves U+200C/U+200D and emoji tags after visible content, while retaining whitespace/bidi-control normalization and numbered fallback for isolated invisible input. Added a persistent cold-open regression covering joined emoji, tag flags, Persian text, invisible first input, and the 60-code-point bound.
+- Authorized GPU command: `/opt/homelab-report/theta-gpu-test :agent-core:test --tests '*SessionPreviewTest*' --tests '*SessionPreviewUnicodeProbe*'`. Result: `GRADLE_EXIT=0`, `TESTS total=9 failed=0`; both original probes printed `identical=true`, with all seven flag code points intact. No assertions or timeouts were weakened. Raw output stays in the review transcript and Probe source remains untracked.
+- Tested source SHA-256: `SessionPreview.kt` = `7c711778b16f7f31f3864d2901228518041102150409485972b096ad5935f1de`; `SessionPreviewTest.kt` = `b73c365dc52af5e9073de13b1351871a9b0c3f6b89dc9b9ee0451b9b32444386`. The remaining production/test sources match the writer head.
+- The original fixed API33 scan passed; this correction adds no API calls or dependencies. No APK was produced during review, and the writer APK above predates this correction. Visual acceptance remains unverified; final-source APK, rendering, emulator regression and CI remain the outer merge pipeline's responsibility.

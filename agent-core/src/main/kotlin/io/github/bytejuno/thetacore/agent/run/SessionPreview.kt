@@ -67,8 +67,12 @@ internal fun compactSessionPreview(parts: Sequence<String>): String {
         var i = 0
         while (i < part.length) {
             val cp = part.codePointAt(i); i += Character.charCount(cp)
+            // Joiners and emoji tags carry glyph identity, unlike layout/bidi controls.
+            val shaping = cp in 0x200C..0x200D || cp in 0xE0020..0xE007F
+            // An isolated invisible prefix must not replace the numbered fallback.
+            if (shaping && (count == 0 || space)) continue
             if (Character.isWhitespace(cp) || Character.isSpaceChar(cp) || Character.isISOControl(cp) ||
-                Character.getType(cp) == Character.FORMAT.toInt()) {
+                Character.getType(cp) == Character.FORMAT.toInt() && !shaping) {
                 if (count > 0) space = true
             } else {
                 if (space && !append(' '.code)) return out.toString()
