@@ -1,0 +1,190 @@
+package io.github.bytejuno.thetacore.chat
+
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import io.github.bytejuno.thetacore.*
+import io.github.bytejuno.thetacore.R
+import io.github.bytejuno.thetacore.agent.provider.openai.ModelsRequestException
+import io.github.bytejuno.thetacore.provider.ProviderSettingsException
+import kotlinx.coroutines.*
+
+@Composable
+internal fun ProviderScreen(host: ThetaApplication, onClose: () -> Unit) {
+    var imageProfile by remember { mutableStateOf(false) }
+    // A profile switch disposes every field and cancels its load/fetch scope, even on switch-back.
+    key(imageProfile) {
+        ProviderProfile(host, imageProfile, { imageProfile = it }, onClose)
+    }
+}
+
+internal fun providerFailureText(failure: ProviderSettingsException.Failure): Int = when (failure) {
+    ProviderSettingsException.Failure.NOT_CONFIGURED -> R.string.chat_configure_first
+    ProviderSettingsException.Failure.DECRYPT_FAILED -> R.string.chat_credentials_unavailable
+    ProviderSettingsException.Failure.ENDPOINT_CHANGED -> R.string.chat_provider_new_key
+    ProviderSettingsException.Failure.READ_FAILED, ProviderSettingsException.Failure.INVALID_DATA -> R.string.chat_provider_read_failed
+    ProviderSettingsException.Failure.WRITE_FAILED -> R.string.chat_provider_failed
+}
+
+@Composable
+private fun ProviderProfile(host: ThetaApplication, imageProfile: Boolean,
+    onProfile: (Boolean) -> Unit, onClose: () -> Unit) {
+    val strings = uiStrings()
+    val scope = rememberCoroutineScope()
+    val store = if (imageProfile) host.imageSettings else host.providerSettings
+    var form by remember { mutableStateOf(ProviderSettingsForm()) }
+    // Only a newly typed key can enter this non-saveable field.
+    var secret by remember { mutableStateOf("") }
+    var loading by remember { mutableStateOf(true) }
+    var busy by remember { mutableStateOf(false) }
+    var loadError by remember { mutableStateOf<Int?>(null) }
+    var error by remember { mutableStateOf<Int?>(null) }
+    var reload by remember { mutableStateOf(0) }
+    var advanced by remember { mutableStateOf(false) }
+    var filter by remember { mutableStateOf("") }
+    val modelLists = remember(scope, store) { ProviderModels(scope, store::fetchModels) }
+    val discovery by modelLists.state.collectAsState()
+    DisposableEffect(modelLists) { onDispose { modelLists.invalidate() } }
+    LaunchedEffect(store, reload) {
+        loading = true; loadError = null
+        try {
+            form = withContext(Dispatchers.IO) { ProviderSettingsForm.loaded(store.readSettings()) }
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (failure: ProviderSettingsException) {
+            if (failure.failure == ProviderSettingsException.Failure.NOT_CONFIGURED) form = ProviderSettingsForm()
+            else loadError = providerFailureText(failure.failure)
+        } catch (_: Exception) { loadError = R.string.chat_provider_read_failed }
+        finally { loading = false }
+    }
+    fun resetModels() { modelLists.invalidate(); filter = "" }
+    val editable = !busy && !loading && loadError == null
+    val hasKey = secret.isNotEmpty() || form.canReuseKey
+    AlertDialog(onDismissRequest = { if (!busy) { resetModels(); onClose() } }, title = {
+        Text(strings.get(R.string.chat_provider))
+    }, text = {
+        Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(strings.get(R.string.chat_provider_notice))
+            FlowRow {
+                TextButton(enabled = !busy && imageProfile, onClick = { resetModels(); onProfile(false) }) {
+                    Text(strings.get(R.string.chat_text_profile))
+                }
+                TextButton(enabled = !busy && !imageProfile, onClick = { resetModels(); onProfile(true) }) {
+                    Text(strings.get(R.string.chat_image_profile))
+                }
+            }
+            Text(strings.get(if (imageProfile) R.string.chat_image_profile else R.string.chat_text_profile),
+                style = MaterialTheme.typography.titleMedium)
+            if (imageProfile) Text(strings.get(R.string.chat_image_settings_notice))
+            if (loading) {
+                LinearProgressIndicator(Modifier.fillMaxWidth())
+                Text(strings.get(R.string.chat_provider_loading))
+            }
+            loadError?.let {
+                Text(strings.get(it), color = MaterialTheme.colorScheme.error)
+                TextButton(onClick = { reload++ }) { Text(strings.get(R.string.chat_provider_reload)) }
+            }
+            OutlinedTextField(form.endpoint, { resetModels(); error = null; form = form.copy(endpoint = it) },
+                enabled = editable, modifier = Modifier.fillMaxWidth(), label = { Text(strings.get(R.string.chat_endpoint)) })
+            OutlinedTextField(secret, { resetModels(); error = null; secret = it }, enabled = editable,
+                modifier = Modifier.fillMaxWidth(), label = { Text(strings.get(R.string.chat_key)) },
+                visualTransformation = PasswordVisualTransformation())
+            if (form.saved != null) Text(strings.get(if (form.canReuseKey)
+                R.string.chat_provider_saved_key else R.string.chat_provider_new_key), style = MaterialTheme.typography.bodySmall)
+            OutlinedTextField(form.model, { error = null; form = form.copy(model = it) }, enabled = editable,
+                modifier = Modifier.fillMaxWidth(), label = { Text(strings.get(R.string.chat_model)) })
+            Text(strings.get(R.string.chat_models_manual), style = MaterialTheme.typography.bodySmall)
+            OutlinedButton(enabled = editable && !discovery.loading && form.endpoint.isNotBlank() && hasKey,
+                onClick = { filter = ""; modelLists.load(form.endpoint.trim(), secret, form.canReuseKey) }) {
+                Text(strings.get(if (discovery.loading) R.string.chat_models_loading else R.string.chat_models_fetch))
+            }
+            discovery.settingsFailure?.let { Text(strings.get(providerFailureText(it)), color = MaterialTheme.colorScheme.error) }
+            discovery.failure?.let { failure ->
+                Text(strings.get(when (failure) {
+                    ModelsRequestException.Failure.INVALID_SETTINGS -> R.string.chat_models_invalid_settings
+                    ModelsRequestException.Failure.HTTP -> R.string.chat_models_http_failed
+                    ModelsRequestException.Failure.TIMEOUT -> R.string.chat_models_timeout
+                    ModelsRequestException.Failure.NETWORK -> R.string.chat_models_network_failed
+                    ModelsRequestException.Failure.TOO_LARGE -> R.string.chat_models_too_large
+                    ModelsRequestException.Failure.INVALID_RESPONSE -> R.string.chat_models_invalid_response
+                }), color = MaterialTheme.colorScheme.error)
+            }
+            discovery.models?.let { models ->
+                if (models.isEmpty()) Text(strings.get(R.string.chat_models_empty))
+                else {
+                    OutlinedTextField(filter, { filter = it }, enabled = editable, singleLine = true,
+                        modifier = Modifier.fillMaxWidth(), label = { Text(strings.get(R.string.chat_models_filter)) })
+                    val matches = remember(models, filter) { models.filter { it.contains(filter, ignoreCase = true) } }
+                    if (matches.isEmpty()) Text(strings.get(R.string.chat_models_no_matches))
+                    LazyColumn(Modifier.fillMaxWidth().heightIn(max = 200.dp)) {
+                        items(matches, key = { it }) { name ->
+                            TextButton(enabled = editable, onClick = { form = form.copy(model = name) },
+                                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                                Text(name, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.fillMaxWidth())
+                            }
+                        }
+                    }
+                }
+            }
+            if (!imageProfile) {
+                TextButton(onClick = { advanced = !advanced }, enabled = editable) {
+                    Text(strings.get(if (advanced) R.string.chat_compat_hide else R.string.chat_compat_show))
+                }
+                if (advanced) {
+                    ProviderToggle(R.string.chat_compat_cache, form.explicitCacheControl, editable) {
+                        form = form.copy(explicitCacheControl = it)
+                    }
+                    Text(strings.get(R.string.chat_compat_cache_notice), style = MaterialTheme.typography.bodySmall)
+                    Text(strings.get(R.string.chat_compat_tokens), style = MaterialTheme.typography.labelLarge)
+                    // Stack long protocol identifiers so narrow screens need no horizontal scrolling.
+                    for (field in OutputTokenField.entries) {
+                        FilterChip(selected = form.maxTokensField == field.wire, enabled = editable,
+                            onClick = { form = form.copy(maxTokensField = field.wire) }, label = { Text(strings.get(field.label)) })
+                    }
+                    ProviderToggle(R.string.chat_compat_usage, form.streamUsage, editable) { form = form.copy(streamUsage = it) }
+                    OutlinedTextField(form.reasoningField, { error = null; form = form.withReasoningField(it) },
+                        enabled = editable, modifier = Modifier.fillMaxWidth(),
+                        label = { Text(strings.get(R.string.chat_compat_reasoning)) })
+                    Text(strings.get(R.string.chat_compat_reasoning_notice), style = MaterialTheme.typography.bodySmall)
+                    ProviderToggle(R.string.chat_compat_replay, form.replayReasoning,
+                        editable && form.reasoningField.isNotBlank()) { form = form.copy(replayReasoning = it) }
+                }
+            }
+            error?.let { Text(strings.get(it), color = MaterialTheme.colorScheme.error) }
+            AppLanguageSetting()
+        }
+    }, confirmButton = {
+        Button(enabled = editable && form.endpoint.isNotBlank() && form.model.isNotBlank() && hasKey, onClick = {
+            resetModels(); busy = true; error = null
+            val draft = form; val newKey = secret
+            scope.launch {
+                try {
+                    withContext(Dispatchers.IO) {
+                        val settings = draft.settings(if (imageProfile) IMAGE_PROVIDER_ID else CHAT_PROVIDER_ID, imageProfile)
+                        if (newKey.isEmpty()) store.updateSettings(settings) else store.replace(settings, newKey)
+                    }
+                    secret = ""; onClose()
+                } catch (cancelled: CancellationException) { throw cancelled }
+                catch (failure: ProviderSettingsException) { error = providerFailureText(failure.failure) }
+                catch (_: IllegalArgumentException) { error = R.string.chat_provider_invalid }
+                catch (_: Exception) { error = R.string.chat_provider_failed }
+                finally { busy = false }
+            }
+        }) { Text(strings.get(if (busy) R.string.chat_provider_saving else R.string.chat_save)) }
+    }, dismissButton = { TextButton(onClick = { resetModels(); onClose() }, enabled = !busy) { Text(strings.get(R.string.chat_close)) } })
+}
+
+@Composable
+private fun ProviderToggle(label: Int, checked: Boolean, enabled: Boolean, onChange: (Boolean) -> Unit) {
+    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text(uiStrings().get(label), Modifier.weight(1f).padding(top = 12.dp))
+        Switch(checked = checked, onCheckedChange = onChange, enabled = enabled)
+    }
+}

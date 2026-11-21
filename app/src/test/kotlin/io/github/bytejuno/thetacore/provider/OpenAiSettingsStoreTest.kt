@@ -7,7 +7,11 @@ import io.github.bytejuno.thetacore.agent.provider.openai.*
 import io.github.bytejuno.thetacore.agent.transport.*
 import io.github.bytejuno.thetacore.storage.*
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
@@ -25,6 +29,222 @@ import java.util.concurrent.TimeUnit
 import javax.crypto.KeyGenerator
 
 class OpenAiSettingsStoreTest {
+    @Test fun cancellationWhileReadingSavedKeyNeverStartsDiscovery() = runBlocking {
+        val root = temp.newFolder()
+        val c = cipher()
+        OpenAiSettingsStore(root, c).replace(settings(), secret)
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val blocking = object : SecretCipher {
+            override fun encrypt(plaintext: ByteArray) = c.encrypt(plaintext)
+            override fun decrypt(ciphertext: ByteArray): ByteArray {
+                entered.countDown(); check(release.await(5, TimeUnit.SECONDS))
+                return c.decrypt(ciphertext)
+            }
+        }
+        var calls = 0
+        val job = launch {
+            OpenAiSettingsStore(root, blocking).fetchModels(settings().baseUrl, "") { _, _ -> calls++; emptyList() }
+        }
+        try {
+            withContext(Dispatchers.IO) { assertTrue(entered.await(5, TimeUnit.SECONDS)) }
+            job.cancel(); release.countDown(); job.cancelAndJoin()
+            assertEquals(0, calls)
+        } finally { release.countDown(); job.cancelAndJoin() }
+    }
+
+    @Test fun savedKeyDiscoveryUsesRealClientForEachProfileWithoutWritingRecords() = runBlocking {
+        val root = temp.newFolder()
+        val c = cipher()
+        val server = java.net.ServerSocket(0, 2, java.net.InetAddress.getByName("127.0.0.1"))
+        val pool = Executors.newSingleThreadExecutor()
+        try {
+            server.soTimeout = 5_000
+            val endpoint = "http://127.0.0.1:${server.localPort}/v1"
+            val chat = OpenAiSettingsStore(root, c)
+            val image = OpenAiSettingsStore(root, c, "images.bin")
+            chat.replace(OpenAiProviderSettings("chat", endpoint, "manual-chat"), "chat-key")
+            image.replace(OpenAiProviderSettings("images", endpoint, "manual-image"), "image-key")
+            for ((store, key) in listOf(chat to "chat-key", image to "image-key")) {
+                val before = root.walkTopDown().filter { it.isFile }.associate { it.name to it.readBytes().toList() }
+                val received = pool.submit<List<String>> {
+                    server.accept().use { socket ->
+                        socket.soTimeout = 5_000
+                        val reader = socket.getInputStream().bufferedReader(Charsets.US_ASCII)
+                        val lines = mutableListOf<String>()
+                        while (true) {
+                            val line = reader.readLine() ?: error("Incomplete HTTP request")
+                            if (line.isEmpty()) break
+                            lines += line
+                        }
+                        val body = "{\"data\":[{\"id\":\"available\"}]}"
+                        socket.getOutputStream().write(("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n" +
+                            "Content-Length: ${body.length}\r\nConnection: close\r\n\r\n$body").toByteArray(Charsets.US_ASCII))
+                        lines
+                    }
+                }
+                assertEquals(listOf("available"), store.fetchModels(endpoint, ""))
+                val request = received.get(5, TimeUnit.SECONDS)
+                assertEquals("GET /v1/models HTTP/1.1", request.first())
+                assertTrue(request.any { it.equals("Authorization: Bearer $key", ignoreCase = true) })
+                assertEquals(before, root.walkTopDown().filter { it.isFile }.associate { it.name to it.readBytes().toList() })
+            }
+        } finally { server.close(); pool.shutdownNow() }
+    }
+
+    @Test fun settingsOnlyUpdateKeepsKeyAndAllCompatFieldsAcrossColdReopen() {
+        val root = temp.newFolder()
+        val c = cipher()
+        val store = OpenAiSettingsStore(root, c)
+        store.replace(settings(), secret)
+        val previous = record(root).readBytes()
+        val saved = store.readSettings()
+        for (enabled in listOf(true, false)) {
+            store.updateSettings(OpenAiProviderSettings(saved.providerId, saved.baseUrl, "edited",
+                saved.parameters, OpenAiChatConfig.Compat(
+                    if (enabled) "max_tokens" else "max_completion_tokens",
+                    if (enabled) "reasoning_content" else null, enabled, !enabled,
+                    SchemaProfile.BASIC, enabled)))
+            val cold = OpenAiSettingsStore(root, c)
+            val actual = cold.readSettings()
+            assertEquals("edited", actual.model)
+            assertEquals(saved.baseUrl, actual.baseUrl)
+            assertEquals(1, actual.parameters.maxOutputTokens)
+            assertEquals(listOf("stop1"), actual.parameters.stopSequences)
+            assertEquals(enabled, actual.compat.explicitCacheControl)
+            assertEquals(enabled, actual.compat.replayReasoning)
+            assertEquals(!enabled, actual.compat.streamUsage)
+            assertEquals(if (enabled) "reasoning_content" else null, actual.compat.reasoningField)
+            assertEquals(if (enabled) "max_tokens" else "max_completion_tokens", actual.compat.maxTokensField)
+            assertEquals(SchemaProfile.BASIC, actual.compat.schemaProfile)
+            assertEquals(secret, token(cold.snapshotForNewRun()))
+        }
+        assertFalse(previous.contentEquals(record(root).readBytes()))
+        assertFalse(record(root).readBytes().toString(Charsets.ISO_8859_1).contains(secret))
+    }
+
+    @Test fun changedEndpointFailsBeforeUpdateOrDiscoveryAndNewKeyCanReplace() = runBlocking {
+        val root = temp.newFolder()
+        val c = cipher()
+        val store = OpenAiSettingsStore(root, c)
+        store.replace(settings(), secret)
+        val original = record(root).readBytes()
+        var requests = 0
+        for (endpoint in listOf("https://other.invalid/v1", "https://example.invalid/v1/", "http://example.invalid/v1")) {
+            failure(ProviderSettingsException.Failure.ENDPOINT_CHANGED) {
+                store.updateSettings(OpenAiProviderSettings("chat", endpoint, "edited"))
+            }
+            try {
+                store.fetchModels(endpoint, "") { _, _ -> requests++; emptyList() }
+                fail("Cross-endpoint reuse must fail")
+            } catch (e: ProviderSettingsException) { assertEquals(ProviderSettingsException.Failure.ENDPOINT_CHANGED, e.failure) }
+            assertArrayEquals(original, record(root).readBytes())
+        }
+        assertEquals(0, requests)
+        val thread = Thread.currentThread()
+        assertEquals(listOf("available"), store.fetchModels("  https://example.invalid/v1  ", "") { url, credentials ->
+            assertNotEquals(thread, Thread.currentThread())
+            assertEquals("https://example.invalid/v1", url)
+            assertEquals(secret, credentials.accessToken())
+            listOf("available")
+        })
+        assertArrayEquals(original, record(root).readBytes()) // Discovery remains read-only.
+        store.fetchModels("https://other.invalid/v1", "replacement-key") { url, credentials ->
+            assertEquals("https://other.invalid/v1", url)
+            assertEquals("replacement-key", credentials.accessToken()); emptyList()
+        }
+        store.replace(OpenAiProviderSettings("chat", "https://other.invalid/v1", "new"), "replacement-key")
+        assertEquals("replacement-key", token(store.snapshotForNewRun()))
+        // A stale form may say reuse is allowed, but the store rechecks its current record.
+        failure(ProviderSettingsException.Failure.ENDPOINT_CHANGED) { store.updateSettings(settings()) }
+        Unit
+    }
+
+    @Test fun updateFailuresPreserveRecordAndClearDecryptedAndEncodedByteArrays() {
+        val root = temp.newFolder()
+        val c = cipher()
+        val plaintexts = mutableListOf<ByteArray>()
+        var failEncrypt = false
+        val observed = object : SecretCipher {
+            override fun encrypt(plaintext: ByteArray): ByteArray {
+                plaintexts += plaintext
+                if (failEncrypt) throw IllegalStateException(secret)
+                return c.encrypt(plaintext)
+            }
+            override fun decrypt(ciphertext: ByteArray): ByteArray = c.decrypt(ciphertext).also { plaintexts += it }
+        }
+        val store = OpenAiSettingsStore(root, observed)
+        failure(ProviderSettingsException.Failure.NOT_CONFIGURED) { store.updateSettings(settings()) }
+        store.replace(settings(), secret)
+        store.updateSettings(OpenAiProviderSettings("chat", settings().baseUrl, "updated"))
+        store.readSettings()
+        assertTrue(plaintexts.all { bytes -> bytes.all { it == 0.toByte() } })
+        val before = record(root).readBytes()
+        failEncrypt = true
+        failure(ProviderSettingsException.Failure.WRITE_FAILED) { store.updateSettings(settings()) }
+        assertArrayEquals(before, record(root).readBytes())
+        assertTrue(plaintexts.all { bytes -> bytes.all { it == 0.toByte() } })
+        record(root).writeBytes(byteArrayOf(1, 2, 3))
+        failure(ProviderSettingsException.Failure.DECRYPT_FAILED) { store.updateSettings(settings()) }
+        assertArrayEquals(byteArrayOf(1, 2, 3), record(root).readBytes())
+        record(root).writeBytes(c.encrypt("{}".toByteArray()))
+        val invalid = record(root).readBytes()
+        failure(ProviderSettingsException.Failure.INVALID_DATA) { store.updateSettings(settings()) }
+        assertArrayEquals(invalid, record(root).readBytes())
+        assertTrue(plaintexts.all { bytes -> bytes.all { it == 0.toByte() } })
+    }
+
+    @Test fun savedKeyDiscoveryFailsClosedForMissingDamagedOrUnavailableRecords() = runBlocking {
+        val root = temp.newFolder()
+        val c = cipher()
+        val store = OpenAiSettingsStore(root, c)
+        var calls = 0
+        suspend fun expectFailure(expected: ProviderSettingsException.Failure) {
+            try {
+                store.fetchModels(settings().baseUrl, "") { _, _ -> calls++; emptyList() }
+                fail("Expected stored-key failure")
+            } catch (e: ProviderSettingsException) { assertEquals(expected, e.failure); assertNull(e.cause) }
+        }
+        expectFailure(ProviderSettingsException.Failure.NOT_CONFIGURED)
+        store.replace(settings(), secret)
+        record(root).writeBytes(byteArrayOf(1))
+        expectFailure(ProviderSettingsException.Failure.DECRYPT_FAILED)
+        record(root).writeBytes(c.encrypt("{}".toByteArray()))
+        expectFailure(ProviderSettingsException.Failure.INVALID_DATA)
+        assertEquals(0, calls)
+    }
+
+    @Test fun updateHoldsLockThroughDecryptAndAtomicReplaceAcrossStoreInstances() {
+        val root = temp.newFolder()
+        val c = cipher()
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val replacing = CountDownLatch(1)
+        val store = OpenAiSettingsStore(root, c)
+        store.replace(settings(), "old-key")
+        val blocking = object : SecretCipher {
+            override fun encrypt(plaintext: ByteArray): ByteArray = c.encrypt(plaintext)
+            override fun decrypt(ciphertext: ByteArray): ByteArray {
+                entered.countDown()
+                check(release.await(5, TimeUnit.SECONDS))
+                return c.decrypt(ciphertext)
+            }
+        }
+        val pool = Executors.newFixedThreadPool(2)
+        try {
+            val update = pool.submit { OpenAiSettingsStore(root, blocking).updateSettings(settings()) }
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            val replacement = pool.submit { replacing.countDown(); OpenAiSettingsStore(root, c).replace(settings(2), "new-key") }
+            assertTrue(replacing.await(5, TimeUnit.SECONDS))
+            assertFalse(replacement.isDone)
+            release.countDown()
+            update.get(5, TimeUnit.SECONDS); replacement.get(5, TimeUnit.SECONDS)
+            val actual = store.snapshotForNewRun()
+            assertEquals(settings(2).baseUrl, actual.settings.baseUrl)
+            assertEquals("new-key", token(actual))
+        } finally { release.countDown(); pool.shutdownNow() }
+    }
+
     @Test fun discoveryFailureLeavesBothProfilesUnchangedAndManualEntryStillSaves() = runBlocking {
         val root = temp.newFolder()
         val c = cipher()

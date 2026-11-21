@@ -4,6 +4,11 @@ import android.content.Context
 import io.github.bytejuno.thetacore.agent.provider.openai.*
 import io.github.bytejuno.thetacore.storage.SecretCipher
 import io.github.bytejuno.thetacore.storage.androidSecretCipher
+import io.github.bytejuno.thetacore.agent.protocol.Credentials
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.ByteBuffer
@@ -22,8 +27,9 @@ class ProviderSettingsException(val failure: Failure) : Exception(when (failure)
     Failure.DECRYPT_FAILED -> "Provider credentials could not be decrypted; credential storage may be unavailable. Re-entering the API key may not restore access"
     Failure.INVALID_DATA -> "Provider settings are invalid; re-enter the configuration"
     Failure.WRITE_FAILED -> "Provider settings could not be saved"
+    Failure.ENDPOINT_CHANGED -> "Enter a new API key for the changed endpoint"
 }) {
-    enum class Failure { NOT_CONFIGURED, READ_FAILED, DECRYPT_FAILED, INVALID_DATA, WRITE_FAILED }
+    enum class Failure { NOT_CONFIGURED, READ_FAILED, DECRYPT_FAILED, INVALID_DATA, WRITE_FAILED, ENDPOINT_CHANGED }
 }
 
 /** Host-only single active OpenAI-compatible profile. All fields (including the key) are one
@@ -52,6 +58,42 @@ class OpenAiSettingsStore internal constructor(noBackupDirectory: File, private 
 
     /** Decrypt once at run admission. No lazy store-backed credentials may escape this boundary. */
     fun snapshotForNewRun(): OpenAiRunSnapshot = synchronized(lock) {
+        readRecord().let { OpenAiRunSnapshot(it.settings, ApiKeyCredentials(it.key)) }
+    }
+
+    /** Only non-secret fields leave the IO boundary for editing. A successful read implies a key. */
+    fun readSettings(): OpenAiProviderSettings = synchronized(lock) { readRecord().settings }
+
+    /** Check and reuse the current record under the same process-wide lock as replacement. */
+    fun updateSettings(settings: OpenAiProviderSettings) = synchronized(lock) {
+        val record = readRecord()
+        checkSavedEndpoint(settings.baseUrl, record.settings.baseUrl)
+        replace(settings, record.key)
+    }
+
+    suspend fun fetchModels(endpoint: String, apiKey: String): List<String> =
+        fetchModels(endpoint, apiKey, OpenAiModelsClient()::fetch)
+
+    /** Credentials are constructed and consumed in IO, never returned to a UI caller. */
+    internal suspend fun fetchModels(endpoint: String, apiKey: String,
+        fetch: suspend (String, Credentials) -> List<String>): List<String> = withContext(Dispatchers.IO) {
+        val credentials = if (apiKey.isEmpty()) synchronized(lock) {
+            val record = readRecord()
+            checkSavedEndpoint(endpoint, record.settings.baseUrl)
+            ApiKeyCredentials(record.key)
+        } else ApiKeyCredentials(apiKey)
+        currentCoroutineContext().ensureActive()
+        fetch(endpoint.trim(), credentials)
+    }
+
+    private fun checkSavedEndpoint(endpoint: String, savedEndpoint: String) {
+        if (endpoint.trim() != savedEndpoint) {
+            throw ProviderSettingsException(ProviderSettingsException.Failure.ENDPOINT_CHANGED)
+        }
+    }
+
+    /** Caller holds lock; all decrypted/encoded byte arrays are cleared even on failure. */
+    private fun readRecord(): ProviderSettingsCodec.Record {
         val encrypted = sanitize(ProviderSettingsException.Failure.READ_FAILED) {
             checkDirectories()
             if (Files.notExists(file, NOFOLLOW_LINKS)) {
@@ -72,7 +114,7 @@ class OpenAiSettingsStore internal constructor(noBackupDirectory: File, private 
         }
         val plaintext = sanitize(ProviderSettingsException.Failure.DECRYPT_FAILED) { cipher.decrypt(encrypted) }
         try {
-            sanitize(ProviderSettingsException.Failure.INVALID_DATA) { ProviderSettingsCodec.decode(plaintext) }
+            return sanitize(ProviderSettingsException.Failure.INVALID_DATA) { ProviderSettingsCodec.decodeRecord(plaintext) }
         } finally { plaintext.fill(0) }
     }
 
