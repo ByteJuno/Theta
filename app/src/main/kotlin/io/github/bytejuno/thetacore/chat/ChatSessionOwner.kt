@@ -23,7 +23,8 @@ internal const val CHAT_PROVIDER_ID = "chat"
 internal data class ChatState(
     val acceptedMessages: Long = 0,
     val loading: Boolean = true,
-    val sessions: List<String> = emptyList(),
+    val sessions: List<SessionPreview> = emptyList(),
+    val moreSessionsAvailable: Boolean = false,
     val sessionId: String? = null,
     val messages: List<Message> = emptyList(),
     val records: Map<String, InvocationRecord> = emptyMap(),
@@ -69,6 +70,7 @@ internal class ChatSessionOwner(
     private var cachedPage: HistoryPage? = null
     private val previewLock = Any()
     private val preview = StringBuilder()
+    private var sessionCursor: String? = null
     fun previewText(): String = synchronized(previewLock) { preview.toString() }
 
     private fun launchOperation(action: suspend () -> Unit) = scope.launch(Dispatchers.IO) {
@@ -95,21 +97,24 @@ internal class ChatSessionOwner(
         if (history != null) return@launchOperation
         tools = service()
         val store = requireNotNull(tools!!.sessionStore)
-        val sessions = store.sessionIds()
-        selectInternal(sessions.firstOrNull(), sessions)
+        val sessions = store.sessionPreviews()
+        selectInternal(sessions.firstOrNull()?.sessionId, sessions)
     }
     fun newSession() = launchOperation {
         check(active == null)
-        selectInternal(null, requireNotNull(tools!!.sessionStore).sessionIds())
+        selectInternal(null, requireNotNull(tools!!.sessionStore).sessionPreviews())
     }
     fun select(id: String) = launchOperation {
         check(active == null)
-        selectInternal(id, requireNotNull(tools!!.sessionStore).sessionIds())
+        selectInternal(id, requireNotNull(tools!!.sessionStore).sessionPreviews())
     }
     fun moreSessions() = launchOperation {
         val previous = mutable.value.sessions
-        val next = requireNotNull(tools!!.sessionStore).sessionIds(previous.lastOrNull())
-        mutable.update { it.copy(sessions = (previous + next).distinct()) }
+        if (!mutable.value.moreSessionsAvailable) return@launchOperation
+        val next = requireNotNull(tools!!.sessionStore).sessionPreviews(sessionCursor)
+        sessionCursor = next.lastOrNull()?.sessionId ?: sessionCursor
+        mutable.update { it.copy(sessions = (previous + next).distinctBy { entry -> entry.sessionId },
+            moreSessionsAvailable = next.size == 50) }
     }
     suspend fun image(sessionId: String, callId: String): ByteArray? = withContext(Dispatchers.IO) {
         gate.withLock {
@@ -140,10 +145,10 @@ internal class ChatSessionOwner(
             history = requireNotNull(host.sessionStore).openHistory(id)
             throw error
         }
-        val sessions = requireNotNull(host.sessionStore).sessionIds()
-        selectInternal(sessions.firstOrNull(), sessions)
+        val sessions = requireNotNull(host.sessionStore).sessionPreviews()
+        selectInternal(sessions.firstOrNull()?.sessionId, sessions)
     }
-    private suspend fun selectInternal(id: String?, sessions: List<String>) {
+    private suspend fun selectInternal(id: String?, sessions: List<SessionPreview>) {
         val host = requireNotNull(tools)
         val store = requireNotNull(host.sessionStore)
         history?.close()
@@ -164,7 +169,10 @@ internal class ChatSessionOwner(
                 host.finishChatRun(pending.identity.runId)
             }
         }
-        mutable.value = ChatState(loading = false, sessions = (listOf(key) + sessions).distinct(), sessionId = key)
+        sessionCursor = sessions.lastOrNull()?.sessionId
+        mutable.value = ChatState(loading = false,
+            sessions = (listOf(store.sessionPreview(key)) + sessions).distinctBy { it.sessionId },
+            moreSessionsAvailable = sessions.size == 50, sessionId = key)
         refresh()
     }
     private fun restorePending(pending: PendingHistoryStep) {
@@ -265,7 +273,9 @@ internal class ChatSessionOwner(
             Math.toIntExact(disk.page(null, 1).totalMessages), disk.chatSummaryWindow(), disk.chatContextWindow()))
         val identity = RunIdentity(chain, disk.sessionId, UUID.randomUUID().toString())
         disk.appendChatInput(disk.revision(), message(Role.USER, textPart(text)), identity)
-        mutable.update { it.copy(acceptedMessages = it.acceptedMessages + 1) }
+        val entry = requireNotNull(tools!!.sessionStore).sessionPreview(disk.sessionId)
+        mutable.update { it.copy(acceptedMessages = it.acceptedMessages + 1,
+            sessions = it.sessions.map { saved -> if (saved.sessionId == entry.sessionId) entry else saved }) }
         start(snapshot, null, identity)
     }
     fun resume(summaryWindowTokens: Long? = null, reconcileId: String? = null) = launchOperation {
