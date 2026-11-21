@@ -14,6 +14,69 @@ import kotlin.test.*
 
 /** Real loopback sockets only. No internet requests, secrets, or model endpoint. */
 class OkHttpModelTransportTest {
+    @Test fun `cancelling before headers disconnects server`(): Unit = runBlocking {
+        repeat(20) {
+            ServerSocket(0).use { server ->
+                val requested = CompletableDeferred<Unit>()
+                val disconnected = CompletableDeferred<Unit>()
+                val worker = thread(isDaemon = true, name = "s2-before-headers") {
+                    try {
+                        server.accept().use { socket ->
+                            socket.soTimeout = 5_000
+                            val input = socket.getInputStream().bufferedReader()
+                            var length = 0
+                            while (true) {
+                                val line = input.readLine() ?: error("Unexpected EOF")
+                                if (line.isEmpty()) break
+                                if (line.startsWith("Content-Length:", true)) length = line.substringAfter(':').trim().toInt()
+                            }
+                            repeat(length) { assertNotEquals(-1, input.read()) }
+                            requested.complete(Unit)
+                            assertEquals(-1, input.read())
+                            disconnected.complete(Unit)
+                        }
+                    } catch (error: Throwable) {
+                        requested.completeExceptionally(error)
+                        disconnected.completeExceptionally(error)
+                    }
+                }
+                val job = launch(Dispatchers.Default) {
+                    OkHttpModelTransport().exchange("http://127.0.0.1:${server.localPort}/", "{}", "").collect()
+                }
+                try {
+                    withTimeout(5_000) { requested.await() }
+                    job.cancelAndJoin()
+                    withTimeout(5_000) { disconnected.await() }
+                } finally { job.cancel(); server.close(); worker.join(5_000) }
+            }
+        }
+    }
+
+    @Test fun `disconnect before headers still propagates transport failure`(): Unit = runBlocking {
+        ServerSocket(0).use { server ->
+            val worker = thread(isDaemon = true, name = "s2-no-headers") {
+                server.accept().use { socket ->
+                    socket.soTimeout = 5_000
+                    val input = socket.getInputStream().bufferedReader()
+                    var length = 0
+                    while (true) {
+                        val line = input.readLine() ?: error("Unexpected EOF")
+                        if (line.isEmpty()) break
+                        if (line.startsWith("Content-Length:", true)) length = line.substringAfter(':').trim().toInt()
+                    }
+                    repeat(length) { assertNotEquals(-1, input.read()) }
+                }
+            }
+            try {
+                assertFailsWith<IOException> {
+                    withTimeout(5_000) {
+                        OkHttpModelTransport().exchange("http://127.0.0.1:${server.localPort}/", "{}", "").toList()
+                    }
+                }
+            } finally { server.close(); worker.join(5_000) }
+        }
+    }
+
     @Test fun `repeated blocked read cancellation never becomes a transport failure`() {
         // Exercise both orderings of the channel cancellation and the blocked reader waking up.
         // Each iteration retains the real peer-disconnect assertion and original deadlines.
