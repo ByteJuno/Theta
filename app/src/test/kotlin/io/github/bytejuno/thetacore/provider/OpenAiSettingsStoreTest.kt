@@ -130,7 +130,7 @@ class OpenAiSettingsStoreTest {
         store.replace(settings(), secret)
         val original = record(root).readBytes()
         var requests = 0
-        for (endpoint in listOf("https://other.invalid/v1", "https://example.invalid/v1/", "http://example.invalid/v1")) {
+        for (endpoint in listOf("https://other.invalid/v1", "https://example.invalid/v1/", "http://127.0.0.1/v1")) {
             failure(ProviderSettingsException.Failure.ENDPOINT_CHANGED) {
                 store.updateSettings(OpenAiProviderSettings("chat", endpoint, "edited"))
             }
@@ -139,6 +139,16 @@ class OpenAiSettingsStoreTest {
                 fail("Cross-endpoint reuse must fail")
             } catch (e: ProviderSettingsException) { assertEquals(ProviderSettingsException.Failure.ENDPOINT_CHANGED, e.failure) }
             assertArrayEquals(original, record(root).readBytes())
+        }
+        try {
+            OpenAiProviderSettings("chat", "http://example.invalid/v1", "edited")
+            fail("Public cleartext endpoint must be rejected")
+        } catch (_: IllegalArgumentException) { }
+        // Scheme-only change on a private address must also fail as ENDPOINT_CHANGED.
+        val localStore = OpenAiSettingsStore(temp.newFolder(), c)
+        localStore.replace(OpenAiProviderSettings("chat", "https://127.0.0.1/v1", "model"), secret)
+        failure(ProviderSettingsException.Failure.ENDPOINT_CHANGED) {
+            localStore.updateSettings(OpenAiProviderSettings("chat", "http://127.0.0.1/v1", "edited"))
         }
         assertEquals(0, requests)
         val thread = Thread.currentThread()
