@@ -5,6 +5,8 @@ import androidx.sqlite.SQLiteDriver
 import androidx.sqlite.SQLiteStatement
 import io.github.bytejuno.thetacore.agent.run.HistoryCodec
 import io.github.bytejuno.thetacore.agent.run.SummaryWorkspace
+import io.github.bytejuno.thetacore.agent.run.SessionPreview
+import io.github.bytejuno.thetacore.agent.run.readSessionPreview
 import io.github.bytejuno.thetacore.agent.run.checkedSessionDirectory
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.security.MessageDigest
@@ -122,6 +124,12 @@ class AgentDatabase private constructor(
             buildList { while (q.step()) add(q.getText(0)) }
         }
     }
+
+    fun sessionPreviews(before: String? = null, limit: Int = 50): List<SessionPreview> = access {
+        sessionIds(before, limit).map { readSessionPreview(it) }
+    }
+
+    fun sessionPreview(sessionId: String): SessionPreview = readSessionPreview(sessionId)
 
     companion object {
         const val FILE_NAME = "agent.db"

@@ -25,6 +25,8 @@ internal class AndroidAgentStore private constructor(
 ) : InvocationStore by delegate {
     val privateImages = io.github.bytejuno.thetacore.agent.ledger.PrivateImageStore(database)
     fun sessionIds(before: String? = null) = database.sessionIds(before)
+    fun sessionPreviews(before: String? = null) = database.sessionPreviews(before)
+    fun sessionPreview(sessionId: String) = database.sessionPreview(sessionId)
     fun createHistory(sessionId: String) = io.github.bytejuno.thetacore.agent.run.SqliteRunHistory.create(database, sessionId)
     fun openHistory(sessionId: String) = io.github.bytejuno.thetacore.agent.run.SqliteRunHistory.open(database, sessionId)
     override fun close() = synchronized(database) {

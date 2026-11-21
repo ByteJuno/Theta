@@ -646,6 +646,8 @@ open class SqliteRunHistory internal constructor(
         }
         val newHead = HistoryHead(sessionId = sessionId, revision = value.revision,
             messageCount = Math.addExact(head.messageCount, next.size.toLong()), hash = hash)
+        val firstText = if (database.sessionPreviewValue(sessionId) == SESSION_PREVIEW_EMPTY)
+            next.asSequence().filter { it.role == Role.USER }.mapNotNull(::firstUserText).firstOrNull() else null
         transaction("append") {
             db.prepare("UPDATE sessions SET revision=? WHERE session_id=? AND revision=?").use {
                 it.bindLong(1, value.revision); it.bindText(2, sessionId); it.bindLong(3, expectedRevision); it.step()
@@ -654,6 +656,7 @@ open class SqliteRunHistory internal constructor(
             writeValue(batchPath(value.revision), value)
             for (id in calls) writeValue(callPath(id), CallLocation(id, value.revision, hash))
             writeValue("head", newHead)
+            if (firstText != null) writeValue(SESSION_PREVIEW_KEY, "1$firstText")
             if (admission != null) {
                 writeValue(accountingPath(admission.taskChainId), admission)
             }
@@ -853,19 +856,21 @@ open class SqliteRunHistory internal constructor(
                                 it.bindText(1, sessionId); it.step()
                             }
                             val head = HistoryHead(sessionId = sessionId, revision = 0, messageCount = 0, hash = EMPTY_HASH)
-                            val out = java.io.ByteArrayOutputStream()
-                            HistoryFrameOutput(out).apply { HistoryCodec.writeValue(head, this); finish() }
-                            database.connection.prepare("INSERT INTO history_values(session_id,name) VALUES(?,'head')").use {
-                                it.bindText(1, sessionId); it.step()
-                            }
-                            database.connection.prepare("INSERT INTO history_chunks(session_id,name,ordinal,bytes) VALUES(?,'head',?,?)").use {
-                                val bytes = out.toByteArray()
-                                var offset = 0
-                                while (offset < bytes.size) {
-                                    val end = minOf(offset + HISTORY_FRAME_BYTES, bytes.size)
-                                    it.bindText(1, sessionId); it.bindLong(2, (offset / HISTORY_FRAME_BYTES).toLong())
-                                    it.bindBlob(3, bytes.copyOfRange(offset, end)); it.step(); it.reset(); offset = end
-                                    fault(HistoryWritePoint("create", HistoryWriteStage.AFTER_CHUNK))
+                            for ((name, initial) in listOf("head" to head, SESSION_PREVIEW_KEY to SESSION_PREVIEW_EMPTY)) {
+                                val out = java.io.ByteArrayOutputStream()
+                                HistoryFrameOutput(out).apply { HistoryCodec.writeValue(initial, this); finish() }
+                                database.connection.prepare("INSERT INTO history_values(session_id,name) VALUES(?,?)").use {
+                                    it.bindText(1, sessionId); it.bindText(2, name); it.step()
+                                }
+                                database.connection.prepare("INSERT INTO history_chunks(session_id,name,ordinal,bytes) VALUES(?,?,?,?)").use {
+                                    val bytes = out.toByteArray()
+                                    var offset = 0
+                                    while (offset < bytes.size) {
+                                        val end = minOf(offset + HISTORY_FRAME_BYTES, bytes.size)
+                                        it.bindText(1, sessionId); it.bindText(2, name); it.bindLong(3, (offset / HISTORY_FRAME_BYTES).toLong())
+                                        it.bindBlob(4, bytes.copyOfRange(offset, end)); it.step(); it.reset(); offset = end
+                                        fault(HistoryWritePoint("create", HistoryWriteStage.AFTER_CHUNK))
+                                    }
                                 }
                             }
                             fault(HistoryWritePoint("create", HistoryWriteStage.AFTER_VALUE))
