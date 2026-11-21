@@ -1,7 +1,7 @@
 # Issue 111 — bounded chat diagnostics
 
-Validated merge implementation: `7d59f6fd82ba0fa037baa197611a3f3573b6bdf3`, integrating main `029adaf75c8118e27a33cbe6aed6057f3b587b0b` into the original diagnostic implementation.
-The following documentation commit changes only this summary; all 350 tracked non-document source digests match the tested tree. Debug APK SHA-256: `a64166e18b8ccce1db4bf5c131b5f7b05f668a81acaf7cfd232ee65cbfbcab39`.
+Validated implementation: `ccdd8d358f734d1bfbcb0c426415cffa5418db68`, including the CI cancellation repair below and the previously integrated main `029adaf75c8118e27a33cbe6aed6057f3b587b0b`.
+The following documentation commit changes only this summary; all 350 tracked non-document source digests match the tested tree. Current Debug APK SHA-256: `c3974706c5f481f901fe4bc65923a535dffd8e993a7d3b668f94af30150d83e8`.
 
 ## Delivered behavior
 
@@ -13,16 +13,23 @@ Reasons over 512 UTF-16 code units are discarded before scanning or copying. Sho
 
 ## Verification
 
-Final command (strict configuration cache): `run-validation.py issue111-b155fe97-merge :app:testDebugUnitTest --tests '*ChatDiagnosticsTest' --tests '*ChatSessionOwnerTest.diagnosticsFollowFailureColdOpenSessionSwitchAndLaterSuccess' --tests '*ChatRecoveryTest' --tests '*ProviderModelsTest' :app:assembleDebug :app:lintDebug`.
+CI run `44897992086` failed the existing real-socket cancellation case. Single original-suite runs passed on Windows and Linux, but a Linux scratch probe calling the unchanged cancellation test failed on iteration 52. Its full stack identified the client read at `ModelTransport.kt:58`: call cancellation closes the socket, and the reader's `close(error)` could replace normal cancellation with `SocketException: Socket closed`.
 
-- **13 tests / 13 passed / 0 failures / 0 errors / 0 skipped**, in one final invocation; 76.83 seconds, strict configuration cache stored. Five formatter/projection cases include every model error code, both locales, bounded output and hostile key/header/body/stack inputs. Three recovery and four provider model-list state cases pass.
-- One real SQLite/owner regression covers failure, cold reopen without a new request, switching to empty and failed sessions, hiding diagnostics during a blocked new request, later successful completion and reselecting the session. Provider responses are synthetic; this is not real-provider acceptance.
-- Debug APK built; bilingual Kotlin/XML guard passed. Lint: **0 errors / 28 warnings**.
-- Existing API33 direct-JDK scanner: **401 agent-core classes, 97 JDK classes, 248 members, 0 violations**. Compiler-linkage exclusions bound to this exact APK and compiled-class hashes; this is neither API33 device execution nor whole-app certification. App API checks are included in Lint.
-- The reviewed RETURN was a merge conflict in both string files. Resolution retains the union of both parents' resource names and exact values (365 string entries per locale, no duplicates). An exact source comparison confirms the original ChatScreen chat/diagnostic body and main's ProviderScreen body are preserved. No diagnostic logic or existing assertion was changed.
-- Historical initial guard/mapping failures remain preserved outside Git. This round's first merge command rejected a missing committer identity before modifying the tree; the retry used the authorized command-local identity. Raw failure and conflict records are retained. All final checks pass.
+The reader now checks `coroutineContext.ensureActive()` before publishing a caught exception. An already cancelled job retains its cancellation cause; an active job still propagates real I/O errors. The production change is limited to this catch path. The formal regression invokes the original real-socket cancellation case 200 times, retaining its peer EOF assertion and 5-second deadlines. A separate truncated HTTP response test proves genuine transport failures remain visible. No mock, exception swallowing or relaxed timeout substitutes for disconnection.
 
-Current raw logs, XML, source/class manifests and APK are under `event-runs/b155fe97-b2d1-46c1-8452-bd6174802ae8` and `validation-issue11/issue111-b155fe97-merge`, outside Git. Historical evidence remains under the original `4b6decd9-6ca2-4bbf-87ce-3cd8f6f7dadf` run. No test deadline or assertion was weakened. No protected/build/workflow file changed.
+Commands use `--configuration-cache --configuration-cache-problems=fail`:
+
+- `run-validation.py issue111-65e72130-green :agent-core:test --tests '*OkHttpModelTransportTest'`: **5/5 passed**, no failures/errors/skips, 16.15 seconds, cache reused. Covers repeated and original cancellation, genuine truncated response failure, no retry after 503, and no redirect following.
+- The same five tests ran on Linux in an isolated scratch checkout. The new tests against old production reproduced the same cancellation failure; after applying the exact production fix **5/5 passed**, 200 cancellation iterations, Gradle 7 seconds, cache reused. These are the same five cases, not five extra unique cases. The temporary diagnostic probe is outside Git and excluded from the formal test filter.
+- `run-validation.py issue111-65e72130-caller :app:testDebugUnitTest --tests '*ChatDiagnosticsTest' --tests '*ChatSessionOwnerTest.diagnosticsFollowFailureColdOpenSessionSwitchAndLaterSuccess' --tests '*ChatRecoveryTest' :app:assembleDebug :app:lintDebug`: **9/9 passed**, no failures/errors/skips, 66.23 seconds, cache reused. Includes bounded bilingual hostile-input formatting and the real SQLite failure/cold-open/session-switch/new-request/success path. Responses are synthetic, not real-provider acceptance.
+- **14 distinct targeted cases pass**, aggregated across the two Windows invocations with identical source digests. No full-suite pass is claimed.
+- Current Debug APK built; bilingual resource guard passed. Lint: **0 errors / 28 warnings**. API33 direct-JDK scan: **401 classes, 97 JDK classes, 248 members, 0 violations**, bound to current APK/class hashes. This is not API33 device execution or whole-app certification.
+
+Current raw logs, red/green XML, source/class manifests and APK are under `event-runs/65e72130-fb71-4155-aa55-948edf05af32` and `validation-issue11/issue111-65e72130-*`, outside Git. Linux scratch evidence remains at `/tmp/theta-writer-65e72130` on the existing GPU host. The initial scratch launcher failed because the archived wrapper has CRLF; direct Java invocation of the unchanged wrapper JAR succeeded. Both launch failures and the real regression failures are retained. No wrapper/build/workflow/protected file changed.
+
+Historical diagnostic/merge evidence remains under `b155fe97-b2d1-46c1-8452-bd6174802ae8` and `4b6decd9-6ca2-4bbf-87ce-3cd8f6f7dadf`; those APK results are not current-build acceptance. Current tests do not repeat unrelated provider model-list validation.
+
+Cancellation handling follows the inspected kotlinx.coroutines [`Job.ensureActive` / `CoroutineContext.ensureActive`](https://github.com/Kotlin/kotlinx.coroutines/blob/master/kotlinx-coroutines-core/common/src/Job.kt) implementation, which throws the cancelled job's original cancellation exception; reference SHA-256 `a617c79f9fae33828e3a9cbae65a128e026274ad204e117d4149d8af3c981c32`.
 
 ## Remaining acceptance
 
