@@ -343,4 +343,24 @@
     <string name="chat_models_network_failed">无法连接服务商，请重试或手动输入模型名称。</string>
     <string name="chat_models_too_large">模型列表过大，请手动输入模型名称。</string>
     <string name="chat_models_invalid_response">服务商返回的模型列表格式不受支持，请手动输入模型名称。</string>
+    <string name="chat_provider_loading">正在读取已保存的配置…</string>
+    <string name="chat_provider_reload">重新读取</string>
+    <string name="chat_provider_saving">正在保存…</string>
+    <string name="chat_provider_read_failed">无法读取已保存的配置，数据未更改。请重新读取，或重新填写配置和密钥。</string>
+    <string name="chat_provider_reenter">重新填写配置和密钥</string>
+    <string name="chat_provider_reenter_notice">请重新填写接口地址、模型和 API 密钥。只有点击保存后才会替换原有记录。</string>
+    <string name="chat_provider_saved_key">此接口已有密钥，留空即可继续使用。</string>
+    <string name="chat_provider_new_key">接口地址已更改，请输入新的 API 密钥后再保存或获取模型。</string>
+    <string name="chat_provider_invalid">请检查接口、模型、密钥和兼容选项。推理字段必须是合法标识符，且不能使用消息保留字段。</string>
+    <string name="chat_compat_show">高级兼容选项 · 展开</string>
+    <string name="chat_compat_hide">高级兼容选项 · 收起</string>
+    <string name="chat_compat_cache">显式缓存控制</string>
+    <string name="chat_compat_cache_notice">仅对支持显式 cache_control 的兼容端点开启；标准 OpenAI 请保持关闭。</string>
+    <string name="chat_compat_tokens">输出 token 上限字段</string>
+    <string name="chat_compat_completion_tokens">max_completion_tokens</string>
+    <string name="chat_compat_max_tokens">max_tokens</string>
+    <string name="chat_compat_usage">返回流式用量</string>
+    <string name="chat_compat_reasoning">推理字段（可选）</string>
+    <string name="chat_compat_reasoning_notice">留空即关闭。使用字母、数字或下划线，以字母或下划线开头；不能使用消息保留字段。</string>
+    <string name="chat_compat_replay">在后续请求中回放推理内容</string>
 </resources>
