@@ -2,6 +2,7 @@ package io.github.bytejuno.thetacore.chat
 
 import io.github.bytejuno.thetacore.agent.provider.openai.ModelsRequestException
 import io.github.bytejuno.thetacore.agent.provider.openai.validApiKey
+import io.github.bytejuno.thetacore.provider.ProviderSettingsException
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -10,6 +11,7 @@ internal data class ProviderModelsState(
     val loading: Boolean = false,
     val models: List<String>? = null,
     val failure: ModelsRequestException.Failure? = null,
+    val settingsFailure: ProviderSettingsException.Failure? = null,
 )
 
 /** UI-thread confined. Revision also rejects late results from non-cooperative clients. */
@@ -28,9 +30,9 @@ internal class ProviderModels(
         current.value = ProviderModelsState()
     }
 
-    fun load(endpoint: String, secret: String) {
+    fun load(endpoint: String, secret: String, reuseSavedKey: Boolean = false) {
         invalidate()
-        if (!validApiKey(secret)) {
+        if (!validApiKey(secret) && !(secret.isEmpty() && reuseSavedKey)) {
             current.value = ProviderModelsState(failure = ModelsRequestException.Failure.INVALID_SETTINGS)
             return
         }
@@ -41,6 +43,9 @@ internal class ProviderModels(
                 val models = fetch(endpoint, secret)
                 if (revision == requested) current.value = ProviderModelsState(models = models)
             } catch (error: CancellationException) { throw error }
+            catch (error: ProviderSettingsException) {
+                if (revision == requested) current.value = ProviderModelsState(settingsFailure = error.failure)
+            }
             catch (error: Exception) {
                 if (revision == requested) current.value = ProviderModelsState(failure =
                     (error as? ModelsRequestException)?.failure ?: ModelsRequestException.Failure.NETWORK)

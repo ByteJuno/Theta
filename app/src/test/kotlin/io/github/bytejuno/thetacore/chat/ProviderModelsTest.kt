@@ -1,6 +1,7 @@
 package io.github.bytejuno.thetacore.chat
 
 import io.github.bytejuno.thetacore.agent.provider.openai.ModelsRequestException
+import io.github.bytejuno.thetacore.provider.ProviderSettingsException
 import kotlinx.coroutines.*
 import org.junit.Assert.*
 import org.junit.Test
@@ -10,6 +11,25 @@ import kotlin.coroutines.resumeWithException
 import kotlin.coroutines.suspendCoroutine
 
 class ProviderModelsTest {
+    @Test fun explicitSavedKeyReuseKeepsErrorsSanitizedAndInvalidatesOnProfileChange() = runBlocking {
+        var calls = 0
+        val models = ProviderModels(this) { _, key ->
+            calls++; assertEquals("", key)
+            throw ProviderSettingsException(ProviderSettingsException.Failure.ENDPOINT_CHANGED)
+        }
+        models.load("endpoint", ""); yield()
+        assertEquals(0, calls)
+        models.load("endpoint", "", reuseSavedKey = true); yield()
+        assertEquals(1, calls)
+        assertEquals(ProviderSettingsException.Failure.ENDPOINT_CHANGED, models.state.value.settingsFailure)
+        assertNull(models.state.value.failure)
+        models.invalidate()
+        assertEquals(ProviderModelsState(), models.state.value)
+        models.load("endpoint", " ", reuseSavedKey = true); yield()
+        assertEquals(1, calls) // Whitespace is not an absent key.
+        assertEquals(ModelsRequestException.Failure.INVALID_SETTINGS, models.state.value.failure)
+    }
+
     @Test fun malformedKeysFailBeforeCredentialConstructionAndCanBeCorrected() = runBlocking {
         var calls = 0
         val models = ProviderModels(this) { _, _ -> calls++; listOf("model") }

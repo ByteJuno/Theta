@@ -30,10 +30,21 @@ internal object ProviderSettingsCodec {
             put("schema", c.schemaProfile.name)
         }
     }.toString().toByteArray(Charsets.UTF_8).also {
-        require(it.size <= OpenAiSettingsStore.MAX_BYTES - 32) { "Provider settings exceed size limit" }
+        if (it.size > OpenAiSettingsStore.MAX_BYTES - 32) {
+            it.fill(0)
+            throw IllegalArgumentException("Provider settings exceed size limit")
+        }
     }
 
-    fun decode(bytes: ByteArray): OpenAiRunSnapshot {
+    internal class Record(val settings: OpenAiProviderSettings, val key: String) {
+        override fun toString() = "ProviderRecord([REDACTED])"
+    }
+
+    fun decode(bytes: ByteArray): OpenAiRunSnapshot = decodeRecord(bytes).let {
+        OpenAiRunSnapshot(it.settings, ApiKeyCredentials(it.key))
+    }
+
+    fun decodeRecord(bytes: ByteArray): Record {
         require(bytes.size <= OpenAiSettingsStore.MAX_BYTES)
         val root = Json.parseToJsonElement(bytes.toString(Charsets.UTF_8)).jsonObject
         require(root.getValue("version").jsonPrimitive.int == 1)
@@ -55,10 +66,12 @@ internal object ProviderSettingsCodec {
             explicitCacheControl = c["explicitCacheControl"]?.jsonPrimitive?.boolean ?: false,
             schemaProfile = SchemaProfile.valueOf(c.getValue("schema").jsonPrimitive.content),
         )
-        return OpenAiRunSnapshot(OpenAiProviderSettings(
+        val key = root.getValue("key").jsonPrimitive.content
+        require(validApiKey(key))
+        return Record(OpenAiProviderSettings(
             root.getValue("provider").jsonPrimitive.content,
             root.getValue("base").jsonPrimitive.content,
             root.getValue("model").jsonPrimitive.content, parameters, compat,
-        ), ApiKeyCredentials(root.getValue("key").jsonPrimitive.content))
+        ), key)
     }
 }

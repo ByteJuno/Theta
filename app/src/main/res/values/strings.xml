@@ -365,4 +365,24 @@
     <string name="chat_models_network_failed">Could not connect to the provider. Try again or enter a model manually.</string>
     <string name="chat_models_too_large">The model list is too large. Enter a model name manually.</string>
     <string name="chat_models_invalid_response">The provider returned an unsupported model list. Enter a model name manually.</string>
+    <string name="chat_provider_loading">Loading saved settings…</string>
+    <string name="chat_provider_reload">Retry loading</string>
+    <string name="chat_provider_saving">Saving…</string>
+    <string name="chat_provider_read_failed">Saved settings could not be read. Nothing was changed. Retry loading or re-enter the settings and key.</string>
+    <string name="chat_provider_reenter">Re-enter settings and key</string>
+    <string name="chat_provider_reenter_notice">Enter the endpoint, model and API key again. The saved record stays unchanged until you save its replacement.</string>
+    <string name="chat_provider_saved_key">A key is saved for this endpoint. Leave the key empty to keep using it.</string>
+    <string name="chat_provider_new_key">The endpoint has changed. Enter a new API key to save or fetch models.</string>
+    <string name="chat_provider_invalid">Check the endpoint, model, key and compatibility options. The reasoning field must be a valid, non-reserved identifier.</string>
+    <string name="chat_compat_show">Advanced compatibility · Show</string>
+    <string name="chat_compat_hide">Advanced compatibility · Hide</string>
+    <string name="chat_compat_cache">Explicit cache control</string>
+    <string name="chat_compat_cache_notice">Enable only for endpoints supporting explicit cache_control. Keep off for standard OpenAI.</string>
+    <string name="chat_compat_tokens">Output token limit field</string>
+    <string name="chat_compat_completion_tokens">max_completion_tokens</string>
+    <string name="chat_compat_max_tokens">max_tokens</string>
+    <string name="chat_compat_usage">Include streaming usage</string>
+    <string name="chat_compat_reasoning">Reasoning field (optional)</string>
+    <string name="chat_compat_reasoning_notice">Leave empty to disable. Use letters, digits or underscores, starting with a letter or underscore; reserved message fields are not allowed.</string>
+    <string name="chat_compat_replay">Replay reasoning in later requests</string>
 </resources>

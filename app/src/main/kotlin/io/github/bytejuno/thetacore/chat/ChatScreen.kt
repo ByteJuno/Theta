@@ -12,22 +12,12 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.github.bytejuno.thetacore.*
 import io.github.bytejuno.thetacore.R
 import io.github.bytejuno.thetacore.agent.ledger.*
 import io.github.bytejuno.thetacore.agent.protocol.*
 import io.github.bytejuno.thetacore.agent.run.RunState
-import io.github.bytejuno.thetacore.agent.provider.openai.OpenAiProviderSettings
-import io.github.bytejuno.thetacore.agent.provider.openai.OpenAiModelsClient
-import io.github.bytejuno.thetacore.agent.provider.openai.ApiKeyCredentials
-import io.github.bytejuno.thetacore.agent.provider.openai.ModelsRequestException
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 internal fun toolState(record: InvocationRecord?): Int = when {
     record == null -> R.string.chat_tool_pending
@@ -218,96 +208,4 @@ private fun ToolCard(call: ContentPart.ToolCall, record: InvocationRecord?, reco
             }
         }
     }
-}
-
-@Composable
-private fun ProviderScreen(host: ThetaApplication, onClose: () -> Unit) {
-    val strings = uiStrings()
-    val scope = rememberCoroutineScope()
-    // Credentials intentionally never use rememberSaveable or a persisted UI state.
-    var endpoint by remember { mutableStateOf("") }
-    var model by remember { mutableStateOf("") }
-    var secret by remember { mutableStateOf("") }
-    var busy by remember { mutableStateOf(false) }
-    var error by remember { mutableStateOf(false) }
-    var imageProfile by remember { mutableStateOf(false) }
-    var filter by remember { mutableStateOf("") }
-    val modelLists = remember(scope) {
-        val client = OpenAiModelsClient()
-        ProviderModels(scope) { url, key -> client.fetch(url, ApiKeyCredentials(key)) }
-    }
-    val discovery by modelLists.state.collectAsState()
-    DisposableEffect(modelLists) { onDispose { modelLists.invalidate() } }
-    fun resetModels() { modelLists.invalidate(); filter = "" }
-    AlertDialog(onDismissRequest = { if (!busy) { resetModels(); onClose() } }, title = { Text(strings.get(R.string.chat_provider)) }, text = {
-        Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(strings.get(R.string.chat_provider_notice))
-            FlowRow {
-                TextButton(enabled = !busy, onClick = { resetModels(); imageProfile = false; endpoint = ""; model = ""; secret = ""; error = false }) {
-                    Text(strings.get(R.string.chat_text_profile))
-                }
-                TextButton(enabled = !busy, onClick = { resetModels(); imageProfile = true; endpoint = ""; model = ""; secret = ""; error = false }) {
-                    Text(strings.get(R.string.chat_image_profile))
-                }
-            }
-            Text(strings.get(if (imageProfile) R.string.chat_image_profile else R.string.chat_text_profile),
-                style = MaterialTheme.typography.titleMedium)
-            if (imageProfile) Text(strings.get(R.string.chat_image_settings_notice))
-            OutlinedTextField(endpoint, { resetModels(); endpoint = it }, enabled = !busy,
-                modifier = Modifier.fillMaxWidth(), label = { Text(strings.get(R.string.chat_endpoint)) })
-            OutlinedTextField(secret, { resetModels(); secret = it }, enabled = !busy,
-                modifier = Modifier.fillMaxWidth(), label = { Text(strings.get(R.string.chat_key)) }, visualTransformation = PasswordVisualTransformation())
-            OutlinedTextField(model, { model = it }, enabled = !busy, modifier = Modifier.fillMaxWidth(),
-                label = { Text(strings.get(R.string.chat_model)) })
-            Text(strings.get(R.string.chat_models_manual), style = MaterialTheme.typography.bodySmall)
-            OutlinedButton(enabled = !busy && !discovery.loading && endpoint.isNotBlank() && secret.isNotBlank(),
-                onClick = { filter = ""; modelLists.load(endpoint.trim(), secret) }) {
-                Text(strings.get(if (discovery.loading) R.string.chat_models_loading else R.string.chat_models_fetch))
-            }
-            discovery.failure?.let { failure ->
-                Text(strings.get(when (failure) {
-                    ModelsRequestException.Failure.INVALID_SETTINGS -> R.string.chat_models_invalid_settings
-                    ModelsRequestException.Failure.HTTP -> R.string.chat_models_http_failed
-                    ModelsRequestException.Failure.TIMEOUT -> R.string.chat_models_timeout
-                    ModelsRequestException.Failure.NETWORK -> R.string.chat_models_network_failed
-                    ModelsRequestException.Failure.TOO_LARGE -> R.string.chat_models_too_large
-                    ModelsRequestException.Failure.INVALID_RESPONSE -> R.string.chat_models_invalid_response
-                }), color = MaterialTheme.colorScheme.error)
-            }
-            discovery.models?.let { models ->
-                if (models.isEmpty()) Text(strings.get(R.string.chat_models_empty))
-                else {
-                    OutlinedTextField(filter, { filter = it }, enabled = !busy, singleLine = true,
-                        modifier = Modifier.fillMaxWidth(), label = { Text(strings.get(R.string.chat_models_filter)) })
-                    val matches = remember(models, filter) { models.filter { it.contains(filter, ignoreCase = true) } }
-                    if (matches.isEmpty()) Text(strings.get(R.string.chat_models_no_matches))
-                    LazyColumn(Modifier.fillMaxWidth().heightIn(max = 200.dp)) {
-                        items(matches, key = { it }) { name ->
-                            TextButton(enabled = !busy, onClick = { model = name },
-                                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-                                Text(name, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.fillMaxWidth())
-                            }
-                        }
-                    }
-                }
-            }
-            if (error) Text(strings.get(R.string.chat_provider_failed), color = MaterialTheme.colorScheme.error)
-            AppLanguageSetting()
-        }
-    }, confirmButton = {
-        Button(enabled = !busy && endpoint.isNotBlank() && model.isNotBlank() && secret.isNotBlank(), onClick = {
-            resetModels(); busy = true; error = false
-            scope.launch {
-                try {
-                    withContext(Dispatchers.IO) {
-                        val store = if (imageProfile) host.imageSettings else host.providerSettings
-                        store.replace(OpenAiProviderSettings(if (imageProfile) IMAGE_PROVIDER_ID else CHAT_PROVIDER_ID, endpoint.trim(), model.trim()), secret)
-                    }
-                    secret = ""; onClose()
-                } catch (cancelled: CancellationException) { throw cancelled }
-                catch (_: Exception) { error = true }
-                finally { busy = false }
-            }
-        }) { Text(strings.get(R.string.chat_save)) }
-    }, dismissButton = { TextButton(onClick = { resetModels(); onClose() }, enabled = !busy) { Text(strings.get(R.string.chat_close)) } })
 }
