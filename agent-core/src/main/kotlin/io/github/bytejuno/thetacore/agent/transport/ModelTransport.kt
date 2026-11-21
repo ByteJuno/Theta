@@ -2,6 +2,7 @@ package io.github.bytejuno.thetacore.agent.transport
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.launch
@@ -61,7 +62,12 @@ class OkHttpModelTransport : ModelTransport {
                             }
                         }
                         close()
-                    } catch (error: Exception) { close(error) }
+                    } catch (error: Exception) {
+                        // Cancelling the call also interrupts a blocking socket read. Keep the
+                        // job's cancellation cause instead of publishing that resulting I/O error.
+                        coroutineContext.ensureActive()
+                        close(error)
+                    }
                 }
                 job.invokeOnCompletion { response.close() }
             }
