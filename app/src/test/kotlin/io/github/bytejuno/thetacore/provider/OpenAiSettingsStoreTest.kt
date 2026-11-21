@@ -1,6 +1,7 @@
 package io.github.bytejuno.thetacore.provider
 
 import android.content.ContextWrapper
+import io.github.bytejuno.thetacore.chat.ProviderModels
 import io.github.bytejuno.thetacore.agent.protocol.ModelEvent
 import io.github.bytejuno.thetacore.agent.provider.openai.*
 import io.github.bytejuno.thetacore.agent.transport.*
@@ -11,6 +12,7 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.yield
 import kotlinx.serialization.json.*
 import org.junit.Assert.*
 import org.junit.Rule
@@ -23,6 +25,30 @@ import java.util.concurrent.TimeUnit
 import javax.crypto.KeyGenerator
 
 class OpenAiSettingsStoreTest {
+    @Test fun discoveryFailureLeavesBothProfilesUnchangedAndManualEntryStillSaves() = runBlocking {
+        val root = temp.newFolder()
+        val c = cipher()
+        val chat = OpenAiSettingsStore(root, c)
+        val image = OpenAiSettingsStore(root, c, "images.bin")
+        chat.replace(settings(1), "chat-key")
+        image.replace(settings(2), "image-key")
+        val originalChat = record(root).readBytes()
+        val imageRecord = File(root, "${OpenAiSettingsStore.DIRECTORY}/images.bin")
+        val originalImage = imageRecord.readBytes()
+        val models = ProviderModels(this) { _, _ -> throw ModelsRequestException(ModelsRequestException.Failure.HTTP) }
+        models.load("https://example.invalid/v1", "chat-key"); yield()
+        assertEquals(ModelsRequestException.Failure.HTTP, models.state.value.failure)
+        assertArrayEquals(originalChat, record(root).readBytes())
+        assertArrayEquals(originalImage, imageRecord.readBytes())
+        // Same explicit replacement used by ProviderScreen; failed discovery is not a save gate.
+        models.invalidate()
+        chat.replace(OpenAiProviderSettings("chat", "https://example.invalid/v1", "manually-entered"), "chat-key")
+        val reopened = OpenAiSettingsStore(root, c).snapshotForNewRun()
+        assertEquals("manually-entered", reopened.settings.model)
+        assertEquals("chat-key", token(reopened))
+        assertArrayEquals(originalImage, imageRecord.readBytes())
+    }
+
     @Test fun imageAndChatProfilesRemainIndependentAcrossReopenAndClear() {
         val root = temp.newFolder()
         val cipher = cipher()

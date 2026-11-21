@@ -330,4 +330,16 @@
     <string name="chat_background_settings_failed">Battery settings are unavailable. You can change battery restrictions later in system App info.</string>
     <string name="chat_notifications_title">Notifications are off</string>
     <string name="chat_notifications_denied">Tasks can still run, but task progress, the notification Stop button and approval reminders may be hidden. Use Stop in the chat. You can enable notifications later in system App info.</string>
+    <string name="chat_models_fetch">Fetch models</string>
+    <string name="chat_models_loading">Fetching models…</string>
+    <string name="chat_models_manual">Select a model below or enter its name manually. Some providers do not list every supported model.</string>
+    <string name="chat_models_filter">Filter models</string>
+    <string name="chat_models_empty">No models were listed. You can still enter a model name manually.</string>
+    <string name="chat_models_no_matches">No matching models.</string>
+    <string name="chat_models_invalid_settings">Check the endpoint and API key, then try again.</string>
+    <string name="chat_models_http_failed">The provider rejected the model list request. Check the key and endpoint, or enter a model manually.</string>
+    <string name="chat_models_timeout">The model list request timed out. Try again or enter a model manually.</string>
+    <string name="chat_models_network_failed">Could not connect to the provider. Try again or enter a model manually.</string>
+    <string name="chat_models_too_large">The model list is too large. Enter a model name manually.</string>
+    <string name="chat_models_invalid_response">The provider returned an unsupported model list. Enter a model name manually.</string>
 </resources>
