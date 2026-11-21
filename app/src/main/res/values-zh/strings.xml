@@ -257,6 +257,7 @@
     <string name="chat_message">消息</string>
     <string name="chat_send">发送</string>
     <string name="chat_session_number">会话 %1$d</string>
+    <string name="chat_current_session">当前会话</string>
     <string name="chat_more_sessions">加载更多会话</string>
     <string name="chat_close">关闭</string>
     <string name="chat_approval_warning">此工具需要你的审批。批准仅授权本次请求。</string>

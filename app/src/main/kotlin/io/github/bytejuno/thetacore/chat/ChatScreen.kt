@@ -12,6 +12,10 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.github.bytejuno.thetacore.*
 import io.github.bytejuno.thetacore.R
@@ -146,12 +150,20 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
     if (sessions) AlertDialog(onDismissRequest = { sessions = false }, title = { Text(strings.get(R.string.chat_sessions)) },
         text = {
             LazyColumn(Modifier.heightIn(max = 400.dp)) {
-                itemsIndexed(state.sessions) { index, id ->
-                    TextButton(onClick = { owner.select(id); sessions = false }) {
-                        Text(strings.get(R.string.chat_session_number, index + 1))
+                itemsIndexed(state.sessions, key = { _, entry -> entry.sessionId }) { index, entry ->
+                    val current = entry.sessionId == state.sessionId
+                    TextButton(onClick = { owner.select(entry.sessionId); sessions = false },
+                        modifier = Modifier.fillMaxWidth().semantics { selected = current }) {
+                        Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.Start) {
+                            Text(entry.text ?: strings.get(R.string.chat_session_number, index + 1),
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            if (current) Text(strings.get(R.string.chat_current_session), style = MaterialTheme.typography.labelSmall)
+                        }
                     }
                 }
-                item { TextButton(onClick = { owner.moreSessions() }) { Text(strings.get(R.string.chat_more_sessions)) } }
+                if (state.moreSessionsAvailable) item {
+                    TextButton(onClick = { owner.moreSessions() }) { Text(strings.get(R.string.chat_more_sessions)) }
+                }
             }
         }, confirmButton = { TextButton(onClick = { sessions = false }) { Text(strings.get(R.string.chat_close)) } })
 }

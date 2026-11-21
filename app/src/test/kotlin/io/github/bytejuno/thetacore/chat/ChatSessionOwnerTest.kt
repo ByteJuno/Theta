@@ -76,6 +76,47 @@ class ChatSessionOwnerTest {
         }
     }
 
+    @Test fun sessionPreviewsSurviveSendColdOpenPagingSelectionAndDeletion() = runBlocking {
+        val root = Files.createTempDirectory("chat-session-previews").toFile()
+        try {
+            val first = fixture(root, AtomicInteger(), provider(false))
+            repeat(52) { index ->
+                first.store.createHistory("old-${index.toString().padStart(3, '0')}").use {
+                    it.append(0, listOf(message(Role.USER, textPart("Previous $index"))))
+                }
+            }
+            first.owner.open().join()
+            first.owner.newSession().join()
+            val id = first.owner.state.value.sessionId!!
+            assertNull(first.owner.state.value.sessions.first().text)
+            first.owner.send("\n我的   长问题 " + "中".repeat(80)).join()
+            await { !first.owner.state.value.active }
+            val title = "我的 长问题 " + "中".repeat(52) + "…"
+            assertEquals(title, first.owner.state.value.sessions.first().text)
+            first.owner.send("Later question").join(); await { !first.owner.state.value.active }
+            assertEquals(title, first.owner.state.value.sessions.first().text)
+            first.close()
+            val cold = fixture(root, AtomicInteger(), provider(false))
+            cold.owner.open().join(); cold.owner.select(id).join()
+            assertEquals(title, cold.owner.state.value.sessions.first().text)
+            assertTrue(cold.owner.state.value.moreSessionsAvailable)
+            cold.owner.moreSessions().join()
+            assertEquals(53, cold.owner.state.value.sessions.size)
+            assertEquals(53, cold.owner.state.value.sessions.map { it.sessionId }.distinct().size)
+            assertFalse(cold.owner.state.value.moreSessionsAvailable)
+            assertEquals("Previous 0", cold.owner.state.value.sessions.single { it.sessionId == "old-000" }.text)
+            cold.owner.select("old-000").join()
+            assertEquals("Previous 0", cold.owner.state.value.sessions.first().text)
+            cold.owner.select(id).join(); cold.owner.deleteCurrentSession().join()
+            assertNull(cold.store.sessionPreview(id).text)
+            assertFalse(cold.owner.state.value.sessions.any { it.sessionId == id })
+            cold.owner.newSession().join()
+            assertNull(cold.owner.state.value.sessions.first().text)
+            assertTrue(cold.failures.toString(), cold.failures.isEmpty())
+            cold.close()
+        } finally { root.deleteRecursively() }
+    }
+
     @Test fun deletionRetainsUnknownEffectRecoveryAcrossPagesAndColdOpen() = runBlocking {
         val root = Files.createTempDirectory("chat-delete-recovery").toFile()
         val executions = AtomicInteger()

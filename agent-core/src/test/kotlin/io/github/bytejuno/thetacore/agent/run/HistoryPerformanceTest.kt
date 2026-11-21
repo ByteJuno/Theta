@@ -10,7 +10,8 @@ import kotlin.test.*
 
 /** Reproducible local microbenchmark, not a cold-cache or Android latency claim.
  * 10,000 separate acknowledged transactions, alternating USER/ASSISTANT, 512 ASCII chars each.
- * Every append commits its new batch and HEAD in one FULL WAL transaction. OS caches are NOT flushed.
+ * Every append commits its new batch and HEAD in one FULL WAL transaction. The first USER text
+ * also writes one bounded preview value in that transaction. OS caches are NOT flushed.
  * Timings use monotonic nanoTime; counters are actual bytes passed through storage reads/writes,
  * not filesystem block traffic. create() initialization/locks/metadata I/O are excluded from counters.
  * No latency threshold: assert the bounded work and loaded-message counts, publish measured times.
@@ -21,6 +22,7 @@ class HistoryPerformanceTest {
         val durability = Durability.PROCESS_CRASH_ONLY
         lateinit var appendIo: HistoryIo
         lateinit var firstBatch: ByteArray
+        lateinit var firstPreview: ByteArray
         var appendMs = 0.0
         var appendOneMs = 0.0
         var appendOneBytes = 0L
@@ -28,15 +30,22 @@ class HistoryPerformanceTest {
             val baseline = h.io()
             appendMs = measureNanoTime {
                 repeat(10_000) { i ->
+                    val beforeAppend = h.io()
                     h.append(i.toLong(), listOf(message(if (i % 2 == 0) Role.USER else Role.ASSISTANT,
                         textPart(i.toString().padEnd(512, 'x')))))
-                    if (i == 0) firstBatch = TestRunHistory.bytes(path, "batches/1")
+                    assertEquals(if (i == 0) 3L else 2L, h.io().filesWritten - beforeAppend.filesWritten,
+                        "Only the first USER append writes preview metadata (append $i)")
+                    if (i == 0) {
+                        firstBatch = TestRunHistory.bytes(path, "batches/1")
+                        firstPreview = TestRunHistory.bytes(path, SESSION_PREVIEW_KEY)
+                        assertTrue(firstPreview.size in 1..SESSION_PREVIEW_BYTES)
+                    }
                 }
             } / 1e6
             appendIo = h.io()
             assertEquals(baseline.bytesRead, appendIo.bytesRead)
             assertEquals(0, appendIo.messagesDecoded)
-            assertEquals(20_000, appendIo.filesWritten)
+            assertEquals(20_001, appendIo.filesWritten) // 20,000 batch/HEAD writes + one preview.
             val before = h.io()
             appendOneMs = measureNanoTime {
                 h.append(10_000, listOf(message(Role.USER, textPart("extra".padEnd(512, 'x')))))
@@ -45,6 +54,7 @@ class HistoryPerformanceTest {
             assertEquals(before.bytesRead, h.io().bytesRead)
             assertEquals(2, h.io().filesWritten - before.filesWritten)
             assertContentEquals(firstBatch, TestRunHistory.bytes(path, "batches/1"))
+            assertContentEquals(firstPreview, TestRunHistory.bytes(path, SESSION_PREVIEW_KEY))
         }
         lateinit var opened: TestRunHistory
         val openMs = measureNanoTime { opened = TestRunHistory.open(path, durability) } / 1e6
@@ -57,6 +67,7 @@ class HistoryPerformanceTest {
             val olderMs = measureNanoTime { older = h.page(recent.older, 50) } / 1e6
             val olderIo = h.io()
             assertEquals(1, openIo.messagesDecoded)
+            assertContentEquals(firstPreview, TestRunHistory.bytes(path, SESSION_PREVIEW_KEY))
             assertEquals(50, recentIo.messagesDecoded - openIo.messagesDecoded)
             assertEquals(50, olderIo.messagesDecoded - recentIo.messagesDecoded)
             assertEquals(10_001, recent.totalMessages)
