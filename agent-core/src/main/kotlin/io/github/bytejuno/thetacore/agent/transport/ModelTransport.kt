@@ -1,5 +1,6 @@
 package io.github.bytejuno.thetacore.agent.transport
 
+import io.github.bytejuno.thetacore.agent.provider.openai.isPrivateCleartextHost
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.ensureActive
@@ -7,6 +8,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.launch
 import okhttp3.*
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.IOException
@@ -31,6 +33,10 @@ class OkHttpModelTransport : ModelTransport {
         .build()
 
     override fun exchange(url: String, body: String, token: String): Flow<TransportEvent> = callbackFlow {
+        val parsed = url.toHttpUrl()
+        require(parsed.scheme == "https" || isPrivateCleartextHost(parsed.host)) {
+            "Cleartext HTTP requires localhost, private LAN, or Tailscale address"
+        }
         val delegate = body.toRequestBody("application/json; charset=utf-8".toMediaType())
         // Disallow follow-up replay too (503 Retry-After: 0 and HTTP/2 recovery), not just connection retries.
         val oneShotBody = object : RequestBody() {

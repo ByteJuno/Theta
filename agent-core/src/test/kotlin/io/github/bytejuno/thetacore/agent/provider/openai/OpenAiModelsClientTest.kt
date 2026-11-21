@@ -43,7 +43,7 @@ class OpenAiModelsClientTest {
         }).build()
         val request = async {
             failure(ModelsRequestException.Failure.TIMEOUT) {
-                OpenAiModelsClient(transport).fetch("http://models.invalid/v1", credentials)
+                OpenAiModelsClient(transport).fetch("https://models.invalid/v1", credentials)
             }
         }
         try {
@@ -146,6 +146,40 @@ class OpenAiModelsClientTest {
             assertNotNull(withContext(Dispatchers.IO) { server.takeRequest(5, TimeUnit.SECONDS) })
             withTimeout(3000) { job.cancelAndJoin() }
             assertTrue(job.isCancelled); assertEquals(1, server.requestCount)
+        }
+    }
+
+    @Test fun cleartextHttpAllowsLocalLanAndTailscaleButRejectsPublicEndpoints() = runBlocking {
+        for (allowed in listOf(
+            "http://localhost:8317/v1",
+            "http://127.0.0.1:8317/v1",
+            "http://10.0.0.1:8317/v1",
+            "http://172.16.0.1:8317/v1",
+            "http://192.168.1.10:11434/v1",
+            "http://100.64.0.1:8317/v1",
+            "http://100.120.32.105:8317/v1",
+            "http://100.127.255.254:8317/v1",
+            "http://169.254.1.1:8317/v1",
+            "http://[::1]:8317/v1",
+            "http://[fd7a:115c:a1e0::1]:8317/v1",
+            "https://api.openai.com/v1",
+            "https://8.8.8.8/v1",
+        )) {
+            assertEquals("completions", OpenAiChatConfig("p", allowed).endpoint.pathSegments.last())
+        }
+        for (rejected in listOf(
+            "http://api.openai.com/v1",
+            "http://models.invalid/v1",
+            "http://8.8.8.8/v1",
+            "http://100.63.255.255:8317/v1",
+            "http://100.128.0.1:8317/v1",
+            "http://172.32.0.1:8317/v1",
+            "http://0.0.0.0:8317/v1",
+            "http://[2001:4860:4860::8888]/v1",
+        )) {
+            failure(ModelsRequestException.Failure.INVALID_SETTINGS) {
+                OpenAiModelsClient().fetch(rejected, credentials)
+            }
         }
     }
 }
