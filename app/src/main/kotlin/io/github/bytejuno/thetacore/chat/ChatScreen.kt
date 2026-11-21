@@ -68,7 +68,6 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
         }
         if (state.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
         state.error?.let { Text(strings.get(it), color = MaterialTheme.colorScheme.error) }
-        state.notice?.let { Text(strings.get(it), style = MaterialTheme.typography.bodyMedium) }
         LazyColumn(Modifier.weight(1f).fillMaxWidth(), state = listState, verticalArrangement = Arrangement.spacedBy(12.dp)) {
             if (state.older != null && !state.active && !state.pending) item {
                 TextButton(onClick = { owner.older() }) { Text(strings.get(R.string.chat_older)) }
@@ -117,6 +116,12 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
             if (stream.isNotEmpty()) item {
                 Text(strings.get(R.string.chat_assistant), style = MaterialTheme.typography.labelLarge)
                 SelectionContainer { Text(stream) }
+            }
+            if (state.notice != null || chatDiagnostic(state) != null) item {
+                Column {
+                    state.notice?.let { Text(strings.get(it), style = MaterialTheme.typography.bodyMedium) }
+                    ChatDiagnostics(state)
+                }
             }
             if (state.active) item { Text(strings.get(if (state.records.values.any { it.pending != null })
                 R.string.chat_tool_approval else R.string.chat_running)) }

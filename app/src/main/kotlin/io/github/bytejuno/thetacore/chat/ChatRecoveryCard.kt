@@ -30,7 +30,7 @@ internal fun ChatRecoveryCard(state: ChatState,
     val actions = recoveryActions(state)
     var window by rememberSaveable(token) { mutableStateOf(state.contextWindowTokens?.toString() ?: "") }
     var confirm by remember(token) { mutableStateOf<ChatRecoveryAction?>(null) }
-    var details by rememberSaveable(token) { mutableStateOf(false) }
+    var details by remember(state.sessionId, token) { mutableStateOf(false) }
     OutlinedCard(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(strings.get(R.string.checkpoint_title), style = MaterialTheme.typography.titleMedium)
@@ -71,9 +71,9 @@ internal fun ChatRecoveryCard(state: ChatState,
                     state.checkpoint?.let {
                         Text(strings.get(R.string.checkpoint_identifier, it.id))
                         Text(strings.get(R.string.checkpoint_run, it.previousRunId))
-                        Text(strings.get(R.string.checkpoint_diagnostic, it.reason))
+                        Text(strings.get(R.string.checkpoint_diagnostic, strings.get(diagnosticReason(it.reason))))
                     }
-                    state.reconciliation?.let { Text(strings.get(R.string.checkpoint_diagnostic, it.reason)) }
+                    state.reconciliation?.let { Text(strings.get(R.string.checkpoint_diagnostic, strings.get(diagnosticReason(it.reason)))) }
                 }
             }
         }
