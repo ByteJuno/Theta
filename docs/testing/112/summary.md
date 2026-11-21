@@ -1,7 +1,7 @@
 # Issue 112 — bounded conversation previews
 
-Writer implementation: `0715832bf22b3263e1adbda39c48653ef5dad0fd` (includes verified main `029adaf75c8118e27a33cbe6aed6057f3b587b0b`). Reviewer correction and its separate evidence are recorded below.
-Debug APK SHA-256: `05c8faa0cb487c401485382c26394c1889dc04fcf12cd56a6ea97286668656a4`.
+Original writer implementation: `0715832bf22b3263e1adbda39c48653ef5dad0fd` (includes verified main `029adaf75c8118e27a33cbe6aed6057f3b587b0b`). Reviewer correction and its separate evidence are recorded below.
+Historical writer APK SHA-256: `05c8faa0cb487c401485382c26394c1889dc04fcf12cd56a6ea97286668656a4`; it predates the reviewer correction and is not current-build acceptance.
 
 The conversation list now shows up to 60 Unicode code points from the first USER text, collapses whitespace/control characters, preserves surrogate pairs, and adds an ellipsis when clipped. Rows use stable session-ID keys, one-line layout ellipsis, a bilingual current-conversation label and selected semantics. The existing numbered label remains for empty/legacy/unreadable previews. Pagination uses its own database cursor, independent of the selected row, and hides Load more after exhaustion.
 
@@ -28,3 +28,21 @@ AndroidX LazyDsl.kt's itemsIndexed key contract was inspected: stable unique Bun
 - Authorized GPU command: `/opt/homelab-report/theta-gpu-test :agent-core:test --tests '*SessionPreviewTest*' --tests '*SessionPreviewUnicodeProbe*'`. Result: `GRADLE_EXIT=0`, `TESTS total=9 failed=0`; both original probes printed `identical=true`, with all seven flag code points intact. No assertions or timeouts were weakened. Raw output stays in the review transcript and Probe source remains untracked.
 - Tested source SHA-256: `SessionPreview.kt` = `7c711778b16f7f31f3864d2901228518041102150409485972b096ad5935f1de`; `SessionPreviewTest.kt` = `b73c365dc52af5e9073de13b1351871a9b0c3f6b89dc9b9ee0451b9b32444386`. The remaining production/test sources match the writer head.
 - The original fixed API33 scan passed; this correction adds no API calls or dependencies. No APK was produced during review, and the writer APK above predates this correction. Visual acceptance remains unverified; final-source APK, rendering, emulator regression and CI remain the outer merge pipeline's responsibility.
+
+## Return repair — exact preview write accounting
+
+Test repair source: `d17c6ab1215b8d64a231598d020ef0d2d31391c1`, based on reviewer head `6cf0b0ef73607dbbc863054fed69cd505b76f2fd`. This round changes only `HistoryPerformanceTest.kt` and this summary; production, UI, protected files, build configuration and workflow remain unchanged.
+
+The retained reviewer log for run `20261121-110957` and CI run `44897746702` both identify the write-count assertion at line 39. Running the original test unchanged on reviewer head locally reproduced `expected:<20000> but was:<20001>`. The first USER append now atomically stores one additional preview value, so the old total omitted a required write. No latency failure was reported. A live shared-worktree XML had an unrelated timestamp; it was retained as unbound evidence and is not attributed to the failed run.
+
+The repaired test asserts exactly **3 writes for the first append and 2 for each of the following 9,999 appends**, for a total of **20,001**, plus the original 2-write extra append. It additionally verifies the first preview frame is at most 1,024 bytes and byte-identical after all subsequent appends and cold reopen. Original assertions for unchanged first history batch, zero history reads/decodes during append, one decoded message on reopen, and 50 messages per bounded page remain intact. No timeout or performance bound was relaxed.
+
+Validation on the repair source:
+
+- **22/22 applicable targeted cases passed**, zero failures/errors/skips: HistoryPerformanceTest 1, SessionPreviewTest 7 (including reviewer's emoji correction), SqliteRunHistoryTest 9, HistoryChunkBoundsTest 3, and two ChatSessionOwner preview/paging cases. The main invocation ran 21 cases in **75.73 seconds**; a misspelled paging filter matched no additional case, so the missing exact method was then run alone successfully in **19.37 seconds**. Source digests are identical across both runs.
+- Debug build, bilingual resource guard and Lint passed (**0 errors / 28 warnings**); strict `--configuration-cache --configuration-cache-problems=fail` stored the cache. API33 direct-JDK static scan passed for **404 classes / 0 violations**, with the current compiled-class manifest and exact APK binding.
+- Current Debug APK SHA-256: `6b47981c1756652441ba6b82a932b32b8ac5d7bd31ad43338d9ff0d2f1f43c72`. This APK includes the reviewer emoji correction. All 349 tracked non-document file digests were checked against the tested source before publication; the later evidence commit changes only this summary.
+- The Windows microbenchmark observed 10,000 acknowledged appends in **13,703.89 ms**, 0 messages decoded, 20,001 value writes and 10,660,621 encoded bytes written. Cold reopen decoded 1 message; each initial 50-message page decoded 50. The extra append wrote 1,068 bytes in 2 values. These counters describe the instrumented history I/O; preview SQL reads are separate bounded metadata reads. Timings include assertions/measurement overhead, use warm OS caches, and are not Android latency claims.
+- Raw red/green XML, original reviewer/CI logs, source and class manifests, scanner output and current APK remain outside Git under `event-runs/9ef5cddc-9728-4774-98ec-0c0bde891027` and `validation-issue11/issue112-9ef5cddc-{red,green,paging}`.
+
+Full suites, final-head CI and prescribed emulator regression remain the independent review pipeline's gates. **Visual/device acceptance remains unverified**, including final-APK conversation list/open/select/load-more/delete, bilingual fallback/current labels, narrow/large-font and light/dark scenarios. No phone or emulator was operated, no real-provider/physical power-loss test was run, and the writer did not merge.
