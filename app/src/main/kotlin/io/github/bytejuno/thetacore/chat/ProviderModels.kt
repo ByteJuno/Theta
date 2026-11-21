@@ -1,6 +1,7 @@
 package io.github.bytejuno.thetacore.chat
 
 import io.github.bytejuno.thetacore.agent.provider.openai.ModelsRequestException
+import io.github.bytejuno.thetacore.agent.provider.openai.validApiKey
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -29,6 +30,10 @@ internal class ProviderModels(
 
     fun load(endpoint: String, secret: String) {
         invalidate()
+        if (!validApiKey(secret)) {
+            current.value = ProviderModelsState(failure = ModelsRequestException.Failure.INVALID_SETTINGS)
+            return
+        }
         val requested = revision
         current.value = ProviderModelsState(loading = true)
         job = scope.launch {

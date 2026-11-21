@@ -10,6 +10,19 @@ import kotlin.coroutines.resumeWithException
 import kotlin.coroutines.suspendCoroutine
 
 class ProviderModelsTest {
+    @Test fun malformedKeysFailBeforeCredentialConstructionAndCanBeCorrected() = runBlocking {
+        var calls = 0
+        val models = ProviderModels(this) { _, _ -> calls++; listOf("model") }
+        for (key in listOf("", "synthetic-key ", "key\r\n", "密钥", "k".repeat(16_385))) {
+            models.load("endpoint", key); yield()
+            assertEquals(ProviderModelsState(failure = ModelsRequestException.Failure.INVALID_SETTINGS), models.state.value)
+            assertEquals(0, calls)
+        }
+        models.load("endpoint", "synthetic-key"); yield()
+        assertEquals(1, calls)
+        assertEquals(ProviderModelsState(models = listOf("model")), models.state.value)
+    }
+
     @Test fun noRequestUntilExplicitLoadAndFailureAllowsRetry() = runBlocking {
         var calls = 0
         val models = ProviderModels(this) { _, _ ->

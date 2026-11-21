@@ -2,13 +2,19 @@ package io.github.bytejuno.thetacore.agent.provider.openai
 
 import io.github.bytejuno.thetacore.agent.protocol.Credentials
 import kotlinx.coroutines.*
+import kotlinx.coroutines.test.*
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
 import okhttp3.OkHttpClient
+import okhttp3.Call
+import okhttp3.Dns
+import okhttp3.EventListener
 import org.junit.Assert.*
 import org.junit.Test
 import java.io.IOException
 import java.net.SocketTimeoutException
+import java.net.InetAddress
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 class OpenAiModelsClientTest {
@@ -20,6 +26,42 @@ class OpenAiModelsClientTest {
         catch (error: ModelsRequestException) {
             assertEquals(expected, error.failure); assertNull(error.cause)
             assertEquals(0, error.suppressed.size); assertFalse(error.toString().contains(key))
+        }
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test fun totalDeadlineCancelsCallEvenWhenDnsCannotReturn() = runTest {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val cancelled = CountDownLatch(1)
+        val transport = OkHttpClient.Builder().dns(Dns {
+            entered.countDown()
+            check(release.await(5, TimeUnit.SECONDS))
+            listOf(InetAddress.getLoopbackAddress())
+        }).eventListener(object : EventListener() {
+            override fun canceled(call: Call) { cancelled.countDown() }
+        }).build()
+        val request = async {
+            failure(ModelsRequestException.Failure.TIMEOUT) {
+                OpenAiModelsClient(transport).fetch("http://models.invalid/v1", credentials)
+            }
+        }
+        try {
+            runCurrent()
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            // Advance the caller's real 30-second deadline without waiting for OS DNS to return.
+            advanceTimeBy(30_000)
+            runCurrent()
+            assertTrue("The caller must finish while DNS is still blocked", request.isCompleted)
+            assertEquals(0L, cancelled.count)
+            request.await()
+        } finally {
+            release.countDown()
+            request.cancel()
+            runCurrent()
+            request.join()
+            transport.dispatcher.executorService.shutdown()
+            transport.connectionPool.evictAll()
         }
     }
 

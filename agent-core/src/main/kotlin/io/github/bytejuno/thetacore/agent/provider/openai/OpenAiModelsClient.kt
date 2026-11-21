@@ -3,6 +3,7 @@ package io.github.bytejuno.thetacore.agent.provider.openai
 import io.github.bytejuno.thetacore.agent.protocol.Credentials
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.*
 import okhttp3.*
 import java.io.IOException
@@ -36,7 +37,10 @@ class OpenAiModelsClient internal constructor(client: OkHttpClient) {
             if (!validApiKey(token)) fail(ModelsRequestException.Failure.INVALID_SETTINGS)
             val request = Request.Builder().url(endpoint).get().header("Accept", "application/json")
                 .header("Authorization", "Bearer $token").build()
-            return read(request)
+            // OkHttp cannot deliver its timeout callback until a blocking DNS lookup returns.
+            // Bound the caller's wait independently; cancellation also cancels the underlying call.
+            return withTimeoutOrNull(30_000) { read(request) }
+                ?: fail(ModelsRequestException.Failure.TIMEOUT)
         } catch (error: CancellationException) { throw error }
         catch (error: ModelsRequestException) { throw error }
         catch (_: Exception) { fail(ModelsRequestException.Failure.INVALID_SETTINGS) }
