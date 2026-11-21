@@ -2,6 +2,7 @@ package io.github.bytejuno.thetacore.agent.transport
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.launch
@@ -44,7 +45,9 @@ class OkHttpModelTransport : ModelTransport {
             .post(oneShotBody).build()
         val call = client.newCall(request)
         call.enqueue(object : Callback {
-            override fun onFailure(call: Call, e: IOException) { close(e) }
+            override fun onFailure(call: Call, e: IOException) {
+                if (!call.isCanceled()) close(e)
+            }
             override fun onResponse(call: Call, response: Response) {
                 // Cancellation can race response delivery: never leave the delivered body unowned.
                 val job = launch(Dispatchers.IO) {
@@ -61,7 +64,13 @@ class OkHttpModelTransport : ModelTransport {
                             }
                         }
                         close()
-                    } catch (error: Exception) { close(error) }
+                    } catch (error: Exception) {
+                        // awaitClose can cancel the call before cancellation reaches this child.
+                        // That socket error belongs to cleanup, even while the child is still active.
+                        if (call.isCanceled()) return@launch
+                        coroutineContext.ensureActive()
+                        close(error)
+                    }
                 }
                 job.invokeOnCompletion { response.close() }
             }

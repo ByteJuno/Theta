@@ -21,6 +21,61 @@ import java.nio.file.Files
 import java.util.concurrent.atomic.AtomicInteger
 
 class ChatSessionOwnerTest {
+    @Test fun diagnosticsFollowFailureColdOpenSessionSwitchAndLaterSuccess() = runBlocking {
+        val root = Files.createTempDirectory("chat-diagnostics").toFile()
+        val requests = AtomicInteger()
+        val responseStarted = CompletableDeferred<Unit>()
+        val responseAllowed = CompletableDeferred<Unit>()
+        val model = object : ModelProvider {
+            override fun executionMode(request: ChatRequest) = ModelExecutionMode.GENERATION_ONLY
+            override fun chat(request: ChatRequest, auth: Credentials): Flow<ModelEvent> = flow {
+                if (requests.incrementAndGet() == 1) {
+                    emit(Events.failed(modelError(ModelErrorCode.AUTH, "Authorization: Bearer private-value")))
+                } else {
+                    emit(Events.started("success", "model"))
+                    responseStarted.complete(Unit); responseAllowed.await()
+                    emit(Events.text(0, "done")); emit(Events.end(0)); emit(Events.finished(FinishReason.STOP))
+                }
+            }
+        }
+        var live: Fixture? = null
+        try {
+            val first = fixture(root, AtomicInteger(), model).also { live = it }
+            first.owner.open().join(); first.owner.send("first").join()
+            await { !first.owner.state.value.active }
+            assertEquals(RunState.FAILED, first.owner.state.value.result?.state)
+            val failedSession = first.owner.state.value.sessionId!!
+            val failedDiagnostic = requireNotNull(chatDiagnostic(first.owner.state.value))
+            assertFalse(failedDiagnostic.toString().contains("private-value"))
+            first.close(); live = null
+            val cold = fixture(root, AtomicInteger(), model).also { live = it }
+            cold.owner.open().join()
+            assertEquals(failedSession, cold.owner.state.value.sessionId)
+            assertEquals(failedDiagnostic, chatDiagnostic(cold.owner.state.value))
+            assertEquals(1, requests.get())
+            cold.owner.newSession().join()
+            val emptySession = cold.owner.state.value.sessionId!!
+            assertNull(chatDiagnostic(cold.owner.state.value))
+            cold.owner.select(failedSession).join()
+            assertEquals(failedDiagnostic, chatDiagnostic(cold.owner.state.value))
+            cold.owner.send("try again").join()
+            withTimeout(10_000) { responseStarted.await() }
+            assertTrue(cold.owner.state.value.active)
+            assertNull(chatDiagnostic(cold.owner.state.value))
+            responseAllowed.complete(Unit)
+            await { !cold.owner.state.value.active }
+            assertEquals(RunState.COMPLETED, cold.owner.state.value.result?.state)
+            assertNull(chatDiagnostic(cold.owner.state.value))
+            cold.owner.select(emptySession).join(); cold.owner.select(failedSession).join()
+            assertNull(chatDiagnostic(cold.owner.state.value))
+            assertEquals(2, requests.get())
+            assertTrue(cold.failures.toString(), cold.failures.isEmpty())
+        } finally {
+            responseAllowed.complete(Unit)
+            live?.close(); root.deleteRecursively()
+        }
+    }
+
     @Test fun sessionPreviewsSurviveSendColdOpenPagingSelectionAndDeletion() = runBlocking {
         val root = Files.createTempDirectory("chat-session-previews").toFile()
         try {
@@ -61,6 +116,7 @@ class ChatSessionOwnerTest {
             cold.close()
         } finally { root.deleteRecursively() }
     }
+
     @Test fun deletionRetainsUnknownEffectRecoveryAcrossPagesAndColdOpen() = runBlocking {
         val root = Files.createTempDirectory("chat-delete-recovery").toFile()
         val executions = AtomicInteger()
