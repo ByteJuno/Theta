@@ -5,18 +5,24 @@ import io.github.bytejuno.thetacore.agent.provider.openai.*
 import io.github.bytejuno.thetacore.agent.transport.*
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeout
+import mockwebserver3.MockResponse
+import mockwebserver3.MockWebServer
+import java.util.concurrent.TimeUnit
 import kotlin.test.*
 
 class OpenAiCredentialsTest {
     private val secret = "synthetic-secret-issue18"
     private val settings = OpenAiProviderSettings("test", "https://example.invalid/v1", "model")
 
-    @Test fun `failed or blank credentials fail AUTH before transport without leaking causes`() = runTest {
+    @Test fun `failed or invalid API key credentials fail AUTH before transport without leaking causes`() = runTest {
         var dispatches = 0
         val transport = ModelTransport { _, _, _ -> flow { dispatches++ } }
         val provider = OpenAiChatProvider(settings.adapterConfig(), transport)
-        for (auth in listOf(Credentials { throw IllegalStateException(secret) }, Credentials { "" },
+        for (auth in listOf(Credentials { throw IllegalStateException(secret) },
+            Credentials { ApiKeyCredentials("").accessToken() }, Credentials { ApiKeyCredentials("  ").accessToken() },
             Credentials { "  " }, Credentials { "$secret\r\nheader" })) {
             val event = provider.chat(chatRequest("model"), auth).toList().single() as ModelEvent.Failed
             assertEquals(ModelErrorCode.AUTH, event.error.code)
@@ -24,6 +30,45 @@ class OpenAiCredentialsTest {
             assertFalse(event.toString().contains(secret))
         }
         assertEquals(0, dispatches)
+    }
+
+    @Test fun `unauthenticated chat omits authorization while API key chat sends bearer`(): Unit = runBlocking {
+        MockWebServer().use { server ->
+            server.start()
+            val provider = OpenAiChatProvider(OpenAiChatConfig("local", server.url("/v1").toString()))
+            for ((auth, header) in listOf(Credentials { "" } to null, ApiKeyCredentials(secret) to "Bearer $secret")) {
+                server.enqueue(MockResponse.Builder().code(200).addHeader("Content-Type", "text/event-stream")
+                    .body("data: {\"id\":\"response\",\"model\":\"model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n").build())
+                val events = withTimeout(5_000) { provider.chat(chatRequest("model"), auth).toList() }
+                assertIs<ModelEvent.Finished>(events.last())
+                assertTrue(events.none { it is ModelEvent.Failed })
+                val sent = assertNotNull(server.takeRequest(5, TimeUnit.SECONDS))
+                assertEquals("POST", sent.method)
+                assertEquals("/v1/chat/completions", sent.url.encodedPath)
+                assertEquals(header, sent.headers["Authorization"])
+                assertEquals(if (header == null) 0 else 1, sent.headers.values("Authorization").size)
+                assertFalse(assertNotNull(sent.body).utf8().contains(secret))
+            }
+            assertEquals(2, server.requestCount)
+        }
+    }
+
+    @Test fun `unauthenticated errors retain safe parameters and reject arbitrary server text`() = runTest {
+        for ((param, expected) in listOf("temperature" to "temperature", "server-private-text" to null)) {
+            var dispatches = 0
+            val transport = ModelTransport { _, _, token -> flow {
+                dispatches++
+                assertEquals("", token)
+                emit(TransportEvent.Headers(400, "application/json", null))
+                emit(TransportEvent.Bytes("""{"error":{"code":"unsupported_parameter","param":"$param"}}""".toByteArray()))
+            } }
+            val event = OpenAiChatProvider(settings.adapterConfig(), transport)
+                .chat(chatRequest("model"), Credentials { "" }).toList().single() as ModelEvent.Failed
+            assertEquals(1, dispatches)
+            assertEquals(ModelErrorCode.UNSUPPORTED_PARAMETER, event.error.code)
+            assertEquals(expected, event.error.param)
+            assertFalse(event.toString().contains("server-private-text"))
+        }
     }
 
     @Test fun `key is only passed to transport never request or diagnostic values`() = runTest {
