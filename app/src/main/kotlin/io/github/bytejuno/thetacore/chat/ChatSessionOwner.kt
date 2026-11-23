@@ -480,15 +480,21 @@ internal class ChatSessionOwner(
                 }
             }
             val executor = executor(pending.records.mapNotNull { it.input.definition }.distinctBy { it.modelName })
+            var admissionPaused = false
             try { executor.execute(calls) }
+            catch (pause: ToolStepPaused) {
+                if (!currentCoroutineContext().isActive) executor.cancelRemaining(calls)
+                currentCoroutineContext().ensureActive()
+                admissionPaused = true
+            }
             catch (error: Exception) { executor.cancelRemaining(calls); throw error }
             finally {
                 // Same atomic pair commit as AgentRunLoop: logical cancellation is not
                 // actual worker exit. Preserve the ledger's UNKNOWN/isolation truth.
-                disk.append(disk.revision(), listOf(pending.assistant,
+                if (!admissionPaused) disk.append(disk.revision(), listOf(pending.assistant,
                     executor.results(pending.identity, pending.stepId, calls)))
             }
-            return R.string.chat_recovered_step
+            return if (admissionPaused) R.string.chat_paused else R.string.chat_recovered_step
         } else {
             val config = requireNotNull(snapshot)
             val id = requireNotNull(identity)

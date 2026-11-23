@@ -374,6 +374,9 @@ internal class HostToolExecutionService(
      * normalize empty/null to {} only after frozen-schema validation; never gate on complete alone.
      * Unknown names are registered as terminal rejections without a fabricated definition;
      * they retain their original binding/order and do not prevent other calls from executing.
+     * A null admission result retains the registered step. An explicit retry of the same bindings
+     * rechecks live guards; actual exit can release timeout/cancellation restrictions, while
+     * independent restart causes still pause. AgentRunLoop uses runBridge with durable history.
      */
     suspend fun executeStep(reducer: ModelEventReducer, taskChain: String, session: String, run: String,
         step: String, unattended: Boolean = false): Message? = withContext(Dispatchers.IO) {
@@ -421,8 +424,9 @@ internal class HostToolExecutionService(
             return !storageFailed
         }
         suspend fun awaitAdmissionProgress(blocked: Mutation.Blocked, input: InvocationInput): Boolean {
-            // Only current-batch leases can be relieved here. Permanent guards (claim budget,
-            // restart, stale definition, recovery) must pause without waiting on unrelated work.
+            // Only current-batch leases can be relieved here. Other guards pause without waiting
+            // on unrelated work; restart restrictions may clear on actual exit, so a later explicit
+            // continuation must recheck admission rather than classifying them as permanent.
             val candidates = when (blocked.reason) {
                 "Execution capacity unavailable" -> pending.toList()
                 "Resource occupied or externally isolated" -> pending.filter {

@@ -25,7 +25,10 @@ interface ToolExecutionBridge {
 fun interface RunApprovals { suspend fun decide(request: ApprovalRequest): Decision? }
 
 data class RunIdentity(val taskChainId: String, val sessionId: String, val runId: String, val unattended: Boolean = false)
-class ToolStepBlocked(message: String) : IllegalStateException(message)
+open class ToolStepBlocked(message: String) : IllegalStateException(message)
+/** Admission was refused before a new claim. Keep a durable pending step for an explicit retry;
+ * this grants nothing and never means that already submitted workers have exited. */
+class ToolStepPaused internal constructor(message: String) : ToolStepBlocked(message)
 
 /** Owns ordering, not permissions. Every path (including unknown tools and truncation) uses the
  * existing ledger. Host owns cold recovery, installed definitions, and process-wide execution slots.
@@ -149,6 +152,14 @@ class LedgerToolExecutor(
                 }
             }
             resolveCurrent()
+            if (r.state == Status.RUNNING || r.state in setOf(Status.SUCCEEDED, Status.FAILED) &&
+                r.instance?.state == InstanceState.UNCONFIRMED) {
+                // Resume observes the original claim, including normal completion handlers.
+                // It must not cancel/re-submit a running sibling or bypass a serial exit barrier.
+                if (r.input.definition?.parallelSafe == true) active += r.callId
+                else await(listOf(r.callId))
+                continue
+            }
             if (r.state.terminal) continue
             if (r.state != Status.READY) throw ToolStepBlocked("Approval not resolved")
             val resource = r.input.definition?.exclusiveResource
@@ -173,7 +184,8 @@ class LedgerToolExecutor(
                     context.ensureActive()
                     val hosted = bridge.claimAndSubmit(r.callId, r.revision)
                     val mutation = hosted ?: ledger.claimExecution(r.callId, r.revision)
-                    val next = record(mutation)
+                    val next = if (mutation is Mutation.Blocked && mutation.reason in resumableAdmissionReasons)
+                        throw ToolStepPaused(mutation.reason) else record(mutation)
                     if (hosted == null) (mutation as? Mutation.Applied)?.ticket?.let { bridge.submit(it) }
                     next
                 }
@@ -225,5 +237,13 @@ class LedgerToolExecutor(
         is Mutation.Blocked -> throw ToolStepBlocked(mutation.reason)
         is Mutation.Conflict -> throw ToolStepBlocked(mutation.reason)
         is Mutation.StorageFailure -> throw ToolStepBlocked("Ledger storage failure: ${mutation.reason}")
+    }
+
+    private companion object {
+        // Re-evaluate the ledger on every explicit continuation. Independent restart causes,
+        // unresolved effects and resource isolation can continue refusing admission indefinitely.
+        val resumableAdmissionReasons = setOf("Plugin restart required",
+            "Task chain awaits unknown instance actual exit", "Step barrier awaits actual exit/submission",
+            "Resource occupied or externally isolated", "Execution capacity unavailable")
     }
 }

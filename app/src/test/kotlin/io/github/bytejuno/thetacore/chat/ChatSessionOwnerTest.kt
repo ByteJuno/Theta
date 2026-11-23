@@ -21,6 +21,91 @@ import java.nio.file.Files
 import java.util.concurrent.atomic.AtomicInteger
 
 class ChatSessionOwnerTest {
+    @Test fun savedStepResumesAfterTimeoutExitWithoutReplayingSubmittedCall() = runBlocking {
+        blockedStepResumes(cancel = false, sticky = false)
+    }
+
+    @Test fun savedStepResumesAfterCancelledExitWithoutReplayingSubmittedCall() = runBlocking {
+        blockedStepResumes(cancel = true, sticky = false)
+    }
+
+    @Test fun savedStepRetainsIndependentRestartRestrictionAfterExit() = runBlocking {
+        blockedStepResumes(cancel = false, sticky = true)
+    }
+
+    private suspend fun blockedStepResumes(cancel: Boolean, sticky: Boolean) {
+        val root = Files.createTempDirectory("chat-step-resume").toFile()
+        val entered = CompletableDeferred<String>()
+        val release = CompletableDeferred<Unit>()
+        val executions = AtomicInteger()
+        val controlled = object : Tool {
+            override val id = "read"
+            override val spec = ToolSpec(id, "controlled read", schema, risk = ToolRisk.READ,
+                timeoutMs = if (cancel) 30_000 else 150)
+            override suspend fun call(args: JsonObject, env: ToolEnv): ToolResult {
+                if (executions.incrementAndGet() == 1) withContext(NonCancellable) {
+                    entered.complete(env.callId)
+                    release.await()
+                }
+                return ToolResult("read", effect = ToolEffect.NONE)
+            }
+        }
+        val model = provider(calls = 2)
+        val f = fixture(root, executions, model, controlled)
+        var firstCall: String? = null
+        try {
+            f.owner.open().join(); f.owner.send("two reads").join()
+            val firstId = withTimeout(10_000) { entered.await() }
+            firstCall = firstId
+            if (cancel) f.host.cancel(firstId) // Cancel this invocation, not the user's whole run.
+            await { !f.owner.state.value.active }
+            assertTrue("Admission pause must retain the original step", f.owner.state.value.pending)
+            val before = f.owner.state.value.records.values.sortedBy { it.input.callOrder }
+            assertEquals(2, before.size)
+            val first = f.host.ledger.get(firstId)!!
+            val nextId = before[1].callId
+            assertEquals(if (cancel) Status.CANCELLED else Status.TIMED_OUT, first.state)
+            assertEquals(Status.READY, f.host.ledger.get(nextId)!!.state)
+            assertNull(f.host.ledger.get(nextId)!!.instance)
+            assertEquals(1, executions.get()); assertEquals(1, model.requests)
+            await { f.host.ledger.get(firstId)!!.restartRequiredUntilExit }
+            if (sticky) assertTrue(f.host.ledger.markRestartRequired(firstId, first.instance!!.attemptId) is Mutation.Applied)
+            // An early explicit retry rechecks admission and preserves both bindings.
+            f.owner.continueSavedStep().join(); await { !f.owner.state.value.active }
+            assertTrue(f.owner.state.value.pending)
+            assertEquals(Status.READY, f.host.ledger.get(nextId)!!.state)
+            assertEquals(1, executions.get()); assertEquals(1, f.budget.occupiedSlots())
+            release.complete(Unit); f.host.awaitObservedExit(firstId)
+            val exited = f.host.ledger.get(firstId)!!
+            assertEquals(first.result, exited.result)
+            assertEquals(first.instance!!.attemptId, exited.instance!!.attemptId)
+            assertEquals(InstanceState.EXIT_CONFIRMED, exited.instance!!.state)
+            assertEquals(sticky, exited.restartRequired)
+            f.owner.continueSavedStep().join(); await { !f.owner.state.value.active }
+            assertEquals(sticky, f.owner.state.value.pending)
+            assertEquals(if (sticky) 1 else 2, executions.get())
+            assertEquals(1, model.requests) // Resuming a saved step never regenerates the response.
+            if (sticky) {
+                assertEquals(Status.READY, f.host.ledger.get(nextId)!!.state)
+                assertNull(f.host.ledger.get(nextId)!!.instance)
+                f.owner.stop().join()
+                assertEquals(Status.CANCELLED, f.host.ledger.get(nextId)!!.state)
+            } else {
+                assertEquals(Status.SUCCEEDED, f.host.ledger.get(nextId)!!.state)
+                val results = f.owner.state.value.messages.last().parts.filterIsInstance<ContentPart.ToolResult>()
+                assertEquals(before.map { it.callId }, results.map { it.callId })
+                assertEquals(first.result, f.host.ledger.get(firstId)!!.result)
+                validateHistory(f.owner.state.value.messages)
+            }
+            assertEquals(0, f.budget.occupiedSlots())
+            assertTrue(f.failures.toString(), f.failures.isEmpty())
+        } finally {
+            release.complete(Unit)
+            firstCall?.let { f.host.awaitObservedExit(it) }
+            f.close(); root.deleteRecursively()
+        }
+    }
+
     @Test fun diagnosticsFollowFailureColdOpenSessionSwitchAndLaterSuccess() = runBlocking {
         val root = Files.createTempDirectory("chat-diagnostics").toFile()
         val requests = AtomicInteger()
