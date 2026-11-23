@@ -1,6 +1,7 @@
 package io.github.bytejuno.thetacore.agent.run
 
 import io.github.bytejuno.thetacore.agent.ledger.InvocationRecord
+import io.github.bytejuno.thetacore.agent.ledger.NonExecutionReason
 import io.github.bytejuno.thetacore.agent.ledger.canonical
 import io.github.bytejuno.thetacore.agent.ledger.atLedgerPrecision
 import io.github.bytejuno.thetacore.agent.protocol.*
@@ -554,7 +555,13 @@ class AgentRunLoop(
                     tools.definitions.singleOrNull { it.toolKey == "host/blob_read" })
                 else history.prepareStep(view.revision, identity, step, assistant)
                 try {
-                    tools.register(identity, step, calls, cancelled = !execute)
+                    val reason = when {
+                        truncated -> null // Protocol 2.7 requires truncation results even at the repeat limit.
+                        duplicate -> NonExecutionReason.REPEATED_CALL_LIMIT
+                        finish.reason == FinishReason.PAUSED -> NonExecutionReason.MODEL_PAUSED
+                        else -> null
+                    }
+                    tools.register(identity, step, calls, cancelled = !execute, reason = reason)
                     if (execute) tools.execute(calls)
                     currentCoroutineContext().ensureActive()
                 } catch (e: Exception) {

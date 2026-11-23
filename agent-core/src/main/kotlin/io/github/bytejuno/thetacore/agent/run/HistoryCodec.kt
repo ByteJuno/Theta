@@ -197,10 +197,13 @@ internal object HistoryCodec {
                 "isolation" to v.isolation, "restartRequired" to v.restartRequired,
                 "recoveryPending" to v.recoveryPending, "restartRequiredUntilExit" to v.restartRequiredUntilExit,
                 "acknowledgedUnknownDenial" to v.acknowledgedUnknownDenial)
-            is InvocationInput -> fields("binding" to v.binding, "taskChainId" to v.taskChainId,
-                "sessionId" to v.sessionId, "runId" to v.runId, "stepId" to v.stepId, "callOrder" to v.callOrder,
-                "argsJson" to v.argsJson, "definition" to v.definition, "unattended" to v.unattended,
-                "initialRisk" to v.initialRisk, "cancelledBeforeExecution" to v.cancelledBeforeExecution, "modelName" to v.modelName)
+            is InvocationInput -> {
+                val input = arrayOf("binding" to v.binding, "taskChainId" to v.taskChainId,
+                    "sessionId" to v.sessionId, "runId" to v.runId, "stepId" to v.stepId, "callOrder" to v.callOrder,
+                    "argsJson" to v.argsJson, "definition" to v.definition, "unattended" to v.unattended,
+                    "initialRisk" to v.initialRisk, "cancelledBeforeExecution" to v.cancelledBeforeExecution, "modelName" to v.modelName)
+                if (v.nonExecutionReason == null) fields(*input) else fields(*input, "nonExecutionReason" to v.nonExecutionReason)
+            }
             is BindingValue -> fields("provider" to v.provider, "requestId" to v.requestId, "responseId" to v.responseId,
                 "index" to v.index, "wireId" to v.wireId, "callId" to v.callId)
             is FrozenDefinition -> fields("toolKey" to v.toolKey, "modelName" to v.modelName, "name" to v.name,
