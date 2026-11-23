@@ -565,6 +565,13 @@ class AgentRunLoop(
                     if (execute) tools.execute(calls)
                     currentCoroutineContext().ensureActive()
                 } catch (e: Exception) {
+                    if (e is ToolStepPaused && chatDisk != null &&
+                        mode == ModelExecutionMode.GENERATION_ONLY && currentCoroutineContext().isActive) {
+                        // The full response/step is durable. Do not cancel queued calls or append
+                        // synthetic results. The host resumes these bindings without regenerating
+                        // the model turn, and still rechecks approval, isolation and actual exit.
+                        return RunResult(RunState.PAUSED, "Tool step admission paused: ${e.message}", steps, retries)
+                    }
                     executionFailure = e
                     // Never retry this generation, even if submit threw before returning a handle.
                     // Complete the full registered batch using ledger truth, not CANCELLED/NONE guesses.
