@@ -21,6 +21,182 @@ import java.nio.file.Files
 import java.util.concurrent.atomic.AtomicInteger
 
 class ChatSessionOwnerTest {
+    @Test fun stoppingSavedStepCommitsBeforeTimedOutWorkerExit() = runBlocking {
+        stopSavedStepBeforeExit(cancel = false)
+    }
+
+    @Test fun stoppingSavedStepCommitsBeforeCancelledWorkerExit() = runBlocking {
+        stopSavedStepBeforeExit(cancel = true)
+    }
+
+    private suspend fun stopSavedStepBeforeExit(cancel: Boolean) {
+        val root = Files.createTempDirectory("chat-stop-saved").toFile()
+        val entered = CompletableDeferred<String>()
+        val release = CompletableDeferred<Unit>()
+        val count = AtomicInteger()
+        val controlled = object : Tool {
+            override val id = "read"
+            override val spec = ToolSpec(id, "controlled", schema, risk = ToolRisk.READ,
+                timeoutMs = if (cancel) 30_000 else 150, exclusiveResource = "saved-resource")
+            override suspend fun call(args: JsonObject, env: ToolEnv): ToolResult {
+                count.incrementAndGet()
+                withContext(NonCancellable) { entered.complete(env.callId); release.await() }
+                return ToolResult("late result", effect = ToolEffect.UNKNOWN)
+            }
+        }
+        val model = provider(calls = 2)
+        val f = fixture(root, count, model, controlled)
+        var firstId: String? = null
+        try {
+            f.owner.open().join(); f.owner.send("two reads").join()
+            val id = withTimeout(10_000) { entered.await() }; firstId = id
+            if (cancel) f.host.cancel(id)
+            await { !f.owner.state.value.active }
+            assertTrue(f.owner.state.value.pending)
+            val before = f.owner.state.value.records.values.sortedBy { it.input.callOrder }
+            val first = f.host.ledger.get(id)!!
+            assertEquals(if (cancel) Status.CANCELLED else Status.TIMED_OUT, first.state)
+            assertEquals(InstanceState.UNCONFIRMED, first.instance!!.state)
+            val session = f.owner.state.value.sessionId!!
+            f.owner.stop().join()
+            assertFalse("Stop must commit without waiting for actual exit", f.owner.state.value.pending)
+            assertEquals(R.string.chat_stopped, f.owner.state.value.notice)
+            val stopped = f.host.ledger.get(id)!!
+            assertEquals(first.result, stopped.result)
+            assertEquals(first.instance, stopped.instance)
+            assertEquals(first.isolation, stopped.isolation)
+            assertEquals(Status.CANCELLED, f.host.ledger.get(before[1].callId)!!.state)
+            assertNull(f.host.ledger.get(before[1].callId)!!.instance)
+            assertEquals(1, f.budget.occupiedSlots()); assertEquals(1, count.get())
+            assertEquals(1, model.requests)
+            val committed = f.owner.state.value.messages
+            assertEquals(before.map { it.callId }, committed.last().parts.filterIsInstance<ContentPart.ToolResult>().map { it.callId })
+            validateHistory(committed)
+            f.owner.stop().join(); f.owner.select(session).join()
+            assertFalse(f.owner.state.value.pending)
+            val expected = f.host.ledger.resultsForStep(session, first.input.runId,
+                first.input.stepId, before.map { it.callId })!!.parts.filterIsInstance<ContentPart.ToolResult>()
+            val actual = f.owner.state.value.messages.last().parts.filterIsInstance<ContentPart.ToolResult>()
+            assertEquals(expected.map { Triple(it.callId, it.text, it.isError) },
+                actual.map { Triple(it.callId, it.text, it.isError) })
+            assertEquals(committed, f.owner.state.value.messages)
+            assertEquals(1, f.budget.occupiedSlots())
+            release.complete(Unit); f.host.awaitObservedExit(id)
+            await { f.owner.state.value.records[id]?.instance?.state == InstanceState.EXIT_CONFIRMED }
+            assertEquals(first.instance!!.attemptId, f.host.ledger.get(id)!!.instance!!.attemptId)
+            assertEquals(first.result, f.host.ledger.get(id)!!.result)
+            assertEquals(0, f.budget.occupiedSlots())
+            assertTrue(f.failures.toString(), f.failures.isEmpty())
+        } finally {
+            release.complete(Unit); firstId?.let { f.host.awaitObservedExit(it) }
+            f.close(); root.deleteRecursively()
+        }
+    }
+
+    @Test fun stoppingRetainedSiblingCommitsWithoutReleasingItsLease() = runBlocking {
+        val root = Files.createTempDirectory("chat-stop-retained").toFile()
+        val entered = CompletableDeferred<String>()
+        val release = CompletableDeferred<Unit>()
+        val count = AtomicInteger()
+        val controlled = object : Tool {
+            override val id = "read"
+            override val spec = ToolSpec(id, "controlled", schema, risk = ToolRisk.READ,
+                timeoutMs = 30_000, parallelSafe = true)
+            override suspend fun call(args: JsonObject, env: ToolEnv): ToolResult {
+                count.incrementAndGet()
+                withContext(NonCancellable) { entered.complete(env.callId); release.await() }
+                return ToolResult("late", effect = ToolEffect.NONE)
+            }
+        }
+        val model = provider(calls = 2)
+        val f = fixture(root, count, model, controlled, budget = PluginExecutionBudget(1, 1))
+        var firstId: String? = null
+        try {
+            f.owner.open().join(); f.owner.send("two parallel reads").join()
+            val id = withTimeout(10_000) { entered.await() }; firstId = id
+            await { f.owner.state.value.pending && f.owner.state.value.records.values.any { it.state == Status.READY } }
+            val before = f.host.ledger.get(id)!!
+            f.owner.stop().join(); await { !f.owner.state.value.active }
+            assertFalse(f.owner.state.value.pending)
+            assertEquals(R.string.chat_stopped, f.owner.state.value.notice)
+            val stopped = f.host.ledger.get(id)!!
+            assertEquals(Status.CANCELLED, stopped.state)
+            assertEquals(before.input, stopped.input); assertEquals(before.instance, stopped.instance)
+            assertEquals(1, f.budget.occupiedSlots()); assertEquals(1, count.get()); assertEquals(1, model.requests)
+            val records = f.owner.state.value.records.values.sortedBy { it.input.callOrder }
+            assertEquals(listOf(Status.CANCELLED, Status.CANCELLED), records.map { it.state })
+            assertNull(records[1].instance)
+            validateHistory(f.owner.state.value.messages)
+            assertTrue(f.failures.toString(), f.failures.isEmpty())
+        } finally {
+            release.complete(Unit); firstId?.let { f.host.awaitObservedExit(it) }
+            f.close(); root.deleteRecursively()
+        }
+    }
+
+    @Test fun retainedSiblingApprovalKeepsExecutionIdentityAndForegroundAdmission() = runBlocking {
+        val root = Files.createTempDirectory("chat-retained-approval").toFile()
+        val requestApproval = CompletableDeferred<Unit>()
+        val entered = CompletableDeferred<String>()
+        val returned = CompletableDeferred<Boolean>()
+        val admission = CompletableDeferred<Unit>()
+        val presence = RecordingPresence()
+        val count = AtomicInteger()
+        val controlled = object : Tool {
+            override val id = "read"
+            override val spec = ToolSpec(id, "controlled", schema, risk = ToolRisk.READ,
+                timeoutMs = 30_000, parallelSafe = true)
+            override suspend fun call(args: JsonObject, env: ToolEnv): ToolResult {
+                if (count.incrementAndGet() == 1) {
+                    entered.complete(env.callId); requestApproval.await()
+                    returned.complete(env.requestApproval("write after read", ToolRisk.WRITE))
+                }
+                return ToolResult("original result", effect = ToolEffect.NONE)
+            }
+        }
+        val model = provider(calls = 2)
+        val f = fixture(root, count, model, controlled, presence, budget = PluginExecutionBudget(1, 1))
+        var firstId: String? = null
+        try {
+            f.owner.open().join(); f.owner.send("two parallel reads").join()
+            val id = withTimeout(10_000) { entered.await() }; firstId = id
+            await { f.owner.state.value.pending && f.owner.state.value.records.values.any { it.state == Status.READY } }
+            val token = f.owner.state.value.executionId
+            val original = f.host.ledger.get(id)!!
+            requestApproval.complete(Unit)
+            await { f.host.ledger.get(id)!!.pending != null }
+            assertTrue("The live sibling still belongs to the original execution", f.owner.state.value.active)
+            assertNotNull(token)
+            presence.admitted = admission
+            val request = f.host.ledger.get(id)!!.pending!!
+            val decision = f.owner.decide(id, request.id, Decision.ALLOW_ONCE)
+            await { presence.events.last().second == ChatTaskProgress.Model }
+            assertFalse(returned.isCompleted)
+            assertEquals(request, f.host.ledger.get(id)!!.pending)
+            admission.complete(Unit); decision.join()
+            assertTrue(withTimeout(10_000) { returned.await() })
+            f.host.awaitObservedExit(id); await { !f.owner.state.value.active }
+            assertTrue(f.owner.state.value.pending)
+            val completed = f.host.ledger.get(id)!!
+            assertEquals(Status.SUCCEEDED, completed.state)
+            assertEquals(original.input, completed.input)
+            assertEquals(original.instance!!.attemptId, completed.instance!!.attemptId)
+            assertEquals(listOf(Decision.ALLOW_ONCE), completed.receipts.map { it.decision })
+            assertEquals(listOf(token), presence.events.map { it.first }.distinct())
+            assertEquals(1, count.get()); assertEquals(1, model.requests)
+            f.owner.continueSavedStep().join(); await { !f.owner.state.value.active }
+            assertFalse(f.owner.state.value.pending)
+            assertEquals(2, count.get()); assertEquals(1, model.requests)
+            assertEquals(completed, f.host.ledger.get(id))
+            validateHistory(f.owner.state.value.messages)
+            assertTrue(f.failures.toString(), f.failures.isEmpty())
+        } finally {
+            admission.complete(Unit); requestApproval.complete(Unit)
+            firstId?.let { f.host.cancel(it); f.host.awaitObservedExit(it) }
+            f.close(); root.deleteRecursively()
+        }
+    }
+
     @Test fun savedStepResumesAfterTimeoutExitWithoutReplayingSubmittedCall() = runBlocking {
         blockedStepResumes(cancel = false, sticky = false)
     }
@@ -342,9 +518,9 @@ class ChatSessionOwnerTest {
         }
     }
     private suspend fun fixture(root: File, count: AtomicInteger, provider: ModelProvider, hostTool: Tool = tool(count),
-        presence: ChatTaskPresence = ChatTaskPresence.None, fault: (SqliteWriteStage) -> Unit = {}): Fixture {
+        presence: ChatTaskPresence = ChatTaskPresence.None, budget: PluginExecutionBudget = PluginExecutionBudget(),
+        fault: (SqliteWriteStage) -> Unit = {}): Fixture {
         val store = AndroidAgentStore.open(root, BundledSQLiteDriver(), fault)
-        val budget = PluginExecutionBudget()
         val host = HostToolBridgeRoot(budget, hostTool).initialize { store }
         return Fixture(store, budget, host, provider, ImageAttachments(store.privateImages), presence)
     }

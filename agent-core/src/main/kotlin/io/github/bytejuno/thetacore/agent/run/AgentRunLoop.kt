@@ -565,7 +565,7 @@ class AgentRunLoop(
                     if (execute) tools.execute(calls)
                     currentCoroutineContext().ensureActive()
                 } catch (e: Exception) {
-                    if (e is ToolStepPaused && history is SqliteRunHistory &&
+                    if (e is ToolStepPaused && chatDisk != null &&
                         mode == ModelExecutionMode.GENERATION_ONLY && currentCoroutineContext().isActive) {
                         // The full response/step is durable. Do not cancel queued calls or append
                         // synthetic results. The host resumes these bindings without regenerating
