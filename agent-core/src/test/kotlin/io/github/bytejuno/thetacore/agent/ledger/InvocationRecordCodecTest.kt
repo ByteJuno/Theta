@@ -8,6 +8,27 @@ import kotlin.test.*
 class InvocationRecordCodecTest {
     private val codec = InvocationRecordCodec(Json { encodeDefaults = true; explicitNulls = true })
 
+    @Test fun legacyCancelledRecordKeepsItsResultAndInputOnReplay() = Fixture().use { f ->
+        val input = f.input().copy(cancelledBeforeExecution = true)
+        val record = f.record(input)
+        val legacy = codec.encode(record)
+        assertFalse(legacy.contains("\"nonExecutionReason\""))
+        val decoded = codec.decode(legacy)
+        decoded.validate()
+        assertEquals(input, decoded.input)
+        assertEquals(LogicalResult(Status.CANCELLED, Effect.NONE, "Truncated model turn: not executed", false), decoded.result)
+        assertEquals(legacy, codec.encode(decoded))
+    }
+
+    @Test fun explicitCancellationReasonsSurviveStorage() = Fixture().use { f ->
+        for (reason in NonExecutionReason.entries) {
+            val input = f.input().copy(cancelledBeforeExecution = true, nonExecutionReason = reason)
+            val record = f.record(input)
+            assertEquals(record, codec.decode(codec.encode(record)))
+            assertEquals(reason.message, record.result!!.text)
+        }
+    }
+
     @Test fun isolatedSurrogatesRoundTripThroughCodecAndUtf8() {
         for ((value, escaped) in listOf(
             "\uD800" to "\\ud800",

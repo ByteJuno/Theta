@@ -214,6 +214,23 @@ class AgentRunLoopTest {
         }
     }
 
+    @Test fun repeatedTruncatedCallsPreserveTruncationReason() = runTest {
+        for (reason in listOf(FinishReason.LENGTH, FinishReason.CONTEXT_EXCEEDED)) {
+            val f = RunFixture(listOf(testDefinition()))
+            val p = ScriptProvider(listOf(calls("tool"), calls("tool"), calls("tool", reason = reason)))
+            assertEquals(RunState.PAUSED, f.loop(p).run().state)
+            assertEquals(3, p.requests.size)
+            assertEquals(2, f.submitted.size)
+            val cancelled = f.store.records().last()
+            assertNull(cancelled.instance)
+            assertNull(cancelled.input.nonExecutionReason)
+            assertEquals(LogicalResult(Status.CANCELLED, Effect.NONE, "Truncated model turn: not executed", false), cancelled.result)
+            val projected = f.history.snapshot().messages.last().parts.single() as ContentPart.ToolResult
+            assertEquals(cancelled.callId, projected.callId)
+            assertEquals(ModelResultText.project(cancelled.result!!), projected.text)
+        }
+    }
+
     @Test fun replayAndPartOrderSurvivePausedAndTools() = runTest {
         val replay = replayData("signed", "m", "untouched payload")
         val first = listOf(Events.started("r", "m"), Events.reasoning(0, "think"), Events.end(0, replay),
@@ -247,9 +264,30 @@ class AgentRunLoopTest {
         val repeated = ScriptProvider(listOf(calls("tool")))
         assertEquals(RunState.PAUSED, f.loop(repeated).run().state)
         assertEquals(3, repeated.requests.size); assertEquals(2, f.submitted.size)
-        assertEquals(Status.CANCELLED, f.store.records().last().state)
+        val cancelled = f.store.records().last()
+        assertEquals(LogicalResult(Status.CANCELLED, Effect.NONE, "Repeated tool call limit: not executed", false), cancelled.result)
+        val projected = f.history.snapshot().messages.last().parts.single() as ContentPart.ToolResult
+        assertEquals(cancelled.callId, projected.callId)
+        assertEquals(ModelResultText.project(cancelled.result!!), projected.text)
         val limited = ScriptProvider(listOf(calls("missing")))
         assertEquals(1, RunFixture().loop(limited, limits = RunLimits(maxSteps = 1)).run().steps)
+    }
+
+    @Test fun pausedClientCallsExplainNonExecutionInNextRequest() = runTest {
+        val f = RunFixture(listOf(testDefinition()))
+        val p = ScriptProvider(listOf(calls("tool", "missing", reason = FinishReason.PAUSED), answer()),
+            ModelExecutionMode.MAY_EXECUTE_SERVER_TOOLS)
+        assertEquals(RunState.COMPLETED, f.loop(p).run().state)
+        assertTrue(f.submitted.isEmpty())
+        val results = p.requests[1].messages.last().parts.filterIsInstance<ContentPart.ToolResult>()
+        assertEquals(2, results.size)
+        assertEquals(2, f.store.records().size)
+        f.store.records().zip(results).forEach { (record, projected) ->
+            assertEquals(LogicalResult(Status.CANCELLED, Effect.NONE, "Model turn paused: client tool not executed", false), record.result)
+            assertNull(record.instance)
+            assertEquals(record.callId, projected.callId)
+            assertEquals(ModelResultText.project(record.result!!), projected.text)
+        }
     }
 
     @Test fun historyWriteFailureNeverReexecutesAndLeavesNoHalfAppend() = runTest {
