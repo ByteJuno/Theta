@@ -622,8 +622,11 @@ class AgentRunLoop(
         return result(RunState.PAUSED, "Step limit")
     }
 
-    /** Replay on an empty part is opaque adapter state, so only replay-free empty text is contentless. */
-    private fun contentless(message: Message) = message.parts.all { it is ContentPart.Text && it.text.isEmpty() && it.replay == null }
+    /** Reasoning alone is not an answer, even with replay; the raw journal retains it.
+     * Preserve the existing opaque replay contract for non-reasoning parts. */
+    private fun contentless(message: Message) = message.parts.all {
+        it is ContentPart.Reasoning || it is ContentPart.Text && it.text.isEmpty() && it.replay == null
+    }
 
     private fun compatible(target: ModelTarget, request: ChatRequest): Boolean = request.messages.all { m ->
         m.parts.all { p -> p.replay?.let { target.provider.canReplay(it, request.model) } != false }
