@@ -951,11 +951,11 @@ class HostToolExecutionServiceTest {
         }
     }
 
-    @Test fun graceExpiredTimeoutBlocksUntilExitThenReusesOriginalToolAndReleasesResource() = runBlocking {
-        Fixture(exitGraceMillis = 30).use { f ->
+    @Test fun graceExpiredCancellationOrTimeoutBlocksUntilExitThenReusesOriginalToolAndReleasesResource() = runBlocking {
+        for (cancel in listOf(false, true)) Fixture(exitGraceMillis = 30).use { f ->
             val entered = CountDownLatch(1); val release = CountDownLatch(1)
             val calls = AtomicInteger()
-            val original = tool(timeout = 100, resource = "shared") {
+            val original = tool(timeout = if (cancel) 60_000 else 100, resource = "shared") {
                 if (calls.incrementAndGet() == 1) { entered.countDown(); release.await() }
                 ToolResult("done", effect = ToolEffect.NONE)
             }
@@ -966,9 +966,11 @@ class HostToolExecutionServiceTest {
                 f.service.prepare(first); f.service.prepare(next)
                 f.service.dispatch(first.binding.callId)
                 assertTrue(entered.await(3, TimeUnit.SECONDS))
+                if (cancel) f.service.cancel(first.binding.callId)
                 waitUntil { f.ledger.get(first.binding.callId)!!.restartRequired }
                 val before = f.ledger.get(first.binding.callId)!!
                 val message = f.ledger.resultsForStep("session", "run", "step", listOf(first.binding.callId))
+                assertEquals(if (cancel) Status.CANCELLED else Status.TIMED_OUT, before.state)
                 assertTrue(before.restartRequiredUntilExit)
                 assertEquals(InstanceState.UNCONFIRMED, before.instance!!.state)
                 repeat(3) {
@@ -998,71 +1000,83 @@ class HostToolExecutionServiceTest {
     }
 
     @Test fun allGraceExpiredCallsOfOwnerMustExitBeforeItCanScheduleAgain() = runBlocking {
-        Fixture(slots = 3, exitGraceMillis = 30).use { f ->
-            val entered = CountDownLatch(2)
-            val releases = listOf(CountDownLatch(1), CountDownLatch(1))
-            val calls = AtomicInteger()
-            val timerHeld = CountDownLatch(1); val releaseTimeouts = CountDownLatch(1)
-            // Hold the existing deadline executor, not the workers or definition gate. Both
-            // claims can enter before either real SDK timeout is allowed to fire.
-            assertNotNull(f.budget.schedule(0) { timerHeld.countDown(); releaseTimeouts.await() })
-            try {
-                assertTrue(timerHeld.await(5, TimeUnit.SECONDS))
-                val d = f.register(tool(timeout = 300, parallel = true) {
-                    val index = calls.getAndIncrement()
-                    if (index < 2) { entered.countDown(); releases[index].await() }
-                    ToolResult("done", effect = ToolEffect.NONE)
-                })
-                val first = f.input(d); val second = f.input(d, order = 1)
-                val next = f.input(d, step = "next")
-                listOf(first, second, next).forEach { f.service.prepare(it) }
-                assertNotNull((f.service.dispatch(first.binding.callId) as Mutation.Applied).ticket)
-                // Fix entry order so releasing index 0 corresponds to the first ledger attempt.
-                waitUntil { calls.get() == 1 }
-                // Deliberately exceed the old 300 ms race window before the second dispatch.
-                delay(400)
-                assertNotNull((f.service.dispatch(second.binding.callId) as Mutation.Applied).ticket)
-                assertTrue(entered.await(5, TimeUnit.SECONDS))
-                listOf(first, second).forEach {
-                    assertEquals(Status.RUNNING, f.ledger.get(it.binding.callId)!!.state)
-                }
-                releaseTimeouts.countDown()
-                waitUntil { listOf(first, second).all { f.ledger.get(it.binding.callId)!!.restartRequired } }
-                listOf(first, second).forEach {
-                    assertEquals(Status.TIMED_OUT, f.ledger.get(it.binding.callId)!!.state)
-                    assertTrue(f.ledger.get(it.binding.callId)!!.restartRequiredUntilExit)
-                }
-                assertEquals(2, f.budget.occupiedSlots())
-                releases[0].countDown()
-                withTimeout(5_000) { f.service.awaitObservedExit(first.binding.callId) }
-                assertFalse(f.ledger.get(first.binding.callId)!!.restartRequired)
-                assertTrue(f.ledger.get(second.binding.callId)!!.restartRequired)
-                assertEquals(1, f.budget.occupiedSlots())
-                assertEquals("Plugin restart required", (f.service.dispatch(next.binding.callId) as Mutation.Blocked).reason)
-                releases[1].countDown()
-                withTimeout(5_000) { f.service.awaitObservedExit(second.binding.callId) }
-                assertEquals(0, f.budget.occupiedSlots())
-                assertNotNull((f.service.dispatch(next.binding.callId) as Mutation.Applied).ticket)
-                withTimeout(5_000) { f.service.awaitObservedExit(next.binding.callId) }
-                assertEquals(3, calls.get())
-            } finally { releaseTimeouts.countDown(); releases.forEach { it.countDown() } }
+        for (cancelledIndex in listOf(-1, 0, 1)) {
+            // A held deadline callback does not freeze elapsed time at cancellation. Keep the
+            // mixed cases before the deadline until cancellation has durably won.
+            val clock = if (cancelledIndex >= 0) ManualClock() else null
+            Fixture(slots = 3, exitGraceMillis = 30, clock = clock).use { f ->
+                val entered = CountDownLatch(2)
+                val releases = listOf(CountDownLatch(1), CountDownLatch(1))
+                val calls = AtomicInteger()
+                val timerHeld = CountDownLatch(1); val releaseTimeouts = CountDownLatch(1)
+                // Hold the existing deadline executor, not the workers or definition gate. Both
+                // claims can enter before either real SDK timeout is allowed to fire.
+                assertNotNull(f.budget.schedule(0) { timerHeld.countDown(); releaseTimeouts.await() })
+                try {
+                    assertTrue(timerHeld.await(5, TimeUnit.SECONDS))
+                    val d = f.register(tool(timeout = 300, parallel = true) {
+                        val index = calls.getAndIncrement()
+                        if (index < 2) { entered.countDown(); releases[index].await() }
+                        ToolResult("done", effect = ToolEffect.NONE)
+                    })
+                    val first = f.input(d); val second = f.input(d, order = 1)
+                    val next = f.input(d, step = "next")
+                    listOf(first, second, next).forEach { f.service.prepare(it) }
+                    assertNotNull((f.service.dispatch(first.binding.callId) as Mutation.Applied).ticket)
+                    // Fix entry order so releasing index 0 corresponds to the first ledger attempt.
+                    waitUntil { calls.get() == 1 }
+                    // Deliberately exceed the old 300 ms race window before the second dispatch.
+                    delay(400)
+                    assertNotNull((f.service.dispatch(second.binding.callId) as Mutation.Applied).ticket)
+                    assertTrue(entered.await(5, TimeUnit.SECONDS))
+                    listOf(first, second).forEach {
+                        assertEquals(Status.RUNNING, f.ledger.get(it.binding.callId)!!.state)
+                    }
+                    if (cancelledIndex >= 0) f.service.cancel(listOf(first, second)[cancelledIndex].binding.callId)
+                    clock?.advance(300)
+                    releaseTimeouts.countDown()
+                    waitUntil { listOf(first, second).all { f.ledger.get(it.binding.callId)!!.restartRequired } }
+                    listOf(first, second).forEachIndexed { index, it ->
+                        assertEquals(if (index == cancelledIndex) Status.CANCELLED else Status.TIMED_OUT,
+                            f.ledger.get(it.binding.callId)!!.state)
+                        assertTrue(f.ledger.get(it.binding.callId)!!.restartRequiredUntilExit)
+                    }
+                    assertEquals(2, f.budget.occupiedSlots())
+                    releases[0].countDown()
+                    withTimeout(5_000) { f.service.awaitObservedExit(first.binding.callId) }
+                    assertFalse(f.ledger.get(first.binding.callId)!!.restartRequired)
+                    assertTrue(f.ledger.get(second.binding.callId)!!.restartRequired)
+                    assertEquals(1, f.budget.occupiedSlots())
+                    assertEquals("Plugin restart required", (f.service.dispatch(next.binding.callId) as Mutation.Blocked).reason)
+                    releases[1].countDown()
+                    withTimeout(5_000) { f.service.awaitObservedExit(second.binding.callId) }
+                    assertEquals(0, f.budget.occupiedSlots())
+                    assertNotNull((f.service.dispatch(next.binding.callId) as Mutation.Applied).ticket)
+                    withTimeout(5_000) { f.service.awaitObservedExit(next.binding.callId) }
+                    assertEquals(3, calls.get())
+                } finally { releaseTimeouts.countDown(); releases.forEach { it.countDown() } }
+            }
         }
     }
 
+
     @Test fun graceExitDoesNotClearOtherRestartCauseBeforeOrAfterGraceExpiry() = runBlocking {
-        for (stickyFirst in listOf(true, false)) Fixture(exitGraceMillis = 100).use { f ->
+        for (cancel in listOf(false, true)) for (stickyFirst in listOf(true, false)) Fixture(exitGraceMillis = 100).use { f ->
             val entered = CountDownLatch(1); val release = CountDownLatch(1)
             try {
-                val d = f.register(tool(timeout = 100) {
+                val d = f.register(tool(timeout = if (cancel) 60_000 else 100) {
                     entered.countDown(); release.await(); ToolResult("late")
                 })
                 val first = f.input(d); val next = f.input(d, step = "next")
                 f.service.prepare(first); f.service.prepare(next)
                 val ticket = (f.service.dispatch(first.binding.callId) as Mutation.Applied).ticket!!
                 assertTrue(entered.await(3, TimeUnit.SECONDS))
+                if (cancel && !stickyFirst) f.service.cancel(first.binding.callId)
                 if (!stickyFirst) waitUntil { f.ledger.get(first.binding.callId)!!.restartRequiredUntilExit }
                 assertTrue(f.ledger.markRestartRequired(first.binding.callId, ticket.attemptId) is Mutation.Applied)
-                waitUntil { f.ledger.get(first.binding.callId)!!.state == Status.TIMED_OUT }
+                if (cancel && stickyFirst) f.service.cancel(first.binding.callId)
+                waitUntil { f.ledger.get(first.binding.callId)!!.state ==
+                    if (cancel) Status.CANCELLED else Status.TIMED_OUT }
                 // Exercise a later grace mark deterministically as well as the service timer.
                 assertTrue(f.ledger.markRestartRequired(first.binding.callId, ticket.attemptId,
                     untilActualExit = true) is Mutation.AlreadyApplied)
@@ -1077,15 +1091,16 @@ class HostToolExecutionServiceTest {
     }
 
     @Test fun graceExitDoesNotRestoreRevokedDefinition() = runBlocking {
-        Fixture(exitGraceMillis = 30).use { f ->
+        for (cancel in listOf(false, true)) Fixture(exitGraceMillis = 30).use { f ->
             val entered = CountDownLatch(1); val release = CountDownLatch(1)
             try {
-                val d = f.register(tool(timeout = 100) {
+                val d = f.register(tool(timeout = if (cancel) 60_000 else 100) {
                     entered.countDown(); release.await(); ToolResult("late")
                 })
                 val first = f.input(d); val next = f.input(d, step = "next")
                 f.service.prepare(first); f.service.prepare(next); f.service.dispatch(first.binding.callId)
                 assertTrue(entered.await(3, TimeUnit.SECONDS))
+                if (cancel) f.service.cancel(first.binding.callId)
                 waitUntil { f.ledger.get(first.binding.callId)!!.restartRequiredUntilExit }
                 f.catalog.revoke(d.toolKey) // Disable/cleanup keeps its independent definition gate.
                 release.countDown()
@@ -1164,7 +1179,7 @@ class HostToolExecutionServiceTest {
     }
 
     @OptIn(ExperimentalCoroutinesApi::class)
-    @Test fun durableCancellationBeforeObservedSdkSuccessStaysRestartRequiredAfterActualExit() = runBlocking {
+    @Test fun durableCancellationBeforeObservedSdkSuccessReleasesOnlyAtActualExit() = runBlocking {
         for (effect in listOf(ToolEffect.NONE, ToolEffect.UNKNOWN)) Fixture(exitGraceMillis = 30).use { f ->
             val entered = CountDownLatch(1); val returnBody = CountDownLatch(1)
             val handler = CountDownLatch(1); val releaseHandler = CountDownLatch(1)
@@ -1197,7 +1212,7 @@ class HostToolExecutionServiceTest {
                 assertTrue(f.service.cancel(first.binding.callId) is Mutation.AlreadyApplied)
                 waitUntil { f.ledger.get(first.binding.callId)!!.restartRequired }
                 val blocked = f.ledger.get(first.binding.callId)!!
-                assertFalse(blocked.restartRequiredUntilExit)
+                assertTrue(blocked.restartRequiredUntilExit)
                 assertEquals(cancelled.result, blocked.result)
                 assertEquals(Status.CANCELLED, blocked.state)
                 assertEquals(InstanceState.UNCONFIRMED, blocked.instance!!.state)
@@ -1214,23 +1229,26 @@ class HostToolExecutionServiceTest {
                 assertEquals(cancelled.result, exited.result)
                 assertEquals(ticket.attemptId, exited.instance!!.attemptId)
                 assertEquals(InstanceState.EXIT_CONFIRMED, exited.instance!!.state)
-                // DESIGN 13.11 releases only timeouts on actual exit; cancellation needs a restart.
-                assertTrue(exited.restartRequired)
+                // Actual exit clears this grace restriction without rewriting cancellation or uncertainty.
+                assertFalse(exited.restartRequired)
                 assertFalse(exited.restartRequiredUntilExit)
                 assertTrue(exited.evidence.containsAll(blocked.evidence))
                 assertEquals(effect == ToolEffect.UNKNOWN, exited.isolation != null)
                 assertEquals(0, f.budget.occupiedSlots())
                 assertSame(original, f.catalog.current(d)!!.tool)
-                if (effect == ToolEffect.NONE) {
-                    assertEquals("Plugin restart required", (f.service.dispatch(next.binding.callId) as Mutation.Blocked).reason)
-                } else {
-                    // Terminal UNKNOWN return evidence still requires review before the restart gate.
+                if (effect == ToolEffect.UNKNOWN) {
+                    // Exit does not clear the independent external-resource uncertainty.
                     assertEquals(Status.WAITING_APPROVAL,
                         (f.service.dispatch(next.binding.callId) as Mutation.Applied).record.state)
                     approve(f, next.binding.callId)
-                    assertEquals("Plugin restart required", (f.service.dispatch(next.binding.callId) as Mutation.Blocked).reason)
+                    assertEquals("Resource occupied or externally isolated",
+                        (f.service.dispatch(next.binding.callId) as Mutation.Blocked).reason)
+                    f.ledger.resolveRecovery(first.binding.callId, RecoveryResolution.VERIFIED_CLEAR)
                 }
-                assertEquals(1, calls.get())
+                assertNotNull((f.service.dispatch(next.binding.callId) as Mutation.Applied).ticket)
+                withTimeout(5_000) { f.service.awaitObservedExit(next.binding.callId) }
+                assertEquals(2, calls.get())
+                assertSame(original, f.catalog.current(d)!!.tool)
             } finally { returnBody.countDown(); releaseHandler.countDown() }
         }
     }
@@ -1248,13 +1266,13 @@ class HostToolExecutionServiceTest {
                 f.service.cancel(i.binding.callId)
                 assertTrue(cancelling.await(3, TimeUnit.SECONDS))
                 waitUntil { f.ledger.get(i.binding.callId)!!.restartRequired }
-                assertFalse(f.ledger.get(i.binding.callId)!!.restartRequiredUntilExit)
+                assertTrue(f.ledger.get(i.binding.callId)!!.restartRequiredUntilExit)
                 assertEquals(Status.CANCELLED, f.ledger.get(i.binding.callId)!!.state)
                 assertEquals(InstanceState.UNCONFIRMED, f.ledger.get(i.binding.callId)!!.instance!!.state)
                 assertEquals(1, f.budget.occupiedSlots())
                 release.countDown(); f.service.awaitObservedExit(i.binding.callId)
                 assertEquals(InstanceState.EXIT_CONFIRMED, f.ledger.get(i.binding.callId)!!.instance!!.state)
-                assertTrue(f.ledger.get(i.binding.callId)!!.restartRequired)
+                assertFalse(f.ledger.get(i.binding.callId)!!.restartRequired)
                 assertEquals(Status.CANCELLED, f.ledger.get(i.binding.callId)!!.state)
                 assertEquals(0, f.budget.occupiedSlots())
             } finally { release.countDown() }

@@ -21,6 +21,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
@@ -51,6 +52,7 @@ fun HookDiagnosticsPanel() {
     val systemPicker = rememberLauncherForActivityResult(HookDocumentPicker(), inspectSelection)
     LaunchedEffect(Unit) {
         try { HookHost.connect() }
+        catch (error: kotlinx.coroutines.CancellationException) { throw error }
         catch (error: Throwable) { HookHost.fail(error) }
     }
     Column {
@@ -70,15 +72,15 @@ fun HookDiagnosticsPanel() {
             Button(enabled = !busy, onClick = {
                 busy = true
                 val action = HookHost.beginAction()
-                scope.launch {
+                // Enter try/finally before a disposed UI scope can skip the coroutine body.
+                scope.launch(start = CoroutineStart.UNDISPATCHED) {
                     try {
-                        withContext(Dispatchers.IO) {
+                        HookHost.runAction(action) {
                             val grant = HookHost.requestScope(value.descriptor.target, action)
                             currentCoroutineContext().ensureActive()
                             HookHost.publish(context, value, grant)
                         }
-                    } catch (error: Throwable) { HookHost.fail(error) }
-                    finally { busy = false }
+                    } finally { busy = false }
                 }
             }) { Text(strings.get(R.string.publish_hook_apk)) }
         }
@@ -86,9 +88,8 @@ fun HookDiagnosticsPanel() {
         // without taking the remote-IO lock; an older approval cannot re-enable afterward.
         Button(onClick = {
             val action = HookHost.beginAction()
-            scope.launch {
-                try { withContext(Dispatchers.IO) { HookHost.disable(action) } }
-                catch (error: Throwable) { HookHost.fail(error) }
+            scope.launch(start = CoroutineStart.UNDISPATCHED) {
+                HookHost.runAction(action) { HookHost.disable(action) }
             }
         }) { Text(strings.get(R.string.disable_hook)) }
         Button(onClick = {
