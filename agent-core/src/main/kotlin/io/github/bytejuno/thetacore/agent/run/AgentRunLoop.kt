@@ -497,7 +497,7 @@ class AgentRunLoop(
                 if (checkpointRequired) return pauseContext(view, "Replay incompatible; checkpoint required")
                 return result(RunState.FAILED, "Model refused response")
             }
-            if (finish.reason in setOf(FinishReason.STOP, FinishReason.OTHER, FinishReason.TOOL_CALLS) && contentless(assistant)) {
+            if (finish.reason in setOf(FinishReason.STOP, FinishReason.OTHER, FinishReason.TOOL_CALLS) && disposition == HistoryDisposition.DISCARD) {
                 if (mode != ModelExecutionMode.GENERATION_ONLY) {
                     serverUnknown = true
                     return pauseContext(view, "Server execution state unknown")
@@ -620,12 +620,6 @@ class AgentRunLoop(
             transientCauses.clear()
         }
         return result(RunState.PAUSED, "Step limit")
-    }
-
-    /** Reasoning alone is not an answer, even with replay; the raw journal retains it.
-     * Preserve the existing opaque replay contract for non-reasoning parts. */
-    private fun contentless(message: Message) = message.parts.all {
-        it is ContentPart.Reasoning || it is ContentPart.Text && it.text.isEmpty() && it.replay == null
     }
 
     private fun compatible(target: ModelTarget, request: ChatRequest): Boolean = request.messages.all { m ->

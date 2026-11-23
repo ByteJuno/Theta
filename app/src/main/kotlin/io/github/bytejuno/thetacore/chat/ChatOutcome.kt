@@ -26,5 +26,6 @@ internal fun replyReason(reason: String): Int = when (reason) {
     "CONTENT_FILTER", "CONTENT_BLOCKED" -> R.string.chat_reply_filtered
     "LENGTH" -> R.string.chat_reply_length
     "CONTEXT_EXCEEDED" -> R.string.chat_reply_context
+    "EMPTY_RESPONSE" -> R.string.chat_diagnostic_empty
     else -> R.string.chat_reply_interrupted
 }

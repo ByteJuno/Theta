@@ -33,6 +33,7 @@ class ReasoningOnlyResponseTest {
                 assertEquals("private reasoning", part.summary)
                 assertEquals(if (signed) "opaque signature" else null, part.replay?.payload)
                 assertEquals(FinishReason.STOP, (attempt.terminal as ModelEvent.Finished).reason)
+                assertEquals(HistoryDisposition.DISCARD, attempt.disposition)
                 assertFalse(attempt.cancelled)
             }
         }
@@ -128,10 +129,19 @@ class ReasoningOnlyResponseTest {
                         RunApprovals { Decision.ALLOW_ONCE }), StoredRunJournal(disk),
                     onEvent = { _, event -> observed += event }).run()
                 assertEquals(if (mode == ModelExecutionMode.GENERATION_ONLY) RunState.FAILED else RunState.PAUSED, result.state)
+                assertEquals(attempts, disk.journalPage().replies.size)
             }
             TestRunHistory.open(root, Durability.PROCESS_CRASH_ONLY).use { disk ->
                 assertEquals(listOf(Role.USER), disk.snapshot().messages.map { it.role })
                 assertEquals(mode != ModelExecutionMode.GENERATION_ONLY, disk.loadBarrier() != null)
+                val replies = disk.journalPage().replies
+                assertEquals(attempts, replies.size)
+                replies.forEach { reply ->
+                    assertEquals("EMPTY_RESPONSE", reply.reason)
+                    val part = assertIs<ContentPart.Reasoning>(reply.partial.parts.single())
+                    assertEquals("private reasoning", part.summary)
+                    assertEquals("opaque signature", part.replay?.payload)
+                }
             }
             assertEquals(attempts, provider.requests.size)
             assertEquals(List(attempts) { "private reasoning" }, observed.filterIsInstance<ModelEvent.ReasoningDelta>().map { it.text })
@@ -145,6 +155,22 @@ class ReasoningOnlyResponseTest {
                 assertEquals("opaque signature", part.replay?.payload)
                 assertTrue(stored.complete)
                 assertEquals(FinishReason.STOP, stored.finish)
+                assertEquals(HistoryDisposition.DISCARD.name, stored.disposition)
+            }
+        }
+    }
+
+    @Test fun terminalClassificationPreservesContinuationAndNonReasoningReplay() {
+        for (reason in listOf(FinishReason.STOP, FinishReason.OTHER, FinishReason.TOOL_CALLS, FinishReason.PAUSED, FinishReason.LENGTH)) {
+            for (signedText in listOf(false, true)) {
+                val reducer = ModelEventReducer("provider", "request")
+                val events = reasoning(true, reason).dropLast(1) + listOf(Events.text(1, ""),
+                    Events.end(1, if (signedText) replayData("p", "m", "text signature") else null),
+                    Events.finished(reason))
+                events.forEach(reducer::accept)
+                val discarded = !signedText && reason in setOf(FinishReason.STOP, FinishReason.OTHER, FinishReason.TOOL_CALLS)
+                assertEquals(if (discarded) HistoryDisposition.DISCARD else HistoryDisposition.KEEP, reducer.historyDisposition())
+                assertEquals("opaque signature", reducer.assistantMessage().parts.first().replay?.payload)
             }
         }
     }
