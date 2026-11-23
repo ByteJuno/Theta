@@ -415,7 +415,7 @@ class OpenAiSettingsStoreTest {
         assertEquals(secret, token(store.snapshotForNewRun()))
     }
 
-    @Test fun permanentlyUnusableExistingKeyFailsAdmissionAndReplacementEvenAfterClear() {
+    @Test fun cipherWithoutRecoveryFailsAdmissionAndReplacementEvenAfterClear() {
         val root = temp.newFolder()
         val existingKey = key()
         var invalidated = false
@@ -423,7 +423,7 @@ class OpenAiSettingsStoreTest {
         val store = OpenAiSettingsStore(root, AesGcmSecretCipher("test") { create ->
             lookups += create
             // Model an alias that still exists but cannot be used, not a missing key.
-            // A write's create=true must not make this permanent failure recoverable.
+            // This low-level cipher has no explicit key-recovery capability.
             if (invalidated) throw java.security.InvalidKeyException("invalidated alias: $secret")
             existingKey
         })
@@ -437,8 +437,7 @@ class OpenAiSettingsStoreTest {
         val before = record(root).readBytes()
         invalidated = true
         val readError = failure(ProviderSettingsException.Failure.DECRYPT_FAILED) { admitAndSubmit() }
-        assertEquals("Provider credentials could not be decrypted; credential storage may be unavailable. " +
-            "Re-entering the API key may not restore access", readError.message)
+        assertEquals("Saved credentials cannot be read; enter the credentials again", readError.message)
         failure(ProviderSettingsException.Failure.WRITE_FAILED) { store.replace(settings(2), secret) }
         assertArrayEquals(before, record(root).readBytes())
         failure(ProviderSettingsException.Failure.DECRYPT_FAILED) { admitAndSubmit() }

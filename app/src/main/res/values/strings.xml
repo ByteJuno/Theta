@@ -233,7 +233,7 @@
     <string name="chat_sessions">Conversations</string>
     <string name="chat_new">New conversation</string>
     <string name="chat_configure_first">Set up a model before sending a message.</string>
-    <string name="chat_credentials_unavailable">Credentials cannot be opened. Check device credential storage or enter the API key again.</string>
+    <string name="chat_credentials_unavailable">Saved credentials cannot be read. Please enter them again.</string>
     <string name="chat_provider_failed">Could not save or read model settings. Check the endpoint, model and API key.</string>
     <string name="chat_operation_failed">The operation could not finish. Your stored history is retained. Restart the app if storage is unavailable.</string>
     <string name="chat_complete">Reply complete</string>

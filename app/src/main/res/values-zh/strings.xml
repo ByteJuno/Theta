@@ -233,7 +233,7 @@
     <string name="chat_sessions">会话</string>
     <string name="chat_new">新建会话</string>
     <string name="chat_configure_first">请先设置模型，再发送消息。</string>
-    <string name="chat_credentials_unavailable">无法读取凭据。请检查设备凭据存储，或重新输入 API 密钥。</string>
+    <string name="chat_credentials_unavailable">已保存的凭据无法读取，需要重新填写。</string>
     <string name="chat_provider_failed">无法保存或读取模型设置。请检查接口地址、模型和 API 密钥。</string>
     <string name="chat_operation_failed">操作未能完成，已保存的历史仍保留。若存储不可用，请重启应用。</string>
     <string name="chat_complete">回复完成</string>
