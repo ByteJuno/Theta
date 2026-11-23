@@ -77,7 +77,7 @@ class InvocationLedger(
         persist(r, next.copy(revision = r.revision + 1), ticket)
 
     fun recordInvocation(input: InvocationInput): Mutation =
-        recordInvocation(input, "Truncated model turn: not executed")
+        recordInvocation(input, input.nonExecutionReason?.message ?: "Truncated model turn: not executed")
 
     /** Only for missing registrations in a durable pending step; existing ledger truth wins. */
     internal fun recordUnsubmittedRecovery(input: InvocationInput): Mutation {

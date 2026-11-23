@@ -15,6 +15,8 @@ interface ModelProvider {
     fun chat(request: ChatRequest, auth: Credentials): Flow<ModelEvent>
 }
 
+/** An empty token selects no authentication for adapters that support it. API key credential
+ * implementations must reject empty keys instead of silently selecting no authentication. */
 fun interface Credentials { suspend fun accessToken(): String }
 enum class ModelExecutionMode { GENERATION_ONLY, MAY_EXECUTE_SERVER_TOOLS }
 enum class Role { USER, ASSISTANT, TOOL }
