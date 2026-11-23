@@ -63,6 +63,11 @@ internal fun canonical(value: JsonElement): String = when (value) {
 internal fun sha256(value: String) = MessageDigest.getInstance("SHA-256")
     .digest(value.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
 
+@Serializable enum class NonExecutionReason(val message: String) {
+    REPEATED_CALL_LIMIT("Repeated tool call limit: not executed"),
+    MODEL_PAUSED("Model turn paused: client tool not executed"),
+}
+
 @Serializable data class InvocationInput(
     val binding: BindingValue, val taskChainId: String, val sessionId: String, val runId: String,
     val stepId: String, val callOrder: Int, val argsJson: String, val definition: FrozenDefinition?,
@@ -71,8 +76,13 @@ internal fun sha256(value: String) = MessageDigest.getInstance("SHA-256")
     val cancelledBeforeExecution: Boolean = false,
     /** Preserve unresolved names without fabricating a catalog definition. */
     val modelName: String = definition?.modelName.orEmpty(),
+    /** Older records omit the reason; their stored result remains authoritative. */
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val nonExecutionReason: NonExecutionReason? = null,
 ) {
     init {
+        require(nonExecutionReason == null || cancelledBeforeExecution)
         require(listOf(taskChainId, sessionId, runId, stepId).all { it.isNotBlank() } && callOrder >= 0)
         if (definition != null) {
             require(modelName == definition.modelName)
