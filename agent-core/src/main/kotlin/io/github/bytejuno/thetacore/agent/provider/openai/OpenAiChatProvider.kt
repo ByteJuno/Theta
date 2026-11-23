@@ -60,7 +60,9 @@ class OpenAiChatProvider(
             emit(Events.failed(modelError(ModelErrorCode.AUTH, "Provider credentials unavailable; re-enter the API key")))
             return@flow
         }
-        if (!validApiKey(token)) {
+        // Empty credentials select no authentication. ApiKeyCredentials rejects empty keys;
+        // other nonempty credentials must still be safe to put in a Bearer header.
+        if (token.isNotEmpty() && !validApiKey(token)) {
             emit(Events.failed(modelError(ModelErrorCode.AUTH, "Provider credentials invalid; re-enter the API key")))
             return@flow
         }
@@ -106,7 +108,9 @@ class OpenAiChatProvider(
         if (terminal is ModelEvent.Failed) {
             val error = terminal.error
             emit(Events.failed(modelError(error.code, "OpenAI Chat request failed", error.httpStatus,
-                error.retryAfterMs, error.param?.takeIf { it in SAFE_ERROR_PARAMETERS && !it.contains(token) })))
+                error.retryAfterMs, error.param?.takeIf {
+                    it in SAFE_ERROR_PARAMETERS && (token.isEmpty() || !it.contains(token))
+                })))
         } else emit(terminal)
     }.catch { error ->
         // Only the collector's own cancellation stays silent; an adapter's internal one is a failure.
