@@ -154,6 +154,12 @@ class ModelEventReducer(private val provider: String, private val requestId: Str
         val finish = terminal as? ModelEvent.Finished ?: return HistoryDisposition.DISCARD
         if (finish.reason in setOf(FinishReason.REFUSAL, FinishReason.CONTENT_FILTER) || parts.isEmpty())
             return HistoryDisposition.DISCARD
+        // Empty terminal answers stay in the journal, including reasoning with opaque replay.
+        // PAUSED continuation and replay on non-reasoning parts keep their existing contracts.
+        if (finish.reason in setOf(FinishReason.STOP, FinishReason.OTHER, FinishReason.TOOL_CALLS) &&
+            parts.values.all { it.kind == Kind.REASONING ||
+                it.kind == Kind.TEXT && it.content.isEmpty() && it.replay == null })
+            return HistoryDisposition.DISCARD
         if (finish.reason in setOf(FinishReason.LENGTH, FinishReason.CONTEXT_EXCEEDED)) {
             if (calls().any { !it.complete }) return HistoryDisposition.DISCARD
             if (calls().isNotEmpty()) return HistoryDisposition.NEEDS_CANCELLED_NONE_RESULTS

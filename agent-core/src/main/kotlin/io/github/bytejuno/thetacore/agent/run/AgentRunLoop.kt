@@ -497,7 +497,7 @@ class AgentRunLoop(
                 if (checkpointRequired) return pauseContext(view, "Replay incompatible; checkpoint required")
                 return result(RunState.FAILED, "Model refused response")
             }
-            if (finish.reason in setOf(FinishReason.STOP, FinishReason.OTHER, FinishReason.TOOL_CALLS) && contentless(assistant)) {
+            if (finish.reason in setOf(FinishReason.STOP, FinishReason.OTHER, FinishReason.TOOL_CALLS) && disposition == HistoryDisposition.DISCARD) {
                 if (mode != ModelExecutionMode.GENERATION_ONLY) {
                     serverUnknown = true
                     return pauseContext(view, "Server execution state unknown")
@@ -621,9 +621,6 @@ class AgentRunLoop(
         }
         return result(RunState.PAUSED, "Step limit")
     }
-
-    /** Replay on an empty part is opaque adapter state, so only replay-free empty text is contentless. */
-    private fun contentless(message: Message) = message.parts.all { it is ContentPart.Text && it.text.isEmpty() && it.replay == null }
 
     private fun compatible(target: ModelTarget, request: ChatRequest): Boolean = request.messages.all { m ->
         m.parts.all { p -> p.replay?.let { target.provider.canReplay(it, request.model) } != false }

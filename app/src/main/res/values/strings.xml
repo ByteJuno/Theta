@@ -283,7 +283,7 @@
     <string name="chat_risk_device">Risk: controls the device</string>
     <string name="chat_risk_root">Risk: privileged root access</string>
     <string name="chat_reply_archive">Retained response attempts</string>
-    <string name="chat_reply_archive_notice">Refused, filtered, interrupted and discarded truncated attempts remain available here. Discarded content is never sent in later model requests. Older truncated records may also have a committed history entry.</string>
+    <string name="chat_reply_archive_notice">Refused, filtered, interrupted, empty and discarded truncated attempts remain available here. Discarded content is never sent in later model requests. Older truncated records may also have a committed history entry.</string>
     <string name="chat_reply_length">The response reached its output limit. Partial text is not a completed answer.</string>
     <string name="chat_reply_context">The response exceeded the context window. Partial text is not a completed answer.</string>
     <string name="chat_reply_older">Earlier retained replies</string>
