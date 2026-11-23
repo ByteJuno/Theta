@@ -134,6 +134,64 @@ class ChatSessionOwnerTest {
         }
     }
 
+    @Test fun stoppingSavedContinuationDuringForegroundAdmissionCommitsBeforeWorkerExit() = runBlocking {
+        val root = Files.createTempDirectory("chat-stop-saved-admission").toFile()
+        val entered = CompletableDeferred<String>()
+        val release = CompletableDeferred<Unit>()
+        val admission = CompletableDeferred<Unit>()
+        val presence = RecordingPresence()
+        val count = AtomicInteger()
+        val controlled = object : Tool {
+            override val id = "read"
+            override val spec = ToolSpec(id, "controlled", schema, risk = ToolRisk.READ,
+                timeoutMs = 30_000, exclusiveResource = "saved-admission-resource")
+            override suspend fun call(args: JsonObject, env: ToolEnv): ToolResult {
+                count.incrementAndGet()
+                withContext(NonCancellable) { entered.complete(env.callId); release.await() }
+                return ToolResult("late", effect = ToolEffect.NONE)
+            }
+        }
+        val model = provider(calls = 2)
+        val f = fixture(root, count, model, controlled, presence)
+        var firstId: String? = null
+        try {
+            f.owner.open().join(); f.owner.send("two reads").join()
+            val id = withTimeout(10_000) { entered.await() }; firstId = id
+            f.host.cancel(id)
+            await { !f.owner.state.value.active }
+            assertTrue(f.owner.state.value.pending)
+            val original = f.host.ledger.get(id)!!
+            val records = f.owner.state.value.records.values.sortedBy { it.input.callOrder }
+            assertEquals(Status.READY, records[1].state)
+            val session = f.owner.state.value.sessionId!!
+            val eventsBefore = presence.events.size
+            presence.admitted = admission
+            f.owner.continueSavedStep().join()
+            await { presence.events.size > eventsBefore }
+            f.owner.stop().join(); await { !f.owner.state.value.active }
+            assertFalse("Stop must settle a saved step even before foreground admission", f.owner.state.value.pending)
+            assertEquals(R.string.chat_stopped, f.owner.state.value.notice)
+            assertEquals(original.result, f.host.ledger.get(id)!!.result)
+            assertEquals(original.instance, f.host.ledger.get(id)!!.instance)
+            assertEquals(original.isolation, f.host.ledger.get(id)!!.isolation)
+            assertEquals(Status.CANCELLED, f.host.ledger.get(records[1].callId)!!.state)
+            assertNull(f.host.ledger.get(records[1].callId)!!.instance)
+            assertEquals(1, f.budget.occupiedSlots())
+            assertEquals(1, count.get()); assertEquals(1, model.requests)
+            val committed = f.owner.state.value.messages
+            assertEquals(records.map { it.callId }, committed.last().parts.filterIsInstance<ContentPart.ToolResult>().map { it.callId })
+            validateHistory(committed)
+            f.owner.select(session).join()
+            assertEquals(committed, f.owner.state.value.messages)
+            assertFalse(f.owner.state.value.pending)
+            assertTrue(f.failures.toString(), f.failures.isEmpty())
+        } finally {
+            admission.complete(Unit); release.complete(Unit)
+            firstId?.let { f.host.awaitObservedExit(it) }
+            f.close(); root.deleteRecursively()
+        }
+    }
+
     @Test fun retainedSiblingApprovalKeepsExecutionIdentityAndForegroundAdmission() = runBlocking {
         val root = Files.createTempDirectory("chat-retained-approval").toFile()
         val requestApproval = CompletableDeferred<Unit>()

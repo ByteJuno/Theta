@@ -366,6 +366,8 @@ internal class ChatSessionOwner(
             val pending = history?.pendingStep(tools!!.ledger)
             if (pending != null) {
                 stopPendingStep(pending)
+                refresh()
+                observeLateExits(requireNotNull(tools), pending.identity.runId)
                 mutable.update { it.copy(notice = R.string.chat_stopped) }
             }
         }
@@ -387,8 +389,6 @@ internal class ChatSessionOwner(
         disk.append(disk.revision(), listOf(pending.assistant, results))
         disk.saveChatInterruption()
         host.finishChatRun(pending.identity.runId)
-        refresh()
-        observeLateExits(host, pending.identity.runId)
     }
     private suspend fun approval(request: ApprovalRequest): Decision? {
         val host = requireNotNull(tools)
@@ -470,8 +470,17 @@ internal class ChatSessionOwner(
                 }
             } catch (error: CancellationException) {
                 notice = R.string.chat_stopped
-                try { history?.saveChatInterruption() }
-                catch (error: Exception) { report(error) }
+                withContext(NonCancellable) {
+                    gate.withLock {
+                        try {
+                            // Stop can arrive before executeChat, while foreground admission
+                            // is pending. Reconcile the saved step at this boundary too.
+                            val saved = history?.pendingStep(requireNotNull(tools).ledger)
+                            if (saved != null) stopPendingStep(saved)
+                            else history?.saveChatInterruption()
+                        } catch (error: Exception) { report(error) }
+                    }
+                }
             }
             catch (error: Exception) {
                 report(error)
