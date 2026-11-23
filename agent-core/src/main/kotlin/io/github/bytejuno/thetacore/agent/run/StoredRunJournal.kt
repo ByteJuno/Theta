@@ -17,6 +17,8 @@ internal data class StoredAttempt(val sequence: Long, val requestId: String, val
             !complete || cancelled || finish == null && error == null -> "INTERRUPTED"
             error != null -> error.name
             finish == FinishReason.REFUSAL || finish == FinishReason.CONTENT_FILTER -> finish.name
+            finish in setOf(FinishReason.STOP, FinishReason.OTHER, FinishReason.TOOL_CALLS) &&
+                disposition == HistoryDisposition.DISCARD.name -> "EMPTY_RESPONSE"
             finish in setOf(FinishReason.LENGTH, FinishReason.CONTEXT_EXCEEDED) &&
                 (disposition == HistoryDisposition.DISCARD.name || disposition == null) -> finish!!.name
             else -> return null

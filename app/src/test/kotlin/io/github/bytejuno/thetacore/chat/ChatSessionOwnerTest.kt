@@ -1605,6 +1605,57 @@ class ChatSessionOwnerTest {
         }
     }
 
+    @Test fun reasoningOnlyRepliesSurviveRetryAndColdOpenWithoutReplay() = runBlocking {
+        for (retrySucceeds in listOf(false, true)) {
+            val root = Files.createTempDirectory("chat-reasoning-reply").toFile()
+            val requests = mutableListOf<ChatRequest>()
+            val model = object : ModelProvider {
+                override fun executionMode(request: ChatRequest) = ModelExecutionMode.GENERATION_ONLY
+                override fun canReplay(data: ReplayData, targetModel: String) = false
+                override fun chat(request: ChatRequest, auth: Credentials): Flow<ModelEvent> = flow {
+                    requests += request
+                    emit(Events.started("response-${requests.size}", "model"))
+                    if (requests.size == 1 || !retrySucceeds) {
+                        emit(Events.reasoning(0, "retained reasoning"))
+                        emit(Events.end(0, replayData("test", "model", "retained signature")))
+                    } else {
+                        emit(Events.text(0, "visible answer")); emit(Events.end(0))
+                    }
+                    emit(Events.finished(FinishReason.STOP))
+                }
+            }
+            try {
+                val first = fixture(root, AtomicInteger(), model)
+                val replies = try {
+                    first.owner.open().join(); first.owner.send("question").join()
+                    await { !first.owner.state.value.active }
+                    assertEquals(if (retrySucceeds) RunState.COMPLETED else RunState.FAILED, first.owner.state.value.result?.state)
+                    assertEquals(2, requests.size)
+                    assertTrue(requests.all { request -> request.messages.flatMap { it.parts }.none { it is ContentPart.Reasoning } })
+                    assertTrue(first.failures.toString(), first.failures.isEmpty())
+                    first.owner.state.value.journal.also { replies ->
+                        assertEquals(if (retrySucceeds) 1 else 2, replies.size)
+                        replies.forEach { reply ->
+                            assertEquals("EMPTY_RESPONSE", reply.reason)
+                            assertEquals(R.string.chat_diagnostic_empty, replyReason(reply.reason))
+                            val part = reply.partial.parts.single() as ContentPart.Reasoning
+                            assertEquals("retained reasoning", part.summary)
+                            assertEquals("retained signature", part.replay?.payload)
+                        }
+                    }
+                } finally { first.close() }
+                val cold = fixture(root, AtomicInteger(), model)
+                try {
+                    cold.owner.open().join()
+                    assertEquals(replies, cold.owner.state.value.journal)
+                    assertTrue(cold.owner.state.value.messages.flatMap { it.parts }.none { it is ContentPart.Reasoning })
+                    assertEquals(2, requests.size)
+                    assertTrue(cold.failures.toString(), cold.failures.isEmpty())
+                } finally { cold.close() }
+            } finally { root.deleteRecursively() }
+        }
+    }
+
     @Test fun incompleteTruncatedRepliesSurviveColdOpenAndNeverReplay() = runBlocking {
         for (finish in listOf(FinishReason.LENGTH, FinishReason.CONTEXT_EXCEEDED)) {
             val root = Files.createTempDirectory("chat-truncated-reply").toFile()
