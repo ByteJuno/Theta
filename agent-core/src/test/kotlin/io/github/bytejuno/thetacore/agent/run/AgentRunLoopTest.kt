@@ -214,6 +214,23 @@ class AgentRunLoopTest {
         }
     }
 
+    @Test fun repeatedTruncatedCallsPreserveTruncationReason() = runTest {
+        for (reason in listOf(FinishReason.LENGTH, FinishReason.CONTEXT_EXCEEDED)) {
+            val f = RunFixture(listOf(testDefinition()))
+            val p = ScriptProvider(listOf(calls("tool"), calls("tool"), calls("tool", reason = reason)))
+            assertEquals(RunState.PAUSED, f.loop(p).run().state)
+            assertEquals(3, p.requests.size)
+            assertEquals(2, f.submitted.size)
+            val cancelled = f.store.records().last()
+            assertNull(cancelled.instance)
+            assertNull(cancelled.input.nonExecutionReason)
+            assertEquals(LogicalResult(Status.CANCELLED, Effect.NONE, "Truncated model turn: not executed", false), cancelled.result)
+            val projected = f.history.snapshot().messages.last().parts.single() as ContentPart.ToolResult
+            assertEquals(cancelled.callId, projected.callId)
+            assertEquals(ModelResultText.project(cancelled.result!!), projected.text)
+        }
+    }
+
     @Test fun replayAndPartOrderSurvivePausedAndTools() = runTest {
         val replay = replayData("signed", "m", "untouched payload")
         val first = listOf(Events.started("r", "m"), Events.reasoning(0, "think"), Events.end(0, replay),

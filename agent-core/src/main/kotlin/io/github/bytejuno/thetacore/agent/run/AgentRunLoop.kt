@@ -556,6 +556,7 @@ class AgentRunLoop(
                 else history.prepareStep(view.revision, identity, step, assistant)
                 try {
                     val reason = when {
+                        truncated -> null // Protocol 2.7 requires truncation results even at the repeat limit.
                         duplicate -> NonExecutionReason.REPEATED_CALL_LIMIT
                         finish.reason == FinishReason.PAUSED -> NonExecutionReason.MODEL_PAUSED
                         else -> null
