@@ -54,14 +54,21 @@ internal class HookActionStatus {
         operation: suspend () -> Unit,
     ) {
         try {
-            withContext(dispatcher) { operation() }
-        } catch (error: TimeoutCancellationException) {
-            if (!currentCoroutineContext().isActive) {
-                cancel(ticket)
-                throw error
+            withContext(dispatcher) {
+                // Record failures before returning to a UI continuation that may be cancelled.
+                try {
+                    operation()
+                } catch (error: TimeoutCancellationException) {
+                    if (!currentCoroutineContext().isActive) throw error
+                    complete(ticket, uiText(R.string.operation_failed, error.javaClass.simpleName))
+                    onFailure(error)
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Throwable) {
+                    complete(ticket, uiText(R.string.operation_failed, error.javaClass.simpleName))
+                    onFailure(error)
+                }
             }
-            complete(ticket, uiText(R.string.operation_failed, error.javaClass.simpleName))
-            onFailure(error)
         } catch (error: CancellationException) {
             cancel(ticket)
             throw error

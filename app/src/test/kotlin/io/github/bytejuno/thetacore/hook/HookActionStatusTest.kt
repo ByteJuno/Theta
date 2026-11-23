@@ -56,6 +56,46 @@ class HookActionStatusTest {
         assertEquals(success, status.status.value)
     }
 
+    @Test fun completedScopeTimeoutSurvivesCancellationOnReturnToUi() {
+        failedOperationSurvivesCancellation("TimeoutCancellationException") {
+            withTimeout(0) { CompletableDeferred<Unit>().await() }
+        }
+    }
+
+    @Test fun completedFailureSurvivesCancellationOnReturnToUi() {
+        failedOperationSurvivesCancellation("IllegalStateException") {
+            throw IllegalStateException("scope denied")
+        }
+    }
+
+    private fun failedOperationSurvivesCancellation(name: String, operation: suspend () -> Unit) {
+        val status = HookActionStatus()
+        status.begin(1)
+        val ui = QueueDispatcher()
+        val io = QueueDispatcher()
+        var failures = 0
+        var returned = false
+        val job = CoroutineScope(ui).launch {
+            status.run(1, io, { failures++ }) {
+                status.waiting(1)
+                operation()
+            }
+            returned = true
+        }
+        ui.drain()
+        io.drain()
+        val expected = uiText(R.string.operation_failed, name)
+        assertEquals(expected, status.status.value)
+        assertEquals(1, failures)
+        job.cancel()
+        ui.drain()
+        assertTrue(job.isCompleted)
+        assertTrue(job.isCancelled)
+        assertFalse(returned)
+        assertEquals(expected, status.status.value)
+        assertEquals(1, failures)
+    }
+
     @Test fun cancellingScopeWaitClearsPendingAndLateApprovalCannotPublish() {
         val status = HookActionStatus()
         status.begin(1)
