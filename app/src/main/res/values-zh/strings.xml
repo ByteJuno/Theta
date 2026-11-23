@@ -179,6 +179,7 @@
     <string name="status_framework_connected">框架已连接；尚未发布 Hook</string>
     <string name="status_framework_disconnected">框架已断开；需要重启目标，开关传播状态未知</string>
     <string name="status_scope_requested">已请求作用域；等待框架决定</string>
+    <string name="status_hook_action_cancelled">Hook 操作在完成前已取消，未确认新的完成结果。</string>
     <string name="status_hook_disabled">全局开关已保存；实时传播未验证。强制停止目标以确保代码退出。</string>
     <string name="status_hook_published">已发布 %1$s；请冷启动目标。尚未验证目标执行。</string>
     <string name="status_hook_cleanup_incomplete">远程清理未完成；清理成功前禁止下次发布。</string>

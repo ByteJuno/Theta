@@ -179,6 +179,7 @@
     <string name="status_framework_connected">Framework connected; no Hook published</string>
     <string name="status_framework_disconnected">Framework disconnected; target restart required, switch propagation unknown</string>
     <string name="status_scope_requested">Scope requested; awaiting framework decision</string>
+    <string name="status_hook_action_cancelled">Hook operation cancelled before completion. No new completion was confirmed.</string>
     <string name="status_hook_disabled">Global switch saved; live propagation unverified. Force-stop target for guaranteed code exit.</string>
     <string name="status_hook_published">Published %1$s; cold-restart target. Target execution not yet verified.</string>
     <string name="status_hook_cleanup_incomplete">Remote cleanup incomplete; next publication blocked until cleanup succeeds.</string>

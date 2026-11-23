@@ -1,7 +1,6 @@
 package io.github.bytejuno.thetacore.hook
 
 import io.github.bytejuno.thetacore.R
-import io.github.bytejuno.thetacore.UiText
 import io.github.bytejuno.thetacore.uiText
 
 import android.content.Context
@@ -11,8 +10,6 @@ import io.github.bytejuno.thetacore.plugin.PlatformPluginSignatureVerifier
 import io.github.libxposed.service.XposedService
 import io.github.libxposed.service.XposedServiceHelper
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
@@ -24,8 +21,8 @@ internal data class HookPublishGrant(val service: XposedService, val action: Lon
 
 /** The official bootstrap delegate is reached through the platform-UID-gated provider. */
 internal object HookHost {
-    private val mutableStatus = MutableStateFlow(uiText(R.string.status_framework_unavailable))
-    val status = mutableStatus.asStateFlow()
+    private val actions = HookActionStatus()
+    val status = actions.status
     @Volatile private var service: XposedService? = null
     private val registered = AtomicBoolean()
     private val connectionLock = Any()
@@ -48,12 +45,10 @@ internal object HookHost {
                         if (ambiguous || (service != null && service !== value)) {
                             ambiguous = true
                             service = null
-                            order.next()
-                            mutableStatus.value = uiText(R.string.status_framework_multiple)
+                            actions.connection(order.next(), uiText(R.string.status_framework_multiple))
                         } else if (service !== value) {
                             service = value
-                            order.next()
-                            mutableStatus.value = uiText(R.string.status_framework_connected)
+                            actions.connection(order.next(), uiText(R.string.status_framework_connected))
                         }
                     }
                 } catch (error: Throwable) { fail(error) }
@@ -62,8 +57,7 @@ internal object HookHost {
                 synchronized(connectionLock) {
                     if (service === value) {
                         service = null
-                        order.next()
-                        mutableStatus.value = uiText(R.string.status_framework_disconnected)
+                        actions.connection(order.next(), uiText(R.string.status_framework_disconnected))
                     }
                 }
             }
@@ -85,7 +79,10 @@ internal object HookHost {
     }
 
     /** Record the explicit user's intent before dispatching work, not when IO happens to run. */
-    fun beginAction(): Long = order.next()
+    fun beginAction(): Long = order.next().also(actions::begin)
+
+    suspend fun runAction(action: Long, operation: suspend () -> Unit) =
+        actions.run(action, Dispatchers.IO, { logFailure(it) }, operation)
 
     /** Callback receives only a detachable, bounded ticket; never the reviewed APK bytes. */
     private class ScopeListener(private val ticket: HookScopeTicket) : XposedService.OnScopeEventListener {
@@ -103,7 +100,7 @@ internal object HookHost {
         }) {
             val ticket = scopeBudget.reserve(target)
             val outcome = ticket.outcome()
-            mutableStatus.value = uiText(R.string.status_scope_requested)
+            actions.waiting(action)
             try {
                 current.requestScope(listOf(target), ScopeListener(ticket))
                 check(withTimeout(60_000) { outcome.await() }) { "Target scope not approved" }
@@ -177,9 +174,9 @@ internal object HookHost {
         // Cleanup failure does NOT roll back/delete the newly selected payload. The next
         // publication retries cleanup before allocating; report the retained staging bound.
         val cleaned = runCatching { retention.clean() }.isSuccess
-        mutableStatus.value = uiText(R.string.hook_publication_status,
+        actions.complete(grant.action, uiText(R.string.hook_publication_status,
             uiText(R.string.status_hook_published, value.descriptor.id),
-            if (cleaned) uiText(R.string.empty) else uiText(R.string.status_hook_cleanup_incomplete))
+            if (cleaned) uiText(R.string.empty) else uiText(R.string.status_hook_cleanup_incomplete)))
     }
 
     fun disable(action: Long) = order.exclusive {
@@ -189,11 +186,13 @@ internal object HookHost {
                 "Global switch write failed"
             }
             order.disabled(action)
-            mutableStatus.value = uiText(R.string.status_hook_disabled)
+            actions.complete(action, uiText(R.string.status_hook_disabled))
         }
     }
     fun fail(error: Throwable) {
-        android.util.Log.w("ThetaHook", "Hook operation failed", error)
-        mutableStatus.value = uiText(R.string.operation_failed, error.javaClass.simpleName)
+        logFailure(error)
+        actions.report(uiText(R.string.operation_failed, error.javaClass.simpleName))
     }
+
+    private fun logFailure(error: Throwable) { android.util.Log.w("ThetaHook", "Hook operation failed", error) }
 }
