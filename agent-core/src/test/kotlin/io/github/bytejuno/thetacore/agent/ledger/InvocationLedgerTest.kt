@@ -298,12 +298,36 @@ class InvocationLedgerTest {
         f.claim(next)
     }
 
-    @Test fun cancelledCallCannotUseGraceReleaseAndStaysRestartRequiredAfterExit(): Unit = Fixture().use { f ->
+    @Test fun cancelledCallGraceReleaseKeepsUnknownResultAndOtherPluginAvailable(): Unit = Fixture().use { f ->
+        val d = definition(Risk.WRITE)
+        val active = f.claim(f.ready(f.input(d)))
+        val id = active.record.callId; val attempt = active.ticket!!.attemptId
+        val cancelled = assertIs<Mutation.Applied>(f.ledger.cancel(id)).record
+        assertEquals(Effect.UNKNOWN, cancelled.result!!.effect)
+        val marked = assertIs<Mutation.Applied>(f.ledger.markRestartRequired(id, attempt, untilActualExit = true)).record
+        assertTrue(marked.restartRequiredUntilExit)
+        val sibling = f.ready(f.input(d.copy(toolKey = "plugin/sibling"), chain = "sibling-chain"))
+        assertEquals("Plugin restart required", assertIs<Mutation.Blocked>(f.ledger.claimExecution(sibling.callId, sibling.revision)).reason)
+        val other = f.ready(f.input(d.copy(owner = "other", toolKey = "other/tool"), chain = "other-chain"))
+        f.claim(other)
+        f.ledger.recordOutcome(id, attempt, Status.SUCCEEDED, "late", Effect.APPLIED)
+        assertTrue(f.ledger.get(id)!!.restartRequired)
+        assertEquals(InstanceState.UNCONFIRMED, f.ledger.get(id)!!.instance!!.state)
+        val exited = assertIs<Mutation.Applied>(f.ledger.recordActualExit(id, attempt, "stopped")).record
+        assertFalse(exited.restartRequired)
+        assertFalse(exited.restartRequiredUntilExit)
+        assertEquals(cancelled.result, exited.result)
+        assertNotNull(exited.isolation)
+        assertTrue(exited.evidence.any { it.outcome?.effect == Effect.APPLIED })
+        f.claim(sibling)
+    }
+
+    @Test fun cancelledCallOtherRestartCauseStaysStickyAfterExit(): Unit = Fixture().use { f ->
         val active = f.claim(f.ready())
         val id = active.record.callId; val attempt = active.ticket!!.attemptId
         f.ledger.cancel(id)
-        assertIs<Mutation.Conflict>(f.ledger.markRestartRequired(id, attempt, untilActualExit = true))
         assertIs<Mutation.Applied>(f.ledger.markRestartRequired(id, attempt))
+        assertIs<Mutation.AlreadyApplied>(f.ledger.markRestartRequired(id, attempt, untilActualExit = true))
         val exited = assertIs<Mutation.Applied>(f.ledger.recordActualExit(id, attempt, "stopped")).record
         assertEquals(Status.CANCELLED, exited.state)
         assertTrue(exited.restartRequired)
@@ -312,32 +336,34 @@ class InvocationLedgerTest {
         assertEquals("Plugin restart required", assertIs<Mutation.Blocked>(f.ledger.claimExecution(next.callId, next.revision)).reason)
     }
 
-    @Test fun graceRestrictionOnlyAcceptsMatchingTimedOutAttempt(): Unit = Fixture().use { f ->
-        val active = f.claim(f.ready())
-        val id = active.record.callId; val attempt = active.ticket!!.attemptId
-        assertIs<Mutation.Conflict>(f.ledger.markRestartRequired(id, attempt, untilActualExit = true))
-        f.ledger.timeout(id)
-        assertIs<Mutation.Conflict>(f.ledger.markRestartRequired(id, "wrong", untilActualExit = true))
-        assertIs<Mutation.Applied>(f.ledger.markRestartRequired(id, attempt, untilActualExit = true))
-        assertIs<Mutation.AlreadyApplied>(f.ledger.markRestartRequired(id, attempt, untilActualExit = true))
-        assertIs<Mutation.Conflict>(f.ledger.recordActualExit(id, "wrong", "stopped"))
-        assertTrue(f.ledger.get(id)!!.restartRequired)
-        assertIs<Mutation.Applied>(f.ledger.recordActualExit(id, attempt, "stopped"))
-        assertIs<Mutation.AlreadyApplied>(f.ledger.recordActualExit(id, attempt, "stopped"))
-        assertIs<Mutation.Conflict>(f.ledger.markRestartRequired(id, attempt, untilActualExit = true))
+    @Test fun graceRestrictionOnlyAcceptsMatchingCancelledOrTimedOutAttempt(): Unit {
+        for (cancel in listOf(false, true)) Fixture().use { f ->
+            val active = f.claim(f.ready())
+            val id = active.record.callId; val attempt = active.ticket!!.attemptId
+            assertIs<Mutation.Conflict>(f.ledger.markRestartRequired(id, attempt, untilActualExit = true))
+            if (cancel) f.ledger.cancel(id) else f.ledger.timeout(id)
+            assertIs<Mutation.Conflict>(f.ledger.markRestartRequired(id, "wrong", untilActualExit = true))
+            assertIs<Mutation.Applied>(f.ledger.markRestartRequired(id, attempt, untilActualExit = true))
+            assertIs<Mutation.AlreadyApplied>(f.ledger.markRestartRequired(id, attempt, untilActualExit = true))
+            assertIs<Mutation.Conflict>(f.ledger.recordActualExit(id, "wrong", "stopped"))
+            assertTrue(f.ledger.get(id)!!.restartRequired)
+            assertIs<Mutation.Applied>(f.ledger.recordActualExit(id, attempt, "stopped"))
+            assertIs<Mutation.AlreadyApplied>(f.ledger.recordActualExit(id, attempt, "stopped"))
+            assertIs<Mutation.Conflict>(f.ledger.markRestartRequired(id, attempt, untilActualExit = true))
+        }
     }
 
     @Test fun completionClearsGraceOnlyIncludingPreviouslyRecordedEvidence(): Unit {
-        for (returnedFirst in listOf(false, true)) Fixture().use { f ->
+        for (cancel in listOf(false, true)) for (returnedFirst in listOf(false, true)) Fixture().use { f ->
             val active = f.claim(f.ready())
             val id = active.record.callId; val attempt = active.ticket!!.attemptId
-            val timedOut = assertIs<Mutation.Applied>(f.ledger.timeout(id)).record
+            val terminal = assertIs<Mutation.Applied>(if (cancel) f.ledger.cancel(id) else f.ledger.timeout(id)).record
             f.ledger.markRestartRequired(id, attempt, untilActualExit = true)
             if (returnedFirst) f.ledger.recordOutcome(id, attempt, Status.SUCCEEDED, "late", Effect.UNKNOWN)
             val exited = assertIs<Mutation.Applied>(f.ledger.complete(id, attempt, Status.SUCCEEDED, "late", Effect.UNKNOWN)).record
             assertFalse(exited.restartRequired)
             assertFalse(exited.restartRequiredUntilExit)
-            assertEquals(timedOut.result, exited.result)
+            assertEquals(terminal.result, exited.result)
             assertNotNull(exited.isolation)
             assertEquals(1, exited.evidence.size)
             assertIs<Mutation.AlreadyApplied>(f.ledger.complete(id, attempt, Status.SUCCEEDED, "late", Effect.UNKNOWN))
@@ -382,30 +408,36 @@ class InvocationLedgerTest {
         assertEquals("Plugin restart required", assertIs<Mutation.Blocked>(f.ledger.claimExecution(sibling.callId, sibling.revision)).reason)
     }
 
-    @Test fun graceRestrictionPersistsAndColdLossStillRequiresRecovery(): Unit = Fixture().use { f ->
-        val active = f.claim(f.ready())
-        val id = active.record.callId; val attempt = active.ticket!!.attemptId
-        f.ledger.timeout(id)
-        val marked = assertIs<Mutation.Applied>(f.ledger.markRestartRequired(id, attempt, untilActualExit = true)).record
-        val encoded = kotlinx.serialization.json.Json.encodeToString(InvocationRecord.serializer(), marked)
-        assertEquals(marked, kotlinx.serialization.json.Json.decodeFromString(InvocationRecord.serializer(), encoded))
-        // Existing records lacking the additive flag remain conservatively sticky.
-        val legacy = kotlinx.serialization.json.Json.parseToJsonElement(encoded) as kotlinx.serialization.json.JsonObject
-        val decoded = kotlinx.serialization.json.Json.decodeFromString(InvocationRecord.serializer(),
-            kotlinx.serialization.json.JsonObject(legacy.filterKeys { it != "restartRequiredUntilExit" }).toString())
-        assertTrue(decoded.restartRequired)
-        assertFalse(decoded.restartRequiredUntilExit)
-        f.reopen()
-        val recovered = f.ledger.get(id)!!
-        assertFalse(recovered.restartRequired)
-        assertFalse(recovered.restartRequiredUntilExit)
-        assertTrue(recovered.recoveryPending)
-        assertNotNull(recovered.isolation)
-        assertEquals(marked.result, recovered.result)
-        val next = f.ready()
-        assertIs<Mutation.Blocked>(f.ledger.claimExecution(next.callId, next.revision))
-        f.ledger.resolveRecovery(id, RecoveryResolution.ACCEPTED_UNCERTAINTY)
-        f.claim(next)
+    @Test fun graceRestrictionPersistsAndColdLossStillRequiresRecovery(): Unit {
+        for (cancel in listOf(false, true)) Fixture().use { f ->
+            val active = f.claim(f.ready())
+            val id = active.record.callId; val attempt = active.ticket!!.attemptId
+            if (cancel) f.ledger.cancel(id) else f.ledger.timeout(id)
+            val marked = assertIs<Mutation.Applied>(f.ledger.markRestartRequired(id, attempt, untilActualExit = true)).record
+            val encoded = kotlinx.serialization.json.Json.encodeToString(InvocationRecord.serializer(), marked)
+            assertEquals(marked, kotlinx.serialization.json.Json.decodeFromString(InvocationRecord.serializer(), encoded))
+            // Existing records lacking the additive flag remain conservatively sticky.
+            val legacy = kotlinx.serialization.json.Json.parseToJsonElement(encoded) as kotlinx.serialization.json.JsonObject
+            val decoded = kotlinx.serialization.json.Json.decodeFromString(InvocationRecord.serializer(),
+                kotlinx.serialization.json.JsonObject(legacy.filterKeys { it != "restartRequiredUntilExit" }).toString())
+            assertTrue(decoded.restartRequired)
+            assertFalse(decoded.restartRequiredUntilExit)
+            decoded.validate()
+            f.store.close()
+            f.store = TestInvocationStore.open(f.directory)
+            assertEquals(marked, f.store.records().single())
+            f.reopen()
+            val recovered = f.ledger.get(id)!!
+            assertFalse(recovered.restartRequired)
+            assertFalse(recovered.restartRequiredUntilExit)
+            assertTrue(recovered.recoveryPending)
+            assertNotNull(recovered.isolation)
+            assertEquals(marked.result, recovered.result)
+            val next = f.ready()
+            assertIs<Mutation.Blocked>(f.ledger.claimExecution(next.callId, next.revision))
+            f.ledger.resolveRecovery(id, RecoveryResolution.ACCEPTED_UNCERTAINTY)
+            f.claim(next)
+        }
     }
 
     @Test fun graceExitCannotClearAnotherAttemptsStickyRestartCause(): Unit = Fixture().use { f ->
