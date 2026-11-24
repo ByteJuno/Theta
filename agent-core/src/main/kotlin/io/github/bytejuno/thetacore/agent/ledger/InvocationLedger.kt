@@ -434,9 +434,17 @@ class InvocationLedger(
         if (r.instance?.attemptId != attemptId) return@withGate Mutation.Conflict("Wrong attempt")
         val ended = terminal(r, status, effect, output.text)
         // The normalized text already fits before the terminal warning is added. If it
-        // no longer fits, keep both the warning prefix and the original retrieval suffix.
-        val outcome = ended.result!!.let { result -> result.copy(output = output.stored,
-            text = ModelResultText.bound(result.text, output.truncationNotice, status, result.effect)) }
+        // no longer fits, keep the warning prefix, preserved media placeholders and retrieval suffix.
+        val outcome = ended.result!!.let { result ->
+            val budget = ModelResultText.budgetFor(status, result.effect)
+            val boundedText = if (output.rebindWithPrefix != null && result.text.endsWith(output.text) &&
+                result.text != output.text && ModelResultText.encodedBytes(result.text, budget) < 0) {
+                output.rebindWithPrefix.invoke(result.text.removeSuffix(output.text), status, result.effect)
+            } else {
+                ModelResultText.bound(result.text, output.truncationNotice, status, result.effect)
+            }
+            result.copy(output = output.stored, text = boundedText)
+        }
         val evidence = ExitEvidence(attemptId, output.text, outcome.copy(text = output.text))
         if (evidence in r.evidence) return@withGate Mutation.AlreadyApplied(r)
         val next = if (r.state.terminal) r else ended.copy(result = outcome)

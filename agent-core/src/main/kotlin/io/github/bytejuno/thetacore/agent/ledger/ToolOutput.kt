@@ -57,8 +57,14 @@ sealed interface OutputPart {
 @Serializable data class StoredToolOutput(val raw: BlobRef, val media: List<BlobRef>, val warning: String? = null) {
     fun references(): List<BlobRef> = listOf(raw) + media
 }
-data class NormalizedOutput(val text: String, val isError: Boolean, val stored: StoredToolOutput,
-    val writes: List<BlobWrite>, val truncationNotice: String)
+data class NormalizedOutput(
+    val text: String,
+    val isError: Boolean,
+    val stored: StoredToolOutput,
+    val writes: List<BlobWrite>,
+    val truncationNotice: String,
+    internal val rebindWithPrefix: ((String, Status, Effect) -> String)? = null,
+)
 
 object ToolOutputNormalizer {
     const val TEXT_LIMIT = 32 * 1024
@@ -87,17 +93,108 @@ object ToolOutputNormalizer {
         val original = parts.map { part -> part.text ?: "[${part.kind}: ${part.blob!!.mimeType}; blob ${part.blob.id}; " +
             "${retrieval(part.blob.id)}]" }
         val empty = original.all { it.isEmpty() }
-        val text = buildList {
+        val fullText = buildList {
             if (structured != null && valid) add("[structured JSON]\n$structured")
             addAll(original)
+            if (!valid && empty) add(warning!!)
+        }.joinToString("\n")
+        val mediaPlaceholders = parts.mapIndexedNotNull { index, part ->
+            if (part.blob != null) original[index] else null
+        }
+        val textOnly = buildList {
+            if (structured != null && valid) add("[structured JSON]\n$structured")
+            parts.forEach { part -> if (part.blob == null) add(part.text!!) }
             if (!valid && empty) add(warning!!)
         }.joinToString("\n")
         val notice = "\n[Truncated tool result; full original JSON: blob ${raw.ref.id}. " +
             "${retrieval(raw.ref.id)}. " + (if (retrievalName != null) "Follow nextOffset. " else "") +
             "Data is base64-encoded bytes. Truncated JSON above is text, not a complete structured value.]"
-        val bounded = ModelResultText.bound(text, notice)
-        return NormalizedOutput(bounded, isError || (!valid && empty),
-            StoredToolOutput(raw.ref, parts.mapNotNull { it.blob }, warning), writes, notice)
+        val bounded = boundPreservingMedia(
+            fullText = fullText,
+            textOnly = textOnly,
+            mediaPlaceholders = mediaPlaceholders,
+            rawId = raw.ref.id,
+            notice = notice,
+            prefix = "",
+            status = Status.TIMED_OUT,
+            effect = Effect.UNKNOWN,
+        )
+        return NormalizedOutput(
+            text = bounded,
+            isError = isError || (!valid && empty),
+            stored = StoredToolOutput(raw.ref, parts.mapNotNull { it.blob }, warning),
+            writes = writes,
+            truncationNotice = notice,
+            rebindWithPrefix = { prefix, status, eff ->
+                boundPreservingMedia(fullText, textOnly, mediaPlaceholders, raw.ref.id, notice, prefix, status, eff)
+            },
+        )
+    }
+
+    private fun boundPreservingMedia(
+        fullText: String,
+        textOnly: String,
+        mediaPlaceholders: List<String>,
+        rawId: String,
+        notice: String,
+        prefix: String,
+        status: Status,
+        effect: Effect,
+    ): String {
+        val totalBudget = ModelResultText.budgetFor(status, effect)
+        val combinedFull = if (prefix.isEmpty()) fullText else prefix + fullText
+        if (ModelResultText.encodedBytes(combinedFull, totalBudget) >= 0) return combinedFull
+        if (mediaPlaceholders.isEmpty()) {
+            return ModelResultText.bound(combinedFull, notice, status, effect)
+        }
+        val noticeBytes = ModelResultText.encodedBytes(notice, totalBudget)
+        require(noticeBytes >= 0) { "Truncation notice exceeds model budget" }
+        val prefixBytes = if (prefix.isEmpty()) 0 else ModelResultText.encodedBytes(prefix, totalBudget - noticeBytes)
+        if (prefixBytes < 0) {
+            return ModelResultText.bound(combinedFull, notice, status, effect)
+        }
+        val available = totalBudget - noticeBytes - prefixBytes
+        val allMedia = mediaPlaceholders.joinToString("\n")
+        val allMediaBytes = ModelResultText.encodedBytes(allMedia, available)
+        if (allMediaBytes >= 0) {
+            val remainingForText = available - allMediaBytes
+            val newlineBytes = 2 // JSON-escaped "\n"
+            if (textOnly.isNotEmpty() && remainingForText > newlineBytes) {
+                val truncatedText = ModelResultText.prefixToBudget(textOnly, remainingForText - newlineBytes)
+                if (truncatedText.isNotEmpty()) {
+                    return prefix + truncatedText + "\n" + allMedia + notice
+                }
+            }
+            return prefix + allMedia + notice
+        }
+        // Media placeholders alone exceed the remaining budget: retain as many placeholders as fit
+        // and emit an explicit omission notice before the complete truncation notice.
+        val totalMedia = mediaPlaceholders.size
+        fun omission(omitted: Int, hasShown: Boolean): String =
+            (if (hasShown) "\n" else "") +
+                "[$omitted of $totalMedia media attachment(s) omitted due to 32 KiB limit; " +
+                "full media references are in original JSON: blob $rawId.]"
+        val kept = mutableListOf<String>()
+        var keptBytes = 0
+        for (index in mediaPlaceholders.indices) {
+            val placeholder = mediaPlaceholders[index]
+            val sepBytes = if (kept.isEmpty()) 0 else 2
+            val placeholderBytes = ModelResultText.encodedBytes(placeholder, available)
+            if (placeholderBytes < 0) break
+            val omittedAfter = totalMedia - (index + 1)
+            val omissionBytes = ModelResultText.encodedBytes(omission(omittedAfter, hasShown = true), available)
+            if (omissionBytes < 0 || keptBytes + sepBytes + placeholderBytes + omissionBytes > available) break
+            kept += placeholder
+            keptBytes += sepBytes + placeholderBytes
+        }
+        val omittedCount = totalMedia - kept.size
+        val omissionText = omission(omittedCount, hasShown = kept.isNotEmpty())
+        val omissionBytes = ModelResultText.encodedBytes(omissionText, available)
+        if (omissionBytes < 0 || keptBytes + omissionBytes > available) {
+            return ModelResultText.bound(prefix + omissionText, notice, status, effect)
+        }
+        val mediaPart = if (kept.isEmpty()) "" else kept.joinToString("\n")
+        return prefix + mediaPart + omissionText + notice
     }
 }
 
