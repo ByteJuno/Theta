@@ -10,6 +10,16 @@ object ModelResultText {
         put("status", status.name.lowercase()); put("effect", effect.name.lowercase()); put("message", text)
     }.toString()
     private fun budget(status: Status, effect: Effect) = LIMIT - encode(status, effect, "").length
+    internal fun budgetFor(status: Status = Status.TIMED_OUT, effect: Effect = Effect.UNKNOWN): Int = budget(status, effect)
+    internal fun encodedBytes(text: String, limit: Int): Int = scan(text, limit, null)
+    internal fun prefixToBudget(text: String, byteLimit: Int): String {
+        if (byteLimit <= 0 || text.isEmpty()) return ""
+        val ends = IntArray(byteLimit + 1)
+        var count = 0
+        if (scan(text, byteLimit, null) { end, _ -> ends[++count] = end } >= 0) return text
+        val end = ends[count]
+        return String(text.substring(0, end).toByteArray(Charsets.UTF_8), Charsets.UTF_8)
+    }
     internal class Work { var codeUnits = 0; var prefixCodeUnits = 0 }
     // kotlinx JSON escapes quotes, backslashes and C0 controls; other characters are emitted
     // literally. JVM UTF-8 replaces an unpaired surrogate with one '?' byte, not U+FFFD.
