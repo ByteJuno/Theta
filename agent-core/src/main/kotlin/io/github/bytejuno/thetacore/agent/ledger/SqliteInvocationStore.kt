@@ -22,6 +22,7 @@ class SqliteInvocationStore private constructor(
     private val ownsDatabase: Boolean,
 ) : InvocationStore {
     private val db = database.connection
+    private val runCatalogs = SqliteRunCatalogStore(database, fault)
     private val codec = InvocationRecordCodec(Json { encodeDefaults = true; ignoreUnknownKeys = false; explicitNulls = true })
     private var closed = false
     private var poisoned = false
@@ -37,6 +38,8 @@ class SqliteInvocationStore private constructor(
     init {
         roots.liveReferences().forEach(::verifyOwnedContent)
     }
+
+    override fun runCatalogStore(): RunCatalogStore = runCatalogs
 
     override fun checkAdmission() = synchronized(database) {
         database.ready()

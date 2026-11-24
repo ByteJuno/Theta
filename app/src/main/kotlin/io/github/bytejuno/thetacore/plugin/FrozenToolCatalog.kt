@@ -11,8 +11,13 @@ import kotlinx.serialization.json.*
  * freeze and dispatch share the ledger's definition gate. Only trusted host code holds this object.
  * External plugin registrations are intentionally NOT bridged by this first host-tool slice.
  */
-internal class FrozenToolCatalog(val gate: DefinitionGate, private val budget: PluginExecutionBudget,
-    private val owner: CoroutineScope, private val validator: Schema202012Validator) {
+internal class FrozenToolCatalog(
+    val gate: DefinitionGate,
+    private val budget: PluginExecutionBudget,
+    private val owner: CoroutineScope,
+    private val validator: Schema202012Validator,
+    private val store: RunCatalogStore? = null,
+) {
     internal data class Entry(val definition: FrozenDefinition, val tool: Tool, val spec: ToolSpec)
     private val entries = mutableMapOf<String, Entry>()
     private val runs = mutableMapOf<String, Map<String, FrozenDefinition>>()
@@ -58,23 +63,74 @@ internal class FrozenToolCatalog(val gate: DefinitionGate, private val budget: P
     }
     fun freeze(runId: String): Map<String, FrozenDefinition> = gate.withGate {
         runs[runId]?.let { return@withGate LinkedHashMap(it) }
+        // Existing persisted runs MUST reuse their original frozen mapping across restarts,
+        // never re-allocate aliases against the current tool directory.
+        store?.loadRunCatalog(runId)?.let { persisted ->
+            return@withGate restoreLocked(runId, persisted)
+        }
         val names = ModelToolNames.allocate(entries.keys)
         val snapshot = entries.values.map { entry ->
             entry.definition.copy(modelName = names.getValue(entry.definition.toolKey))
         }.sortedBy { it.modelName }.associateBy { it.modelName }
         check(snapshot.size == entries.size) { "Model tool names must be unique" }
+        store?.saveRunCatalog(runId, snapshot.values.toList())
         gate.freezeRun(runId, snapshot.values)
         runs[runId] = snapshot
         LinkedHashMap(snapshot)
     }
-    /** Recover only already-persisted calls, never allocate aliases from today's directory.
-     * This snapshot cannot be used for a new model request; full run catalog recovery is #31. */
-    fun restorePending(runId: String, definitions: List<FrozenDefinition>) = gate.withGate {
-        check(runs[runId] == null)
-        require(definitions.map { it.modelName }.distinct().size == definitions.size)
-        val restored = definitions.associateBy { it.modelName }
-        gate.freezeRun(runId, definitions)
+
+    /** Restore a persisted run catalog from durable storage without re-allocating model names. */
+    fun restore(runId: String): Map<String, FrozenDefinition>? = gate.withGate {
+        runs[runId]?.let { return@withGate LinkedHashMap(it) }
+        val persisted = store?.loadRunCatalog(runId) ?: return@withGate null
+        restoreLocked(runId, persisted)
+    }
+
+    /** Restore an explicitly provided persisted run catalog into both this catalog and [gate]. */
+    fun restore(runId: String, definitions: Collection<FrozenDefinition>): Map<String, FrozenDefinition> = gate.withGate {
+        val canonical = definitions.sortedBy { it.modelName }.associateBy { it.modelName }
+        require(canonical.size == definitions.size) { "Model tool names must be unique" }
+        require(definitions.map { it.toolKey }.distinct().size == definitions.size) { "Tool keys must be unique" }
+        store?.loadRunCatalog(runId)?.let { persisted ->
+            require(persisted.associateBy { it.modelName } == canonical) {
+                "Restored catalog conflicts with persisted run catalog for $runId"
+            }
+        }
+        restoreLocked(runId, canonical.values)
+    }
+
+    /** Restore every persisted run catalog into both this catalog and [gate]. */
+    fun restoreAll(): Map<String, Map<String, FrozenDefinition>> = gate.withGate {
+        val persisted = store?.loadAllRunCatalogs().orEmpty()
+        linkedMapOf<String, Map<String, FrozenDefinition>>().apply {
+            persisted.forEach { (runId, definitions) ->
+                put(runId, restoreLocked(runId, definitions))
+            }
+        }
+    }
+
+    private fun restoreLocked(runId: String, definitions: Collection<FrozenDefinition>): Map<String, FrozenDefinition> {
+        val restored = gate.restoreRun(runId, definitions)
+        val existing = runs[runId]
+        require(existing == null || existing == restored) { "Run directory is immutable" }
         runs[runId] = restored
+        return LinkedHashMap(restored)
+    }
+
+    /** Recover a pending step: prefer the full persisted run catalog when available, and fall back
+     * to persisted call definitions only for pre-v6 runs that have no saved run catalog. */
+    fun restorePending(runId: String, definitions: List<FrozenDefinition>) = gate.withGate {
+        val full = runs[runId] ?: store?.loadRunCatalog(runId)?.let { restoreLocked(runId, it) }
+        if (full != null) {
+            for (definition in definitions) {
+                require(full[definition.modelName] == definition) {
+                    "Pending definition conflicts with persisted run catalog for $runId"
+                }
+            }
+            return@withGate
+        }
+        restoreLocked(runId, definitions)
+        Unit
     }
     fun definition(runId: String, name: String): FrozenDefinition? = gate.withGate { runs[runId]?.get(name) }
     /** Null means this run has no frozen catalog here, which says nothing about whether a name is unknown. */
