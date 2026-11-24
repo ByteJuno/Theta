@@ -22,6 +22,7 @@ internal class HostToolRuntimeApi(private val service: HostToolExecutionService)
         fun field(name: String) = request.getValue(name).jsonPrimitive.content
         when (field("operation")) {
             "freeze" -> Json.encodeToString(service.catalog.freeze(field("runId")))
+            "restore" -> service.catalog.restore(field("runId"))?.let { Json.encodeToString(it) } ?: "null"
             "prepare" -> {
                 val run = field("runId")
                 val name = field("name")

@@ -17,10 +17,25 @@ class DefinitionGate {
     /** A removed tool has nothing left to refresh: its frozen calls must resolve as STALE, not pause forever. */
     fun uninstall(toolKey: String) = withGate { definitions.remove(toolKey); refreshing.remove(toolKey); Unit }
     fun freezeRun(runId: String, tools: Collection<FrozenDefinition>) = withGate {
-        val frozen = tools.associateBy { it.modelName }
-        require(frozen.size == tools.size)
+        restoreRun(runId, tools)
+        Unit
+    }
+    /** Restore a persisted run catalog without re-allocating aliases from current tools.
+     * Idempotent for an identical mapping; rejects any attempt to alter an immutable run catalog. */
+    fun restoreRun(runId: String, tools: Collection<FrozenDefinition>): Map<String, FrozenDefinition> = withGate {
+        require(runId.isNotBlank()) { "Run id must not be blank" }
+        val frozen = tools.sortedBy { it.modelName }.associateBy { it.modelName }
+        require(frozen.size == tools.size) { "Duplicate model tool name in run catalog" }
+        require(tools.map { it.toolKey }.distinct().size == tools.size) { "Duplicate tool key in run catalog" }
         require(runs[runId] == null || runs[runId] == frozen) { "Run directory is immutable" }
         runs[runId] = frozen
+        LinkedHashMap(frozen)
+    }
+    fun restoreRuns(catalogs: Map<String, Collection<FrozenDefinition>>) = withGate {
+        catalogs.forEach { (runId, tools) -> restoreRun(runId, tools) }
+    }
+    fun frozenRun(runId: String): Map<String, FrozenDefinition>? = withGate {
+        runs[runId]?.let { LinkedHashMap(it) }
     }
     val frozenRunCount: Int get() = withGate { runs.size }
     fun releaseRun(runId: String) = withGate { runs.remove(runId); Unit }

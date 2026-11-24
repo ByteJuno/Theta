@@ -133,7 +133,7 @@ class AgentDatabase private constructor(
 
     companion object {
         const val FILE_NAME = "agent.db"
-        const val SCHEMA_VERSION = 5
+        const val SCHEMA_VERSION = 6
         private const val APPLICATION_ID = 0x54485441
         // On POSIX, closing ANY descriptor of a locked file can drop this process's lock.
         // Reject duplicate instances before even opening a second descriptor.
@@ -159,6 +159,7 @@ class AgentDatabase private constructor(
             createDeletionSchema(connection)
             createQuarantineSchema(connection)
             createPrivateImageSchema(connection)
+            createRunCatalogSchema(connection)
             connection.execute("PRAGMA application_id=$APPLICATION_ID")
             connection.execute("PRAGMA user_version=$SCHEMA_VERSION")
         }
@@ -179,6 +180,10 @@ class AgentDatabase private constructor(
             connection.execute("CREATE TABLE private_image_attempts (session_id TEXT NOT NULL, call_id TEXT NOT NULL, size INTEGER, hash TEXT, PRIMARY KEY(session_id,call_id)) WITHOUT ROWID")
             connection.execute("CREATE TABLE private_image_chunks (session_id TEXT NOT NULL, call_id TEXT NOT NULL, ordinal INTEGER NOT NULL, bytes BLOB NOT NULL, PRIMARY KEY(session_id,call_id,ordinal), FOREIGN KEY(session_id,call_id) REFERENCES private_image_attempts(session_id,call_id) ON DELETE CASCADE) WITHOUT ROWID")
         }
+        private fun createRunCatalogSchema(connection: SQLiteConnection) {
+            connection.execute("CREATE TABLE run_catalogs (run_id TEXT PRIMARY KEY NOT NULL, size INTEGER NOT NULL, hash TEXT NOT NULL) WITHOUT ROWID")
+            connection.execute("CREATE TABLE run_catalog_chunks (run_id TEXT NOT NULL REFERENCES run_catalogs(run_id) ON DELETE CASCADE, ordinal INTEGER NOT NULL, bytes BLOB NOT NULL, PRIMARY KEY(run_id, ordinal)) WITHOUT ROWID")
+        }
         /** Only recognized SQLite schemas are upgraded; legacy files are never imported. */
         fun upgradeSchema(connection: SQLiteConnection, oldVersion: Int, newVersion: Int) {
             connection.verifyWriteConfiguration()
@@ -187,7 +192,8 @@ class AgentDatabase private constructor(
             if (oldVersion == 1) createHistorySchema(connection)
             if (oldVersion < 3) createDeletionSchema(connection)
             if (oldVersion < 4) createQuarantineSchema(connection)
-            createPrivateImageSchema(connection)
+            if (oldVersion < 5) createPrivateImageSchema(connection)
+            createRunCatalogSchema(connection)
             connection.execute("PRAGMA user_version=$SCHEMA_VERSION")
         }
 
