@@ -315,6 +315,7 @@
     <string name="chat_image_configure">请在模型设置中配置生图模型、基础地址和密钥，再明确请求生成新图片。</string>
     <string name="chat_image_already_attempted">此调用已尝试，不会再次提交。请先检查此前结果，再决定是否请求新图片；可能产生费用。</string>
     <string name="chat_image_failed">生图已停止或失败。请检查模型配置和服务状态。不会自动重试；服务端可能已计费。</string>
+    <string name="chat_image_not_sent">未发起生图请求。</string>
     <string name="chat_image_unavailable">保存的图片缺失或无效；未重新发起生图请求。</string>
     <string name="chat_image_description">为当前会话生成的图片</string>
     <string name="chat_delete_recovery_required">此会话仍有待处理任务或结果未知的调用。请先处理恢复操作（包括较早消息），再删除会话。</string>

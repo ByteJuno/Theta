@@ -36,6 +36,16 @@ internal fun toolState(record: InvocationRecord?): Int = when {
 }
 internal fun showApproval(record: InvocationRecord): Boolean = record.pending != null && !record.input.unattended
 
+internal fun reconcileDraftOnAccepted(
+    draft: String,
+    acceptedMessages: Long,
+    clearedAtAccepted: Long,
+): Pair<String, Long> = when {
+    acceptedMessages > clearedAtAccepted -> "" to acceptedMessages
+    acceptedMessages < clearedAtAccepted -> draft to acceptedMessages
+    else -> draft to clearedAtAccepted
+}
+
 @Composable
 internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
     val strings = uiStrings()
@@ -43,6 +53,7 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
     val launchTask = rememberChatTaskLauncher(host)
     val state by owner.state.collectAsState()
     var input by rememberSaveable(state.sessionId) { mutableStateOf("") }
+    var clearedAtAccepted by rememberSaveable { mutableLongStateOf(state.acceptedMessages) }
     var settings by rememberSaveable { mutableStateOf(false) }
     var stream by remember { mutableStateOf("") }
     LaunchedEffect(state.active) {
@@ -57,7 +68,11 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
     var sessions by remember { mutableStateOf(false) }
     var deleting by remember { mutableStateOf(false) }
     LaunchedEffect(owner) { owner.open() }
-    LaunchedEffect(state.acceptedMessages) { if (state.acceptedMessages > 0) input = "" }
+    LaunchedEffect(state.acceptedMessages) {
+        val (nextInput, nextCleared) = reconcileDraftOnAccepted(input, state.acceptedMessages, clearedAtAccepted)
+        input = nextInput
+        clearedAtAccepted = nextCleared
+    }
     Column(Modifier.fillMaxSize().imePadding().padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(strings.get(R.string.chat_title), style = MaterialTheme.typography.headlineMedium)
         // Wrapping actions keep navigation available at large font scales and narrow widths.
@@ -179,8 +194,8 @@ private fun ToolCard(call: ContentPart.ToolCall, record: InvocationRecord?, reco
             Text(if (imageCall) strings.get(R.string.chat_image_title) else call.name, style = MaterialTheme.typography.titleSmall)
             Text(strings.get(toolState(record))) // never hidden by collapsing details
             if (imageCall && record != null) {
-                record.result?.let { Text(strings.get(imageResultLabel(it.text))) }
-                if (record.state.terminal) ChatImage(record, owner)
+                imageResultLabel(record)?.let { Text(strings.get(it)) }
+                if (shouldLoadChatImage(record)) ChatImage(record, owner)
             }
             if (record != null && showApproval(record)) {
                 val approval = requireNotNull(record.pending)
@@ -215,7 +230,7 @@ private fun ToolCard(call: ContentPart.ToolCall, record: InvocationRecord?, reco
                 SelectionContainer { Text(call.argsJson) }
                 record?.result?.let {
                     Text(strings.get(R.string.chat_result), style = MaterialTheme.typography.labelLarge)
-                    SelectionContainer { Text(if (imageCall) strings.get(imageResultLabel(it.text)) else it.text) }
+                    SelectionContainer { Text(if (imageCall) strings.get(imageResultLabel(record) ?: R.string.chat_image_failed) else it.text) }
                 }
             }
         }
