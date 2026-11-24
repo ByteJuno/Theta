@@ -1,42 +1,53 @@
 # Issue 57 verification
 
-Implementation: `2e22ed3657003f9251e6b3ae52ad3e13611f28dd`, based on
-`44e676af8185e09f9c56026f7efc058f7acee48f`. Debug APK SHA-256:
-`6a4a629386125b7496cc86fb8a307f9174902e118a56c5c996a8b22c2305c002`.
+Implementation: `aac585f920c922dac04e73bed72acdafe931ce4e`, based on
+`632ae22eb26f28852f325e8686992bb15ad66231` (merged with `main`). Debug APK SHA-256:
+`6100b9beb029e56f1dddb351e1470fcae77136be4f31cf35048a36735a1267a4`.
 
-Explicit credential replacement now retries once with a rebuilt key when key
-lookup or cipher initialization reports an unusable key. Reading credentials and
-updating settings with a saved key never authorize rotation. Usable keys remain
-unchanged. The existing provider reentry/save controls use this path for the
-separate chat and image aliases; plugin settings do not opt into recovery. Both
-languages now state that saved credentials cannot be read and must be reentered.
+Explicit credential replacement now classifies AndroidKeyStore and JCA failures
+fail-closed across the full exception cause chain before deleting and rebuilding a
+key. Only definitive key invalidation (`KeyPermanentlyInvalidatedException`,
+non-transient/non-auth/non-system `android.security.KeyStoreException` with
+`ERROR_KEY_CORRUPTED` or `ERROR_KEY_DOES_NOT_EXIST`, or explicit AndroidKeyStore
+boundary detection of non-`SecretKey`, non-AES, or dangling alias entries) authorizes
+replacement. Transient IO/service failures, authentication/temporal exceptions,
+system errors, unknown bare `InvalidKeyException`/`UnrecoverableKeyException`, and
+any cause/suppressed chain containing a non-recoverable veto preserve the original
+key and encrypted record so old credentials remain readable once the fault clears.
+Reading credentials and settings-only updates never authorize rotation. Both
+languages state that saved credentials cannot be read and must be reentered.
 
-Windows/JDK 25: 45/45 JVM tests passed, no failures/errors/skips, in one invocation:
-CredentialKeyRecoveryTest (7), OpenAiSettingsStoreTest (20), ProviderSettingsEditorTest
-(2), and PluginSettingsStorageTest (16). Debug and lint passed in that invocation
-(74.76 seconds); lint reported zero errors, 28 warnings and one hint.
+Before the fix, `CredentialKeyRecoveryTest.wrappedTemporaryAndUnknownFailures*`
+reproduced the return finding on `632ae22eb26f28852f325e8686992bb15ad66231` (1/1
+failed; evidence preserved outside Git in `issue57-return-red-20261124`). The first
+green attempt failed compilation on `requiresUserAuthentication()` method syntax
+(`issue57-return-green-20261124`, preserved outside Git). After fixing that call:
+
+Windows/JDK 25: 48/48 JVM tests passed, no failures/errors/skips, in one invocation
+(`issue57-return-green2-20261124`): CredentialKeyRecoveryTest (10),
+OpenAiSettingsStoreTest (20), ProviderSettingsEditorTest (2), and
+PluginSettingsStorageTest (16). Debug APK assembly and lintDebug passed in that
+same invocation (77.50 seconds, 0 errors);
 `--configuration-cache --configuration-cache-problems=fail` was used and the cache
-was reused. The first attempt built Debug but failed compiling the new tests due
-to private snapshot-field access. Tests were corrected to use the public target
-boundary; the original failure log is preserved outside Git. This is not a
-before/after behavioral reproduction on the original implementation.
+was reused.
 
-New tests use real AES-GCM, the production recovery policy, atomic filesystem
-records and provider editor/store paths, with injected key-provider failures.
-They cover unreadable aliases and actual Cipher.init invalid-key rejection, read
-and settings-update nonmutation, explicit replacement and cold reopen for both
-profiles, usable-key reuse, corrupt-ciphertext replacement without rotation,
-partial-generation cleanup, delete failure and retry, persistence failure and
-retry, sanitized errors, immutable admitted snapshots, profile isolation and
-plugin recovery opt-out. Existing tests cover concurrent record replacement,
-snapshot requests, plaintext clearing and the no-backup factory boundary.
+New and updated tests use real AES-GCM, the production fail-closed cause-chain
+classifier, atomic filesystem records, and provider editor/store paths with injected
+key-provider and cipher-init failures. They cover wrapped transient IO/auth/system
+and unknown bare exceptions paired with both succeeding and failing key generation
+(asserting original key and record preservation plus cold-reopen readability after
+fault recovery), all `android.security.KeyStoreException` error codes and flag
+combinations, cause/suppressed veto precedence, definitive lookup/wrapped-lookup/
+cipher-init invalidation recovery for both profiles, read/settings-update
+nonmutation, usable-key reuse, corrupt-ciphertext replacement without rotation,
+partial-generation cleanup, delete/persistence failure retries, sanitized errors,
+immutable admitted snapshots, profile isolation, and plugin recovery opt-out.
 
 No real credentials were read. AndroidKeyStore/hardware invalidation, device,
-Android API 33 runtime and Release/R8 were not exercised. No agent-core API was
+Android API 33 runtime, and Release/R8 were not exercised. No agent-core API was
 added. Visual rendering was not verified: pending scenarios are credential read
 failure, reentry, save success/failure/retry in Chinese and English on small
-screens, large fonts and existing light/dark themes. Existing layout is reused;
-only the failure message changed. No authorized local disposable render entry
-was used. Final-head independent review, prescribed regression and CI remain
-required before reviewer merge. Protected files are unchanged. Raw logs, XML,
-source hashes and the matching APK are retained outside Git.
+screens, large fonts, and existing light/dark themes. Existing layout is reused;
+only the failure message changed. Final-head independent review, prescribed
+regression, and CI remain required before reviewer merge. Protected files are
+unchanged. Raw logs, XML, and failure evidence are retained outside Git.
