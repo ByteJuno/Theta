@@ -6,6 +6,8 @@ import io.github.bytejuno.thetacore.agent.protocol.*
 import io.github.bytejuno.thetacore.agent.provider.openai.OpenAiRunSnapshot
 import io.github.bytejuno.thetacore.agent.provider.openai.OpenAiChatCodec
 import io.github.bytejuno.thetacore.agent.run.*
+import io.github.bytejuno.thetacore.agent.transport.ModelTransport
+import io.github.bytejuno.thetacore.agent.transport.OkHttpModelTransport
 import io.github.bytejuno.thetacore.plugin.HostToolExecutionService
 import io.github.bytejuno.thetacore.provider.ProviderSettingsException
 import kotlinx.coroutines.*
@@ -47,6 +49,14 @@ internal data class ChatState(
     val recovery: ChatRecoveryToken? = null,
 )
 
+internal fun sharedTargetFactory(transport: ModelTransport): (OpenAiRunSnapshot) -> ModelTarget =
+    { snapshot -> snapshot.target(transport) }
+
+private fun defaultTargetForRun(): (OpenAiRunSnapshot) -> ModelTarget {
+    val shared = lazy { OkHttpModelTransport() }
+    return { snapshot -> snapshot.target(shared.value) }
+}
+
 /** Application-owned, single-session writer. Activity disposal never cancels an admitted run.
  * All persistence and definition gates run on IO. UI receives copies and submits only IDs. */
 internal class ChatSessionOwner(
@@ -54,7 +64,7 @@ internal class ChatSessionOwner(
     private val service: suspend () -> HostToolExecutionService,
     private val configuration: () -> OpenAiRunSnapshot,
     private val diagnostic: (Throwable) -> Unit = {},
-    private val targetForRun: (OpenAiRunSnapshot) -> ModelTarget = { it.target() },
+    private val targetForRun: (OpenAiRunSnapshot) -> ModelTarget = defaultTargetForRun(),
     private val imageAttachments: ImageAttachments? = null,
     private val presence: ChatTaskPresence = ChatTaskPresence.None,
 ) {

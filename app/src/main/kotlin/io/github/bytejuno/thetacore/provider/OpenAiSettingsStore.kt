@@ -24,7 +24,7 @@ import java.util.UUID
 class ProviderSettingsException(val failure: Failure) : Exception(when (failure) {
     Failure.NOT_CONFIGURED -> "Provider not configured"
     Failure.READ_FAILED -> "Provider settings could not be read"
-    Failure.DECRYPT_FAILED -> "Provider credentials could not be decrypted; credential storage may be unavailable. Re-entering the API key may not restore access"
+    Failure.DECRYPT_FAILED -> "Saved credentials cannot be read; enter the credentials again"
     Failure.INVALID_DATA -> "Provider settings are invalid; re-enter the configuration"
     Failure.WRITE_FAILED -> "Provider settings could not be saved"
     Failure.ENDPOINT_CHANGED -> "Enter a new API key for the changed endpoint"
@@ -45,13 +45,19 @@ class OpenAiSettingsStore internal constructor(noBackupDirectory: File, private 
     private val file = directory.resolve(recordName)
     private val lock = locks[(file.toString().hashCode() and Int.MAX_VALUE) % locks.size]
 
-    /** Explicit replacement repairs corrupt records/missing keys; old snapshots remain independent.
-     * An unusable existing Keystore alias fails explicitly, never silently rotates on a read. */
+    /** Explicit replacement may rebuild an unusable credential key; old snapshots remain independent.
+     * Reads and settings-only updates never rotate the key. */
     fun replace(settings: OpenAiProviderSettings, apiKey: String) = synchronized(lock) {
+        write(settings, apiKey, replaceKey = true)
+    }
+
+    private fun write(settings: OpenAiProviderSettings, apiKey: String, replaceKey: Boolean) {
         require(validApiKey(apiKey)) { "Invalid API key" }
         val plaintext = ProviderSettingsCodec.encode(settings, apiKey)
         try {
-            val encrypted = sanitize(ProviderSettingsException.Failure.WRITE_FAILED) { cipher.encrypt(plaintext) }
+            val encrypted = sanitize(ProviderSettingsException.Failure.WRITE_FAILED) {
+                if (replaceKey) cipher.encryptForReplacement(plaintext) else cipher.encrypt(plaintext)
+            }
             sanitize(ProviderSettingsException.Failure.WRITE_FAILED) { persist(encrypted) }
         } finally { plaintext.fill(0) }
     }
@@ -68,7 +74,7 @@ class OpenAiSettingsStore internal constructor(noBackupDirectory: File, private 
     fun updateSettings(settings: OpenAiProviderSettings) = synchronized(lock) {
         val record = readRecord()
         checkSavedEndpoint(settings.baseUrl, record.settings.baseUrl)
-        replace(settings, record.key)
+        write(settings, record.key, replaceKey = false)
     }
 
     suspend fun fetchModels(endpoint: String, apiKey: String): List<String> =
@@ -185,11 +191,11 @@ class OpenAiSettingsStore internal constructor(noBackupDirectory: File, private 
          * filesDir, plugin dataDir, external storage or cacheDir for this record. */
         fun android(context: Context): OpenAiSettingsStore = OpenAiSettingsStore(
             context.noBackupFilesDir,
-            androidSecretCipher("theta.provider.credentials.v1", "theta-provider-credentials-v1"),
+            androidSecretCipher("theta.provider.credentials.v1", "theta-provider-credentials-v1", allowKeyRecovery = true),
         )
         fun images(context: Context): OpenAiSettingsStore = OpenAiSettingsStore(
             context.noBackupFilesDir,
-            androidSecretCipher("theta.provider.images.v1", "theta-provider-images-v1"),
+            androidSecretCipher("theta.provider.images.v1", "theta-provider-images-v1", allowKeyRecovery = true),
             "images.bin",
         )
     }

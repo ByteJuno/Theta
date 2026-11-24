@@ -65,6 +65,8 @@ internal class InvocationRecordCodec(private val json: Json) {
     }
 }
 
+/** Escape raw unpaired UTF-16 surrogates as JSON \uXXXX so UTF-8 encoding is lossless.
+ * Valid surrogate pairs and existing JSON escapes (including literal "\\ud800") remain unchanged. */
 internal fun escapeUnpairedSurrogatesForJson(value: String): String = buildString(value.length) {
     var index = 0
     while (index < value.length) {

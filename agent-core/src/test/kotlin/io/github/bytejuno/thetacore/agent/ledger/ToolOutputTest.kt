@@ -135,4 +135,90 @@ class ToolOutputTest {
         f.reopen()
         sql(f.directory) { assertEquals(1L, it.longValue("SELECT count(*) FROM contents")) }
     }
+
+    @Test fun structuredResultAndLongTextReserveBudgetForAllMediaPlaceholders() {
+        val structured = buildJsonObject {
+            put("payload", "s".repeat(60_000))
+        }
+        val media = listOf(
+            OutputPart.Media(MediaKind.IMAGE, "image/png", byteArrayOf(1, 2, 3)),
+            OutputPart.Media(MediaKind.AUDIO, "audio/wav", byteArrayOf(4, 5, 6)),
+            OutputPart.Media(MediaKind.DOCUMENT, "application/pdf", byteArrayOf(7, 8, 9)),
+            OutputPart.Media(MediaKind.VIDEO, "video/mp4", byteArrayOf(10, 11, 12)),
+        )
+        val normalized = output(parts = listOf(OutputPart.Text("summary text")) + media, structured = structured)
+        assertEquals(4, normalized.stored.media.size)
+        val envelope = ModelResultText.encode(Status.TIMED_OUT, Effect.UNKNOWN, normalized.text)
+        assertTrue(envelope.toByteArray(Charsets.UTF_8).size <= ModelResultText.LIMIT)
+        assertTrue(normalized.text.startsWith("[structured JSON]\n"))
+        assertTrue(normalized.text.endsWith(normalized.truncationNotice))
+        assertTrue(normalized.text.contains(normalized.stored.raw.id))
+        val expectedKinds = listOf("IMAGE", "AUDIO", "DOCUMENT", "VIDEO")
+        val expectedMimes = listOf("image/png", "audio/wav", "application/pdf", "video/mp4")
+        normalized.stored.media.forEachIndexed { i, ref ->
+            val placeholder = "[${expectedKinds[i]}: ${expectedMimes[i]}; blob ${ref.id}; " +
+                "Retrieve with host_blob_read(id=\"${ref.id}\", offset=0)]"
+            assertTrue(normalized.text.contains(placeholder), "Missing media placeholder #$i")
+        }
+        val raw = Json.decodeFromString(RawToolOutput.serializer(), String(normalized.writes.last().bytes()))
+        assertEquals(60_000, raw.structured!!.jsonObject.getValue("payload").jsonPrimitive.content.length)
+        assertEquals(4, raw.content.count { it.blob != null })
+
+        // Long multibyte/escaped text with media also preserves every media placeholder and stays within 32 KiB.
+        val escapedLongText = ("界😀\"\\\u0001").repeat(12_000)
+        val textWithMedia = output(parts = listOf(OutputPart.Text(escapedLongText)) + media, structured = null)
+        val textEnvelope = ModelResultText.encode(Status.TIMED_OUT, Effect.UNKNOWN, textWithMedia.text)
+        assertTrue(textEnvelope.toByteArray(Charsets.UTF_8).size <= ModelResultText.LIMIT)
+        assertFalse(textWithMedia.text.contains('\uFFFD'))
+        assertTrue(textWithMedia.text.endsWith(textWithMedia.truncationNotice))
+        textWithMedia.stored.media.forEach { ref ->
+            assertTrue(textWithMedia.text.contains("blob ${ref.id}"))
+        }
+    }
+
+    @Test fun unknownEffectWarningPrefixPreservesMediaPlaceholdersWithinEnvelopeLimit() = Fixture().use { f ->
+        val media = listOf(
+            OutputPart.Media(MediaKind.IMAGE, "image/png", byteArrayOf(11, 22)),
+            OutputPart.Media(MediaKind.DOCUMENT, "text/csv", "a,b".toByteArray()),
+        )
+        val structured = buildJsonObject { put("big", "z".repeat(60_000)) }
+        val normalized = ToolOutputNormalizer.normalize(
+            media, structured, false, Effect.UNKNOWN, null, ArgumentsValidator { _, _ -> true }, "host_blob_read",
+        )
+        val claim = f.claim(f.ready(f.input()))
+        val applied = assertIs<Mutation.Applied>(
+            f.ledger.recordToolOutput(claim.record.callId, claim.ticket!!.attemptId, Status.SUCCEEDED, normalized, Effect.UNKNOWN),
+        ).record
+        val projected = (f.ledger.resultsForStep(
+            applied.input.sessionId, applied.input.runId, applied.input.stepId, listOf(applied.callId),
+        )!!.parts.single() as io.github.bytejuno.thetacore.agent.protocol.ContentPart.ToolResult).text
+        assertTrue(projected.toByteArray(Charsets.UTF_8).size <= ModelResultText.LIMIT)
+        val message = Json.parseToJsonElement(projected).jsonObject.getValue("message").jsonPrimitive.content
+        assertTrue(message.startsWith("Side effects are unknown."))
+        assertTrue(message.endsWith(normalized.truncationNotice))
+        normalized.stored.media.forEach { ref ->
+            assertTrue(message.contains("blob ${ref.id}"))
+        }
+    }
+
+    @Test fun excessiveMediaAttachmentsEmitExplicitOmissionNoticeAndStayWithin32KiB() {
+        val totalMedia = 400
+        val manyMedia = (0 until totalMedia).map { index ->
+            OutputPart.Media(MediaKind.IMAGE, "image/png", "img-$index".toByteArray())
+        }
+        val structured = buildJsonObject { put("data", "m".repeat(60_000)) }
+        val normalized = output(parts = manyMedia, structured = structured)
+        assertEquals(totalMedia, normalized.stored.media.size)
+        val envelope = ModelResultText.encode(Status.TIMED_OUT, Effect.UNKNOWN, normalized.text)
+        assertTrue(envelope.toByteArray(Charsets.UTF_8).size <= ModelResultText.LIMIT)
+        assertTrue(normalized.text.endsWith(normalized.truncationNotice))
+        val shownCount = normalized.stored.media.count { ref -> normalized.text.contains("blob ${ref.id}") }
+        assertTrue(shownCount in 1 until totalMedia, "Expected partial media list, got $shownCount of $totalMedia")
+        val omittedCount = totalMedia - shownCount
+        assertTrue(
+            normalized.text.contains("[$omittedCount of $totalMedia media attachment(s) omitted due to 32 KiB limit;"),
+            "Missing explicit media omission notice in: ${normalized.text.takeLast(600)}",
+        )
+        assertTrue(normalized.text.contains("blob ${normalized.stored.raw.id}"))
+    }
 }
