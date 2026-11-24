@@ -365,12 +365,30 @@ internal class ChatSessionOwner(
         if (active == null) {
             val pending = history?.pendingStep(tools!!.ledger)
             if (pending != null) {
-                pending.records.filter { !it.state.terminal }.forEach { tools!!.cancel(it.callId) }
-                history!!.recoverPending(tools!!.ledger)
-                tools!!.finishChatRun(pending.identity.runId)
+                stopPendingStep(pending)
                 refresh()
+                observeLateExits(requireNotNull(tools), pending.identity.runId)
+                mutable.update { it.copy(notice = R.string.chat_stopped) }
             }
         }
+    }
+    private suspend fun stopPendingStep(pending: PendingHistoryStep) {
+        val host = requireNotNull(tools)
+        val disk = requireNotNull(history)
+        pending.records.forEach { record ->
+            when (host.cancel(record.callId)) {
+                is Mutation.Applied, is Mutation.AlreadyApplied -> Unit
+                else -> error("Could not cancel saved invocation")
+            }
+        }
+        val ids = pending.assistant.parts.filterIsInstance<ContentPart.ToolCall>().map { it.binding.callId }
+        val results = requireNotNull(host.ledger.resultsForStep(disk.sessionId,
+            pending.identity.runId, pending.stepId, ids)) { "Incomplete saved step" }
+        // Commit the pair from logical ledger results. Actual exit, resource leases and
+        // isolation remain owned by the host observer; cold recovery is not a live stop.
+        disk.append(disk.revision(), listOf(pending.assistant, results))
+        disk.saveChatInterruption()
+        host.finishChatRun(pending.identity.runId)
     }
     private suspend fun approval(request: ApprovalRequest): Decision? {
         val host = requireNotNull(tools)
@@ -428,11 +446,41 @@ internal class ChatSessionOwner(
             var notice = R.string.chat_complete
             try {
                 presence.update(executionId, ChatTaskProgress.Model)
-                notice = withStatusUpdates { executeChat(snapshot, pending, identity, resumeId, readmitId) }
+                notice = withStatusUpdates {
+                    val result = executeChat(snapshot, pending, identity, resumeId, readmitId)
+                    // Admission can pause after submitting a parallel sibling. Keep the
+                    // execution identity, approvals and foreground owner until that sibling
+                    // settles; only an explicit continuation may submit the remaining calls.
+                    val host = requireNotNull(tools)
+                    val saved = history!!.pendingStep(host.ledger)
+                    try {
+                        saved?.records?.filter { it.state == Status.RUNNING ||
+                            it.state in setOf(Status.SUCCEEDED, Status.FAILED) &&
+                                it.instance?.state == InstanceState.UNCONFIRMED
+                        }?.forEach { host.runBridge().awaitTerminal(it.callId) }
+                    } catch (error: Exception) {
+                        withContext(NonCancellable) {
+                            gate.withLock {
+                                history!!.pendingStep(host.ledger)?.let { stopPendingStep(it) }
+                            }
+                        }
+                        throw error
+                    }
+                    result
+                }
             } catch (error: CancellationException) {
                 notice = R.string.chat_stopped
-                try { history?.saveChatInterruption() }
-                catch (error: Exception) { report(error) }
+                withContext(NonCancellable) {
+                    gate.withLock {
+                        try {
+                            // Stop can arrive before executeChat, while foreground admission
+                            // is pending. Reconcile the saved step at this boundary too.
+                            val saved = history?.pendingStep(requireNotNull(tools).ledger)
+                            if (saved != null) stopPendingStep(saved)
+                            else history?.saveChatInterruption()
+                        } catch (error: Exception) { report(error) }
+                    }
+                }
             }
             catch (error: Exception) {
                 report(error)
@@ -480,15 +528,21 @@ internal class ChatSessionOwner(
                 }
             }
             val executor = executor(pending.records.mapNotNull { it.input.definition }.distinctBy { it.modelName })
+            var admissionPaused = false
             try { executor.execute(calls) }
+            catch (pause: ToolStepPaused) {
+                if (!currentCoroutineContext().isActive) executor.cancelRemaining(calls)
+                currentCoroutineContext().ensureActive()
+                admissionPaused = true
+            }
             catch (error: Exception) { executor.cancelRemaining(calls); throw error }
             finally {
                 // Same atomic pair commit as AgentRunLoop: logical cancellation is not
                 // actual worker exit. Preserve the ledger's UNKNOWN/isolation truth.
-                disk.append(disk.revision(), listOf(pending.assistant,
+                if (!admissionPaused) disk.append(disk.revision(), listOf(pending.assistant,
                     executor.results(pending.identity, pending.stepId, calls)))
             }
-            return R.string.chat_recovered_step
+            return if (admissionPaused) R.string.chat_paused else R.string.chat_recovered_step
         } else {
             val config = requireNotNull(snapshot)
             val id = requireNotNull(identity)

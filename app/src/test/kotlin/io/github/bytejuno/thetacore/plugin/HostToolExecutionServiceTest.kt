@@ -503,6 +503,45 @@ class HostToolExecutionServiceTest {
         }
     }
 
+    @Test fun ledgerExecutorResumeObservesRunningSiblingWithoutDuplicateClaim() = runBlocking {
+        Fixture(slots = 1).use { f ->
+            val entered = CompletableDeferred<Unit>(); val release = CompletableDeferred<Unit>()
+            val executions = AtomicInteger()
+            val first = f.catalog.registerHost("host/first", "1", tool(parallel = true, timeout = 30_000) {
+                executions.incrementAndGet(); entered.complete(Unit); release.await()
+                ToolResult("first", effect = ToolEffect.NONE)
+            })
+            val second = f.catalog.registerHost("host/second", "1", tool(parallel = true) {
+                executions.incrementAndGet(); ToolResult("second", effect = ToolEffect.NONE)
+            })
+            val definitions = f.catalog.freeze("run").values.toList()
+            val reducer = completedCalls(listOf(first.modelName, second.modelName), "ledger-resume")
+            val calls = reducer.calls()
+            val executor = LedgerToolExecutor(f.ledger, f.gate, definitions, f.service.runBridge())
+            executor.register(RunIdentity("chain", "session", "run"), "step", calls, false)
+            try {
+                suspend fun attempt() {
+                    try { executor.execute(calls); fail("Capacity must pause the step") }
+                    catch (_: ToolStepPaused) { }
+                }
+                attempt(); withTimeout(5_000) { entered.await() }
+                val original = f.ledger.get(calls[0].binding.callId)!!.instance
+                attempt()
+                assertEquals(original, f.ledger.get(calls[0].binding.callId)!!.instance)
+                assertEquals(Status.RUNNING, f.ledger.get(calls[0].binding.callId)!!.state)
+                assertNull(f.ledger.get(calls[1].binding.callId)!!.instance)
+                assertEquals(1, executions.get())
+                release.complete(Unit); f.service.awaitObservedExit(calls[0].binding.callId)
+                withTimeout(5_000) { executor.execute(calls) }
+                assertEquals(2, executions.get())
+                executor.execute(calls)
+                assertEquals(2, executions.get())
+                assertEquals(original!!.attemptId, f.ledger.get(calls[0].binding.callId)!!.instance!!.attemptId)
+                assertNotNull(executor.results(RunIdentity("chain", "session", "run"), "step", calls))
+            } finally { release.complete(Unit); f.service.awaitObservedExit(calls[0].binding.callId) }
+        }
+    }
+
     @Test fun resumingApprovalObservesRunningSiblingWithoutDuplicateClaim() = runBlocking {
         Fixture().use { f ->
             val readEntered = CountDownLatch(1); val writeEntered = CountDownLatch(1)
