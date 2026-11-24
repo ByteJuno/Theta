@@ -1,5 +1,7 @@
 # Theta
 
+<img src="docs/theta-icon.svg" width="88" height="88" alt="Theta icon" align="right" />
+
 一个“万物可插拔”的 Android AI 助手基座：内核只管 agent 循环和安全，其余功能都做成可以随时安装、卸载的插件。
 
 An Android AI assistant base where almost everything is a plugin. The core only owns the agent loop and safety; everything else can be installed and removed at any time.
