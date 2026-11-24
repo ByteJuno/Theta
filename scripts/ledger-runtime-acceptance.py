@@ -5,8 +5,9 @@ python -I scripts/ledger-runtime-acceptance.py --sdk SDK --jdk JDK --serial emul
   --avd theta_issue17_api36 --apk app/build/outputs/apk/release/app-release.apk \
   --mapping app/build/outputs/mapping/release/mapping.txt --keystore DEBUG_KEYSTORE --output NEW_DIR
 
-Destructive ONLY to emulator-5588 / theta_issue17_api36 host app data. Never selects a
-physical device or emulator-5582. Signature must match host (local debug-signed Release).
+Destructive ONLY to emulator-5588 / owned ledger acceptance AVDs (theta_issue17_api36,
+theta_issue51_api33) host app data. Never selects a physical device or emulator-5582.
+Signature must match host (local debug-signed Release).
 The only current consumer is this instrumentation, not a production UI/model path.
 Every guard and command executes under python -O as well as normal Python.
 """
@@ -29,9 +30,12 @@ def require(condition, reason):
         raise RuntimeError(reason)
 
 
+ALLOWED_AVDS = {'theta_issue17_api36', 'theta_issue51_api33'}
+
+
 def validate_device(serial, avd, device):
     require(serial == 'emulator-5588', 'Only owned emulator-5588 is allowed; emulator-5582 and physical devices are reserved')
-    require(avd == 'theta_issue17_api36', 'Use the issue17-owned AVD')
+    require(avd in ALLOWED_AVDS, 'Use an owned ledger acceptance AVD')
     require(device('get-serialno').strip() == serial, 'Device serial mismatch')
     require(device('shell', 'getprop', 'ro.kernel.qemu').strip() == '1', 'Device is not an emulator')
     name = device('emu', 'avd', 'name').splitlines()

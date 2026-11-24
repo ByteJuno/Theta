@@ -511,5 +511,45 @@ class ChatNavigation(unittest.TestCase):
             with self.assertRaises(Exception): lc.start()
         tap.assert_not_called()
 
+    def test_fresh_resizes_logcat_buffer_after_clearing_previous_checkpoint(self):
+        calls = []
+        def adb(*args, **kwargs):
+            calls.append(args)
+            if args == ('shell', 'pm', 'path', lc.PACKAGE):
+                return ''
+            if args[:1] == ('install',):
+                return 'Success'
+            return ''
+        with patch.object(lc, 'adb', side_effect=adb), \
+                patch.object(lc, 'clear_logs', side_effect=lambda: calls.append(('clear_logs',))), \
+                patch.object(lc, 'start'), patch.object(lc, 'text'):
+            lc.fresh('host.apk')
+        clear_idx = calls.index(('clear_logs',))
+        resize_idx = calls.index(('logcat', '-G', '4M'))
+        self.assertGreater(resize_idx, clear_idx)
+
+    def test_main_runs_without_sigalrm(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            host = root / 'host.apk'
+            hello = root / 'hello.apk'
+            host.write_bytes(b'host')
+            hello.write_bytes(b'hello')
+            fixtures = root / 'fixtures'
+            for flavor in lc.FLAVORS:
+                apk = fixtures / flavor / 'release' / f'fixtures-{flavor}-release.apk'
+                apk.parent.mkdir(parents=True, exist_ok=True)
+                apk.write_bytes(flavor.encode())
+            no_alarm = type('NoSigAlrm', (), {})()
+            with patch.object(lc, 'OUTPUT', root / 'out'), \
+                    patch.object(lc, 'RESULTS', []), \
+                    patch.object(lc, 'EVIDENCE_ERRORS', []), \
+                    patch.object(lc, 'check_device', return_value='emulator-5588'), \
+                    patch.object(lc, 'case') as run_case, \
+                    patch.object(lc, 'signal', no_alarm), \
+                    patch.object(sys, 'argv', ['lifecycle-acceptance.py', str(host), str(fixtures), '--hello', str(hello), '--case', 'cleanupBlock']):
+                self.assertEqual(0, lc.main())
+            run_case.assert_called_once()
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

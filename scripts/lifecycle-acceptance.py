@@ -306,6 +306,8 @@ def fresh(host):
     installed = adb("install", host, timeout=300)
     require("Success" in installed, "Host APK installation failed: " + installed)
     clear_logs()
+    # Keep long blocking-callback windows (60s + UI sweeps) from evicting early ThetaFixture logs.
+    adb("logcat", "-G", "4M", check=False)
     adb("logcat", "-c", "-b", "crash")
     start()
     text("No plugins installed")
@@ -875,8 +877,9 @@ def main():
         require(all(p.is_file() for p in paths), f"Missing APKs: {[str(p) for p in paths if not p.is_file()]}")
         report["apk_sha256"] = {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
         # InstaBox/Linux: global deadline also bounds command loops and XML retries.
-        signal.signal(signal.SIGALRM, expired)
-        signal.alarm(int(os.environ.get("S1_TOTAL_TIMEOUT", "5400")))
+        if hasattr(signal, "SIGALRM"):
+            signal.signal(signal.SIGALRM, expired)
+            signal.alarm(int(os.environ.get("S1_TOTAL_TIMEOUT", "5400")))
         cases = {"upgrade-and-data": lambda: upgrade_data(args.host, apks)}
         for flavor in ("disableThrow", "cleanupThrow", "cleanupBlock"):
             cases[flavor] = lambda f=flavor: cleanup_fault(args.host, apks, f)
