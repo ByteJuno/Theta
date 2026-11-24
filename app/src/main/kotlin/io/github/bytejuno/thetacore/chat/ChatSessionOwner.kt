@@ -187,11 +187,10 @@ internal class ChatSessionOwner(
     }
     private fun restorePending(pending: PendingHistoryStep) {
         val host = requireNotNull(tools)
-        val runId = pending.identity.runId
-        if (host.catalog.frozen(runId) == null && host.catalog.restore(runId) == null) {
-            host.catalog.restorePending(runId,
-                (pending.records.mapNotNull { it.input.definition } + listOfNotNull(pending.resultReader)).distinct())
-        }
+        host.catalog.restorePending(
+            pending.identity.runId,
+            (pending.records.mapNotNull { it.input.definition } + listOfNotNull(pending.resultReader)).distinct(),
+        )
     }
     private suspend fun refresh(before: HistoryCursor? = null) {
         val disk = requireNotNull(history)
