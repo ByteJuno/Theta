@@ -5,8 +5,14 @@ import io.github.bytejuno.thetacore.agent.provider.openai.OpenAiProviderSettings
 import io.github.bytejuno.thetacore.agent.provider.openai.OpenAiRunSnapshot
 import io.github.bytejuno.thetacore.agent.transport.ModelTransport
 import io.github.bytejuno.thetacore.chat.ProviderSettingsEditor
+import io.github.bytejuno.thetacore.storage.AesGcmSecretCipher
+import io.github.bytejuno.thetacore.storage.KeyFailureKind
 import io.github.bytejuno.thetacore.storage.KeyStoreSecretCipher
+import io.github.bytejuno.thetacore.storage.SecretCipher
 import io.github.bytejuno.thetacore.storage.SecretKeySource
+import io.github.bytejuno.thetacore.storage.UnusableSecretKeyException
+import io.github.bytejuno.thetacore.storage.classifyKeyStoreError
+import io.github.bytejuno.thetacore.storage.isDefinitiveKeyInvalidation
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
 import org.junit.Rule
@@ -14,6 +20,9 @@ import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import java.io.File
 import java.io.IOException
+import java.security.InvalidKeyException
+import java.security.KeyStoreException
+import java.security.ProviderException
 import java.security.UnrecoverableKeyException
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -37,11 +46,14 @@ class CredentialKeyRecoveryTest {
         var failGeneration = false
         var failDeletion = false
         var failWrites = false
+        var lookupFailure: Exception? = null
+        var clearLookupFailureOnDelete = false
         var deletes = 0
         var creates = 0
         override fun load(create: Boolean): SecretKey {
+            lookupFailure?.let { throw it }
             if (serviceFailure) throw IOException("synthetic provider error")
-            if (unreadable || (create && failWrites)) throw UnrecoverableKeyException("synthetic unusable alias")
+            if (unreadable || (create && failWrites)) throw UnusableSecretKeyException("synthetic unusable alias")
             if (current == null) {
                 if (!create) throw UnrecoverableKeyException("synthetic missing alias")
                 creates++
@@ -54,6 +66,7 @@ class CredentialKeyRecoveryTest {
             deletes++
             if (failDeletion) throw IOException("synthetic delete failure")
             current = null; unreadable = false; failWrites = false
+            if (clearLookupFailureOnDelete) lookupFailure = null
         }
     }
 
@@ -69,16 +82,50 @@ class CredentialKeyRecoveryTest {
 
     @Test fun explicitReentryRecoversLookupAndCipherInitFailuresAndPreservesAdmittedSnapshot() = runBlocking {
         for (name in listOf("active.bin", "images.bin")) {
-            for (mode in listOf("lookup", "cipher-init")) {
+            for (mode in listOf("lookup", "wrapped-lookup", "cipher-init")) {
                 val root = temp.newFolder()
                 val keys = Keys()
-                val cipher = KeyStoreSecretCipher("recovery-$name", keys, allowKeyRecovery = true)
+                var invalidatedKey: SecretKey? = null
+                val aes = AesGcmSecretCipher("recovery-$name", keys::load)
+                val innerCipher = object : SecretCipher {
+                    override fun encrypt(plaintext: ByteArray): ByteArray {
+                        if (invalidatedKey != null && keys.current === invalidatedKey) {
+                            throw InvalidKeyException(
+                                "synthetic cipher init failure",
+                                UnusableSecretKeyException("synthetic invalidated key"),
+                            )
+                        }
+                        return aes.encrypt(plaintext)
+                    }
+                    override fun decrypt(ciphertext: ByteArray): ByteArray {
+                        if (invalidatedKey != null && keys.current === invalidatedKey) {
+                            throw InvalidKeyException(
+                                "synthetic cipher init failure",
+                                UnusableSecretKeyException("synthetic invalidated key"),
+                            )
+                        }
+                        return aes.decrypt(ciphertext)
+                    }
+                }
+                val cipher = if (mode == "cipher-init") {
+                    KeyStoreSecretCipher(innerCipher, keys, allowKeyRecovery = true)
+                } else {
+                    KeyStoreSecretCipher("recovery-$name", keys, allowKeyRecovery = true)
+                }
                 val store = OpenAiSettingsStore(root, cipher, name)
                 store.replace(settings(), "synthetic-old-key")
                 val admitted = store.snapshotForNewRun()
                 val original = record(root, name).readBytes()
-                if (mode == "lookup") keys.unreadable = true
-                else keys.current = SecretKeySpec(ByteArray(1), "AES") // real Cipher.init rejects this key
+                when (mode) {
+                    "lookup" -> keys.unreadable = true
+                    "wrapped-lookup" -> {
+                        keys.clearLookupFailureOnDelete = true
+                        keys.lookupFailure = UnrecoverableKeyException("synthetic wrapper").apply {
+                            initCause(UnusableSecretKeyException("synthetic corrupted alias"))
+                        }
+                    }
+                    "cipher-init" -> invalidatedKey = keys.current
+                }
                 val editor = ProviderSettingsEditor()
                 repeat(2) {
                     editor.load(store)
@@ -188,6 +235,172 @@ class CredentialKeyRecoveryTest {
         assertEquals("new", store.readSettings().model)
     }
 
+    @Test fun wrappedTemporaryAndUnknownFailuresPreserveKeyAndReadableRecordEvenIfGenerationWouldFail() = runBlocking {
+        class SyntheticAuthError : Exception("synthetic auth required")
+        val failures = listOf(
+            IOException("synthetic temporary service failure"),
+            UnrecoverableKeyException("synthetic wrapper").apply {
+                initCause(IOException("synthetic temporary service failure"))
+            },
+            InvalidKeyException("synthetic wrapper", IOException("synthetic temporary service failure")),
+            ProviderException("synthetic wrapper", IOException("synthetic temporary service failure")),
+            UnusableSecretKeyException("synthetic wrapper", IOException("synthetic temporary service failure")),
+            UnusableSecretKeyException("synthetic suppressed").apply {
+                addSuppressed(IOException("synthetic suppressed transient"))
+            },
+            UnrecoverableKeyException("synthetic unknown failure"),
+            InvalidKeyException("synthetic unknown failure"),
+            KeyStoreException("synthetic uninitialized keystore"),
+            IllegalStateException("synthetic wrapper", InvalidKeyException("synthetic unknown failure")),
+            InvalidKeyException("synthetic auth wrapper", SyntheticAuthError()),
+            UnusableSecretKeyException("synthetic auth veto", SyntheticAuthError()),
+        )
+        val classifier: (Throwable) -> KeyFailureKind = { node ->
+            if (node is SyntheticAuthError) KeyFailureKind.NON_RECOVERABLE
+            else io.github.bytejuno.thetacore.storage.classifyAndroidKeyFailure(node)
+        }
+        for (injected in failures) for (generationFails in listOf(false, true)) {
+            val root = temp.newFolder()
+            val keys = Keys()
+            val store = OpenAiSettingsStore(root, KeyStoreSecretCipher("recovery", keys, true, classifier))
+            store.replace(settings(), "old")
+            val originalKey = keys.current
+            val original = record(root).readBytes()
+            keys.lookupFailure = injected
+            keys.failGeneration = generationFails
+            failure(ProviderSettingsException.Failure.WRITE_FAILED) { store.replace(settings(), "new") }
+            assertSame(originalKey, keys.current)
+            assertEquals(0, keys.deletes)
+            assertEquals(0, keys.creates)
+            assertArrayEquals(original, record(root).readBytes())
+            keys.lookupFailure = null
+            val cold = OpenAiSettingsStore(root, KeyStoreSecretCipher("recovery", keys, true, classifier))
+            assertEquals("old", token(cold.snapshotForNewRun()))
+            cold.replace(settings("retry"), "new")
+            assertEquals("new", token(cold.snapshotForNewRun()))
+            assertSame(originalKey, keys.current)
+            assertEquals(0, keys.deletes)
+            assertEquals(0, keys.creates)
+        }
+    }
+
+    @Test fun cipherInitTransientAuthAndUnknownFailuresPreserveKeyEvenIfGenerationWouldFail() = runBlocking {
+        class SyntheticPlatformTransient : Exception("synthetic transient keystore error")
+        class SyntheticPlatformInvalidated : Exception("synthetic permanently invalidated")
+        val classifier: (Throwable) -> KeyFailureKind = { node ->
+            when (node) {
+                is SyntheticPlatformTransient -> KeyFailureKind.NON_RECOVERABLE
+                is SyntheticPlatformInvalidated -> KeyFailureKind.DEFINITIVE_INVALIDATION
+                else -> io.github.bytejuno.thetacore.storage.classifyAndroidKeyFailure(node)
+            }
+        }
+        val nonRecoverable = listOf<() -> Exception>(
+            { InvalidKeyException("synthetic unknown cipher init") },
+            { InvalidKeyException("synthetic wrapped transient", IOException("synthetic io")) },
+            { ProviderException("synthetic wrapped transient", SyntheticPlatformTransient()) },
+            {
+                InvalidKeyException("synthetic invalidated with transient cause", SyntheticPlatformInvalidated()).apply {
+                    cause!!.initCause(SyntheticPlatformTransient())
+                }
+            },
+        )
+        for (makeFailure in nonRecoverable) for (generationFails in listOf(false, true)) {
+            val root = temp.newFolder()
+            val keys = Keys()
+            val aes = AesGcmSecretCipher("recovery", keys::load)
+            var encryptFailure: Exception? = null
+            val inner = object : SecretCipher {
+                override fun encrypt(plaintext: ByteArray): ByteArray {
+                    encryptFailure?.let { throw it }
+                    return aes.encrypt(plaintext)
+                }
+                override fun decrypt(ciphertext: ByteArray): ByteArray = aes.decrypt(ciphertext)
+            }
+            val store = OpenAiSettingsStore(root, KeyStoreSecretCipher(inner, keys, true, classifier))
+            store.replace(settings(), "old")
+            val originalKey = keys.current
+            val original = record(root).readBytes()
+            encryptFailure = makeFailure()
+            keys.failGeneration = generationFails
+            failure(ProviderSettingsException.Failure.WRITE_FAILED) { store.replace(settings(), "new") }
+            assertSame(originalKey, keys.current)
+            assertEquals(0, keys.deletes)
+            assertEquals(0, keys.creates)
+            assertArrayEquals(original, record(root).readBytes())
+            encryptFailure = null
+            val cold = OpenAiSettingsStore(root, KeyStoreSecretCipher("recovery", keys, true, classifier))
+            assertEquals("old", token(cold.snapshotForNewRun()))
+        }
+
+        // Real Cipher.init rejecting an unknown invalid key without definitive invalidation cause does not delete.
+        val root = temp.newFolder()
+        val keys = Keys()
+        val store = OpenAiSettingsStore(root, KeyStoreSecretCipher("recovery", keys, true))
+        store.replace(settings(), "old")
+        val original = record(root).readBytes()
+        keys.current = SecretKeySpec(ByteArray(1), "AES")
+        failure(ProviderSettingsException.Failure.WRITE_FAILED) { store.replace(settings(), "new") }
+        assertEquals(0, keys.deletes)
+        assertEquals(0, keys.creates)
+        assertArrayEquals(original, record(root).readBytes())
+    }
+
+    @Test fun keyStoreErrorCodeClassificationAndCauseChainRulesAreFailClosed() {
+        val definitiveCodes = setOf(
+            android.security.KeyStoreException.ERROR_KEY_CORRUPTED,
+            android.security.KeyStoreException.ERROR_KEY_DOES_NOT_EXIST,
+        )
+        val nonRecoverableCodes = listOf(
+            android.security.KeyStoreException.ERROR_OTHER,
+            android.security.KeyStoreException.ERROR_USER_AUTHENTICATION_REQUIRED,
+            android.security.KeyStoreException.ERROR_KEYSTORE_UNINITIALIZED,
+            android.security.KeyStoreException.ERROR_INTERNAL_SYSTEM_ERROR,
+            android.security.KeyStoreException.ERROR_PERMISSION_DENIED,
+            android.security.KeyStoreException.ERROR_ID_ATTESTATION_FAILURE,
+            android.security.KeyStoreException.ERROR_ATTESTATION_CHALLENGE_TOO_LARGE,
+            android.security.KeyStoreException.ERROR_KEYMINT_FAILURE,
+            android.security.KeyStoreException.ERROR_KEYSTORE_FAILURE,
+            android.security.KeyStoreException.ERROR_UNIMPLEMENTED,
+            android.security.KeyStoreException.ERROR_INCORRECT_USAGE,
+            android.security.KeyStoreException.ERROR_KEY_NOT_TEMPORALLY_VALID,
+            android.security.KeyStoreException.ERROR_KEY_OPERATION_EXPIRED,
+            android.security.KeyStoreException.ERROR_ATTESTATION_KEYS_UNAVAILABLE,
+            android.security.KeyStoreException.ERROR_TOO_MANY_KEYS,
+        )
+        for (code in definitiveCodes) {
+            assertEquals(KeyFailureKind.DEFINITIVE_INVALIDATION, classifyKeyStoreError(code, false, false, false))
+            assertEquals(KeyFailureKind.NON_RECOVERABLE, classifyKeyStoreError(code, true, false, false))
+            assertEquals(KeyFailureKind.NON_RECOVERABLE, classifyKeyStoreError(code, false, true, false))
+            assertEquals(KeyFailureKind.NON_RECOVERABLE, classifyKeyStoreError(code, false, false, true))
+        }
+        for (code in nonRecoverableCodes) {
+            assertEquals(KeyFailureKind.NON_RECOVERABLE, classifyKeyStoreError(code, false, false, false))
+        }
+
+        // Deeply wrapped definitive invalidation recovers when no veto exists in the chain.
+        val deepDefinitive = IllegalStateException(
+            "outer",
+            ProviderException("mid", UnusableSecretKeyException("corrupted")),
+        )
+        assertTrue(isDefinitiveKeyInvalidation(deepDefinitive))
+
+        // Veto anywhere in the cause chain blocks deletion even if another node is definitive.
+        val vetoBefore = IOException("outer transient", UnusableSecretKeyException("inner"))
+        val vetoAfter = UnusableSecretKeyException("outer", IOException("inner transient"))
+        assertFalse(isDefinitiveKeyInvalidation(vetoBefore))
+        assertFalse(isDefinitiveKeyInvalidation(vetoAfter))
+
+        // Suppressed definitive invalidation must not authorize deletion; suppressed transient vetoes it.
+        val suppressedOnly = InvalidKeyException("unknown").apply {
+            addSuppressed(UnusableSecretKeyException("suppressed"))
+        }
+        assertFalse(isDefinitiveKeyInvalidation(suppressedOnly))
+        val suppressedVeto = UnusableSecretKeyException("outer").apply {
+            addSuppressed(IllegalStateException("wrapper", IOException("suppressed transient")))
+        }
+        assertFalse(isDefinitiveKeyInvalidation(suppressedVeto))
+    }
+
     @Test fun persistenceFailureAfterRecoveryLeavesNoPartialRecordAndNextSaveReusesNewKey() {
         val root = temp.newFolder()
         val keys = Keys()
@@ -221,7 +434,7 @@ class CredentialKeyRecoveryTest {
         assertEquals(0, imageKeys.deletes)
         val noRecovery = KeyStoreSecretCipher("plugin", imageKeys)
         imageKeys.unreadable = true
-        assertThrows(UnrecoverableKeyException::class.java) { noRecovery.encryptForReplacement(byteArrayOf(1)) }
+        assertThrows(UnusableSecretKeyException::class.java) { noRecovery.encryptForReplacement(byteArrayOf(1)) }
         assertEquals(0, imageKeys.deletes)
     }
 }
