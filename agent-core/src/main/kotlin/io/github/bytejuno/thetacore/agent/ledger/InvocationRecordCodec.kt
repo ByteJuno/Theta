@@ -26,20 +26,7 @@ internal class InvocationRecordCodec(private val json: Json) {
      * remain untouched, and valid surrogate pairs keep their original UTF-8 representation.
      * Result/evidence text has already undergone the storage-v1 normalization above.
      */
-    private fun String.escapeUnpairedSurrogates(): String = buildString(length) {
-        var index = 0
-        while (index < this@escapeUnpairedSurrogates.length) {
-            val unit = this@escapeUnpairedSurrogates[index++]
-            if (unit in '\uD800'..'\uDBFF' && index < this@escapeUnpairedSurrogates.length &&
-                this@escapeUnpairedSurrogates[index] in '\uDC00'..'\uDFFF') {
-                append(unit)
-                append(this@escapeUnpairedSurrogates[index++])
-            } else if (unit in '\uD800'..'\uDFFF') {
-                append("\\u")
-                append(unit.code.toString(16).padStart(4, '0'))
-            } else append(unit)
-        }
-    }
+    private fun String.escapeUnpairedSurrogates(): String = escapeUnpairedSurrogatesForJson(this)
 
     fun decode(encoded: String): InvocationRecord {
         val stored = json.parseToJsonElement(encoded).jsonObject
@@ -75,6 +62,23 @@ internal class InvocationRecordCodec(private val json: Json) {
                 ))
             }),
         ))
+    }
+}
+
+/** Escape raw unpaired UTF-16 surrogates as JSON \uXXXX so UTF-8 encoding is lossless.
+ * Valid surrogate pairs and existing JSON escapes (including literal "\\ud800") remain unchanged. */
+internal fun escapeUnpairedSurrogatesForJson(value: String): String = buildString(value.length) {
+    var index = 0
+    while (index < value.length) {
+        val unit = value[index++]
+        if (unit in '\uD800'..'\uDBFF' && index < value.length &&
+            value[index] in '\uDC00'..'\uDFFF') {
+            append(unit)
+            append(value[index++])
+        } else if (unit in '\uD800'..'\uDFFF') {
+            append("\\u")
+            append(unit.code.toString(16).padStart(4, '0'))
+        } else append(unit)
     }
 }
 

@@ -46,10 +46,12 @@ import java.util.UUID
         source == Source.FIRST_PARTY && owner == "host" && it.startsWith("host/") && it.length > 5
     }
 
-    val digest: String get() = sha256("definition-v1:" + buildJsonObject {
+    /** Escape raw unpaired UTF-16 surrogates in canonical JSON before UTF-8 SHA-256 so distinct
+     * surrogates cannot collapse to '?'; valid Unicode definitions keep identical v1 digests. */
+    val digest: String get() = sha256("definition-v1:" + escapeUnpairedSurrogatesForJson(buildJsonObject {
         put("name", name); put("description", description)
         put("inputSchema", Json.parseToJsonElement(inputSchema)); put("risk", declaredRisk.name)
-    }.let(::canonical))
+    }.let(::canonical)))
 }
 
 /** Stable equality for retry matching: object order/whitespace ignored, array order and types retained. */
