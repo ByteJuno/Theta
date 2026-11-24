@@ -49,7 +49,7 @@ public final class LedgerInstrumentation extends Instrumentation {
             }
         }
         require(keys.equals(new java.util.HashSet<>(java.util.Arrays.asList(
-            "host/clock", "host/blob_read", "host/screen_info"))), "unexpected host directory");
+            "host/clock", "host/blob_read", "host/screen_info", "host/generate_image"))), "unexpected host directory");
         require(clock != null, "clock not registered");
         return clock;
     }

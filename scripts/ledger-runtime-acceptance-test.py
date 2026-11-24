@@ -16,7 +16,8 @@ class AcceptanceGuardsTest(unittest.TestCase):
         self.assertFalse(any(isinstance(node, ast.Assert) for node in ast.walk(ast.parse(PATH.read_text(encoding='utf-8')))))
 
     def test_wrong_target_rejected_before_any_command(self):
-        for serial, avd in [('emulator-5582', 'theta_issue17_api36'), ('physical', 'theta_issue17_api36'),
+        for serial, avd in [('emulator-5582', 'theta_issue17_api36'), ('emulator-5582', 'theta_issue51_api33'),
+                            ('physical', 'theta_issue17_api36'), ('physical', 'theta_issue51_api33'),
                             ('emulator-5586', 'theta_issue17_api36'), ('emulator-5588', 'wrong')]:
             commands = []
             with self.assertRaises(RuntimeError):
@@ -29,8 +30,9 @@ class AcceptanceGuardsTest(unittest.TestCase):
             replies = iter(values)
             with self.assertRaises(RuntimeError):
                 acceptance.validate_device('emulator-5588', 'theta_issue17_api36', lambda *args: next(replies))
-        replies = iter(('emulator-5588', '1', 'theta_issue17_api36\nOK'))
-        acceptance.validate_device('emulator-5588', 'theta_issue17_api36', lambda *args: next(replies))
+        for avd in ('theta_issue17_api36', 'theta_issue51_api33'):
+            replies = iter(('emulator-5588', '1', avd + '\nOK'))
+            acceptance.validate_device('emulator-5588', avd, lambda *args: next(replies))
 
     def test_clear_runs_once_and_rejects_failed_result(self):
         for response in ('Success\n', 'Failed', 'NotSuccess'):
