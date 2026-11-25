@@ -182,6 +182,41 @@ internal class PluginDataCatalog(
         return PluginDataContent(paths.toList(), text)
     }
 
+    /** Reads and strictly validates provider preset JSON templates from an active data selection. */
+    fun readProviderTemplates(selection: SelectedPluginData): ProviderTemplateLoadResult {
+        val current = states.read(selection.manifest.id)
+            ?: throw PluginPackageException("Data page revoked", PluginFailureReason.DATA_PAGE_REVOKED)
+        dataRequire(
+            current == selection.state && current.enabled && !current.pendingDelete,
+            "Data page revoked",
+            PluginFailureReason.DATA_PAGE_REVOKED,
+        )
+        val rawEntries = linkedMapOf<String, ByteArray>()
+        val validatedManifest = validateSelection(selection.manifest.id, current) { name, bytes ->
+            if (name.startsWith("providers/") && name.endsWith(".json")) {
+                rawEntries[name] = bytes.copyOf()
+            }
+        }
+        dataRequire(validatedManifest == selection.manifest, "Selected manifest changed")
+        val templates = mutableListOf<ProviderTemplate>()
+        val errors = mutableListOf<String>()
+        rawEntries.entries.sortedBy { it.key }.forEach { (entryPath, bytes) ->
+            try {
+                templates += parseProviderTemplate(
+                    pluginId = validatedManifest.id,
+                    pluginName = validatedManifest.name,
+                    pluginVersion = validatedManifest.version,
+                    entryPath = entryPath,
+                    bytes = bytes,
+                    authorUnverified = true,
+                )
+            } catch (error: Exception) {
+                errors += "${validatedManifest.id}/$entryPath: ${error.message ?: "invalid provider template"}"
+            }
+        }
+        return ProviderTemplateLoadResult(templates.toList(), errors.toList())
+    }
+
     private fun selected(id: String, state: PluginDataState): SelectedPluginData =
         SelectedPluginData(validateSelection(id, state), state)
 

@@ -451,4 +451,13 @@
     <string name="chat_provider_no_auth_notice">请求不携带 Authorization 头。关闭后可填写 API 密钥。</string>
     <string name="chat_system_prompt">自定义系统提示词（可选）</string>
     <string name="chat_system_prompt_notice">最多 %1$d 个字符。作为稳定系统消息前缀注入新运行，不混入时间等易变内容。</string>
+    <string name="chat_provider_templates_title">已启用数据插件的服务商模板</string>
+    <string name="chat_provider_template_source">来源数据包：%1$s</string>
+    <string name="chat_provider_template_host">目标主机：%1$s</string>
+    <string name="chat_provider_template_unverified">未签名数据包 · 作者身份未验证</string>
+    <string name="chat_provider_template_use">选用模板</string>
+    <string name="chat_provider_template_unsupported">对应协议适配器暂未启用（%1$s）</string>
+    <string name="chat_provider_template_copy_notice">已从 %1$s 预填。保存后将作为宿主独立档案副本保存，后续数据包更新、停用或卸载均不会修改其接口地址。</string>
+    <string name="chat_provider_template_models">模板候选模型（点按选用，也可手动编辑或在线拉取）</string>
+    <string name="chat_provider_target_host">保存前请确认目标主机域名：%1$s</string>
 </resources>

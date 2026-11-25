@@ -3,6 +3,8 @@ package io.github.bytejuno.thetacore.chat
 import androidx.compose.runtime.*
 import io.github.bytejuno.thetacore.R
 import io.github.bytejuno.thetacore.agent.provider.openai.*
+import io.github.bytejuno.thetacore.plugin.ProviderTemplate
+import io.github.bytejuno.thetacore.plugin.extractTargetHost
 import io.github.bytejuno.thetacore.provider.MAX_PROFILE_NAME_CHARS
 import io.github.bytejuno.thetacore.provider.OpenAiSettingsStore
 import io.github.bytejuno.thetacore.provider.ProviderProfileSummary
@@ -81,6 +83,37 @@ internal class ProviderSettingsEditor {
         form = ProviderSettingsForm()
     }
 
+    /**
+     * Prefills a NEW independent host profile draft from a validated `openai-chat` data plugin
+     * template. Never attaches any existing saved API key and never links back to the source plugin.
+     */
+    fun applyTemplate(template: ProviderTemplate): Boolean {
+        if (!editable || !template.supported) return false
+        val compat = template.compat ?: OpenAiChatConfig.Compat()
+        creatingNew = true
+        replacingUnreadable = false
+        form = ProviderSettingsForm(
+            endpoint = template.baseUrl,
+            model = template.models.firstOrNull()?.id.orEmpty(),
+            saved = null,
+            explicitCacheControl = compat.explicitCacheControl,
+            maxTokensField = compat.maxTokensField,
+            streamUsage = compat.streamUsage,
+            reasoningField = compat.reasoningField.orEmpty(),
+            replayReasoning = compat.replayReasoning && !compat.reasoningField.isNullOrBlank(),
+            schemaProfile = compat.schemaProfile,
+            profileId = null,
+            profileName = template.name.take(MAX_PROFILE_NAME_CHARS),
+            systemPrompt = "",
+            noAuth = false,
+            savedNoAuth = false,
+            templateModels = template.models.map { it.id },
+            templateSourceName = template.pluginName,
+            templateAuthorUnverified = template.authorUnverified,
+        )
+        return true
+    }
+
     /** Explicit UI action only. Disk is untouched until a new key is entered and saved. */
     fun beginReplacement() {
         if (loading || loadError == null) return
@@ -108,14 +141,21 @@ internal data class ProviderSettingsForm(
     val streamUsage: Boolean = true,
     val reasoningField: String = "",
     val replayReasoning: Boolean = false,
+    val schemaProfile: SchemaProfile = SchemaProfile.FULL,
     val profileId: String? = null,
     val profileName: String = "",
     val systemPrompt: String = "",
     val noAuth: Boolean = false,
     val savedNoAuth: Boolean = false,
+    val templateModels: List<String> = emptyList(),
+    val templateSourceName: String? = null,
+    val templateAuthorUnverified: Boolean = false,
 ) {
     val canReuseKey: Boolean
         get() = saved != null && !noAuth && !savedNoAuth && endpoint.trim() == saved.baseUrl
+
+    val targetHost: String?
+        get() = extractTargetHost(endpoint)
 
     fun withProfileName(value: String): ProviderSettingsForm =
         copy(profileName = value.take(MAX_PROFILE_NAME_CHARS))
@@ -134,7 +174,7 @@ internal data class ProviderSettingsForm(
             reasoningField = reasoningField.trim().ifEmpty { null },
             replayReasoning = replayReasoning,
             streamUsage = streamUsage,
-            schemaProfile = saved?.compat?.schemaProfile ?: SchemaProfile.FULL,
+            schemaProfile = schemaProfile,
             explicitCacheControl = explicitCacheControl,
         )
         return OpenAiProviderSettings(
@@ -157,6 +197,7 @@ internal data class ProviderSettingsForm(
             streamUsage = settings.compat.streamUsage,
             reasoningField = settings.compat.reasoningField.orEmpty(),
             replayReasoning = settings.compat.replayReasoning,
+            schemaProfile = settings.compat.schemaProfile,
             systemPrompt = settings.systemPrompt.orEmpty(),
         )
 
