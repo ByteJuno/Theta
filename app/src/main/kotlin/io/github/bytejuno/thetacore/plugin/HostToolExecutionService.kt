@@ -216,7 +216,7 @@ internal class HostToolExecutionService(
         if (record.state != Status.READY) return@withGate checked
         val entry = catalog.current(requireNotNull(record.input.definition)) ?: return@withGate Mutation.Blocked("Definition unavailable")
         if (entry.failureWindow?.isQuarantined(entry.tool) == true) {
-            return@withGate Mutation.Blocked("Plugin tool quarantined after repeated failures")
+            return@withGate observe(ledger.rejectUnsubmitted(callId, "Plugin tool quarantined after repeated failures"))
         }
         var invocation: PluginInvocation? = null
         val executionDomain = entry.definition.builtinToolKey ?: entry.definition.owner

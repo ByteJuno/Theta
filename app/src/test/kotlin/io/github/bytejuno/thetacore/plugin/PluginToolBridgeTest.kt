@@ -1201,13 +1201,17 @@ class PluginToolBridgeTest {
             assertTrue(failureWindow.isQuarantined(flakyTool))
             assertEquals(5, attempts.get())
 
-            // 6. New submission of quarantined tool MUST be blocked before entering tool body.
+            // 6. Reject only this unsubmitted call, before entering the quarantined tool body.
             mode.set("ok")
             val c6 = callUuid("q-6")
             assertTrue(service.prepare(newInput("q-6", flakyDef)) is Mutation.Applied)
-            val blocked = service.dispatch(c6)
-            assertTrue("Expected quarantined tool to be blocked, got $blocked", blocked is Mutation.Blocked)
-            assertTrue((blocked as Mutation.Blocked).reason.contains("quarantined", ignoreCase = true))
+            val rejected = service.dispatch(c6)
+            assertTrue("Expected quarantined tool to be rejected, got $rejected", rejected is Mutation.Applied)
+            val rejection = (rejected as Mutation.Applied).record
+            assertEquals(Status.REJECTED, rejection.state)
+            assertEquals(Effect.NONE, rejection.result?.effect)
+            assertNull(rejection.instance)
+            assertTrue(rejection.result!!.text.contains("quarantined", ignoreCase = true))
             assertEquals("Quarantined tool body must not run", 5, attempts.get())
 
             // 7. Unrelated sibling tool in the same plugin is NOT quarantined and still executes.
@@ -1496,6 +1500,94 @@ class PluginToolBridgeTest {
         } finally {
             owner.cancel()
             metadataBudget.close()
+        }
+    }
+
+    @Test
+    fun quarantinedToolDoesNotCancelHealthySiblingInChatBatch(): Unit = runBlocking {
+        val root = Files.createTempDirectory("theta-plugin-quarantine-batch").toFile()
+        val owner = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val budget = PluginExecutionBudget()
+        val store = openTestStore(root)
+        try {
+            val gate = DefinitionGate()
+            val validator = Schema202012Validator()
+            val ledger = InvocationLedger(store, gate, validator,
+                policy = ApprovalPolicy(mode = { ApprovalMode.BALANCED }))
+            ledger.recoverColdStart("quarantine-batch-process")
+            val catalog = FrozenToolCatalog(gate, budget, owner, validator, store.runCatalogStore())
+            val service = HostToolExecutionService(budget, owner, catalog, ledger, validator, sessionStore = store)
+            val bridge = PluginToolBridge(owner)
+            bridge.attachCatalog(catalog)
+            val pluginId = "com.example.quarantinebatch"
+            val token = Any()
+            val badCalls = AtomicInteger()
+            val healthyCalls = AtomicInteger()
+            val bad = simpleTool("flaky") { _, _ ->
+                badCalls.incrementAndGet()
+                ToolResult("failed", isError = true, effect = ToolEffect.NONE)
+            }
+            val healthy = simpleTool("healthy") { _, _ ->
+                healthyCalls.incrementAndGet()
+                ToolResult("healthy result", effect = ToolEffect.NONE)
+            }
+            bridge.attachPlugin(pluginId, "1", token)
+            val registrations = PluginRegistrations.tracked<Extension> { entries, closed ->
+                bridge.onRegistrationsChanged(pluginId, token, entries, closed)
+            }
+            registrations.register(bad.id, bad)
+            registrations.register(healthy.id, healthy)
+            bridge.activatePlugin(pluginId, token)
+            bridge.awaitPending(pluginId)
+            val warmup = catalog.freeze("warmup-run").values.single { it.toolKey.endsWith("/flaky") }
+            repeat(3) { n ->
+                val callId = callUuid("quarantine-batch-warmup-$n")
+                val input = InvocationInput(binding(callId, "warmup-$n"),
+                    "chain-$n", "session-$n", "warmup-run", "step-$n", 0, "{}", warmup, false, Risk.READ)
+                assertTrue(service.prepare(input) is Mutation.Applied)
+                assertTrue(service.dispatch(callId) is Mutation.Applied)
+                service.awaitObservedExit(callId)
+                assertEquals(Status.FAILED, ledger.get(callId)?.state)
+            }
+            var response = 0
+            val provider = object : ModelProvider {
+                override fun chat(request: ChatRequest, auth: Credentials) = flow {
+                    emit(Events.started("response-${response++}", request.model))
+                    if (response == 1) {
+                        for ((index, suffix) in listOf("flaky", "healthy").withIndex()) {
+                            val name = request.tools.single { it.name.endsWith(suffix) }.name
+                            emit(Events.toolStart(index, "wire-$index", name))
+                            emit(Events.toolDelta(index, "{}"))
+                            emit(Events.end(index))
+                        }
+                        emit(Events.finished(FinishReason.TOOL_CALLS))
+                    } else {
+                        emit(Events.text(0, "done"))
+                        emit(Events.end(0))
+                        emit(Events.finished(FinishReason.STOP))
+                    }
+                }
+            }
+            val snapshot = OpenAiRunSnapshot(
+                OpenAiProviderSettings("chat", "https://example.invalid/v1", "test"), ApiKeyCredentials("test"))
+            val chat = ChatSessionOwner(owner, { service }, { snapshot },
+                targetForRun = { ModelTarget("chat", provider, ApiKeyCredentials("test")) })
+            chat.open().join()
+            chat.send("run flaky then healthy").join()
+            awaitUntil { !chat.state.value.active && chat.state.value.result != null }
+            val records = chat.state.value.records.values.sortedBy { it.input.callOrder }
+            assertEquals(1, healthyCalls.get())
+            assertEquals(Status.REJECTED, records.first().state)
+            assertEquals(Effect.NONE, records.first().result?.effect)
+            assertNull(records.first().instance)
+            assertEquals(Status.SUCCEEDED, records.last().state)
+            assertEquals(3, badCalls.get())
+            assertEquals(io.github.bytejuno.thetacore.agent.run.RunState.COMPLETED, chat.state.value.result?.state)
+        } finally {
+            owner.cancel()
+            budget.close()
+            store.close()
+            root.deleteRecursively()
         }
     }
 
