@@ -14,6 +14,7 @@ import io.github.bytejuno.thetacore.sdk.*
 import java.io.File
 import java.nio.file.Files
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
@@ -695,7 +696,13 @@ class PluginToolBridgeTest {
                 if (ok) ToolResult("acted", effect = ToolEffect.APPLIED)
                 else ToolResult("denied", isError = true, effect = ToolEffect.NONE)
             }
-            catalog.registerPlugin("com.example.auto", "1", escalatingTool, "smart_act")
+            catalog.registerPlugin(
+                "com.example.auto",
+                "1",
+                escalatingTool,
+                "smart_act",
+                failureWindow = PluginToolFailureWindow(threshold = 10),
+            )
             val frozen = catalog.freeze("run-esc")
             val def = frozen.values.single { it.toolKey == "com.example.auto/smart_act" }
 
@@ -824,6 +831,391 @@ class PluginToolBridgeTest {
             assertEquals(Risk.DEVICE_CONTROL, observedRiskInsideTool.get())
             assertEquals(Risk.DEVICE_CONTROL, ledger.get(callU2)?.effectiveRisk)
             assertEquals(Status.SUCCEEDED, ledger.get(callU2)?.state)
+        } finally {
+            owner.cancel()
+            budget.close()
+            store?.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun revokingDuringMetadataCaptureNeverPublishesOrExecutesTool(): Unit = runBlocking {
+        val budget = PluginExecutionBudget(processSlots = 4, perPluginSlots = 1, cancellationThreads = 2)
+        val owner = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            val gate = DefinitionGate()
+            val validator = Schema202012Validator()
+            val catalog = FrozenToolCatalog(gate, budget, owner, validator)
+            val bridge = PluginToolBridge(owner)
+            bridge.attachCatalog(catalog)
+
+            val pluginId = "com.example.atomic"
+            val token = Any()
+            val calls = AtomicInteger()
+            val captureEntered = CompletableDeferred<Unit>()
+            val releaseCapture = CountDownLatch(1)
+            val tool = object : Tool {
+                override val id = "ephemeral"
+                override val spec: ToolSpec
+                    get() {
+                        captureEntered.complete(Unit)
+                        releaseCapture.await(5, TimeUnit.SECONDS)
+                        return ToolSpec("ephemeral", "Revoked mid-capture", emptySchema, risk = ToolRisk.READ)
+                    }
+
+                override suspend fun call(args: JsonObject, env: ToolEnv): ToolResult {
+                    calls.incrementAndGet()
+                    return ToolResult("should-never-run")
+                }
+            }
+
+            bridge.attachPlugin(pluginId, "1", token)
+            val registrations = PluginRegistrations.tracked<Extension> { entries, closed ->
+                bridge.onRegistrationsChanged(pluginId, token, entries, closed)
+            }
+            val revoke = registrations.register(tool.id, tool)
+            bridge.activatePlugin(pluginId, token)
+
+            // Wait until metadata capture is actively in-flight, then revoke synchronously.
+            captureEntered.await()
+            revoke()
+
+            // Revocation returned: entry must NOT be visible now, nor after capture finishes.
+            assertTrue(catalog.pluginToolKeys(pluginId).isEmpty())
+            assertTrue(catalog.freeze("run-before-release").values.none { it.toolKey == "$pluginId/ephemeral" })
+
+            releaseCapture.countDown()
+            bridge.awaitPending(pluginId)
+
+            assertTrue(catalog.pluginToolKeys(pluginId).isEmpty())
+            assertTrue(catalog.freeze("run-after-release").values.none { it.toolKey == "$pluginId/ephemeral" })
+            assertEquals(0, calls.get())
+
+            // Repeated race check: once revoke() returns, the tool never reappears in catalog or freeze.
+            repeat(15) { iteration ->
+                val raceId = "race_$iteration"
+                val raceEntered = CompletableDeferred<Unit>()
+                val raceTool = object : Tool {
+                    override val id = raceId
+                    override val spec: ToolSpec
+                        get() {
+                            raceEntered.complete(Unit)
+                            return ToolSpec(raceId, "Race tool $iteration", emptySchema, risk = ToolRisk.READ)
+                        }
+                    override suspend fun call(args: JsonObject, env: ToolEnv): ToolResult = ToolResult("bad")
+                }
+                val revokeRace = registrations.register(raceId, raceTool)
+                raceEntered.await()
+                revokeRace()
+                assertFalse(catalog.pluginToolKeys(pluginId).contains("$pluginId/$raceId"))
+                bridge.awaitPending(pluginId)
+                assertFalse(catalog.pluginToolKeys(pluginId).contains("$pluginId/$raceId"))
+                assertTrue(catalog.freeze("run-race-$iteration").values.none { it.toolKey == "$pluginId/$raceId" })
+            }
+        } finally {
+            owner.cancel()
+            budget.close()
+        }
+    }
+
+    @Test
+    fun metadataCaptureTimeoutRecordsFailureAndContinuesAfterSlotRelease(): Unit = runBlocking {
+        val root = Files.createTempDirectory("theta-plugin-meta-timeout").toFile()
+        val metadataBudget = PluginExecutionBudget(processSlots = 2, perPluginSlots = 1, cancellationThreads = 2)
+        val execBudget = PluginExecutionBudget(processSlots = 4, perPluginSlots = 2, cancellationThreads = 2)
+        val owner = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        var store: AndroidAgentStore? = null
+        try {
+            store = openTestStore(root)
+            val gate = DefinitionGate()
+            val validator = Schema202012Validator()
+            val ledger = InvocationLedger(store, gate, validator, policy = ApprovalPolicy(mode = { ApprovalMode.BALANCED }))
+            ledger.recoverColdStart("epoch-timeout")
+            val catalog = FrozenToolCatalog(
+                gate = gate,
+                budget = metadataBudget,
+                owner = owner,
+                validator = validator,
+                store = store.runCatalogStore(),
+                metadataCaptureTimeoutMs = 200L,
+            )
+            val service = HostToolExecutionService(execBudget, owner, catalog, ledger, validator, sessionStore = store)
+            val errors = CopyOnWriteArrayList<Pair<String, Throwable>>()
+            val bridge = PluginToolBridge(owner) { _, toolId, error -> errors += toolId to error }
+            bridge.attachCatalog(catalog)
+
+            val pluginId = "com.example.timeout"
+            val token = Any()
+            val allowSlowExit = CountDownLatch(1)
+            val slowTool = object : Tool {
+                override val id = "slow_meta"
+                override val spec: ToolSpec
+                    get() {
+                        // Ignore interruption until allowSlowExit so the worker holds its slot past timeout.
+                        while (!allowSlowExit.await(20, TimeUnit.MILLISECONDS)) {
+                            // wait until test releases slot
+                        }
+                        return ToolSpec("slow_meta", "Too slow", emptySchema, risk = ToolRisk.READ)
+                    }
+                override suspend fun call(args: JsonObject, env: ToolEnv): ToolResult = ToolResult("never")
+            }
+            val healthyTool = simpleTool("healthy_after", risk = ToolRisk.READ) { _, _ ->
+                ToolResult("healthy-ok", effect = ToolEffect.NONE)
+            }
+
+            bridge.attachPlugin(pluginId, "1", token)
+            val registrations = PluginRegistrations.tracked<Extension> { entries, closed ->
+                bridge.onRegistrationsChanged(pluginId, token, entries, closed)
+            }
+            registrations.register(slowTool.id, slowTool)
+            registrations.register(healthyTool.id, healthyTool)
+            bridge.activatePlugin(pluginId, token)
+
+            // Timeout must be recorded as a local metadata failure (not silent bridge cancellation).
+            awaitUntil { errors.any { it.first == "slow_meta" && it.second is MetadataCaptureTimeoutException } }
+            assertEquals(1, errors.size)
+            assertTrue("Healthy tool must wait until slow_meta actually releases its slot", catalog.pluginToolKeys(pluginId).isEmpty())
+
+            // Release slow_meta worker -> slot frees -> subsequent healthy_after MUST be registered.
+            allowSlowExit.countDown()
+            bridge.awaitPending(pluginId)
+
+            assertEquals(setOf("$pluginId/healthy_after"), catalog.pluginToolKeys(pluginId))
+            assertTrue(errors.none { it.first == "healthy_after" })
+
+            val frozen = catalog.freeze("run-after-meta-timeout")
+            val def = frozen.values.single { it.toolKey == "$pluginId/healthy_after" }
+            val callId = callUuid("call-healthy-after-timeout")
+            assertTrue(
+                service.prepare(
+                    InvocationInput(
+                        binding(callId, "w-healthy"),
+                        "chain-t",
+                        "session-t",
+                        "run-after-meta-timeout",
+                        "step-t",
+                        0,
+                        "{}",
+                        def,
+                        unattended = false,
+                        initialRisk = def.declaredRisk,
+                    ),
+                ) is Mutation.Applied,
+            )
+            assertTrue(service.dispatch(callId) is Mutation.Applied)
+            service.awaitObservedExit(callId)
+            assertEquals(Status.SUCCEEDED, ledger.get(callId)?.state)
+            assertEquals("healthy-ok", ledger.get(callId)?.result?.text)
+        } finally {
+            owner.cancel()
+            metadataBudget.close()
+            execBudget.close()
+            store?.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun temporaryMetadataCapacityExhaustionRemainsPendingAndResumesWhenSlotFrees(): Unit = runBlocking {
+        val metadataBudget = PluginExecutionBudget(processSlots = 1, perPluginSlots = 1, cancellationThreads = 2)
+        val owner = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            val gate = DefinitionGate()
+            val validator = Schema202012Validator()
+            val catalog = FrozenToolCatalog(gate, metadataBudget, owner, validator)
+            val errors = CopyOnWriteArrayList<Pair<String, Throwable>>()
+            val bridge = PluginToolBridge(owner) { _, toolId, error -> errors += toolId to error }
+            bridge.attachCatalog(catalog)
+
+            // Occupy the single process metadata slot externally without relaxing capacity.
+            val blockerEntered = CompletableDeferred<Unit>()
+            val releaseBlocker = CompletableDeferred<Unit>()
+            val blockerLease = requireNotNull(
+                metadataBudget.submit("com.example.blocker", owner, onCancel = {}, onExit = {}) {
+                    blockerEntered.complete(Unit)
+                    releaseBlocker.await()
+                },
+            )
+            blockerEntered.await()
+
+            val pluginId = "com.example.waiting"
+            val token = Any()
+            val waitingTool = simpleTool("deferred_tool", risk = ToolRisk.READ)
+            bridge.attachPlugin(pluginId, "1", token)
+            val registrations = PluginRegistrations.tracked<Extension> { entries, closed ->
+                bridge.onRegistrationsChanged(pluginId, token, entries, closed)
+            }
+            registrations.register(waitingTool.id, waitingTool)
+            bridge.activatePlugin(pluginId, token)
+
+            // While capacity is occupied, tool stays pending: NOT registered and NOT permanently failed.
+            delay(120)
+            assertTrue(catalog.pluginToolKeys(pluginId).isEmpty())
+            assertTrue("Temporary capacity unavailability must not record failure: $errors", errors.isEmpty())
+
+            // Free the slot -> registration resumes automatically and publishes.
+            releaseBlocker.complete(Unit)
+            blockerLease.actualExited.await()
+            bridge.awaitPending(pluginId)
+
+            assertEquals(setOf("$pluginId/deferred_tool"), catalog.pluginToolKeys(pluginId))
+            assertTrue(errors.isEmpty())
+            val frozen = catalog.freeze("run-capacity-recovered")
+            assertTrue(frozen.values.any { it.toolKey == "$pluginId/deferred_tool" })
+        } finally {
+            owner.cancel()
+            metadataBudget.close()
+        }
+    }
+
+    @Test
+    fun chatBridgeCountsEachTerminalOnceAndQuarantinesToolAfterThreshold(): Unit = runBlocking {
+        val root = Files.createTempDirectory("theta-plugin-bridge-quarantine").toFile()
+        val budget = PluginExecutionBudget(processSlots = 6, perPluginSlots = 2, cancellationThreads = 2)
+        val owner = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        var store: AndroidAgentStore? = null
+        try {
+            store = openTestStore(root)
+            val gate = DefinitionGate()
+            val validator = Schema202012Validator()
+            val ledger = InvocationLedger(store, gate, validator, policy = ApprovalPolicy(mode = { ApprovalMode.BALANCED }))
+            ledger.recoverColdStart("epoch-quarantine")
+            val catalog = FrozenToolCatalog(gate, budget, owner, validator, store.runCatalogStore())
+            val service = HostToolExecutionService(budget, owner, catalog, ledger, validator, sessionStore = store)
+            val bridge = PluginToolBridge(owner)
+            bridge.attachCatalog(catalog)
+
+            val failureWindow = PluginToolFailureWindow(threshold = 3, windowMillis = 30_000L)
+            val pluginId = "com.example.flaky"
+            val token = Any()
+            val attempts = AtomicInteger()
+            val mode = AtomicReference("ok")
+            val cancelEntered = CompletableDeferred<Unit>()
+            val releaseCancelled = CompletableDeferred<Unit>()
+            val timeoutEntered = CompletableDeferred<Unit>()
+            val releaseTimedOut = CompletableDeferred<Unit>()
+
+            val flakyTool = simpleTool("flaky", risk = ToolRisk.READ, timeoutMs = 150L) { _, _ ->
+                attempts.incrementAndGet()
+                when (mode.get()) {
+                    "ok" -> ToolResult("good", effect = ToolEffect.NONE)
+                    "throw" -> throw IllegalStateException("boom")
+                    "timeout_then_late_error" -> {
+                        timeoutEntered.complete(Unit)
+                        withContext(NonCancellable) {
+                            releaseTimedOut.await()
+                        }
+                        // Returns an error AFTER timeout already terminated the call; must NOT double-count!
+                        ToolResult("late-err", isError = true, effect = ToolEffect.NONE)
+                    }
+                    "cancel" -> {
+                        cancelEntered.complete(Unit)
+                        withContext(NonCancellable) {
+                            releaseCancelled.await()
+                        }
+                        ToolResult("late-after-cancel", isError = true, effect = ToolEffect.NONE)
+                    }
+                    else -> ToolResult("error-result", isError = true, effect = ToolEffect.NONE)
+                }
+            }
+            val siblingTool = simpleTool("healthy_sibling", risk = ToolRisk.READ) { _, _ ->
+                ToolResult("sibling-ok", effect = ToolEffect.NONE)
+            }
+
+            bridge.attachPlugin(pluginId, "1", token, failureWindow)
+            val registrations = PluginRegistrations.tracked<Extension> { entries, closed ->
+                bridge.onRegistrationsChanged(pluginId, token, entries, closed)
+            }
+            registrations.register(flakyTool.id, flakyTool)
+            registrations.register(siblingTool.id, siblingTool)
+            bridge.activatePlugin(pluginId, token)
+            bridge.awaitPending(pluginId)
+
+            val frozen = catalog.freeze("run-quarantine")
+            val flakyDef = frozen.values.single { it.toolKey == "$pluginId/flaky" }
+            val siblingDef = frozen.values.single { it.toolKey == "$pluginId/healthy_sibling" }
+
+            fun newInput(seed: String, def: FrozenDefinition) = InvocationInput(
+                binding(callUuid(seed), "w-$seed"),
+                "chain-$seed",
+                "session-$seed",
+                "run-quarantine",
+                "step-$seed",
+                0,
+                "{}",
+                def,
+                unattended = false,
+                initialRisk = def.declaredRisk,
+            )
+
+            // 1. SUCCEEDED -> does not count toward failure threshold.
+            mode.set("ok")
+            val c1 = callUuid("q-1")
+            assertTrue(service.prepare(newInput("q-1", flakyDef)) is Mutation.Applied)
+            assertTrue(service.dispatch(c1) is Mutation.Applied)
+            service.awaitObservedExit(c1)
+            assertEquals(Status.SUCCEEDED, ledger.get(c1)?.state)
+            assertFalse(failureWindow.isQuarantined(flakyTool))
+
+            // 2. FAILED (thrown exception) -> failure count = 1.
+            mode.set("throw")
+            val c2 = callUuid("q-2")
+            assertTrue(service.prepare(newInput("q-2", flakyDef)) is Mutation.Applied)
+            assertTrue(service.dispatch(c2) is Mutation.Applied)
+            service.awaitObservedExit(c2)
+            assertEquals(Status.FAILED, ledger.get(c2)?.state)
+            assertFalse(failureWindow.isQuarantined(flakyTool))
+
+            // 3. TIMED_OUT followed by late error return -> MUST count ONLY ONCE (failure count = 2, NOT 3!).
+            mode.set("timeout_then_late_error")
+            val c3 = callUuid("q-3")
+            assertTrue(service.prepare(newInput("q-3", flakyDef)) is Mutation.Applied)
+            assertTrue(service.dispatch(c3) is Mutation.Applied)
+            timeoutEntered.await()
+            awaitUntil { ledger.get(c3)?.state == Status.TIMED_OUT }
+            releaseTimedOut.complete(Unit)
+            service.awaitObservedExit(c3)
+            assertFalse("Timed-out call with late return must only count once (2 < 3)", failureWindow.isQuarantined(flakyTool))
+
+            // 4. CANCELLED externally (even with late error return) -> does not count (failure count stays 2).
+            mode.set("cancel")
+            val c4 = callUuid("q-4")
+            assertTrue(service.prepare(newInput("q-4", flakyDef)) is Mutation.Applied)
+            assertTrue(service.dispatch(c4) is Mutation.Applied)
+            cancelEntered.await()
+            assertTrue(service.cancel(c4) is Mutation.Applied)
+            releaseCancelled.complete(Unit)
+            service.awaitObservedExit(c4)
+            assertEquals(Status.CANCELLED, ledger.get(c4)?.state)
+            assertFalse("Cancelled call must not trip quarantine", failureWindow.isQuarantined(flakyTool))
+
+            // 5. FAILED (isError=true) -> failure count = 3 -> QUARANTINED!
+            mode.set("error")
+            val c5 = callUuid("q-5")
+            assertTrue(service.prepare(newInput("q-5", flakyDef)) is Mutation.Applied)
+            assertTrue(service.dispatch(c5) is Mutation.Applied)
+            service.awaitObservedExit(c5)
+            assertEquals(Status.FAILED, ledger.get(c5)?.state)
+            assertTrue(failureWindow.isQuarantined(flakyTool))
+            assertEquals(5, attempts.get())
+
+            // 6. New submission of quarantined tool MUST be blocked before entering tool body.
+            mode.set("ok")
+            val c6 = callUuid("q-6")
+            assertTrue(service.prepare(newInput("q-6", flakyDef)) is Mutation.Applied)
+            val blocked = service.dispatch(c6)
+            assertTrue("Expected quarantined tool to be blocked, got $blocked", blocked is Mutation.Blocked)
+            assertTrue((blocked as Mutation.Blocked).reason.contains("quarantined", ignoreCase = true))
+            assertEquals("Quarantined tool body must not run", 5, attempts.get())
+
+            // 7. Unrelated sibling tool in the same plugin is NOT quarantined and still executes.
+            val cSib = callUuid("q-sib")
+            assertTrue(service.prepare(newInput("q-sib", siblingDef)) is Mutation.Applied)
+            assertTrue(service.dispatch(cSib) is Mutation.Applied)
+            service.awaitObservedExit(cSib)
+            assertEquals(Status.SUCCEEDED, ledger.get(cSib)?.state)
+            assertEquals("sibling-ok", ledger.get(cSib)?.result?.text)
         } finally {
             owner.cancel()
             budget.close()

@@ -8,6 +8,7 @@ import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.InternalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.runBlocking
@@ -45,6 +46,7 @@ internal class PluginExecutionBudget(
     }
     private val active = mutableSetOf<Lease>()
     private var closed = false
+    private var slotReleaseSignal = CompletableDeferred<Unit>()
     // Event-driven: only a rejected handoff (threads still busy/unwinding) arms a retry.
     // Pending handoffs retain their reserved slots; this is not an admission queue.
     private var retryArmed = false
@@ -173,6 +175,13 @@ internal class PluginExecutionBudget(
 
     fun occupiedSlots(): Int = synchronized(lock) { active.size }
 
+    fun isClosed(): Boolean = synchronized(lock) { closed }
+
+    /** Completes the next time any active slot is released (or immediately if closed). */
+    fun nextSlotRelease(): Deferred<Unit> = synchronized(lock) {
+        if (closed) CompletableDeferred(Unit) else slotReleaseSignal
+    }
+
     override fun nowNanos() = System.nanoTime()
     override fun elapsedRealtimeNanos() = nowNanos()
     override fun arm(delayMillis: Long, action: () -> Unit): () -> Unit {
@@ -222,11 +231,14 @@ internal class PluginExecutionBudget(
         if (!lease.executionExited || lease.cancelRunning ||
             (lease.cancelRequested && !lease.cancelDelivered)) return
         if (!active.remove(lease)) return
+        val releasedSignal = slotReleaseSignal
+        slotReleaseSignal = CompletableDeferred()
         // Do not complete/cancel execution here: Job callbacks can be arbitrary plugin code,
         // and must never execute while the host admission gate is held.
         lease.ownerChild.complete()
         lease.onExit()
         lease.actualExited.complete(Unit)
+        releasedSignal.complete(Unit)
         finishShutdownIfEmpty()
     }
 
@@ -234,6 +246,7 @@ internal class PluginExecutionBudget(
     override fun close() = synchronized(lock) {
         if (closed) return
         closed = true
+        slotReleaseSignal.complete(Unit)
         active.toList().forEach { it.cancel() }
         pumpExecution()
         workers.shutdown() // Never shutdownNow: interruption is not proof of actual exit.

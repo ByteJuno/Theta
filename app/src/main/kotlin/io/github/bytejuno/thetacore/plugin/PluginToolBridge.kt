@@ -8,6 +8,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 internal fun validatePluginOwner(pluginId: String) {
@@ -54,11 +56,13 @@ internal class PluginToolBridge(
         val pluginId: String,
         val version: String,
         val token: Any,
+        val failureWindow: PluginToolFailureWindow,
         var active: Boolean = false,
         var closed: Boolean = false,
         var tools: List<RegisteredExtension<Tool>> = emptyList(),
         val registered: MutableMap<String, Tool> = linkedMapOf(),
         val failed: MutableMap<String, Tool> = linkedMapOf(),
+        var inFlight: RegisteredExtension<Tool>? = null,
         var syncJob: Job? = null,
     )
 
@@ -66,7 +70,12 @@ internal class PluginToolBridge(
     private var catalog: FrozenToolCatalog? = null
     private val plugins = linkedMapOf<String, PluginBinding>()
 
-    fun attachPlugin(pluginId: String, version: String, token: Any) {
+    fun attachPlugin(
+        pluginId: String,
+        version: String,
+        token: Any,
+        failureWindow: PluginToolFailureWindow = PluginToolFailureWindow(),
+    ) {
         validatePluginOwner(pluginId)
         validateVersion(version)
         synchronized(lock) {
@@ -74,7 +83,12 @@ internal class PluginToolBridge(
             if (previous != null) {
                 closeBindingLocked(previous)
             }
-            plugins[pluginId] = PluginBinding(pluginId = pluginId, version = version, token = token)
+            plugins[pluginId] = PluginBinding(
+                pluginId = pluginId,
+                version = version,
+                token = token,
+                failureWindow = failureWindow,
+            )
         }
     }
 
@@ -150,6 +164,7 @@ internal class PluginToolBridge(
         binding.tools = emptyList()
         binding.registered.clear()
         binding.failed.clear()
+        binding.inFlight = null
         binding.syncJob?.cancel()
         binding.syncJob = null
         catalog?.revokePlugin(binding.pluginId)
@@ -161,11 +176,21 @@ internal class PluginToolBridge(
         binding.tools.forEach { entry ->
             desired[entry.id] = entry.value
         }
+        val revokedIds = linkedSetOf<String>()
         val removedRegistered = binding.registered.entries
             .filter { (toolId, tool) -> desired[toolId] !== tool }
             .map { it.key }
         removedRegistered.forEach { toolId ->
             binding.registered.remove(toolId)
+            revokedIds += toolId
+        }
+        binding.inFlight?.let { activeCapture ->
+            if (desired[activeCapture.id] !== activeCapture.value) {
+                binding.inFlight = null
+                revokedIds += activeCapture.id
+            }
+        }
+        revokedIds.forEach { toolId ->
             if (validPluginToolId(toolId)) {
                 target.revoke("${binding.pluginId}/$toolId")
             }
@@ -188,6 +213,7 @@ internal class PluginToolBridge(
             while (true) {
                 val next: RegisteredExtension<Tool> = synchronized(lock) {
                     if (binding.closed || !binding.active || catalog !== target) {
+                        binding.inFlight = null
                         binding.syncJob = null
                         return
                     }
@@ -195,35 +221,84 @@ internal class PluginToolBridge(
                         binding.registered[entry.id] !== entry.value && binding.failed[entry.id] !== entry.value
                     }
                     if (candidate == null) {
+                        binding.inFlight = null
                         binding.syncJob = null
                         return
                     }
+                    binding.inFlight = candidate
                     candidate
                 }
                 if (!validPluginToolId(next.id)) {
                     synchronized(lock) {
-                        if (!binding.closed) binding.failed[next.id] = next.value
+                        if (binding.inFlight === next) binding.inFlight = null
+                        if (!binding.closed && binding.tools.any { it.id == next.id && it.value === next.value }) {
+                            binding.failed[next.id] = next.value
+                        }
                     }
                     onRegistrationError(binding.pluginId, next.id, IllegalArgumentException("Invalid plugin tool id"))
                     continue
                 }
                 try {
-                    target.registerPlugin(binding.pluginId, binding.version, next.value, next.id)
-                    synchronized(lock) {
-                        val stillCurrent = !binding.closed &&
-                            binding.active &&
-                            catalog === target &&
-                            binding.tools.any { it.id == next.id && it.value === next.value }
-                        if (stillCurrent) {
-                            binding.registered[next.id] = next.value
-                        } else {
-                            target.revoke("${binding.pluginId}/${next.id}")
+                    target.registerPluginAtomically(
+                        pluginId = binding.pluginId,
+                        version = binding.version,
+                        tool = next.value,
+                        toolId = next.id,
+                        failureWindow = binding.failureWindow,
+                    ) { install ->
+                        synchronized(lock) {
+                            val stillCurrent = !binding.closed &&
+                                binding.active &&
+                                catalog === target &&
+                                binding.tools.any { it.id == next.id && it.value === next.value }
+                            if (!stillCurrent) {
+                                if (binding.inFlight === next) binding.inFlight = null
+                                return@synchronized null
+                            }
+                            install().also {
+                                binding.registered[next.id] = next.value
+                                if (binding.inFlight === next) binding.inFlight = null
+                            }
                         }
                     }
+                    synchronized(lock) {
+                        if (binding.inFlight === next) binding.inFlight = null
+                    }
+                } catch (capacity: MetadataCapacityUnavailableException) {
+                    val shouldRetry = synchronized(lock) {
+                        if (binding.inFlight === next) binding.inFlight = null
+                        !binding.closed && binding.active && catalog === target && !target.isBudgetClosed()
+                    }
+                    if (!shouldRetry) return
+                    capacity.nextRelease.await()
+                } catch (timeout: MetadataCaptureTimeoutException) {
+                    val hasMorePending = synchronized(lock) {
+                        if (binding.inFlight === next) binding.inFlight = null
+                        if (!binding.closed && binding.tools.any { it.id == next.id && it.value === next.value }) {
+                            binding.failed[next.id] = next.value
+                        }
+                        !binding.closed && binding.active && catalog === target && binding.tools.any { entry ->
+                            binding.registered[entry.id] !== entry.value && binding.failed[entry.id] !== entry.value
+                        }
+                    }
+                    onRegistrationError(binding.pluginId, next.id, timeout)
+                    if (hasMorePending && !target.isBudgetClosed()) {
+                        timeout.actualExited.await()
+                    }
                 } catch (cancelled: CancellationException) {
-                    throw cancelled
+                    if (!currentCoroutineContext().isActive) {
+                        throw cancelled
+                    }
+                    synchronized(lock) {
+                        if (binding.inFlight === next) binding.inFlight = null
+                        if (!binding.closed && binding.tools.any { it.id == next.id && it.value === next.value }) {
+                            binding.failed[next.id] = next.value
+                        }
+                    }
+                    onRegistrationError(binding.pluginId, next.id, cancelled)
                 } catch (error: Throwable) {
                     synchronized(lock) {
+                        if (binding.inFlight === next) binding.inFlight = null
                         if (!binding.closed && binding.tools.any { it.id == next.id && it.value === next.value }) {
                             binding.failed[next.id] = next.value
                         }
@@ -233,6 +308,7 @@ internal class PluginToolBridge(
             }
         } finally {
             synchronized(lock) {
+                binding.inFlight = null
                 if (binding.syncJob === coroutineContext[Job]) {
                     binding.syncJob = null
                 }

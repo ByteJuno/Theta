@@ -7,6 +7,15 @@ import io.github.bytejuno.thetacore.sdk.*
 import kotlinx.coroutines.*
 import kotlinx.serialization.json.*
 
+internal class MetadataCaptureTimeoutException(
+    val actualExited: Deferred<Unit>,
+    cause: TimeoutCancellationException,
+) : IllegalStateException("Tool metadata capture timed out", cause)
+
+internal class MetadataCapacityUnavailableException(
+    val nextRelease: Deferred<Unit>,
+) : IllegalStateException("Metadata capacity unavailable; registration remains pending")
+
 /** Scoped host registry, not the asynchronously published plugin UI list. Registration, revocation,
  * freeze and dispatch share the ledger's definition gate. Only trusted host code holds this object.
  */
@@ -16,23 +25,49 @@ internal class FrozenToolCatalog(
     private val owner: CoroutineScope,
     private val validator: Schema202012Validator,
     private val store: RunCatalogStore? = null,
+    private val metadataCaptureTimeoutMs: Long = 5_000L,
 ) {
-    internal data class Entry(val definition: FrozenDefinition, val tool: Tool, val spec: ToolSpec)
+    init {
+        require(metadataCaptureTimeoutMs in 1L..5_000L) {
+            "Metadata capture timeout must be in 1..5000 ms"
+        }
+    }
+
+    internal data class Entry(
+        val definition: FrozenDefinition,
+        val tool: Tool,
+        val spec: ToolSpec,
+        val failureWindow: PluginToolFailureWindow? = null,
+    )
     private val entries = mutableMapOf<String, Entry>()
     private val runs = mutableMapOf<String, Map<String, FrozenDefinition>>()
     private val generations = mutableMapOf<String, Long>()
     private val pluginEpochs = mutableMapOf<String, Long>()
+    private val pluginFailureWindows = mutableMapOf<String, PluginToolFailureWindow>()
+
+    fun isBudgetClosed(): Boolean = budget.isClosed() || !owner.isActive
+
+    private fun resolvePluginFailureWindow(
+        pluginId: String,
+        supplied: PluginToolFailureWindow?,
+    ): PluginToolFailureWindow = supplied ?: gate.withGate {
+        pluginFailureWindows.getOrPut(pluginId) { PluginToolFailureWindow() }
+    }
 
     suspend fun registerHost(key: String, version: String, tool: Tool): FrozenDefinition {
         require(key.startsWith("host/") && key.length > 5)
-        return registerKnownKey(
-            key = key,
-            budgetDomain = key,
-            source = Source.FIRST_PARTY,
-            ownerId = "host",
-            version = version,
-            tool = tool,
-            pluginEpoch = null,
+        return requireNotNull(
+            registerKnownKey(
+                key = key,
+                budgetDomain = key,
+                source = Source.FIRST_PARTY,
+                ownerId = "host",
+                version = version,
+                tool = tool,
+                pluginEpoch = null,
+                failureWindow = null,
+                commit = { it() },
+            ),
         )
     }
 
@@ -41,26 +76,34 @@ internal class FrozenToolCatalog(
         version: String,
         tool: Tool,
         toolId: String? = null,
+        failureWindow: PluginToolFailureWindow? = null,
     ): FrozenDefinition {
         validatePluginOwner(pluginId)
         validateVersion(version)
+        val resolvedFailureWindow = resolvePluginFailureWindow(pluginId, failureWindow)
         if (toolId != null) {
             validatePluginToolId(toolId)
             val key = "$pluginId/$toolId"
             require(!key.startsWith("host/") && !key.startsWith("mcp/")) { "Reserved tool prefix" }
             val epoch = gate.withGate { pluginEpochs[pluginId] ?: 0L }
-            return registerKnownKey(
-                key = key,
-                budgetDomain = pluginId,
-                source = Source.THIRD_PARTY,
-                ownerId = pluginId,
-                version = version,
-                tool = tool,
-                pluginEpoch = epoch,
+            return requireNotNull(
+                registerKnownKey(
+                    key = key,
+                    budgetDomain = pluginId,
+                    source = Source.THIRD_PARTY,
+                    ownerId = pluginId,
+                    version = version,
+                    tool = tool,
+                    pluginEpoch = epoch,
+                    failureWindow = resolvedFailureWindow,
+                    commit = { it() },
+                ),
             )
         }
         val epoch = gate.withGate { pluginEpochs[pluginId] ?: 0L }
         val captured = CompletableDeferred<Pair<String, ToolSpec>>()
+        if (isBudgetClosed()) throw IllegalStateException("Metadata budget closed")
+        val nextRelease = budget.nextSlotRelease()
         val lease = budget.submit(
             pluginId,
             owner,
@@ -74,13 +117,26 @@ internal class FrozenToolCatalog(
             } catch (_: Throwable) {
                 captured.completeExceptionally(IllegalArgumentException("Tool metadata failed"))
             }
-        } ?: error("Metadata capacity unavailable; registration remains pending")
+        } ?: if (isBudgetClosed()) {
+            throw IllegalStateException("Metadata budget closed")
+        } else {
+            throw MetadataCapacityUnavailableException(nextRelease)
+        }
         val (resolvedId, spec) = try {
-            withTimeout(5_000) {
+            withTimeout(metadataCaptureTimeoutMs) {
                 captured.await().also { lease.actualExited.await() }
             }
+        } catch (timeout: TimeoutCancellationException) {
+            lease.cancel()
+            if (currentCoroutineContext().isActive) {
+                throw MetadataCaptureTimeoutException(lease.actualExited, timeout)
+            }
+            throw timeout
         } catch (error: Throwable) {
             lease.cancel()
+            if (error is CancellationException && currentCoroutineContext().isActive) {
+                throw IllegalStateException("Tool metadata capture cancelled", error)
+            }
             throw error
         }
         validatePluginToolId(resolvedId)
@@ -99,10 +155,43 @@ internal class FrozenToolCatalog(
                 version = version,
                 generation = generation,
             )
-            entries[key] = Entry(definition, tool, spec)
+            entries[key] = Entry(definition, tool, spec, resolvedFailureWindow)
             gate.install(definition)
             definition
         }
+    }
+
+    /**
+     * Registers a plugin tool while executing [commit] as the single atomic publish boundary
+     * around [gate] installation. Returning `null` from [commit] aborts publication cleanly
+     * without ever installing the entry into [entries] or [gate].
+     */
+    internal suspend fun registerPluginAtomically(
+        pluginId: String,
+        version: String,
+        tool: Tool,
+        toolId: String,
+        failureWindow: PluginToolFailureWindow? = null,
+        commit: (install: () -> FrozenDefinition) -> FrozenDefinition?,
+    ): FrozenDefinition? {
+        validatePluginOwner(pluginId)
+        validateVersion(version)
+        validatePluginToolId(toolId)
+        val key = "$pluginId/$toolId"
+        require(!key.startsWith("host/") && !key.startsWith("mcp/")) { "Reserved tool prefix" }
+        val resolvedFailureWindow = resolvePluginFailureWindow(pluginId, failureWindow)
+        val epoch = gate.withGate { pluginEpochs[pluginId] ?: 0L }
+        return registerKnownKey(
+            key = key,
+            budgetDomain = pluginId,
+            source = Source.THIRD_PARTY,
+            ownerId = pluginId,
+            version = version,
+            tool = tool,
+            pluginEpoch = epoch,
+            failureWindow = resolvedFailureWindow,
+            commit = commit,
+        )
     }
 
     private suspend fun registerKnownKey(
@@ -113,7 +202,9 @@ internal class FrozenToolCatalog(
         version: String,
         tool: Tool,
         pluginEpoch: Long?,
-    ): FrozenDefinition {
+        failureWindow: PluginToolFailureWindow?,
+        commit: (install: () -> FrozenDefinition) -> FrozenDefinition?,
+    ): FrozenDefinition? {
         val generation = gate.withGate {
             if (pluginEpoch != null) {
                 check((pluginEpochs[ownerId] ?: 0L) == pluginEpoch) { "Plugin revoked before metadata capture" }
@@ -125,6 +216,8 @@ internal class FrozenToolCatalog(
         }
         try {
             val captured = CompletableDeferred<ToolSpec>()
+            if (isBudgetClosed()) throw IllegalStateException("Metadata budget closed")
+            val nextRelease = budget.nextSlotRelease()
             val lease = budget.submit(
                 budgetDomain,
                 owner,
@@ -136,11 +229,24 @@ internal class FrozenToolCatalog(
                 } catch (_: Throwable) {
                     captured.completeExceptionally(IllegalArgumentException("Tool metadata failed"))
                 }
-            } ?: error("Metadata capacity unavailable; registration remains pending")
+            } ?: if (isBudgetClosed()) {
+                throw IllegalStateException("Metadata budget closed")
+            } else {
+                throw MetadataCapacityUnavailableException(nextRelease)
+            }
             val spec = try {
-                withTimeout(5_000) { captured.await().also { lease.actualExited.await() } }
+                withTimeout(metadataCaptureTimeoutMs) { captured.await().also { lease.actualExited.await() } }
+            } catch (timeout: TimeoutCancellationException) {
+                lease.cancel()
+                if (currentCoroutineContext().isActive) {
+                    throw MetadataCaptureTimeoutException(lease.actualExited, timeout)
+                }
+                throw timeout
             } catch (error: Throwable) {
                 lease.cancel()
+                if (error is CancellationException && currentCoroutineContext().isActive) {
+                    throw IllegalStateException("Tool metadata capture cancelled", error)
+                }
                 throw error
             }
             validateSpec(spec)
@@ -152,15 +258,26 @@ internal class FrozenToolCatalog(
                 version = version,
                 generation = generation,
             )
-            return gate.withGate {
-                check(generations[key] == generation) { "Registration revoked/replaced during metadata capture" }
-                if (pluginEpoch != null) {
-                    check((pluginEpochs[ownerId] ?: 0L) == pluginEpoch) { "Plugin revoked during metadata capture" }
+            val published = commit {
+                gate.withGate {
+                    check(generations[key] == generation) { "Registration revoked/replaced during metadata capture" }
+                    if (pluginEpoch != null) {
+                        check((pluginEpochs[ownerId] ?: 0L) == pluginEpoch) { "Plugin revoked during metadata capture" }
+                    }
+                    entries[key] = Entry(definition, tool, spec, failureWindow)
+                    gate.install(definition)
+                    definition
                 }
-                entries[key] = Entry(definition, tool, spec)
-                gate.install(definition)
-                definition
             }
+            if (published == null) {
+                gate.withGate {
+                    if (generations[key] == generation) {
+                        entries.remove(key)
+                        gate.uninstall(key)
+                    }
+                }
+            }
+            return published
         } catch (error: Throwable) {
             gate.withGate {
                 if (generations[key] == generation) {

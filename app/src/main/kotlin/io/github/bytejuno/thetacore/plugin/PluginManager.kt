@@ -783,8 +783,9 @@ internal class HostPluginContext(
     private val toolBridge: PluginToolBridge? = null,
     onFault: (HostPluginContext) -> Unit,
 ) : PluginContext {
+    private val toolFailures = PluginToolFailureWindow()
     init {
-        toolBridge?.attachPlugin(pluginId, version, this)
+        toolBridge?.attachPlugin(pluginId, version, this, toolFailures)
     }
     override val hostApiLevel = THETA_API_LEVEL
     override val prefs: PluginPrefs get() = settings.prefs
@@ -792,7 +793,6 @@ internal class HostPluginContext(
     private var extensionsActive = false
     private val entryAttempts = IdentityHashMap<EntryAdapter, PluginEntryRuntime>()
     private val calls = IdentityHashMap<PluginInvocation, Tool>()
-    private val toolFailures = PluginToolFailureWindow()
     private val countedCalls = java.util.Collections.newSetFromMap(IdentityHashMap<PluginInvocation, Boolean>())
     var entryCapacityExceeded by mutableStateOf(false)
         private set
