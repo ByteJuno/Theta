@@ -6,6 +6,7 @@ import io.github.bytejuno.thetacore.agent.provider.openai.SchemaProfile
 import io.github.bytejuno.thetacore.provider.validProfileDisplayName
 import java.net.URI
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
@@ -64,6 +65,10 @@ private val TEMPLATE_MODEL_KEYS = setOf(
     "tools",
     "promptCache",
     "structuredOutput",
+)
+private val TEMPLATE_MODEL_NULLABLE_KEYS = TEMPLATE_MODEL_KEYS - setOf("id", "displayName")
+private val TEMPLATE_TOOL_KEYS = setOf(
+    "supported", "parallel", "forcedChoice", "schemaProfile", "maxTools", "maxNameLength", "mediaInResults",
 )
 private val TEMPLATE_COMPAT_KEYS = setOf(
     "maxTokensField",
@@ -154,8 +159,12 @@ private fun parseTemplateModels(json: JsonObject): List<ProviderTemplateModel> {
     dataRequire(raw.size <= MAX_TEMPLATE_MODELS, "Too many models in provider template")
     val seenIds = linkedSetOf<String>()
     return raw.map { element ->
-        val obj = element as? JsonObject ?: throw PluginPackageException("Model entry must be an object")
-        dataRequire(obj.keys.all { it in TEMPLATE_MODEL_KEYS }, "Unknown field in provider template model")
+        val rawModel = element as? JsonObject ?: throw PluginPackageException("Model entry must be an object")
+        dataRequire(rawModel.keys.all { it in TEMPLATE_MODEL_KEYS }, "Unknown field in provider template model")
+        // PROTOCOL 2.2: nullable model metadata is unknown, just like an omitted field.
+        val obj = JsonObject(rawModel.filterNot { (key, value) ->
+            key in TEMPLATE_MODEL_NULLABLE_KEYS && value == JsonNull
+        })
         val id = templateRequiredString(obj, "id", 256)
         dataRequire(seenIds.add(id), "Duplicate model id in provider template")
         val displayName = templateOptionalString(obj, "displayName", 128)
@@ -170,7 +179,7 @@ private fun parseTemplateModels(json: JsonObject): List<ProviderTemplateModel> {
         dataRequire(inputKinds.all { it in TEMPLATE_MEDIA_KINDS }, "Unknown inputKinds value")
         val outputKinds = templateOptionalStringList(obj, "outputKinds", maxItems = 16, maxLen = 32)
         dataRequire(outputKinds.all { it in TEMPLATE_MEDIA_KINDS }, "Unknown outputKinds value")
-        templateOptionalBoolean(obj, "tools")
+        validateTemplateToolSupport(obj)
         templateOptionalBoolean(obj, "promptCache")
         templateOptionalBoolean(obj, "structuredOutput")
         ProviderTemplateModel(
@@ -181,6 +190,22 @@ private fun parseTemplateModels(json: JsonObject): List<ProviderTemplateModel> {
             reasoningLevels = reasoningLevels,
             defaultReasoningLevel = defaultReasoningLevel,
         )
+    }
+}
+
+private fun validateTemplateToolSupport(model: JsonObject) {
+    if ("tools" !in model) return
+    val raw = model["tools"] as? JsonObject ?: throw PluginPackageException("tools must be an object")
+    dataRequire(raw.keys.all { it in TEMPLATE_TOOL_KEYS }, "Unknown field in provider template tools")
+    val obj = JsonObject(raw.filterNot { (key, value) -> key != "supported" && value == JsonNull })
+    dataRequire(templateOptionalBoolean(obj, "supported") != null, "tools.supported must be a boolean")
+    templateOptionalBoolean(obj, "parallel")
+    templateOptionalBoolean(obj, "forcedChoice")
+    templateOptionalBoolean(obj, "mediaInResults")
+    templateOptionalLong(obj, "maxTools", 0L..Int.MAX_VALUE.toLong())
+    templateOptionalLong(obj, "maxNameLength", 0L..Int.MAX_VALUE.toLong())
+    templateOptionalString(obj, "schemaProfile", 64)?.let { wire ->
+        dataRequire(SchemaProfile.entries.any { it.name == wire }, "Unknown tools.schemaProfile")
     }
 }
 

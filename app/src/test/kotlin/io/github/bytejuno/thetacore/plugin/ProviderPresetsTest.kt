@@ -74,7 +74,15 @@ class ProviderPresetsTest {
                   "defaultReasoningLevel": "high",
                   "inputKinds": ["text"],
                   "outputKinds": ["text"],
-                  "tools": true,
+                  "tools": {
+                    "supported": true,
+                    "parallel": false,
+                    "forcedChoice": true,
+                    "schemaProfile": "BASIC",
+                    "maxTools": 32,
+                    "maxNameLength": 64,
+                    "mediaInResults": false
+                  },
                   "promptCache": true,
                   "structuredOutput": true
                 },
@@ -132,6 +140,71 @@ class ProviderPresetsTest {
         val local = parseProviderTemplate("com.example.local", "Local Pack", "1.0", "providers/ollama.json", localRaw)
         assertEquals("127.0.0.1", local.host)
         assertTrue(local.supported)
+    }
+
+    @Test
+    fun documentedModelMetadataLoadsFromInstalledDataPlugin() {
+        val root = Files.createTempDirectory("theta-presets-model-metadata").toFile()
+        try {
+            val nullableKeys = listOf(
+                "contextWindow", "maxOutputTokens", "reasoningLevels", "defaultReasoningLevel",
+                "inputKinds", "outputKinds", "tools", "promptCache", "structuredOutput",
+            )
+            val modelFields = nullableKeys.associateWith { "\"$it\":null" } + mapOf(
+                "tool-support" to """"tools":{"supported":true,"parallel":false,"forcedChoice":true,"schemaProfile":"BASIC","maxTools":32,"maxNameLength":64,"mediaInResults":false}""",
+                "unknown-tool-details" to """"tools":{"supported":false,"parallel":null,"forcedChoice":null,"schemaProfile":null,"maxTools":null,"maxNameLength":null,"mediaInResults":null}""",
+            )
+            val entries = modelFields.mapKeys { (id, _) -> "providers/$id.json" }.mapValues { (path, fields) ->
+                val id = path.removePrefix("providers/").removeSuffix(".json")
+                """{"id":"$id","name":"$id","protocol":"openai-chat","baseUrl":"https://api.example.com/v1","models":[{"id":"model",$fields}]}"""
+            }
+            val catalog = PluginDataCatalog(root, 1)
+            val stage = catalog.stage(ByteArrayInputStream(dataBundle(entries = entries)))
+            val installed = catalog.install(stage, stage.sha256, acknowledged = true)
+            val loaded = catalog.readProviderTemplates(installed)
+            assertEquals(emptyList<String>(), loaded.errors)
+            assertEquals(modelFields.keys, loaded.templates.map { it.id }.toSet())
+            loaded.templates.forEach { template ->
+                assertTrue(template.supported)
+                assertEquals("model", template.models.single().id)
+                assertNull(template.models.single().contextWindow)
+                assertNull(template.models.single().maxOutputTokens)
+                assertEquals(emptyList<String>(), template.models.single().reasoningLevels)
+                assertNull(template.models.single().defaultReasoningLevel)
+            }
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun modelMetadataStillRejectsWrongTypesUnknownFieldsAndInvalidToolSupport() {
+        val invalidFields = listOf(
+            """"tools":true""",
+            """"tools":[]""",
+            """"tools":{}""",
+            """"tools":{"supported":null}""",
+            """"tools":{"supported":"true"}""",
+            """"tools":{"supported":true,"parallel":"false"}""",
+            """"tools":{"supported":true,"forcedChoice":1}""",
+            """"tools":{"supported":true,"schemaProfile":"UNKNOWN"}""",
+            """"tools":{"supported":true,"maxTools":-1}""",
+            """"tools":{"supported":true,"maxNameLength":1.5}""",
+            """"tools":{"supported":true,"maxNameLength":2147483648}""",
+            """"tools":{"supported":true,"mediaInResults":[]}""",
+            """"tools":{"supported":true,"extra":null}""",
+            """"contextWindow":"128000"""",
+            """"reasoningLevels":"high"""",
+            """"promptCache":"false"""",
+            """"unknown":null""",
+            """"displayName":null""",
+        )
+        invalidFields.forEach { fields ->
+            val payload = """{"id":"invalid","name":"Invalid","protocol":"openai-chat","baseUrl":"https://api.example.com/v1","models":[{"id":"model",$fields}]}"""
+            assertThrows("Expected invalid model metadata: $fields", PluginPackageException::class.java) {
+                parseProviderTemplate("com.example.presets", "Pack", "1.0", "providers/invalid.json", payload.toByteArray())
+            }
+        }
     }
 
     @Test
