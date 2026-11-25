@@ -16,6 +16,7 @@
             <data android:mimeType="*/*" />
         </intent>
         <package android:name="io.github.bytejuno.thetacore.sample.hooktarget" />
+        <package android:name="moe.shizuku.privileged.api" />
         <intent><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.HOME" /></intent>
     </queries>
 
