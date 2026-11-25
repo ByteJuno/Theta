@@ -53,6 +53,7 @@ private fun ProviderProfile(
     var error by remember { mutableStateOf<Int?>(null) }
     var reload by remember { mutableIntStateOf(0) }
     var advanced by remember { mutableStateOf(false) }
+    var approvalSettingsOpen by remember { mutableStateOf(false) }
     var filter by remember { mutableStateOf("") }
     val modelLists = remember(scope, store, imageProfile) {
         ProviderModels(scope) { endpoint, key ->
@@ -319,6 +320,11 @@ private fun ProviderProfile(
                     }
                 }
                 error?.let { Text(strings.get(it), color = MaterialTheme.colorScheme.error) }
+                if (!imageProfile) {
+                    OutlinedButton(onClick = { approvalSettingsOpen = true }, enabled = !busy) {
+                        Text(strings.get(R.string.chat_approval_settings))
+                    }
+                }
                 AppLanguageSetting()
             }
         },
@@ -362,6 +368,7 @@ private fun ProviderProfile(
             }
         },
     )
+    if (approvalSettingsOpen) ChatApprovalDialog(host) { approvalSettingsOpen = false }
 }
 
 @Composable

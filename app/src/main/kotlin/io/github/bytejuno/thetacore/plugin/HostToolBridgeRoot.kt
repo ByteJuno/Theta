@@ -22,10 +22,13 @@ internal class HostToolBridgeRoot(
     private var service: HostToolExecutionService? = null
 
     /** Open inside the one-shot gate: even a failed open must not retry as a fresh installation. */
-    suspend fun initialize(screenBackend: io.github.bytejuno.thetacore.plugin.tools.ScreenBackend? = null,
+    suspend fun initialize(
+        screenBackend: io.github.bytejuno.thetacore.plugin.tools.ScreenBackend? = null,
         invocationClock: InvocationClock = budget,
         imageTool: ((InvocationStore) -> Tool)? = null,
-        openStore: () -> InvocationStore): HostToolExecutionService = withContext(Dispatchers.IO) {
+        policy: ApprovalPolicy = ApprovalPolicy(),
+        openStore: () -> InvocationStore,
+    ): HostToolExecutionService = withContext(Dispatchers.IO) {
         mutex.withLock {
             service?.let { return@withLock it }
             check(!attempted) { "Bridge initialization already attempted; process restart required" }
@@ -35,7 +38,7 @@ internal class HostToolBridgeRoot(
             try {
                 val gate = DefinitionGate()
                 val validator = Schema202012Validator()
-                val ledger = InvocationLedger(store, gate, validator)
+                val ledger = InvocationLedger(store, gate, validator, policy = policy)
                 val recovery = ledger.recoverColdStart(UUID.randomUUID().toString())
                 check(recovery !is Mutation.StorageFailure && recovery !is Mutation.Conflict) {
                     "Host tool cold recovery failed: $recovery"

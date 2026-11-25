@@ -72,6 +72,7 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
     var sessions by remember { mutableStateOf(false) }
     var deleting by remember { mutableStateOf(false) }
     var profilePicker by remember { mutableStateOf(false) }
+    var approvalDialog by rememberSaveable { mutableStateOf(false) }
     val uiScope = rememberCoroutineScope()
     val providerRevision by host.providerSettings.revision.collectAsState()
     var profileCatalog by remember { mutableStateOf(ProviderProfilesCatalog(null, emptyList())) }
@@ -80,6 +81,10 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
             runCatching { host.providerSettings.readProfiles() }
                 .getOrDefault(ProviderProfilesCatalog(null, emptyList()))
         }
+    }
+    val approvalSettings by host.approvalSettings.state.collectAsState()
+    LaunchedEffect(host.approvalSettings) {
+        withContext(Dispatchers.IO) { runCatching { host.approvalSettings.ensureLoaded() } }
     }
     LaunchedEffect(owner) { owner.open() }
     LaunchedEffect(state.acceptedMessages) {
@@ -112,10 +117,38 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
         FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             TextButton(onClick = onPlugins) { Text(strings.get(R.string.chat_plugins)) }
             TextButton(onClick = { settings = true }) { Text(strings.get(R.string.chat_provider)) }
+            TextButton(onClick = { approvalDialog = true }) { Text(strings.get(R.string.chat_approval_settings)) }
             TextButton(onClick = { sessions = true }, enabled = !state.active && !state.loading) { Text(strings.get(R.string.chat_sessions)) }
             TextButton(onClick = { owner.newSession() }, enabled = !state.active && !state.loading) { Text(strings.get(R.string.chat_new)) }
             TextButton(onClick = { deleting = true }, enabled = !state.active && !state.pending && !state.loading) {
                 Text(strings.get(R.string.chat_delete_session))
+            }
+        }
+        if (approvalSettings.mode == ApprovalMode.FULL_AUTO) {
+            Surface(
+                onClick = { approvalDialog = true },
+                color = MaterialTheme.colorScheme.errorContainer,
+                contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                shape = MaterialTheme.shapes.small,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(strings.get(R.string.chat_full_auto_banner), style = MaterialTheme.typography.labelLarge)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        TextButton(onClick = {
+                            uiScope.launch {
+                                withContext(Dispatchers.IO) {
+                                    runCatching { host.approvalSettings.setMode(ApprovalMode.BALANCED) }
+                                }
+                            }
+                        }) {
+                            Text(strings.get(R.string.chat_full_auto_switch_balanced))
+                        }
+                        TextButton(onClick = { approvalDialog = true }) {
+                            Text(strings.get(R.string.chat_approval_settings))
+                        }
+                    }
+                }
             }
         }
         if (state.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
@@ -137,7 +170,14 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
                     message.parts.forEach { part -> when (part) {
                         is ContentPart.Text -> SelectionContainer { Text(part.text) }
                         is ContentPart.Reasoning -> part.summary?.let { SelectionContainer { Text(it, style = MaterialTheme.typography.bodySmall) } }
-                        is ContentPart.ToolCall -> ToolCard(part, state.records[part.binding.callId], state.recoveries[part.binding.callId], owner, launchTask)
+                        is ContentPart.ToolCall -> ToolCard(
+                            call = part,
+                            record = state.records[part.binding.callId],
+                            recovery = state.recoveries[part.binding.callId],
+                            allowRootLongTerm = approvalSettings.allowRootLongTerm,
+                            owner = owner,
+                            launchTask = launchTask,
+                        )
                         is ContentPart.ToolResult -> Unit // result lives inside the associated tool row
                     } }
                 }
@@ -233,6 +273,7 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
             TextButton(onClick = { profilePicker = false }) { Text(strings.get(R.string.chat_close)) }
         },
     )
+    if (approvalDialog) ChatApprovalDialog(host) { approvalDialog = false }
     if (deleting) AlertDialog(onDismissRequest = { deleting = false },
         title = { Text(strings.get(R.string.chat_delete_session)) },
         text = { Text(strings.get(R.string.chat_delete_session_confirm)) },
@@ -261,8 +302,14 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
 }
 
 @Composable
-private fun ToolCard(call: ContentPart.ToolCall, record: InvocationRecord?, recovery: RecoveryRequest?, owner: ChatSessionOwner,
-    launchTask: (() -> Unit) -> Unit) {
+private fun ToolCard(
+    call: ContentPart.ToolCall,
+    record: InvocationRecord?,
+    recovery: RecoveryRequest?,
+    allowRootLongTerm: Boolean,
+    owner: ChatSessionOwner,
+    launchTask: (() -> Unit) -> Unit,
+) {
     val strings = uiStrings()
     var expanded by rememberSaveable(call.binding.callId) { mutableStateOf(false) }
     OutlinedCard(Modifier.fillMaxWidth()) {
@@ -276,6 +323,7 @@ private fun ToolCard(call: ContentPart.ToolCall, record: InvocationRecord?, reco
             }
             if (record != null && showApproval(record)) {
                 val approval = requireNotNull(record.pending)
+                val canGrantMultiCall = canGrantMultiCallApproval(approval, allowRootLongTerm)
                 Text(strings.get(R.string.chat_approval_warning))
                 Text(strings.get(when (approval.risk) {
                     Risk.READ -> R.string.chat_risk_read
@@ -285,9 +333,24 @@ private fun ToolCard(call: ContentPart.ToolCall, record: InvocationRecord?, reco
                 }))
                 SelectionContainer { Text(approval.summary.ifBlank { call.argsJson }) }
                 if (approval.unknownCalls.isNotEmpty()) Text(strings.get(R.string.chat_unknown_warning), color = MaterialTheme.colorScheme.error)
-                FlowRow {
-                    Button(onClick = { launchTask { owner.decide(record.callId, approval.id, Decision.ALLOW_ONCE) } }) { Text(strings.get(R.string.chat_allow)) }
-                    TextButton(onClick = { launchTask { owner.decide(record.callId, approval.id, Decision.DENY) } }) { Text(strings.get(R.string.chat_deny)) }
+                if (approval.risk == Risk.ROOT && !allowRootLongTerm) {
+                    Text(strings.get(R.string.chat_root_long_term_hint), style = MaterialTheme.typography.bodySmall)
+                }
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = { launchTask { owner.decide(record.callId, approval.id, Decision.ALLOW_ONCE) } }) {
+                        Text(strings.get(R.string.chat_allow))
+                    }
+                    if (canGrantMultiCall) {
+                        OutlinedButton(onClick = { launchTask { owner.decide(record.callId, approval.id, Decision.ALLOW_SESSION) } }) {
+                            Text(strings.get(R.string.chat_allow_session))
+                        }
+                        OutlinedButton(onClick = { launchTask { owner.decide(record.callId, approval.id, Decision.ALLOW_ALWAYS) } }) {
+                            Text(strings.get(R.string.chat_allow_always))
+                        }
+                    }
+                    TextButton(onClick = { launchTask { owner.decide(record.callId, approval.id, Decision.DENY) } }) {
+                        Text(strings.get(R.string.chat_deny))
+                    }
                 }
             }
             if (recovery != null && record != null && !record.input.unattended) {
