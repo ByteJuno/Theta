@@ -335,7 +335,6 @@ internal class ChatSessionOwner(
         start(snapshot, null, identity, resumeId, readmitId)
     }
     fun decide(callId: String, requestId: String, decision: Decision) = launchOperation {
-        require(decision == Decision.ALLOW_ONCE || decision == Decision.DENY)
         val host = requireNotNull(tools)
         val r = requireNotNull(host.ledger.get(callId))
         require(r.input.sessionId == history!!.sessionId && !r.input.unattended)
@@ -344,8 +343,16 @@ internal class ChatSessionOwner(
             if (r.pending?.id == requestId) {
                 presence.update(requireNotNull(coldToken ?: mutable.value.executionId), ChatTaskProgress.Model)
             }
-            when (host.decide(callId, requestId, decision)) {
+            when (val outcome = host.decide(callId, requestId, decision)) {
                 is Mutation.Applied, is Mutation.AlreadyApplied -> Unit
+                is Mutation.Blocked -> {
+                    if (coldToken != null) withContext(NonCancellable) { presence.finish(coldToken, ChatTaskProgress.Approval) }
+                    if (outcome.reason == "ROOT long-term grants disabled") {
+                        mutable.update { it.copy(loading = false, error = R.string.chat_root_long_term_disabled) }
+                        return@launchOperation
+                    }
+                    error("Approval blocked: ${outcome.reason}")
+                }
                 else -> error("Approval changed or unavailable")
             }
             refresh()

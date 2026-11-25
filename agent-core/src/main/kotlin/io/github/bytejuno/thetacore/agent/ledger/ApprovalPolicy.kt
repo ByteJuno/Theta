@@ -51,9 +51,16 @@ class DefinitionGate {
 }
 enum class DefinitionState { CURRENT, STALE, REFRESH_PENDING }
 
+enum class ApprovalMode {
+    STRICT,
+    BALANCED,
+    FULL_AUTO,
+}
+
 class ApprovalPolicy(
     private val denied: (InvocationInput) -> Boolean = { false },
     private val allowRootLongTerm: () -> Boolean = { false },
+    private val mode: () -> ApprovalMode = { ApprovalMode.STRICT },
 ) {
     internal enum class Verdict { ALLOW, ASK, DENY }
     internal fun permitsLongTerm(risk: Risk) = risk != Risk.ROOT || allowRootLongTerm()
@@ -72,8 +79,16 @@ class ApprovalPolicy(
                 }
         }
         if (grant && permitsLongTerm(risk)) return Verdict.ALLOW
-        if (risk == Risk.READ && definition.source == Source.FIRST_PARTY) return Verdict.ALLOW
-        return if (i.unattended) Verdict.DENY else Verdict.ASK
+        if (i.unattended) {
+            return if (risk == Risk.READ && definition.source == Source.FIRST_PARTY) Verdict.ALLOW else Verdict.DENY
+        }
+        return when (mode()) {
+            ApprovalMode.STRICT ->
+                if (risk == Risk.READ && definition.source == Source.FIRST_PARTY) Verdict.ALLOW else Verdict.ASK
+            ApprovalMode.BALANCED ->
+                if (risk == Risk.READ || risk == Risk.WRITE) Verdict.ALLOW else Verdict.ASK
+            ApprovalMode.FULL_AUTO -> Verdict.ALLOW
+        }
     }
 }
 

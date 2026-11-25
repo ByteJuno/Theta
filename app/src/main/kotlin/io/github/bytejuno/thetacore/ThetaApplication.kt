@@ -28,6 +28,7 @@ import kotlinx.coroutines.async
 
 class ThetaApplication : Application() {
     internal val plugins by lazy { PluginManager(this) }
+    internal val approvalSettings by lazy { io.github.bytejuno.thetacore.chat.ChatApprovalSettingsStore.android(this) }
     internal val providerSettings by lazy { io.github.bytejuno.thetacore.provider.OpenAiSettingsStore.android(this) }
     internal val imageSettings by lazy { io.github.bytejuno.thetacore.provider.OpenAiSettingsStore.images(this) }
     /** Process-wide shared HTTP transport so chat runs reuse one OkHttp connection pool. */
@@ -97,7 +98,8 @@ class ThetaApplication : Application() {
         // A failed Deferred stays failed for this process; there is no in-memory fallback.
         hostToolsStartup = hostToolsOwner.async {
             try {
-                plugins.initializeHostTools().also {
+                approvalSettings.ensureLoaded()
+                plugins.initializeHostTools(approvalSettings.policy()).also {
                     Log.i("ThetaHostTools", "Host tools initialized")
                 }
             }

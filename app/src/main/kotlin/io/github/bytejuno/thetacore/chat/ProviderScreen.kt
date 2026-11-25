@@ -48,6 +48,7 @@ private fun ProviderProfile(host: ThetaApplication, imageProfile: Boolean,
     var error by remember { mutableStateOf<Int?>(null) }
     var reload by remember { mutableStateOf(0) }
     var advanced by remember { mutableStateOf(false) }
+    var approvalSettingsOpen by remember { mutableStateOf(false) }
     var filter by remember { mutableStateOf("") }
     val modelLists = remember(scope, store) { ProviderModels(scope, store::fetchModels) }
     val discovery by modelLists.state.collectAsState()
@@ -152,6 +153,11 @@ private fun ProviderProfile(host: ThetaApplication, imageProfile: Boolean,
                 }
             }
             error?.let { Text(strings.get(it), color = MaterialTheme.colorScheme.error) }
+            if (!imageProfile) {
+                OutlinedButton(onClick = { approvalSettingsOpen = true }, enabled = !busy) {
+                    Text(strings.get(R.string.chat_approval_settings))
+                }
+            }
             AppLanguageSetting()
         }
     }, confirmButton = {
@@ -173,6 +179,7 @@ private fun ProviderProfile(host: ThetaApplication, imageProfile: Boolean,
             }
         }) { Text(strings.get(if (busy) R.string.chat_provider_saving else R.string.chat_save)) }
     }, dismissButton = { TextButton(onClick = { resetModels(); onClose() }, enabled = !busy) { Text(strings.get(R.string.chat_close)) } })
+    if (approvalSettingsOpen) ChatApprovalDialog(host) { approvalSettingsOpen = false }
 }
 
 @Composable

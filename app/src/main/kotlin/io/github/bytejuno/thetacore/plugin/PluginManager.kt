@@ -93,12 +93,15 @@ internal class PluginManager(context: Context) {
     }
 
     /** Application startup owns the store and the single recovery attempt, never an Activity. */
-    suspend fun initializeHostTools(): HostToolExecutionService =
+    suspend fun initializeHostTools(
+        policy: io.github.bytejuno.thetacore.agent.ledger.ApprovalPolicy = io.github.bytejuno.thetacore.agent.ledger.ApprovalPolicy(),
+    ): HostToolExecutionService =
         hostToolBridge.initialize(io.github.bytejuno.thetacore.plugin.tools.AndroidScreenBackend(app),
             AndroidInvocationClock(app, executionBudget),
             imageTool = { store -> io.github.bytejuno.thetacore.plugin.tools.HostImageGenerationTool(
                 io.github.bytejuno.thetacore.provider.OpenAiSettingsStore.images(app)::snapshotForNewRun,
-                io.github.bytejuno.thetacore.chat.ImageAttachments((store as AndroidAgentStore).privateImages)) }) {
+                io.github.bytejuno.thetacore.chat.ImageAttachments((store as AndroidAgentStore).privateImages)) },
+            policy = policy) {
             AndroidAgentStore.open(app)
         }
     private val stageCleanup = PluginStageCleanup()
