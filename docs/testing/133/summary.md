@@ -25,3 +25,23 @@
 
 ## Unverified Boundaries
 - Physical Android device / emulator Photo Picker & Camera intents, on-device Android `ImageDecoder` decode path, visual rendering layout, real multimodal vision LLM endpoints, Android API 33 runtime behavior, and R8 Release builds were not executed locally in this slice.
+
+## Review Round 1 Fix
+- Addressed `[REVIEW:RETURN]` (`IC_kwDOVkrS_s8AAAABqoffGQ`; prior review returns on PR #144: `1`).
+- Validated implementation commit: `1a3c903caf0c987aad7245fae9315a50f4c29453`.
+- Changes:
+  1. Updated `ContextSummarizer` (`ContextPolicy.kt`) to attach actual `ContentPart.Media` parts when summarizing multimodal transactions (charging real image budget and sending real `image_url` payloads to vision-capable `SummaryModel`s) while keeping durable SQLite history strictly `BlobRef`-only, and failing closed (`null` -> `PAUSED`, never `CONTINUATION`) when the summary model cannot consume images or fit them in budget.
+  2. Updated `AgentRunLoop` (`AgentRunLoop.kt`) to check media capability BEFORE summary network calls and BEFORE consuming recovery/readmission checkpoints (`readmitBudgetCheckpointId` / `resumeCheckpointId`), ensuring definite local rejections (`"Image input disabled for active model"`) make 0 network calls, never write `ADMITTED` or `SUMMARY_RESERVED`, leave existing `BUDGET`/`CONTINUATION` checkpoints intact without reconciliation requirements, and allow clean subsequent retries. Also blocked `recover` fallbacks from switching to models without required media support.
+  3. Replaced the hand-written PNG/JPEG/WebP binary header parser in `UserImageValidator.kt` with Android `ImageDecoder`'s `OnHeaderDecodedListener` callback + software full decode validation (`validateAndDecodeAndroidUserImage`), wired `ChatSessionOwner`'s default `userImageValidator` to `validateAndDecodeAndroidUserImage`, and used the injected validator seam in pure-JVM tests (`UserImageChatTest.kt`).
+  4. Added formal regression tests in `MultimodalImageInputTest.kt` covering `CONTEXT_TOO_LONG -> image-consuming summary -> CONTINUATION -> resume`, fail-closed `PAUSED` when `SummaryModel` lacks image input, old-history `compactPrior` with images, and disabled image input across ordinary + budget-readmission + clean retry flows.
+- Command:
+  ```powershell
+  .\gradlew.bat ":agent-core:test" ":app:verifyUiResources" ":app:testDebugUnitTest" ":app:assembleDebug" ":app:lintDebug" --no-daemon --configuration-cache --configuration-cache-problems=fail "-Pandroid.overridePathCheck=true"
+  ```
+  - `:agent-core:test`: Passed (`total=585`, `passed=584`, `skipped=1`, `failed=0`).
+  - `:app:verifyUiResources`: Passed (`477` English/Chinese keys; Kotlin PSI + XML checks passed).
+  - `:app:testDebugUnitTest`: Passed (`total=647`, `passed=646`, `skipped=1`, `failed=0`; 1 existing Windows POSIX skip).
+  - `:app:assembleDebug`: Passed (`app-debug.apk` SHA-256: `31bf7a0dd26c2003099622b9db0405ce9c090df0b398585a1210bdafc7e7976e`).
+  - `:app:lintDebug`: Passed.
+  - Configuration cache: Reused cleanly with `--configuration-cache-problems=fail`.
+
