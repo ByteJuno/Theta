@@ -27,3 +27,22 @@
 
 ## Unverified Boundaries
 - Physical Android device / emulator UI rendering, real APK dex classloading of third-party plugins on device, Android API 33 runtime behavior, and R8 Release builds were not executed locally in this slice.
+
+## Review Round 2 Fix
+- Addressed `[REVIEW:RETURN]` (`IC_kwDOVkrS_s8AAAABqomkhA`; prior return comments on PR #142: 3 total including 1 merge-conflict return `IC_kwDOVkrS_s8AAAABqnouog` and 2 substantive review returns `IC_kwDOVkrS_s8AAAABqn2zzw`, `IC_kwDOVkrS_s8AAAABqomkhA`).
+- Validated implementation commit: `aa4c4dac007e551105531732122e8939d836eed0`.
+- Changes:
+  1. Decoupled background slot-release / actual-exit waits from host startup (`PluginToolBridge.attachCatalog`) and plugin management operation locks (`PluginManager.load` -> `PluginToolBridge.awaitInitialPass`): once a capture times out or hits temporary capacity exhaustion, `initialPassSettled` completes immediately so host startup recovers and `setEnabled(false)` / `uninstall` never wait for non-cooperative capture workers, while background `syncJob` still resumes pending registrations once capacity frees.
+  2. Added strictly monotonic unique `registrationId` to `PluginRegistrations` / `RegisteredExtension` and keyed `PluginToolBridge`'s `registered`, `failed`, `inFlight`, and atomic `commit` checks by `registrationId`, preventing stale failures or captures from an earlier registration from poisoning or overwriting a re-registration of the same `Tool` object instance.
+  3. Added formal regression tests in `PluginToolBridgeTest` covering non-cooperative timeout during host startup (`attachCatalog`), non-cooperative timeout under plugin operation lock + immediate disable/uninstall, and re-registering the exact same `Tool` object instance across both stale failure and stale publish races.
+- Command:
+  ```powershell
+  .\gradlew.bat ":agent-core:test" ":app:verifyUiResources" ":app:testDebugUnitTest" ":app:assembleDebug" ":app:lintDebug" --no-daemon --configuration-cache --configuration-cache-problems=fail "-Pandroid.overridePathCheck=true"
+  ```
+  - `:agent-core:test`: Passed (`total=579`, `passed=578`, `skipped=1`, `failed=0`).
+  - `:app:verifyUiResources`: Passed (`467` English/Chinese keys; Kotlin PSI + XML checks passed).
+  - `:app:testDebugUnitTest`: Passed (`total=656`, `passed=655`, `skipped=1`, `failed=0`; 1 existing Windows POSIX skip).
+  - `:app:assembleDebug`: Passed (`app-debug.apk` SHA-256: `7545e6488127ec5015e7b8e36ae1e0dcf80dc2de523a2e2cb404932f7621acd9`).
+  - `:app:lintDebug`: Passed.
+  - Configuration cache: Reused cleanly with `--configuration-cache-problems=fail`.
+
