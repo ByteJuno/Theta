@@ -1,7 +1,7 @@
 # Issue #131 Testing Summary
 
 ## Scope
-- Base commit (`origin/main`): `1b102c1ce5b96c5ff313d5374b8822223ea972da`
+- Base commit (`origin/main`): `1b102c1ce5b96c5ff313d5374b882223ea972da6`
 - Branch: `auto/131-provider-profiles`
 - Summary:
   - Extended `OpenAiProviderSettings` and `OpenAiRunSnapshot` with bounded optional `systemPrompt` (`<= 32,000` characters, injected stably as `ChatRequest.system` without volatile timestamps) and explicit `NoAuthCredentials` support, plus cross-profile reasoning replay message compatibility checks.
