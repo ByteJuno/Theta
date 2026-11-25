@@ -181,7 +181,7 @@ private fun dataQuotedString(value: JsonElement?, key: String): String =
 
 internal fun dataString(json: JsonObject, key: String): String {
     val value = dataQuotedString(json[key], key)
-    dataRequire(value.isNotBlank() && value.length <= 2048 && value.none { it < ' ' || it.isISOControl() }, "Invalid $key")
+    dataRequire(value.isNotBlank() && value.length <= 2048 && value.none { it < ' ' }, "Invalid $key")
     return value
 }
 

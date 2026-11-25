@@ -11,39 +11,68 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 
 class HostEnvironmentTest {
-    private fun dexApk(manifestJson: String): File {
-        val file = Files.createTempFile("theta-manifest-test-", ".apk").toFile()
+    private fun dexApkBytes(manifestJson: String): ByteArray {
         val out = ByteArrayOutputStream()
         ZipOutputStream(out).use { zip ->
             zip.putNextEntry(ZipEntry("assets/theta-plugin.json"))
             zip.write(manifestJson.toByteArray(Charsets.UTF_8))
             zip.closeEntry()
         }
-        file.writeBytes(out.toByteArray())
+        return out.toByteArray()
+    }
+
+    private fun dexApk(manifestJson: String): File {
+        val file = Files.createTempFile("theta-manifest-test-", ".apk").toFile()
+        file.writeBytes(dexApkBytes(manifestJson))
         return file
     }
 
     @Test
-    fun legacySixFieldDexManifestRemainsBackwardCompatible() {
-        val json = """{"schema":1,"type":"dex","id":"io.example.legacy","name":"Legacy","version":"1.0.0","versionCode":3,"apiLevel":1,"entry":"io.example.LegacyPlugin"}"""
-        val apk = dexApk(json)
+    fun legacySixFieldDexManifestAndInstalledPackageRecoveryDoNotImposeDataLengthCap() {
+        val root = Files.createTempDirectory("theta-legacy-dex-restore").toFile()
         try {
-            val manifest = readPluginManifest(apk)
+            val longLegacyName = "LegacyPlugin-" + "N".repeat(3000)
+            val longLegacyVersion = "1.0.0+" + "v".repeat(2500)
+            val longLegacyEntry = "io.example." + "sub.".repeat(550) + "LegacyEntry"
+            val legacyJson = """{"schema":1,"type":"dex","id":"io.example.legacy","name":"$longLegacyName","version":"$longLegacyVersion","versionCode":3,"apiLevel":1,"entry":"$longLegacyEntry","author":"Legacy Author"}"""
+
+            val verifier = PluginSignatureVerifier { PluginSigners(listOf("a".repeat(64))) }
+            val store = fixturePluginStore(root, root.resolve("cache"), verifier)
+            val staged = store.stage(dexApkBytes(legacyJson).inputStream())
+            store.install(staged)
+
+            // Cold store restore must load previously installed legacy dex packages without rejecting >2048-char fields.
+            val coldStore = fixturePluginStore(root, root.resolve("cache"), verifier)
+            val rejected = mutableListOf<String>()
+            val installed = coldStore.installed(onFailure = { fail("Unexpected restore failure: $it") }, onRejected = rejected::add)
+            assertTrue(rejected.isEmpty())
+            assertEquals(1, installed.size)
+            val manifest = installed.single().manifest
             assertEquals("io.example.legacy", manifest.id)
-            assertEquals("Legacy", manifest.name)
-            assertEquals("1.0.0", manifest.version)
+            assertEquals(longLegacyName, manifest.name)
+            assertEquals(longLegacyVersion, manifest.version)
             assertEquals(3L, manifest.versionCode)
             assertEquals(1, manifest.apiLevel)
-            assertEquals("io.example.LegacyPlugin", manifest.entry)
+            assertEquals(longLegacyEntry, manifest.entry)
             assertTrue(manifest.provides.isEmpty())
             assertTrue(manifest.declares.isEmpty())
             assertEquals(PluginRequirements(), manifest.requires)
             assertFalse(manifest.requires.requiresAny)
+
+            // Total 64 KiB manifest size limit is still strictly enforced.
+            val oversizedJson = """{"schema":1,"type":"dex","id":"io.example.huge","name":"${"H".repeat(66_000)}","version":"1","versionCode":1,"apiLevel":1,"entry":"io.example.Huge"}"""
+            val hugeApk = dexApk(oversizedJson)
+            try {
+                assertThrows(PluginPackageException::class.java) { readPluginManifest(hugeApk) }
+            } finally {
+                hugeApk.delete()
+            }
         } finally {
-            apk.delete()
+            deleteFixtureRoot(root)
         }
     }
 
@@ -90,12 +119,11 @@ class HostEnvironmentTest {
     }
 
     @Test
-    fun dexManifestFailsClosedOnInvalidTypesUnknownKeysDuplicatesControlCharsAndBounds() {
+    fun dexManifestFailsClosedOnInvalidNewFieldsUnknownRequirementKeysDuplicatesControlCharsAndBounds() {
         val base = """{"schema":1,"type":"dex","id":"io.example.bad","name":"Bad","version":"1.0","versionCode":1,"apiLevel":1,"entry":"io.example.Bad""""
         val tooManyItems = (1..65).joinToString(",") { "\"cap$it\"" }
         val overlongItem = "a".repeat(129)
         val invalidPayloads = listOf(
-            "$base,\"unknownField\":true}",
             "$base,\"requires\":[]}",
             "$base,\"requires\":null}",
             "$base,\"requires\":{\"adb\":false}}",
@@ -147,34 +175,66 @@ class HostEnvironmentTest {
     }
 
     @Test
-    fun environmentEvaluationAccuratelyComputesRootFreeReadyAndMissingItems() {
+    fun otherAppAccessibilityServicesDoNotSatisfyHostAndShizukuManagerOnlyReportsDetectedUnverified() {
+        val hostPkg = "io.github.bytejuno.thetacore"
+
+        // Case 1: Other apps have Accessibility enabled, Theta does NOT; Shizuku Manager is installed,
+        // su binary exists on PATH, LSPosed is disconnected.
+        val passiveStatus = evaluatePassiveHostEnvironment(
+            hostPackageName = hostPkg,
+            accessibilityManagerEnabled = true,
+            enabledAccessibilityPackages = listOf("com.google.android.marvin.talkback", "com.example.other"),
+            shizukuManagerInstalled = true,
+            shizukuServiceConfirmed = false,
+            suBinaryDetected = true,
+            rootGrantConfirmed = false,
+            lsposedConnected = false,
+        )
+        assertFalse("Other apps' accessibility services must never mark Theta ready", passiveStatus.accessibilityEnabled)
+        assertEquals(EnvironmentReadiness.UNAVAILABLE, passiveStatus.readiness(HostRequirementKey.ACCESSIBILITY))
+
+        assertTrue(passiveStatus.shizukuAvailable)
+        assertFalse(passiveStatus.shizukuReady)
+        assertEquals(EnvironmentReadiness.DETECTED_UNVERIFIED, passiveStatus.readiness(HostRequirementKey.SHIZUKU))
+
+        assertTrue(passiveStatus.rootAvailable)
+        assertFalse(passiveStatus.rootReady)
+        assertEquals(EnvironmentReadiness.DETECTED_UNVERIFIED, passiveStatus.readiness(HostRequirementKey.ROOT))
+        assertEquals(EnvironmentReadiness.UNAVAILABLE, passiveStatus.readiness(HostRequirementKey.LSPOSED))
+
+        val eval = PluginRequirements(accessibility = true, shizuku = true, root = true, lsposed = true).evaluate(passiveStatus)
+        assertFalse(eval.allSatisfied)
+        assertEquals(listOf(HostRequirementKey.ACCESSIBILITY, HostRequirementKey.LSPOSED), eval.missing)
+        assertEquals(listOf(HostRequirementKey.SHIZUKU, HostRequirementKey.ROOT), eval.unverified)
+        assertTrue(eval.missingAccessibility)
+        assertEquals(EnvironmentReadiness.DETECTED_UNVERIFIED, eval.shizukuReadiness)
+        assertEquals(EnvironmentReadiness.DETECTED_UNVERIFIED, eval.rootReadiness)
+
+        // Case 2: Theta's own Accessibility service enabled + Shizuku service & Root explicitly confirmed + LSPosed connected.
+        val confirmedStatus = evaluatePassiveHostEnvironment(
+            hostPackageName = hostPkg,
+            accessibilityManagerEnabled = true,
+            enabledAccessibilityPackages = listOf("com.example.other", hostPkg),
+            shizukuManagerInstalled = true,
+            shizukuServiceConfirmed = true,
+            suBinaryDetected = true,
+            rootGrantConfirmed = true,
+            lsposedConnected = true,
+        )
+        assertTrue(confirmedStatus.accessibilityEnabled)
+        assertTrue(confirmedStatus.shizukuReady)
+        assertTrue(confirmedStatus.rootReady)
+        assertTrue(confirmedStatus.lsposedActive)
+        val readyEval = PluginRequirements(accessibility = true, shizuku = true, root = true, lsposed = true).evaluate(confirmedStatus)
+        assertTrue(readyEval.allSatisfied)
+        assertTrue(readyEval.missing.isEmpty())
+        assertTrue(readyEval.unverified.isEmpty())
+
+        // Case 3: Root-free plugin with no requirements.
         val noneEval = PluginRequirements().evaluate(HostEnvironmentStatus())
         assertFalse(noneEval.hasRequirements)
         assertTrue(noneEval.isRootFree)
         assertTrue(noneEval.allSatisfied)
-        assertTrue(noneEval.missing.isEmpty())
-
-        val rootFreeReqs = PluginRequirements(accessibility = true, shizuku = true)
-        val partialStatus = HostEnvironmentStatus(accessibilityEnabled = false, shizukuAvailable = true)
-        val partialEval = rootFreeReqs.evaluate(partialStatus)
-        assertTrue(partialEval.hasRequirements)
-        assertTrue(partialEval.isRootFree)
-        assertFalse(partialEval.allSatisfied)
-        assertEquals(listOf(HostRequirementKey.ACCESSIBILITY), partialEval.missing)
-        assertTrue(partialEval.missingAccessibility)
-        assertFalse(partialEval.missingShizuku)
-        assertFalse(partialEval.missingPrivileged)
-
-        val readyEval = rootFreeReqs.evaluate(HostEnvironmentStatus(accessibilityEnabled = true, shizukuAvailable = true))
-        assertTrue(readyEval.allSatisfied)
-        assertTrue(readyEval.missing.isEmpty())
-
-        val privilegedReqs = PluginRequirements(root = true, lsposed = true)
-        val missingPrivEval = privilegedReqs.evaluate(HostEnvironmentStatus(rootAvailable = true, lsposedActive = false))
-        assertFalse(missingPrivEval.isRootFree)
-        assertFalse(missingPrivEval.allSatisfied)
-        assertEquals(listOf(HostRequirementKey.LSPOSED), missingPrivEval.missing)
-        assertTrue(missingPrivEval.missingPrivileged)
     }
 
     @Test

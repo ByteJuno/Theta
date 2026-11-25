@@ -68,23 +68,18 @@ internal fun readPluginManifest(apk: File): PluginManifest {
 internal fun parsePluginManifest(bytes: ByteArray): PluginManifest {
     dataRequire(bytes.size <= MANIFEST_MAX_BYTES, "Manifest is too large")
     val json = dataJson(bytes)
-    val allowed = setOf(
-        "schema", "type", "id", "name", "version", "versionCode",
-        "apiLevel", "entry", "provides", "declares", "requires", "hooks",
-    )
-    dataRequire(json.keys.all { it in allowed }, "Unsupported plugin manifest field")
     dataRequire(dataInteger(json, "schema") == 1L, "Unsupported plugin schema; expected 1")
-    dataRequire(dataString(json, "type") == "dex", "Unsupported plugin type; only dex is implemented")
-    val id = dataString(json, "id")
-    // id 和 versionCode 会变成目录名，这里挡住路径穿越。
+    dataRequire(dexLegacyString(json, "type") == "dex", "Unsupported plugin type; only dex is implemented")
+    val id = dexLegacyString(json, "id")
+    // id 和 versionCode 会变成目录名，这里挡住路径穿越；旧版已安装 dex 字段不套用数据包的 2048 字符上限。
     checkId(id)
-    val name = dataString(json, "name")
-    val version = dataString(json, "version")
+    val name = dexLegacyString(json, "name")
+    val version = dexLegacyString(json, "version")
     val versionCode = dataInteger(json, "versionCode")
     dataRequire(versionCode >= 1L, "Invalid versionCode")
     val apiLevelLong = dataInteger(json, "apiLevel")
     dataRequire(apiLevelLong in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong(), "apiLevel exceeds integer range")
-    val entry = dataString(json, "entry")
+    val entry = dexLegacyString(json, "entry")
     if ("hooks" in json) {
         val hooks = json["hooks"] as? JsonArray
             ?: throw PluginPackageException("hooks must be an array")
@@ -102,6 +97,10 @@ internal fun parsePluginManifest(bytes: ByteArray): PluginManifest {
         requires = parsePluginRequirements(json),
     )
 }
+
+private fun dexLegacyString(json: JsonObject, key: String): String =
+    (json[key] as? JsonPrimitive)?.takeIf { it.isString }?.content
+        ?: throw PluginPackageException("$key must be a string")
 
 internal fun parsePluginRequirements(json: JsonObject): PluginRequirements {
     if ("requires" !in json) return PluginRequirements()

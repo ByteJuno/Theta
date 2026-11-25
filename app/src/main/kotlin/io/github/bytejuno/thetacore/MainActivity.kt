@@ -45,6 +45,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import io.github.bytejuno.thetacore.hook.HookHost
 import io.github.bytejuno.thetacore.plugin.AndroidHostEnvironmentDetector
+import io.github.bytejuno.thetacore.plugin.EnvironmentReadiness
 import io.github.bytejuno.thetacore.plugin.HostEnvironmentStatus
 import io.github.bytejuno.thetacore.plugin.HostRequirementKey
 import io.github.bytejuno.thetacore.plugin.ManagedPluginData
@@ -393,7 +394,6 @@ private fun ThetaCoreApp(
                             PluginManifestEnvironmentSummary(
                                 manifest = plugin.manifest,
                                 environment = hostEnvironment,
-                                showAdvisoryNotice = true,
                                 onOpenAccessibility = launchAccessibilitySettings,
                             )
                             Text(strings.get(R.string.rollback_data_boundary))
@@ -581,7 +581,6 @@ private fun PluginList(
             PluginManifestEnvironmentSummary(
                 manifest = plugin.manifest,
                 environment = hostEnvironment,
-                showAdvisoryNotice = false,
                 onOpenAccessibility = onOpenAccessibility,
             )
             Text(strings.get(plugin.status))
@@ -632,14 +631,19 @@ private fun HostEnvironmentSummaryBar(
     onOpenAccessibility: () -> Unit,
 ) {
     val strings = uiStrings()
+    fun readinessText(key: HostRequirementKey): String = strings.get(when (environment.readiness(key)) {
+        EnvironmentReadiness.READY -> R.string.plugin_env_state_ready
+        EnvironmentReadiness.DETECTED_UNVERIFIED -> R.string.plugin_env_state_unverified
+        EnvironmentReadiness.UNAVAILABLE -> R.string.plugin_env_state_unavailable
+    })
     Column {
         Text(strings.get(R.string.plugin_env_host_title), style = MaterialTheme.typography.titleMedium)
         Text(strings.get(
             R.string.plugin_env_host_summary,
-            strings.label(environment.accessibilityEnabled),
-            strings.label(environment.shizukuAvailable),
-            strings.label(environment.rootAvailable),
-            strings.label(environment.lsposedActive),
+            readinessText(HostRequirementKey.ACCESSIBILITY),
+            readinessText(HostRequirementKey.SHIZUKU),
+            readinessText(HostRequirementKey.ROOT),
+            readinessText(HostRequirementKey.LSPOSED),
         ))
         Row {
             TextButton(onClick = onRefresh) { Text(strings.get(R.string.plugin_env_refresh)) }
@@ -656,7 +660,6 @@ private fun HostEnvironmentSummaryBar(
 private fun PluginManifestEnvironmentSummary(
     manifest: PluginManifest,
     environment: HostEnvironmentStatus,
-    showAdvisoryNotice: Boolean,
     onOpenAccessibility: () -> Unit,
 ) {
     val strings = uiStrings()
@@ -674,18 +677,26 @@ private fun PluginManifestEnvironmentSummary(
         }
         val tags = evaluation.checks.map { check ->
             when (check.key) {
-                HostRequirementKey.ACCESSIBILITY -> strings.get(
-                    if (check.satisfied) R.string.plugin_req_accessibility_ready else R.string.plugin_req_accessibility_missing,
-                )
-                HostRequirementKey.SHIZUKU -> strings.get(
-                    if (check.satisfied) R.string.plugin_req_shizuku_ready else R.string.plugin_req_shizuku_missing,
-                )
-                HostRequirementKey.ROOT -> strings.get(
-                    if (check.satisfied) R.string.plugin_req_root_ready else R.string.plugin_req_root_missing,
-                )
-                HostRequirementKey.LSPOSED -> strings.get(
-                    if (check.satisfied) R.string.plugin_req_lsposed_ready else R.string.plugin_req_lsposed_missing,
-                )
+                HostRequirementKey.ACCESSIBILITY -> strings.get(when (check.readiness) {
+                    EnvironmentReadiness.READY -> R.string.plugin_req_accessibility_ready
+                    EnvironmentReadiness.DETECTED_UNVERIFIED, EnvironmentReadiness.UNAVAILABLE ->
+                        R.string.plugin_req_accessibility_missing
+                })
+                HostRequirementKey.SHIZUKU -> strings.get(when (check.readiness) {
+                    EnvironmentReadiness.READY -> R.string.plugin_req_shizuku_ready
+                    EnvironmentReadiness.DETECTED_UNVERIFIED -> R.string.plugin_req_shizuku_unverified
+                    EnvironmentReadiness.UNAVAILABLE -> R.string.plugin_req_shizuku_missing
+                })
+                HostRequirementKey.ROOT -> strings.get(when (check.readiness) {
+                    EnvironmentReadiness.READY -> R.string.plugin_req_root_ready
+                    EnvironmentReadiness.DETECTED_UNVERIFIED -> R.string.plugin_req_root_unverified
+                    EnvironmentReadiness.UNAVAILABLE -> R.string.plugin_req_root_missing
+                })
+                HostRequirementKey.LSPOSED -> strings.get(when (check.readiness) {
+                    EnvironmentReadiness.READY -> R.string.plugin_req_lsposed_ready
+                    EnvironmentReadiness.DETECTED_UNVERIFIED, EnvironmentReadiness.UNAVAILABLE ->
+                        R.string.plugin_req_lsposed_missing
+                })
             }
         }
         Text(tags.joinToString())
@@ -695,14 +706,18 @@ private fun PluginManifestEnvironmentSummary(
                 Text(strings.get(R.string.plugin_env_open_accessibility))
             }
         }
-        if (evaluation.missingShizuku) {
-            Text(strings.get(R.string.plugin_env_shizuku_guide))
+        when (evaluation.shizukuReadiness) {
+            EnvironmentReadiness.DETECTED_UNVERIFIED -> Text(strings.get(R.string.plugin_env_shizuku_unverified_guide))
+            EnvironmentReadiness.UNAVAILABLE -> Text(strings.get(R.string.plugin_env_shizuku_guide))
+            EnvironmentReadiness.READY, null -> Unit
         }
-        if (evaluation.missingPrivileged) {
+        if (evaluation.rootReadiness == EnvironmentReadiness.DETECTED_UNVERIFIED) {
+            Text(strings.get(R.string.plugin_env_root_unverified_guide))
+        }
+        if (evaluation.rootReadiness == EnvironmentReadiness.UNAVAILABLE ||
+            evaluation.lsposedReadiness == EnvironmentReadiness.UNAVAILABLE) {
             Text(strings.get(R.string.plugin_env_privileged_guide))
         }
     }
-    if (showAdvisoryNotice) {
-        Text(strings.get(R.string.plugin_env_advisory_notice))
-    }
+    Text(strings.get(R.string.plugin_env_advisory_notice))
 }
