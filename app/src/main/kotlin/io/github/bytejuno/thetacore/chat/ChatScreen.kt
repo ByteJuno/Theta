@@ -23,6 +23,7 @@ import io.github.bytejuno.thetacore.agent.ledger.*
 import io.github.bytejuno.thetacore.agent.protocol.*
 import io.github.bytejuno.thetacore.agent.run.RunState
 import io.github.bytejuno.thetacore.plugin.PluginToolProgress
+import io.github.bytejuno.thetacore.provider.ProviderProfilesCatalog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -71,8 +72,17 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
     }
     var sessions by remember { mutableStateOf(false) }
     var deleting by remember { mutableStateOf(false) }
+    var profilePicker by remember { mutableStateOf(false) }
     var approvalDialog by rememberSaveable { mutableStateOf(false) }
     val uiScope = rememberCoroutineScope()
+    val providerRevision by host.providerSettings.revision.collectAsState()
+    var profileCatalog by remember { mutableStateOf(ProviderProfilesCatalog(null, emptyList())) }
+    LaunchedEffect(host.providerSettings, providerRevision) {
+        profileCatalog = withContext(Dispatchers.IO) {
+            runCatching { host.providerSettings.readProfiles() }
+                .getOrDefault(ProviderProfilesCatalog(null, emptyList()))
+        }
+    }
     val approvalSettings by host.approvalSettings.state.collectAsState()
     LaunchedEffect(host.approvalSettings) {
         withContext(Dispatchers.IO) { runCatching { host.approvalSettings.ensureLoaded() } }
@@ -84,7 +94,26 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
         clearedAtAccepted = nextCleared
     }
     Column(Modifier.fillMaxSize().imePadding().padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text(strings.get(R.string.chat_title), style = MaterialTheme.typography.headlineMedium)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(strings.get(R.string.chat_title), style = MaterialTheme.typography.headlineMedium)
+            val activeProfile = profileCatalog.activeProfile
+            OutlinedButton(
+                onClick = {
+                    if (profileCatalog.profiles.isEmpty()) settings = true else profilePicker = true
+                },
+                enabled = !state.active && !state.loading,
+            ) {
+                Text(
+                    text = activeProfile?.headerLabel() ?: strings.get(R.string.chat_profile_unconfigured),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
         // Wrapping actions keep navigation available at large font scales and narrow widths.
         FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             TextButton(onClick = onPlugins) { Text(strings.get(R.string.chat_plugins)) }
@@ -202,6 +231,50 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
             modifier = Modifier.fillMaxWidth()) { Text(strings.get(R.string.chat_send)) }
     }
     if (settings) ProviderScreen(host) { settings = false }
+    if (profilePicker) AlertDialog(
+        onDismissRequest = { profilePicker = false },
+        title = { Text(strings.get(R.string.chat_profile_switch_title)) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(strings.get(R.string.chat_profile_switch_notice), style = MaterialTheme.typography.bodySmall)
+                LazyColumn(Modifier.heightIn(max = 360.dp)) {
+                    itemsIndexed(profileCatalog.profiles, key = { _, entry -> entry.id }) { _, entry ->
+                        val current = entry.id == profileCatalog.activeProfileId
+                        TextButton(
+                            enabled = !state.active && !state.loading,
+                            onClick = {
+                                profilePicker = false
+                                uiScope.launch {
+                                    withContext(Dispatchers.IO) {
+                                        runCatching { host.providerSettings.selectActiveProfile(entry.id) }
+                                    }
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth().semantics { selected = current },
+                        ) {
+                            Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.Start) {
+                                Text(entry.headerLabel(), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                if (current) {
+                                    Text(
+                                        strings.get(R.string.chat_profile_active_badge),
+                                        style = MaterialTheme.typography.labelSmall,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { profilePicker = false; settings = true }) {
+                Text(strings.get(R.string.chat_profile_manage))
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = { profilePicker = false }) { Text(strings.get(R.string.chat_close)) }
+        },
+    )
     if (approvalDialog) ChatApprovalDialog(host) { approvalDialog = false }
     if (deleting) AlertDialog(onDismissRequest = { deleting = false },
         title = { Text(strings.get(R.string.chat_delete_session)) },

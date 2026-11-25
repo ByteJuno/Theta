@@ -435,4 +435,20 @@
     <string name="plugin_env_root_unverified_guide">A su binary was detected passively without requesting Root. Actual Root authorization remains unverified until runtime.</string>
     <string name="plugin_env_privileged_guide">Root or LSPosed is not ready. Grant access in your Root manager or enable Theta in LSPosed Manager if this plugin needs it.</string>
     <string name="plugin_env_advisory_notice">Environment and capability tags are passive advisory guidance only: they do not prompt for permissions, block installation, or sandbox in-process dex code.</string>
+    <string name="chat_profiles_title">Saved profiles</string>
+    <string name="chat_profile_chip_active">%1$s (Active)</string>
+    <string name="chat_profile_new">New profile</string>
+    <string name="chat_profile_activate">Set active</string>
+    <string name="chat_profile_delete">Delete profile</string>
+    <string name="chat_profile_name">Profile name (optional)</string>
+    <string name="chat_profile_name_notice">Defaults to the model name if left blank. Saving makes this profile active for subsequent runs.</string>
+    <string name="chat_profile_unconfigured">Select model</string>
+    <string name="chat_profile_switch_title">Switch model profile</string>
+    <string name="chat_profile_switch_notice">Applies to subsequent runs only; active tasks are never modified mid-run.</string>
+    <string name="chat_profile_active_badge">Active profile</string>
+    <string name="chat_profile_manage">Manage profiles</string>
+    <string name="chat_provider_no_auth">No authentication (local endpoint)</string>
+    <string name="chat_provider_no_auth_notice">Requests are sent without an Authorization header. Disable to enter an API key.</string>
+    <string name="chat_system_prompt">Custom system prompt (optional)</string>
+    <string name="chat_system_prompt_notice">Up to %1$d characters. Prepended as a stable system message for new runs without volatile timestamps.</string>
 </resources>
