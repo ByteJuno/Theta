@@ -32,7 +32,9 @@ import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -41,6 +43,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import io.github.bytejuno.thetacore.hook.HookHost
+import io.github.bytejuno.thetacore.plugin.AndroidHostEnvironmentDetector
+import io.github.bytejuno.thetacore.plugin.HostEnvironmentStatus
+import io.github.bytejuno.thetacore.plugin.HostRequirementKey
 import io.github.bytejuno.thetacore.plugin.ManagedPluginData
 import io.github.bytejuno.thetacore.plugin.PluginDataPage
 import io.github.bytejuno.thetacore.plugin.PluginImportRequests
@@ -48,9 +54,13 @@ import io.github.bytejuno.thetacore.plugin.ManagedDataRecord
 import io.github.bytejuno.thetacore.plugin.StagedPluginData
 import io.github.bytejuno.thetacore.plugin.ManagedPlugin
 import io.github.bytejuno.thetacore.plugin.PluginManager
+import io.github.bytejuno.thetacore.plugin.PluginManifest
 import io.github.bytejuno.thetacore.plugin.PluginCrashRecovery
 import io.github.bytejuno.thetacore.plugin.PluginPackageException
 import io.github.bytejuno.thetacore.plugin.StagedPlugin
+import io.github.bytejuno.thetacore.plugin.detectHostEnvironmentSafely
+import io.github.bytejuno.thetacore.plugin.evaluate
+import io.github.bytejuno.thetacore.plugin.openAccessibilitySettings
 import io.github.bytejuno.thetacore.sdk.SettingsPage
 import io.github.bytejuno.thetacore.sdk.THETA_API_LEVEL
 import java.io.IOException
@@ -140,6 +150,20 @@ private fun ThetaCoreApp(
     var staging by remember { mutableStateOf(false) }
     var restorePolicy by remember { mutableStateOf(crashRecovery.policy) }
     var resumeRequested by remember { mutableStateOf(crashRecovery.resumeRequested) }
+    val environmentDetector = remember(context) { AndroidHostEnvironmentDetector(context) }
+    var hostEnvironment by remember { mutableStateOf(HostEnvironmentStatus()) }
+    var environmentRefreshSeq by remember { mutableIntStateOf(0) }
+    val hookStatus by HookHost.status.collectAsState()
+    LaunchedEffect(showPlugins, staged != null, resumed, hookStatus, environmentRefreshSeq) {
+        if (showPlugins || staged != null) {
+            hostEnvironment = detectHostEnvironmentSafely(environmentDetector)
+        }
+    }
+    val launchAccessibilitySettings: () -> Unit = {
+        if (!openAccessibilitySettings(context)) {
+            error = uiText(R.string.plugin_env_settings_unavailable)
+        }
+    }
 
     fun leavePage() {
         pageLease.beforeRender(null)
@@ -269,6 +293,9 @@ private fun ThetaCoreApp(
                         recovery = recovery,
                         staging = staging,
                         dataRecoveryBlocked = manager.dataRecoveryBlocked || restorePolicy.skipData,
+                        hostEnvironment = hostEnvironment,
+                        onRefreshEnvironment = { environmentRefreshSeq++ },
+                        onOpenAccessibility = launchAccessibilitySettings,
                         onTool = { toolSelection = it },
                         onCancelReading = ::cancelReading,
                         onRetryCleanup = { operate { manager.retryImportCleanup() } },
@@ -313,7 +340,12 @@ private fun ThetaCoreApp(
                     text = {
                         Column(Modifier.verticalScroll(rememberScrollState())) {
                             Text(strings.get(R.string.package_metadata, plugin.manifest.name, plugin.manifest.id, plugin.manifest.version, plugin.manifest.versionCode, plugin.manifest.apiLevel))
-                            Text(strings.get(R.string.package_capabilities, plugin.manifest.provides.joinToString(), plugin.manifest.declares.joinToString()))
+                            Text(strings.get(
+                                R.string.package_capabilities,
+                                plugin.manifest.provides.takeIf { it.isNotEmpty() }?.joinToString() ?: strings.get(R.string.none),
+                                plugin.manifest.declares.takeIf { it.isNotEmpty() }?.joinToString() ?: strings.get(R.string.none),
+                            ))
+                            Text(strings.get(R.string.plugin_env_none_required))
                             Text(strings.get(R.string.author_unverified))
                             Text(strings.get(R.string.digest_notice))
                             Text(strings.get(R.string.package_digest, plugin.sha256))
@@ -358,6 +390,12 @@ private fun ThetaCoreApp(
                     text = {
                         Column(Modifier.verticalScroll(rememberScrollState())) {
                             Text(strings.get(R.string.install_activation_notice, plugin.manifest.id))
+                            PluginManifestEnvironmentSummary(
+                                manifest = plugin.manifest,
+                                environment = hostEnvironment,
+                                showAdvisoryNotice = true,
+                                onOpenAccessibility = launchAccessibilitySettings,
+                            )
                             Text(strings.get(R.string.rollback_data_boundary))
                             if (isUpdate) {
                                 Text(strings.get(R.string.observation_start_notice))
@@ -465,6 +503,9 @@ private fun PluginList(
     recovery: Boolean,
     staging: Boolean,
     dataRecoveryBlocked: Boolean,
+    hostEnvironment: HostEnvironmentStatus,
+    onRefreshEnvironment: () -> Unit,
+    onOpenAccessibility: () -> Unit,
     onTool: (HostToolSelection) -> Unit,
     onCancelReading: () -> Unit,
     onRetryCleanup: () -> Unit,
@@ -487,6 +528,7 @@ private fun PluginList(
         Text(stringResource(R.string.app_name), style = MaterialTheme.typography.headlineMedium)
         Text(stringResource(R.string.api_level, THETA_API_LEVEL))
         AppLanguageSetting()
+        HostEnvironmentSummaryBar(hostEnvironment, onRefreshEnvironment, onOpenAccessibility)
         if (recovery) Text(strings.get(R.string.recovery_requested))
         Button(onClick = onPick, enabled = !staging) { Text(strings.get(R.string.import_code)) }
         Button(onClick = onPickData, enabled = !staging && !dataRecoveryBlocked) { Text(strings.get(R.string.import_data)) }
@@ -509,6 +551,14 @@ private fun PluginList(
             Text(manifest?.let { strings.get(R.string.package_name_version, it.name, it.version) }
                 ?: strings.get(R.string.recorded_version, plugin.id, plugin.state.version))
             Text(plugin.id)
+            if (manifest != null) {
+                Text(strings.get(
+                    R.string.package_capabilities,
+                    manifest.provides.takeIf { it.isNotEmpty() }?.joinToString() ?: strings.get(R.string.none),
+                    manifest.declares.takeIf { it.isNotEmpty() }?.joinToString() ?: strings.get(R.string.none),
+                ))
+                Text(strings.get(R.string.plugin_env_none_required))
+            }
             Text(strings.get(plugin.status))
             if (manifest == null) Text(strings.get(R.string.recorded_digest, plugin.state.sha256))
             Row {
@@ -528,6 +578,12 @@ private fun PluginList(
         if (manager.plugins.isEmpty()) Text(stringResource(R.string.no_plugins))
         manager.plugins.forEach { plugin ->
             Text(strings.get(R.string.package_name_version, plugin.manifest.name, plugin.manifest.version), style = MaterialTheme.typography.titleMedium)
+            PluginManifestEnvironmentSummary(
+                manifest = plugin.manifest,
+                environment = hostEnvironment,
+                showAdvisoryNotice = false,
+                onOpenAccessibility = onOpenAccessibility,
+            )
             Text(strings.get(plugin.status))
             Row {
                 TextButton(
@@ -566,5 +622,87 @@ private fun PluginList(
             }
         }
         io.github.bytejuno.thetacore.hook.HookDiagnosticsPanel()
+    }
+}
+
+@Composable
+private fun HostEnvironmentSummaryBar(
+    environment: HostEnvironmentStatus,
+    onRefresh: () -> Unit,
+    onOpenAccessibility: () -> Unit,
+) {
+    val strings = uiStrings()
+    Column {
+        Text(strings.get(R.string.plugin_env_host_title), style = MaterialTheme.typography.titleMedium)
+        Text(strings.get(
+            R.string.plugin_env_host_summary,
+            strings.label(environment.accessibilityEnabled),
+            strings.label(environment.shizukuAvailable),
+            strings.label(environment.rootAvailable),
+            strings.label(environment.lsposedActive),
+        ))
+        Row {
+            TextButton(onClick = onRefresh) { Text(strings.get(R.string.plugin_env_refresh)) }
+            if (!environment.accessibilityEnabled) {
+                TextButton(onClick = onOpenAccessibility) {
+                    Text(strings.get(R.string.plugin_env_open_accessibility))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PluginManifestEnvironmentSummary(
+    manifest: PluginManifest,
+    environment: HostEnvironmentStatus,
+    showAdvisoryNotice: Boolean,
+    onOpenAccessibility: () -> Unit,
+) {
+    val strings = uiStrings()
+    val evaluation = manifest.requires.evaluate(environment)
+    Text(strings.get(
+        R.string.package_capabilities,
+        manifest.provides.takeIf { it.isNotEmpty() }?.joinToString() ?: strings.get(R.string.none),
+        manifest.declares.takeIf { it.isNotEmpty() }?.joinToString() ?: strings.get(R.string.none),
+    ))
+    if (!evaluation.hasRequirements) {
+        Text(strings.get(R.string.plugin_env_none_required))
+    } else {
+        if (evaluation.isRootFree) {
+            Text(strings.get(R.string.plugin_env_root_free))
+        }
+        val tags = evaluation.checks.map { check ->
+            when (check.key) {
+                HostRequirementKey.ACCESSIBILITY -> strings.get(
+                    if (check.satisfied) R.string.plugin_req_accessibility_ready else R.string.plugin_req_accessibility_missing,
+                )
+                HostRequirementKey.SHIZUKU -> strings.get(
+                    if (check.satisfied) R.string.plugin_req_shizuku_ready else R.string.plugin_req_shizuku_missing,
+                )
+                HostRequirementKey.ROOT -> strings.get(
+                    if (check.satisfied) R.string.plugin_req_root_ready else R.string.plugin_req_root_missing,
+                )
+                HostRequirementKey.LSPOSED -> strings.get(
+                    if (check.satisfied) R.string.plugin_req_lsposed_ready else R.string.plugin_req_lsposed_missing,
+                )
+            }
+        }
+        Text(tags.joinToString())
+        if (evaluation.missingAccessibility) {
+            Text(strings.get(R.string.plugin_env_accessibility_guide))
+            TextButton(onClick = onOpenAccessibility) {
+                Text(strings.get(R.string.plugin_env_open_accessibility))
+            }
+        }
+        if (evaluation.missingShizuku) {
+            Text(strings.get(R.string.plugin_env_shizuku_guide))
+        }
+        if (evaluation.missingPrivileged) {
+            Text(strings.get(R.string.plugin_env_privileged_guide))
+        }
+    }
+    if (showAdvisoryNotice) {
+        Text(strings.get(R.string.plugin_env_advisory_notice))
     }
 }

@@ -27,6 +27,8 @@ internal object HookHost {
     private val registered = AtomicBoolean()
     private val connectionLock = Any()
     private var ambiguous = false
+    val isConnected: Boolean
+        get() = synchronized(connectionLock) { service != null && !ambiguous }
     private val order = HookHostOrder()
     private val scopeBudget = HookScopeBudget()
     // Official RemotePreferences updates its local map BEFORE IPC, even when commit fails.
