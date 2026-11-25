@@ -30,9 +30,9 @@ internal class ProviderModels(
         current.value = ProviderModelsState()
     }
 
-    fun load(endpoint: String, secret: String, reuseSavedKey: Boolean = false) {
+    fun load(endpoint: String, secret: String, reuseSavedKey: Boolean = false, noAuth: Boolean = false) {
         invalidate()
-        if (!validApiKey(secret) && !(secret.isEmpty() && reuseSavedKey)) {
+        if (!noAuth && !validApiKey(secret) && !(secret.isEmpty() && reuseSavedKey)) {
             current.value = ProviderModelsState(failure = ModelsRequestException.Failure.INVALID_SETTINGS)
             return
         }

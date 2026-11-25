@@ -12,6 +12,8 @@ interface ModelProvider {
     fun contextConfigurationKey(): String = ""
     fun executionMode(request: ChatRequest): ModelExecutionMode = ModelExecutionMode.MAY_EXECUTE_SERVER_TOOLS
     fun canReplay(data: ReplayData, targetModel: String): Boolean = false
+    fun canReplayMessage(message: Message, targetModel: String): Boolean =
+        message.parts.all { part -> part.replay?.let { canReplay(it, targetModel) } != false }
     fun chat(request: ChatRequest, auth: Credentials): Flow<ModelEvent>
 }
 

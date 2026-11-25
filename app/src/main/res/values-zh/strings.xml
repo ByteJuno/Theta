@@ -388,4 +388,20 @@
     <string name="chat_compat_reasoning">推理字段（可选）</string>
     <string name="chat_compat_reasoning_notice">留空即关闭。使用字母、数字或下划线，以字母或下划线开头；不能使用消息保留字段。</string>
     <string name="chat_compat_replay">在后续请求中回放推理内容</string>
+    <string name="chat_profiles_title">已保存的配置档案</string>
+    <string name="chat_profile_chip_active">%1$s（当前）</string>
+    <string name="chat_profile_new">新建档案</string>
+    <string name="chat_profile_activate">设为当前</string>
+    <string name="chat_profile_delete">删除档案</string>
+    <string name="chat_profile_name">档案名称（可选）</string>
+    <string name="chat_profile_name_notice">留空则默认使用模型名称。保存后将作为后续新运行的当前激活档案。</string>
+    <string name="chat_profile_unconfigured">选择模型</string>
+    <string name="chat_profile_switch_title">切换模型档案</string>
+    <string name="chat_profile_switch_notice">仅对后续新发起的对话运行生效，绝不中途更改正在执行的任务。</string>
+    <string name="chat_profile_active_badge">当前激活档案</string>
+    <string name="chat_profile_manage">管理档案</string>
+    <string name="chat_provider_no_auth">免认证（本地接口）</string>
+    <string name="chat_provider_no_auth_notice">请求不携带 Authorization 头。关闭后可填写 API 密钥。</string>
+    <string name="chat_system_prompt">自定义系统提示词（可选）</string>
+    <string name="chat_system_prompt_notice">最多 %1$d 个字符。作为稳定系统消息前缀注入新运行，不混入时间等易变内容。</string>
 </resources>

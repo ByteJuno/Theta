@@ -6,6 +6,8 @@ import io.github.bytejuno.thetacore.agent.transport.ModelTransport
 import io.github.bytejuno.thetacore.agent.transport.OkHttpModelTransport
 import java.util.Collections
 
+const val MAX_SYSTEM_PROMPT_CHARS = 32_000
+
 /** Non-secret settings. No credentials, headers or arbitrary JSON credential fields. */
 class OpenAiProviderSettings(
     val providerId: String,
@@ -13,11 +15,17 @@ class OpenAiProviderSettings(
     val model: String,
     val parameters: OpenAiParameters = OpenAiParameters(),
     val compat: OpenAiChatConfig.Compat = OpenAiChatConfig.Compat(),
+    systemPrompt: String? = null,
 ) {
+    val systemPrompt: String? = systemPrompt?.trim()?.takeIf { it.isNotEmpty() }
+
     init {
         require(providerId.matches(Regex("[A-Za-z0-9._-]{1,128}"))) { "Invalid provider identifier" }
         require(model.isNotBlank() && model.length <= 256) { "Invalid model name" }
         require(baseUrl.length <= 4096) { "Invalid provider URL" }
+        require(this.systemPrompt == null || this.systemPrompt.length <= MAX_SYSTEM_PROMPT_CHARS) {
+            "Invalid system prompt length"
+        }
         adapterConfig()
     }
     fun adapterConfig() = OpenAiChatConfig(providerId, baseUrl, setOf(model), compat)
@@ -58,17 +66,26 @@ class ApiKeyCredentials(private val token: String) : Credentials {
     override fun toString() = "ApiKeyCredentials([REDACTED])"
 }
 
+/** Explicit unauthenticated mode for local endpoints; never inferred from a blank password field. */
+object NoAuthCredentials : Credentials {
+    override suspend fun accessToken(): String = ""
+    override fun toString() = "NoAuthCredentials"
+}
+
 /** Bearer tokens must be nonempty printable ASCII with no whitespace/header injection. */
 fun validApiKey(token: String): Boolean = token.length in 1..16384 && token.all { it in '!'..'~' }
 
 /** One snapshot per NEW run. Pass target() and request() to AgentRunLoop, never re-read a store
  * inside a running loop. Updates/deletion affect future snapshots only. Adapters still request
  * Credentials on every attempt (2.12), rather than caching them in the provider. */
-class OpenAiRunSnapshot(val settings: OpenAiProviderSettings, private val credentials: ApiKeyCredentials) {
+class OpenAiRunSnapshot(val settings: OpenAiProviderSettings, private val credentials: Credentials) {
+    constructor(settings: OpenAiProviderSettings, credentials: ApiKeyCredentials) : this(settings, credentials as Credentials)
+
     fun target(transport: ModelTransport = OkHttpModelTransport()): ModelTarget =
         ModelTarget(settings.providerId, OpenAiChatProvider(settings.adapterConfig(), transport), credentials)
 
     fun request(configure: ChatRequestBuilder.() -> Unit = {}): ChatRequest = chatRequest(settings.model) {
+        settings.systemPrompt?.let { system = it }
         configure()
         settings.parameters.applyTo(this)
     }
