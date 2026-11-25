@@ -24,3 +24,11 @@
 
 ## Unverified Boundaries
 - Physical Android device / emulator UI visual layout, Android API 33 runtime behavior, real third-party data plugin ZIP import on device, and R8 Release builds were not executed locally in this slice.
+
+## Review Round 1 Correction
+- Reviewed PR head: `6d98f2e29a0f8f8a1da7b736b2ff807a6206272d`; prior writer returns: `0`.
+- Fixed implementation commit: `379ad384cac710bb282edbfe3460fef4010565f3`.
+- A GPU JVM probe installed an enabled data plugin containing four documented model metadata variants. Before the fix, only the baseline preset loaded: the `ToolSupport` object was rejected as non-boolean, and nullable model capabilities were rejected as non-integers. The probe failed (`total=1`, `failed=1`).
+- The parser now validates the `ToolSupport` object from PROTOCOL section 2.2 and accepts explicitly unknown nullable model metadata. Unknown fields and invalid types remain rejected. Regression tests cover catalog loading for each nullable model field, tool capability objects, and 18 invalid metadata cases. The original valid fixture now uses the documented object shape; no existing assertions were removed.
+- Targeted GPU validation on the fixed implementation: `/opt/homelab-report/theta-gpu-test :app:testDebugUnitTest --tests '*ProviderPresetsTest' --tests '*ProviderPresetsSchemaProbe*'` passed (`total=7`, `failed=0`). The unchanged probe loaded all four presets. Probe source remains untracked and is excluded from commits.
+- The earlier build, lint, and APK evidence applies to `9f54f9e733e6680f3c2b107a2c4854178d5cb9ad`; it is not a new APK result for this correction. Visual rendering of the template cards and model chips remains unverified. Final emulator regression is left to the review controller.
