@@ -1,10 +1,16 @@
 package io.github.bytejuno.thetacore.agent.provider.openai
 
 import io.github.bytejuno.thetacore.agent.protocol.*
+import java.util.Base64
 import kotlinx.serialization.json.*
 
+private val ALLOWED_IMAGE_MIME_TYPES = setOf("image/jpeg", "image/png", "image/webp")
+
 /** OpenAI Chat only (not Responses). Unknown extraBody keys pass unchanged, reserved keys fail closed. */
-class OpenAiChatCodec(private val config: OpenAiChatConfig) {
+class OpenAiChatCodec(
+    private val config: OpenAiChatConfig,
+    private val mediaReader: MediaContentReader? = null,
+) {
     private val reserved = setOf("model", "messages", "tools", "tool_choice", "parallel_tool_calls", "stream",
         "stream_options", "max_tokens", "max_completion_tokens", "reasoning_effort", "temperature", "top_p",
         "stop", "response_format", "n", "functions", "function_call")
@@ -34,7 +40,23 @@ class OpenAiChatCodec(private val config: OpenAiChatConfig) {
         return units
     }
 
-    fun encode(request: ChatRequest): String {
+    fun encode(request: ChatRequest): String = encodeInternal(request, includeMediaPayload = true)
+
+    /**
+     * Conservative byte/token budget estimate for [request] without reading media bytes or
+     * allocating large base64 strings during context admission checks.
+     */
+    fun estimateRequestBytes(request: ChatRequest): Long {
+        val structural = encodeInternal(request, includeMediaPayload = false).toByteArray(Charsets.UTF_8).size.toLong()
+        val mediaCost = request.messages.sumOf { message ->
+            message.parts.filterIsInstance<ContentPart.Media>().sumOf { part ->
+                IMAGE_BUDGET_BASE_BYTES + (part.blob.sizeBytes / IMAGE_BUDGET_SIZE_DIVISOR)
+            }
+        }
+        return structural + mediaCost
+    }
+
+    private fun encodeInternal(request: ChatRequest, includeMediaPayload: Boolean): String {
         require(config.models.isEmpty() || request.model in config.models) { "Model not configured" }
         // Fail before sending/billing, not after receiving an otherwise valid response.
         reasoningFragmentUnits(request.model)
@@ -48,7 +70,7 @@ class OpenAiChatCodec(private val config: OpenAiChatConfig) {
         }
         if (request.toolChoice is ToolChoice.Named) require(request.tools.any { it.name == (request.toolChoice as ToolChoice.Named).name })
         if (request.toolChoice == ToolChoice.Required) require(request.tools.isNotEmpty())
-        val history = encodeHistory(request)
+        val history = encodeHistory(request, includeMediaPayload)
         return buildJsonObject {
             // Tool catalog first for a stable serialized prefix.
             if (request.tools.isNotEmpty()) putJsonArray("tools") {
@@ -90,7 +112,7 @@ class OpenAiChatCodec(private val config: OpenAiChatConfig) {
             putJsonObject("cache_control") { put("type", "ephemeral") }
         }) }
 
-    private fun encodeHistory(request: ChatRequest): JsonArray {
+    private fun encodeHistory(request: ChatRequest, includeMediaPayload: Boolean): JsonArray {
         val output = mutableListOf<JsonElement>()
         request.system?.let { output += buildJsonObject { put("role", "system"); put("content", it) } }
         var pending = emptyList<ContentPart.ToolCall>()
@@ -112,7 +134,14 @@ class OpenAiChatCodec(private val config: OpenAiChatConfig) {
             } else {
                 require(pending.isEmpty()) { "Missing tool results before next message" }
                 require(message.parts.none { it is ContentPart.ToolResult })
-                if (message.role == Role.USER) require(message.parts.all { it is ContentPart.Text })
+                val mediaParts = message.parts.filterIsInstance<ContentPart.Media>()
+                if (message.role == Role.USER) {
+                    require(message.parts.all { it is ContentPart.Text || it is ContentPart.Media }) {
+                        "Unsupported USER content part"
+                    }
+                } else {
+                    require(mediaParts.isEmpty()) { "Media parts are only supported on USER messages" }
+                }
                 val calls = message.parts.filterIsInstance<ContentPart.ToolCall>()
                 val reasonings = message.parts.filterIsInstance<ContentPart.Reasoning>()
                 require(reasonings.all { !config.compat.replayReasoning || it.replay != null }) { "Required reasoning replay missing" }
@@ -130,8 +159,12 @@ class OpenAiChatCodec(private val config: OpenAiChatConfig) {
                 }
                 output += buildJsonObject {
                     put("role", message.role.name.lowercase())
-                    val text = message.parts.filterIsInstance<ContentPart.Text>().joinToString("") { it.text }
-                    put("content", if (text.isEmpty() && calls.isNotEmpty()) JsonNull else cachedText(text, message.cacheBreakpoint))
+                    if (message.role == Role.USER && mediaParts.isNotEmpty()) {
+                        put("content", encodeMultimodalUserContent(message, includeMediaPayload))
+                    } else {
+                        val text = message.parts.filterIsInstance<ContentPart.Text>().joinToString("") { it.text }
+                        put("content", if (text.isEmpty() && calls.isNotEmpty()) JsonNull else cachedText(text, message.cacheBreakpoint))
+                    }
                     if (reasonings.isNotEmpty() && config.compat.replayReasoning) {
                         put(config.compat.reasoningField!!, reasonings.joinToString("") {
                             Json.parseToJsonElement(it.replay!!.payload).jsonObject.string("text")!!
@@ -149,6 +182,63 @@ class OpenAiChatCodec(private val config: OpenAiChatConfig) {
         }
         require(pending.isEmpty()) { "Unpaired calls at end of history" }
         return JsonArray(output)
+    }
+
+    private fun encodeMultimodalUserContent(message: Message, includeMediaPayload: Boolean): JsonArray {
+        val items = mutableListOf<JsonObject>()
+        val applyCache = message.cacheBreakpoint && config.compat.explicitCacheControl
+        val filtered = message.parts.filter { part ->
+            when (part) {
+                is ContentPart.Text -> part.text.isNotEmpty()
+                is ContentPart.Media -> true
+                else -> false
+            }
+        }
+        require(filtered.isNotEmpty()) { "Empty multimodal user message" }
+        filtered.forEachIndexed { index, part ->
+            val last = index == filtered.lastIndex
+            when (part) {
+                is ContentPart.Text -> items += buildJsonObject {
+                    put("type", "text")
+                    put("text", part.text)
+                    if (applyCache && last) putJsonObject("cache_control") { put("type", "ephemeral") }
+                }
+                is ContentPart.Media -> {
+                    require(part.kind == MediaKind.IMAGE) { "Unsupported user media kind" }
+                    require(part.blob.mimeType in ALLOWED_IMAGE_MIME_TYPES) { "Unsupported image MIME type" }
+                    require(part.blob.sizeBytes in 1L..ImageLimits.BYTES.toLong()) { "Image size out of bounds" }
+                    if (includeMediaPayload) {
+                        require(config.compat.supportsImageInput) { "Image input disabled for active model" }
+                        val reader = requireNotNull(mediaReader) { "Media reader unavailable" }
+                        val bytes = reader.read(part.blob) ?: throw IllegalArgumentException("User image attachment unavailable")
+                        require(bytes.size in 1..ImageLimits.BYTES && bytes.size.toLong() == part.blob.sizeBytes) {
+                            "User image size mismatch"
+                        }
+                        val encoded = Base64.getEncoder().encodeToString(bytes)
+                        items += buildJsonObject {
+                            put("type", "image_url")
+                            putJsonObject("image_url") {
+                                put("url", "data:${part.blob.mimeType};base64,$encoded")
+                            }
+                            if (applyCache && last) putJsonObject("cache_control") { put("type", "ephemeral") }
+                        }
+                    } else {
+                        items += buildJsonObject {
+                            put("type", "image_url")
+                            putJsonObject("image_url") { put("url", "data:${part.blob.mimeType};base64,") }
+                            if (applyCache && last) putJsonObject("cache_control") { put("type", "ephemeral") }
+                        }
+                    }
+                }
+                else -> throw IllegalArgumentException("Unsupported USER content part")
+            }
+        }
+        return JsonArray(items)
+    }
+
+    companion object {
+        internal const val IMAGE_BUDGET_BASE_BYTES = 4096L
+        internal const val IMAGE_BUDGET_SIZE_DIVISOR = 128L
     }
 
     private fun checkSchema(schema: JsonObject) {

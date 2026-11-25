@@ -451,4 +451,14 @@
     <string name="chat_provider_no_auth_notice">Requests are sent without an Authorization header. Disable to enter an API key.</string>
     <string name="chat_system_prompt">Custom system prompt (optional)</string>
     <string name="chat_system_prompt_notice">Up to %1$d characters. Prepended as a stable system message for new runs without volatile timestamps.</string>
+    <string name="chat_compat_image_input">Supports image input</string>
+    <string name="chat_compat_image_input_notice">Enabled by default. Disable for text-only models to block sending images before network requests.</string>
+    <string name="chat_image_input_disabled">Image input is disabled for the active model profile. Remove attached images or enable image input in provider settings.</string>
+    <string name="chat_image_add_photo">Add photo</string>
+    <string name="chat_image_take_photo">Camera</string>
+    <string name="chat_image_remove">Remove</string>
+    <string name="chat_image_invalid">Selected image is unsupported, corrupted, or exceeds safety limits (JPEG/PNG/WEBP, max 8 MiB, max 4096 px / 4 MP).</string>
+    <string name="chat_image_limit">Up to %1$d images can be attached per message.</string>
+    <string name="chat_image_user_description">User attached image</string>
+    <string name="chat_image_pending_count">Attached images (%1$d/%2$d)</string>
 </resources>

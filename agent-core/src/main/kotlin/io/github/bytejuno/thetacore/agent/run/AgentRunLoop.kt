@@ -419,6 +419,7 @@ class AgentRunLoop(
                 return pauseContext(view, "Request budget exceeded; checkpoint required")
             }
             if (!compatible(target, request)) return pauseContext(view, "Replay incompatible; checkpoint required")
+            if (!mediaSupported(target, request)) return result(RunState.FAILED, "Image input disabled for active model")
             val mode = target.provider.executionMode(request) // freeze BEFORE submission, including extraBody
             val reducer = ModelEventReducer(target.id, request.requestId)
             beforeModelSubmit()
@@ -638,6 +639,12 @@ class AgentRunLoop(
 
     private fun compatible(target: ModelTarget, request: ChatRequest): Boolean = request.messages.all { m ->
         target.provider.canReplayMessage(m, request.model)
+    }
+
+    private fun mediaSupported(target: ModelTarget, request: ChatRequest): Boolean = request.messages.all { m ->
+        m.parts.filterIsInstance<ContentPart.Media>().all { media ->
+            target.provider.supportsMediaInput(media.kind, request.model)
+        }
     }
 
     private suspend fun recover(decision: RecoveryDecision, error: ModelError?, request: ChatRequest): Boolean {

@@ -317,6 +317,12 @@ private fun ProviderProfile(
                             form.replayReasoning,
                             editable && form.reasoningField.isNotBlank(),
                         ) { form = form.copy(replayReasoning = it) }
+                        ProviderToggle(
+                            R.string.chat_compat_image_input,
+                            form.supportsImageInput,
+                            editable,
+                        ) { form = form.copy(supportsImageInput = it) }
+                        Text(strings.get(R.string.chat_compat_image_input_notice), style = MaterialTheme.typography.bodySmall)
                     }
                 }
                 error?.let { Text(strings.get(it), color = MaterialTheme.colorScheme.error) }

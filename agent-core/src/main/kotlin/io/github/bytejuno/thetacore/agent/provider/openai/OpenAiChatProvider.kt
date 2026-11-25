@@ -27,18 +27,22 @@ private val SAFE_ERROR_PARAMETERS = setOf("temperature", "top_p", "parallel_tool
 class OpenAiChatProvider(
     private val config: OpenAiChatConfig,
     private val transport: ModelTransport = OkHttpModelTransport(),
+    private val mediaReader: MediaContentReader? = null,
 ) : ModelProvider {
-    private val codec = OpenAiChatCodec(config)
+    private val codec = OpenAiChatCodec(config, mediaReader)
     override fun contextConfigurationKey(): String = buildJsonObject {
         put("version", 1); put("provider", config.providerId); put("endpoint", config.endpoint.toString())
         put("maxTokens", config.compat.maxTokensField); put("reasoning", config.compat.reasoningField)
         put("replay", config.compat.replayReasoning); put("usage", config.compat.streamUsage)
         put("schema", config.compat.schemaProfile.name); put("cache", config.compat.explicitCacheControl)
+        if (!config.compat.supportsImageInput) put("imageInput", false)
     }.toString()
     override fun canReplay(data: ReplayData, targetModel: String): Boolean = codec.canReplay(data, targetModel)
     override fun canReplayMessage(message: Message, targetModel: String): Boolean =
         super.canReplayMessage(message, targetModel) &&
             message.parts.filterIsInstance<ContentPart.Reasoning>().all { !config.compat.replayReasoning || it.replay != null }
+    override fun supportsMediaInput(kind: MediaKind, model: String): Boolean =
+        kind == MediaKind.IMAGE && config.compat.supportsImageInput
     override fun executionMode(request: ChatRequest): ModelExecutionMode =
         if (request.extraBody.isEmpty()) ModelExecutionMode.GENERATION_ONLY else ModelExecutionMode.MAY_EXECUTE_SERVER_TOOLS
 

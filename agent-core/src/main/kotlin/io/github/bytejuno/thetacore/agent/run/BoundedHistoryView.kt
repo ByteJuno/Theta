@@ -21,6 +21,7 @@ data class RequestViewLimit(val maxMessages: Int = 4096, val maxChars: Long = 2L
                 remaining -= 64 + (p.replay?.let { it.protocol.length.toLong() + it.model.length + it.payload.length } ?: 0)
                 remaining -= when (p) {
                     is ContentPart.Text -> p.text.length.toLong()
+                    is ContentPart.Media -> p.blob.id.length.toLong() + p.blob.mimeType.length
                     is ContentPart.Reasoning -> (p.summary?.length ?: 0).toLong()
                     is ContentPart.ToolResult -> p.text.length.toLong() + p.callId.length
                     is ContentPart.ToolCall -> with(p.binding) { p.name.length.toLong() + p.argsJson.length +
