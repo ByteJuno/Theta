@@ -69,18 +69,17 @@ def find_control_bytes(raw):
 def git_changed_files(repo, base):
     paths = set()
     cmds = [
-        ['git', 'diff', '--name-only', f'{base}...HEAD'],
-        ['git', 'diff', '--name-only'],
-        ['git', 'diff', '--cached', '--name-only'],
-        ['git', 'ls-files', '--others', '--exclude-standard'],
+        ['git', 'diff', '--no-renames', '--name-only', '-z', f'{base}...HEAD'],
+        ['git', 'diff', '--no-renames', '--name-only', '-z'],
+        ['git', 'diff', '--cached', '--no-renames', '--name-only', '-z'],
+        ['git', 'ls-files', '--others', '--exclude-standard', '-z'],
     ]
     for cmd in cmds:
-        proc = subprocess.run(cmd, cwd=repo, text=True, capture_output=True, check=False)
-        if proc.returncode == 0:
-            for line in proc.stdout.splitlines():
-                line = line.strip()
-                if line:
-                    paths.add(line)
+        proc = subprocess.run(cmd, cwd=repo, capture_output=True, check=False)
+        if proc.returncode != 0:
+            detail = proc.stderr.decode('utf-8', errors='replace').strip()
+            raise RuntimeError(f'Changed-file check failed ({" ".join(cmd)}): {detail}')
+        paths.update(os.fsdecode(path) for path in proc.stdout.split(b'\0') if path)
     return sorted(paths)
 
 
@@ -147,8 +146,12 @@ def main(argv=None):
     ap.add_argument('--gradle-arg', action='append', default=[], help='Extra argument forwarded to Gradle (repeatable)')
     args = ap.parse_args(argv)
 
-    repo = find_repo_root()
-    changed = git_changed_files(repo, args.base)
+    try:
+        repo = find_repo_root()
+        changed = git_changed_files(repo, args.base)
+    except (OSError, RuntimeError) as exc:
+        print(f'PREFLIGHT STATIC CHECKS FAILED:\n - {exc}', file=sys.stderr)
+        return 1
     errors = []
     errors.extend(check_strings_parity(repo))
     errors.extend(check_testing_docs(repo, changed))

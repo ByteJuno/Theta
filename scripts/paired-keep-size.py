@@ -183,8 +183,11 @@ def signer_digest(text):
     return next(iter(certs))
 
 
-SENSITIVE_LINE = re.compile(r'(?i)(password|secret|token|api[_-]?key|store[_-]?pass)\s*([:=])\s*\S+')
-HOME_PATH = re.compile(r'(?:/(?:home|Users)/[^/\s]+|[A-Za-z]:\\Users\\[^\\\s]+)')
+# Discard the rest of a credential assignment line: values may contain spaces,
+# quoted keys, or escaped quotes, and diagnostic output need not retain them.
+SENSITIVE_LINE = re.compile(r'''(?i)(password|secret|token|api[_-]?key|store[_-]?pass)(["']?\s*[:=]).*''')
+# A home-directory name may contain spaces; stop at its path separator.
+HOME_PATH = re.compile(r'(?:/(?:home|Users)/[^/\r\n]+|[A-Za-z]:\\Users\\[^\\\r\n]+)')
 
 
 def failure_excerpt(log, max_lines=50, max_chars=4000):
