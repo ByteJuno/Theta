@@ -30,6 +30,20 @@ internal class HostToolExecutionService(
     private val active = mutableMapOf<String, PluginInvocation>()
     private val retiringRuns = mutableSetOf<String>()
 
+    fun activeProgress(callId: String): PluginToolProgress? =
+        gate.withGate { active[callId] }?.progress?.value
+
+    fun activeProgressSnapshot(callIds: Collection<String>): Map<String, PluginToolProgress> {
+        val pairs = gate.withGate {
+            callIds.mapNotNull { id -> active[id]?.let { id to it } }
+        }
+        return buildMap {
+            pairs.forEach { (id, invocation) ->
+                invocation.progress.value?.let { put(id, it) }
+            }
+        }
+    }
+
     /** The history owner has committed or reconciled the pending step. A late return can
      * still need the frozen reader until the last observer records actual exit. */
     fun finishChatRun(runId: String) = gate.withGate {
