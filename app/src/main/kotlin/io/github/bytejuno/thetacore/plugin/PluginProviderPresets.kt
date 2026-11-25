@@ -301,3 +301,31 @@ private fun templateOptionalStringList(
         value
     }
 }
+
+/**
+ * Reads and strictly validates provider preset JSON templates from an active data selection.
+ * Kept outside [PluginDataCatalog] so `:samples:storage-fixture` compiles standalone without `:agent-core`.
+ */
+internal fun PluginDataCatalog.readProviderTemplates(selection: SelectedPluginData): ProviderTemplateLoadResult {
+    val rawEntries = readEntries(selection) { name ->
+        name.startsWith("providers/") && name.endsWith(".json")
+    }
+    val manifest = selection.manifest
+    val templates = mutableListOf<ProviderTemplate>()
+    val errors = mutableListOf<String>()
+    rawEntries.forEach { (entryPath, bytes) ->
+        try {
+            templates += parseProviderTemplate(
+                pluginId = manifest.id,
+                pluginName = manifest.name,
+                pluginVersion = manifest.version,
+                entryPath = entryPath,
+                bytes = bytes,
+                authorUnverified = true,
+            )
+        } catch (error: Exception) {
+            errors += "${manifest.id}/$entryPath: ${error.message ?: "invalid provider template"}"
+        }
+    }
+    return ProviderTemplateLoadResult(templates.toList(), errors.toList())
+}
