@@ -20,7 +20,6 @@
   - `:app:testDebugUnitTest`: Passed (`total=648`, `passed=647`, `skipped=1`, `failed=0`; includes `ProviderPresetsTest`; 1 existing Windows POSIX skip).
   - `:app:assembleDebug`: Passed (`app-debug.apk` SHA-256: `613245bc1552a27c657d0d596a2e453aa1d8c84b8c6b79cf49f3900539bac687`).
   - `:app:lintDebug`: Passed.
-  - Configuration cache: Reused cleanly with `--configuration-cache-problems=fail`.
 
 ## Unverified Boundaries
 - Physical Android device / emulator UI visual layout, Android API 33 runtime behavior, real third-party data plugin ZIP import on device, and R8 Release builds were not executed locally in this slice.
@@ -48,4 +47,14 @@
   - `:app:testDebugUnitTest`: Passed (`total=650`, `passed=649`, `skipped=1`, `failed=0`; 1 existing Windows POSIX skip).
   - `:app:assembleDebug`: Passed (`app-debug.apk` SHA-256: `10ca337f12e600b64a5e05a58236a206034fa97c392968422570a25b53988a71`).
   - `:app:lintDebug`: Passed.
+
+## Review Round 3 Fix (Offscreen Host Readiness)
+- Addressed RETURN `IC_kwDOVkrS_s8AAAABqpeW1A` on head `a34a0b91d2d42f9842d9b62bbcc6d77f17bafd72`; reviewer state records 2 cumulative writer returns.
+- Validated implementation commit: `4373f95713fe6fdaaf92f04635893c9001917dea`.
+- Read the original dedicated-emulator run `20261125-074447`: its log explicitly binds source `a34a0b91d2d42f9842d9b62bbcc6d77f17bafd72`, records `VERIFY_S1_EXIT=1` (410 seconds) and `SIGNATURES_EXIT=0` (2020 seconds), and fails at `host shows up`. The failure screenshot shows the plugin page down to the data-package section; the crash log is empty. The code-package empty state follows that section in `MainActivity`, but the readiness wait never scrolled. The original APK hash was not independently recovered, so this screenshot is diagnostic evidence from that recorded run, not visual acceptance for the new commit.
+- Enabled the existing list sweep for the exact `No plugins installed` readiness assertion. Kept its predicate, timeout, crash detection, and requirement to finish before any plugin installation unchanged. No app UI, signing checks, protected files, or review-controller configuration changed.
+- Added two deterministic regression cases that exercise the real `run` / `wait_for` / `scroll` path with simulated screen, clock, and transport: find the empty code list below environment/data sections; reject a genuinely missing empty list at the unchanged deadline without installing a plugin. Before the fix, the first case timed out and the second detected that no sweep occurred; original failures are retained outside Git.
+- Validation: `python -X utf8 -B scripts/acceptance-observation-test.py` passed **39/39** cases (0.520 seconds reported by unittest); `git diff --check` passed. These are script-level tests with simulated device I/O, not an emulator/device pass.
+- No new APK generated; APK SHA-256: **not generated**. Existing Gradle/app evidence above remains bound to its original commits. App sources and build inputs did not change in this correction, so Gradle and the full acceptance suite were not rerun locally. New-head CI and final dedicated-emulator regression remain the reviewer controller's gate. Provider-template visual behavior, real-device behavior, API 33 runtime and new-head R8 execution remain unverified by the writer.
+  - Configuration cache: Reused cleanly with `--configuration-cache-problems=fail`.
 
