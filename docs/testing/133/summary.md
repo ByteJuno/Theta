@@ -45,3 +45,14 @@
   - `:app:lintDebug`: Passed.
   - Configuration cache: Reused cleanly with `--configuration-cache-problems=fail`.
 
+## Review Round 2: host readiness observation
+
+- Addressed OWNER RETURN `IC_kwDOVkrS_s8AAAABqqgTzg`; cumulative review returns: 2.
+- Tested script source commit: `8fb4efa77bd1edfe7f6ad95cc988201a75a36f04`. Reused the scoped readiness fix from `4373f95713fe6fdaaf92f04635893c9001917dea`; both affected script files matched before and after transplantation.
+- Exact prior-head evidence: reviewer run `20261125-083450` identifies source `c7b5263a9fd0c0dc5734f2dc594c70d299f43051`, `VERIFY_S1_EXIT=1 seconds=413`, and `SIGNATURES_EXIT=0 seconds=2017`. Its readiness failure sees only the environment and data sections. The archived R8 failure screenshot also ends at the data section, and the crash log is empty. This is prior-build diagnostic evidence; its APK SHA was not independently obtained here.
+- Fix: enable the existing bounded list sweep while waiting for the exact `No plugins installed` label. Keep the readiness assertion, crash detection, original timeout, and install ordering. No application code, resources, Gradle inputs, or protected files changed in this round.
+- Before the fix, the two transplanted regression cases reproduced the missing-scroll behavior: offscreen label times out and the missing-label case performs no sweep. Raw failures were retained outside Git.
+- After the fix, `python -X utf8 -B scripts/acceptance-observation-test.py` passed **39/39** (0.648 seconds process elapsed). Coverage includes finding the offscreen empty list and retaining the original deadline/no-install behavior if the label is absent. These are script unit tests with simulated observation/clock/adb boundaries, not device acceptance.
+- `git diff --check`: passed. New APK: **not generated**; APK SHA: **not available**. Gradle/configuration-cache tests were not rerun because this round changes only Python acceptance scripts and this summary. Earlier JVM/build/APK results above remain bound to their recorded commits.
+- Final-head CI, independent review, and the dedicated emulator regression remain required. The writer did not operate any device or merge the PR. Photo Picker, camera, image previews, multilingual layouts, font scaling, and real multimodal endpoints remain visually/functionally unverified at the device boundary.
+- Raw reviewer evidence, red/green logs, file hashes, and timing: local event run `84ecab5e-2eb8-4082-bdd6-d43a9db0e961` (outside Git).
