@@ -72,6 +72,7 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
     var sessions by remember { mutableStateOf(false) }
     var deleting by remember { mutableStateOf(false) }
     var profilePicker by remember { mutableStateOf(false) }
+    val profileSwitcher = remember { ProfileQuickSwitchController() }
     var approvalDialog by rememberSaveable { mutableStateOf(false) }
     val uiScope = rememberCoroutineScope()
     val providerRevision by host.providerSettings.revision.collectAsState()
@@ -80,6 +81,13 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
         profileCatalog = withContext(Dispatchers.IO) {
             runCatching { host.providerSettings.readProfiles() }
                 .getOrDefault(ProviderProfilesCatalog(null, emptyList()))
+        }
+    }
+    fun performProfileSwitch(profileId: String) {
+        uiScope.launch {
+            if (profileSwitcher.switchTo(profileId, host.providerSettings::selectActiveProfile)) {
+                profilePicker = false
+            }
         }
     }
     val approvalSettings by host.approvalSettings.state.collectAsState()
@@ -104,10 +112,14 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
                 onClick = {
                     if (profileCatalog.profiles.isEmpty()) settings = true else profilePicker = true
                 },
-                enabled = !state.active && !state.loading,
+                enabled = !state.active && !state.loading && !profileSwitcher.switching,
             ) {
                 Text(
-                    text = activeProfile?.headerLabel() ?: strings.get(R.string.chat_profile_unconfigured),
+                    text = if (profileSwitcher.switching) {
+                        strings.get(R.string.chat_profile_switching)
+                    } else {
+                        activeProfile?.headerLabel() ?: strings.get(R.string.chat_profile_unconfigured)
+                    },
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -151,8 +163,30 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
                 }
             }
         }
-        if (state.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
+        if (state.loading || profileSwitcher.switching) LinearProgressIndicator(Modifier.fillMaxWidth())
         state.error?.let { Text(strings.get(it), color = MaterialTheme.colorScheme.error) }
+        profileSwitcher.error?.let { switchError ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    strings.get(switchError),
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.weight(1f),
+                )
+                profileSwitcher.failedProfileId?.let { retryId ->
+                    TextButton(
+                        enabled = !state.active && !state.loading && !profileSwitcher.switching,
+                        onClick = { performProfileSwitch(retryId) },
+                    ) {
+                        Text(strings.get(R.string.chat_profile_switch_retry))
+                    }
+                }
+            }
+        }
         LazyColumn(Modifier.weight(1f).fillMaxWidth(), state = listState, verticalArrangement = Arrangement.spacedBy(12.dp)) {
             if (state.older != null && !state.active && !state.pending) item {
                 TextButton(onClick = { owner.older() }) { Text(strings.get(R.string.chat_older)) }
@@ -199,7 +233,7 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
                     } }
                 }
             }
-            if (!state.active && !state.pending && (state.checkpoint != null || state.reconciliation != null ||
+            if (!state.active && !state.pending && !profileSwitcher.switching && (state.checkpoint != null || state.reconciliation != null ||
                     state.result?.state in setOf(RunState.PAUSED, RunState.FAILED))) item {
                 ChatRecoveryCard(state) { token, action, window, confirmed ->
                     launchTask { owner.recover(token, action, window, confirmed) }
@@ -218,36 +252,44 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
             if (state.active) item { Text(strings.get(if (state.records.values.any { it.pending != null })
                 R.string.chat_tool_approval else R.string.chat_running)) }
         }
-        if (state.pending && !state.active && state.records.values.none { it.pending != null }) {
+        if (state.pending && !state.active && !profileSwitcher.switching && state.records.values.none { it.pending != null }) {
             TextButton(onClick = { launchTask { owner.continueSavedStep() } }) { Text(strings.get(R.string.chat_finish_saved)) }
         }
         if (state.active || state.pending) TextButton(onClick = { owner.stop() }) { Text(strings.get(R.string.chat_stop)) }
         OutlinedTextField(value = input, onValueChange = { if (it.length <= 32_000) input = it },
             label = { Text(strings.get(R.string.chat_message)) }, modifier = Modifier.fillMaxWidth(),
-            minLines = 1, maxLines = 5, enabled = !state.loading && !state.active && !state.pending)
-        Button(onClick = { val text = input; launchTask { owner.send(text) } }, enabled = input.isNotBlank() && !state.loading && !state.active && !state.pending,
+            minLines = 1, maxLines = 5, enabled = !state.loading && !state.active && !state.pending && !profileSwitcher.switching)
+        Button(onClick = { val text = input; launchTask { owner.send(text) } }, enabled = input.isNotBlank() && !state.loading && !state.active && !state.pending && !profileSwitcher.switching,
             modifier = Modifier.fillMaxWidth()) { Text(strings.get(R.string.chat_send)) }
     }
     if (settings) ProviderScreen(host) { settings = false }
     if (profilePicker) AlertDialog(
-        onDismissRequest = { profilePicker = false },
+        onDismissRequest = { if (!profileSwitcher.switching) profilePicker = false },
         title = { Text(strings.get(R.string.chat_profile_switch_title)) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(strings.get(R.string.chat_profile_switch_notice), style = MaterialTheme.typography.bodySmall)
+                if (profileSwitcher.switching) {
+                    LinearProgressIndicator(Modifier.fillMaxWidth())
+                    Text(strings.get(R.string.chat_profile_switching), style = MaterialTheme.typography.bodySmall)
+                }
+                profileSwitcher.error?.let { switchError ->
+                    Text(strings.get(switchError), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                    profileSwitcher.failedProfileId?.let { retryId ->
+                        TextButton(
+                            enabled = !state.active && !state.loading && !profileSwitcher.switching,
+                            onClick = { performProfileSwitch(retryId) },
+                        ) {
+                            Text(strings.get(R.string.chat_profile_switch_retry))
+                        }
+                    }
+                }
                 LazyColumn(Modifier.heightIn(max = 360.dp)) {
                     itemsIndexed(profileCatalog.profiles, key = { _, entry -> entry.id }) { _, entry ->
                         val current = entry.id == profileCatalog.activeProfileId
                         TextButton(
-                            enabled = !state.active && !state.loading,
-                            onClick = {
-                                profilePicker = false
-                                uiScope.launch {
-                                    withContext(Dispatchers.IO) {
-                                        runCatching { host.providerSettings.selectActiveProfile(entry.id) }
-                                    }
-                                }
-                            },
+                            enabled = !state.active && !state.loading && !profileSwitcher.switching,
+                            onClick = { performProfileSwitch(entry.id) },
                             modifier = Modifier.fillMaxWidth().semantics { selected = current },
                         ) {
                             Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.Start) {
@@ -265,12 +307,18 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
             }
         },
         confirmButton = {
-            TextButton(onClick = { profilePicker = false; settings = true }) {
+            TextButton(
+                enabled = !profileSwitcher.switching,
+                onClick = { profilePicker = false; profileSwitcher.clearError(); settings = true },
+            ) {
                 Text(strings.get(R.string.chat_profile_manage))
             }
         },
         dismissButton = {
-            TextButton(onClick = { profilePicker = false }) { Text(strings.get(R.string.chat_close)) }
+            TextButton(
+                enabled = !profileSwitcher.switching,
+                onClick = { profilePicker = false },
+            ) { Text(strings.get(R.string.chat_close)) }
         },
     )
     if (approvalDialog) ChatApprovalDialog(host) { approvalDialog = false }

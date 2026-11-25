@@ -31,8 +31,11 @@ class ProviderSettingsException(val failure: Failure) : Exception(when (failure)
     Failure.INVALID_DATA -> "Provider settings are invalid; re-enter the configuration"
     Failure.WRITE_FAILED -> "Provider settings could not be saved"
     Failure.ENDPOINT_CHANGED -> "Enter a new API key for the changed endpoint"
+    Failure.CATALOG_RECOVERED -> "Saved profiles are readable again; reload to avoid overwriting existing profiles"
 }) {
-    enum class Failure { NOT_CONFIGURED, READ_FAILED, DECRYPT_FAILED, INVALID_DATA, WRITE_FAILED, ENDPOINT_CHANGED }
+    enum class Failure {
+        NOT_CONFIGURED, READ_FAILED, DECRYPT_FAILED, INVALID_DATA, WRITE_FAILED, ENDPOINT_CHANGED, CATALOG_RECOVERED,
+    }
 }
 
 /** Host-only encrypted OpenAI-compatible profile catalog (or single image record).
@@ -133,7 +136,7 @@ class OpenAiSettingsStore internal constructor(
     ): ProviderProfileSummary = synchronized(lock) {
         val id = profileId?.trim()?.takeIf { it.isNotEmpty() } ?: UUID.randomUUID().toString()
         require(validProfileId(id)) { "Invalid profile identifier" }
-        val resolvedName = displayName.trim().ifEmpty { settings.model.take(MAX_PROFILE_NAME_CHARS) }
+        val resolvedName = displayName.trim().ifEmpty { fallbackProfileDisplayName(settings.model) }
         require(validProfileDisplayName(resolvedName)) { "Invalid profile display name" }
         if (noAuth) {
             require(apiKey.isEmpty()) { "Do not supply an API key when no-auth is enabled" }
@@ -141,6 +144,23 @@ class OpenAiSettingsStore internal constructor(
 
         if (replaceUnreadable) {
             if (!noAuth) require(validApiKey(apiKey)) { "Invalid API key" }
+            // Re-read inside the same storage lock before discarding the catalog: if the catalog
+            // became readable again (e.g. transient IO/Keystore recovery), preserve all profiles.
+            val recoveredReadable = try {
+                readCatalog()
+                true
+            } catch (error: ProviderSettingsException) {
+                when (error.failure) {
+                    ProviderSettingsException.Failure.NOT_CONFIGURED,
+                    ProviderSettingsException.Failure.READ_FAILED,
+                    ProviderSettingsException.Failure.DECRYPT_FAILED,
+                    ProviderSettingsException.Failure.INVALID_DATA -> false
+                    else -> throw error
+                }
+            }
+            if (recoveredReadable) {
+                throw ProviderSettingsException(ProviderSettingsException.Failure.CATALOG_RECOVERED)
+            }
             val record = ProviderSettingsCodec.ProfileRecord(
                 id = id,
                 displayName = resolvedName,

@@ -451,4 +451,9 @@
     <string name="chat_provider_no_auth_notice">Requests are sent without an Authorization header. Disable to enter an API key.</string>
     <string name="chat_system_prompt">Custom system prompt (optional)</string>
     <string name="chat_system_prompt_notice">Up to %1$d characters. Prepended as a stable system message for new runs without volatile timestamps.</string>
+    <string name="chat_provider_replace_catalog_warning">Warning: saving here will replace the entire unreadable profile catalog and discard all previously saved profiles and keys.</string>
+    <string name="chat_provider_catalog_recovered">Saved profiles became readable again. All existing profiles have been preserved and reloaded without overwriting.</string>
+    <string name="chat_profile_switching">Switching active profile…</string>
+    <string name="chat_profile_switch_failed">Could not switch active profile. Your previous selection was kept; retry or open profile settings.</string>
+    <string name="chat_profile_switch_retry">Retry switch</string>
 </resources>

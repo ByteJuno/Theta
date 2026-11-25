@@ -13,6 +13,19 @@ internal fun validProfileId(id: String): Boolean = PROFILE_ID_REGEX.matches(id)
 internal fun validProfileDisplayName(name: String): Boolean =
     name.isNotBlank() && name.length <= MAX_PROFILE_NAME_CHARS && name.none { it < ' ' || it.isISOControl() }
 
+/**
+ * Generates a valid profile display name fallback from a model identifier without modifying
+ * the model identifier itself, parameters, or credentials.
+ */
+internal fun fallbackProfileDisplayName(model: String): String {
+    val sanitized = buildString {
+        model.forEach { ch ->
+            if (ch >= ' ' && !ch.isISOControl()) append(ch)
+        }
+    }.trim().take(MAX_PROFILE_NAME_CHARS).trim()
+    return if (validProfileDisplayName(sanitized)) sanitized else DEFAULT_PROFILE_ID
+}
+
 data class ProviderProfileSummary(
     val id: String,
     val displayName: String,
@@ -90,7 +103,15 @@ internal object ProviderSettingsCodec {
             return encodeCatalog(
                 CatalogRecord(
                     activeProfileId = DEFAULT_PROFILE_ID,
-                    profiles = listOf(ProfileRecord(DEFAULT_PROFILE_ID, settings.model, settings, token, noAuth = false)),
+                    profiles = listOf(
+                        ProfileRecord(
+                            DEFAULT_PROFILE_ID,
+                            fallbackProfileDisplayName(settings.model),
+                            settings,
+                            token,
+                            noAuth = false,
+                        ),
+                    ),
                 ),
             )
         }
@@ -163,7 +184,7 @@ internal object ProviderSettingsCodec {
                 val settings = decodeSettings(root, systemPrompt = null)
                 val key = root.getValue("key").jsonPrimitive.content
                 require(validApiKey(key))
-                val defaultName = settings.model.take(MAX_PROFILE_NAME_CHARS)
+                val defaultName = fallbackProfileDisplayName(settings.model)
                 CatalogRecord(
                     activeProfileId = DEFAULT_PROFILE_ID,
                     profiles = listOf(ProfileRecord(DEFAULT_PROFILE_ID, defaultName, settings, key, noAuth = false)),

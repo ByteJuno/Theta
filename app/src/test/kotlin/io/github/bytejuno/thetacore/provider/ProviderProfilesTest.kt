@@ -440,4 +440,194 @@ class ProviderProfilesTest {
             root.deleteRecursively()
         }
     }
+
+    @Test
+    fun recoverySaveReReadsUnderLockPreservesProfilesWhenReadableAgainAndReloadsEditor(): Unit = runBlocking {
+        val root = temp.newFolder()
+        val key = generateKey()
+        var failReads = false
+        val flakyCipher = object : SecretCipher {
+            private val delegate = AesGcmSecretCipher("flaky-recovery-aad") { key }
+            override fun encrypt(plaintext: ByteArray): ByteArray = delegate.encrypt(plaintext)
+            override fun encryptForReplacement(plaintext: ByteArray): ByteArray = delegate.encryptForReplacement(plaintext)
+            override fun decrypt(ciphertext: ByteArray): ByteArray {
+                if (failReads) throw IllegalStateException("Transient keystore glitch")
+                return delegate.decrypt(ciphertext)
+            }
+        }
+        val store = OpenAiSettingsStore(root, flakyCipher)
+        store.saveProfile(
+            profileId = "p1",
+            displayName = "Primary",
+            settings = OpenAiProviderSettings("chat", "https://p1.example/v1", "model-1"),
+            apiKey = "sk-p1",
+            activate = true,
+        )
+        store.saveProfile(
+            profileId = "p2",
+            displayName = "Backup",
+            settings = OpenAiProviderSettings("chat", "https://p2.example/v1", "model-2"),
+            apiKey = "sk-p2",
+            activate = false,
+        )
+
+        // Simulate transient read failure -> user clicks "Re-enter" (replacingUnreadable = true).
+        failReads = true
+        val editor = io.github.bytejuno.thetacore.chat.ProviderSettingsEditor()
+        editor.load(store, imageProfile = false)
+        assertNotNull(editor.loadError)
+        editor.beginReplacement()
+        assertTrue(editor.replacingUnreadable)
+
+        // Before the user confirms Save, the storage/Keystore becomes readable again!
+        failReads = false
+        val thrown = assertThrows(ProviderSettingsException::class.java) {
+            store.saveProfile(
+                profileId = null,
+                displayName = "Overwrite Attempt",
+                settings = OpenAiProviderSettings("chat", "https://new.example/v1", "new-model"),
+                apiKey = "sk-overwrite",
+                replaceUnreadable = true,
+            )
+        }
+        assertEquals(ProviderSettingsException.Failure.CATALOG_RECOVERED, thrown.failure)
+
+        // All previously saved profiles and keys MUST remain completely intact!
+        val catalog = store.readProfiles()
+        assertEquals("p1", catalog.activeProfileId)
+        assertEquals(listOf("p1", "p2"), catalog.profiles.map { it.id })
+        assertEquals("sk-p1", tokenOf(store.snapshotForNewRun()))
+        store.selectActiveProfile("p2")
+        assertEquals("sk-p2", tokenOf(store.snapshotForNewRun()))
+
+        // Editor reload restores both profiles cleanly.
+        editor.load(store, imageProfile = false)
+        assertFalse(editor.replacingUnreadable)
+        assertNull(editor.loadError)
+        assertEquals(listOf("p1", "p2"), editor.profiles.map { it.id })
+    }
+
+    @Test
+    fun quickSwitchWaitsForWriteCompletionPreservesSelectionOnFailureAndRetries(): Unit = runBlocking {
+        val root = temp.newFolder()
+        val key = generateKey()
+        var failWrite = false
+        val writeStarted = CompletableDeferred<Unit>()
+        val allowWriteFinish = CompletableDeferred<Unit>()
+        val controlledCipher = object : SecretCipher {
+            private val delegate = AesGcmSecretCipher("quick-switch-aad") { key }
+            override fun encrypt(plaintext: ByteArray): ByteArray {
+                if (failWrite) throw IllegalStateException("Disk full")
+                return delegate.encrypt(plaintext)
+            }
+            override fun encryptForReplacement(plaintext: ByteArray): ByteArray = delegate.encryptForReplacement(plaintext)
+            override fun decrypt(ciphertext: ByteArray): ByteArray = delegate.decrypt(ciphertext)
+        }
+        val store = OpenAiSettingsStore(root, controlledCipher)
+        store.saveProfile(
+            profileId = "first",
+            displayName = "First",
+            settings = OpenAiProviderSettings("chat", "https://first.example/v1", "m1"),
+            apiKey = "sk-first",
+            activate = true,
+        )
+        store.saveProfile(
+            profileId = "second",
+            displayName = "Second",
+            settings = OpenAiProviderSettings("chat", "https://second.example/v1", "m2"),
+            apiKey = "sk-second",
+            activate = false,
+        )
+
+        val controller = io.github.bytejuno.thetacore.chat.ProfileQuickSwitchController()
+        assertFalse(controller.switching)
+
+        // 1. Write failure preserves old active profile and surfaces retryable error state.
+        failWrite = true
+        val failed = controller.switchTo("second", store::selectActiveProfile)
+        assertFalse(failed)
+        assertFalse(controller.switching)
+        assertEquals(R.string.chat_profile_switch_failed, controller.error)
+        assertEquals("second", controller.failedProfileId)
+        assertEquals("first", store.readProfiles().activeProfileId)
+
+        // 2. Retry waits for write completion (switching stays true until write finishes).
+        failWrite = false
+        val retryJob = async(Dispatchers.Default) {
+            controller.switchTo(requireNotNull(controller.failedProfileId)) { targetId ->
+                writeStarted.complete(Unit)
+                allowWriteFinish.await()
+                store.selectActiveProfile(targetId)
+            }
+        }
+        withTimeout(5_000) { writeStarted.await() }
+        assertTrue("switching must stay true while write is in flight", controller.switching)
+        // Concurrent switch attempt while switching is ignored.
+        assertFalse(controller.switchTo("first", store::selectActiveProfile))
+
+        allowWriteFinish.complete(Unit)
+        assertTrue(retryJob.await())
+        assertFalse(controller.switching)
+        assertNull(controller.error)
+        assertNull(controller.failedProfileId)
+        assertEquals("second", store.readProfiles().activeProfileId)
+    }
+
+    @Test
+    fun legacyV1MigrationGeneratesLegalDisplayNameFallbackWhilePreservingModelParametersAndKey(): Unit = runBlocking {
+        val longAndControlModel = "  \torg/very-long-model-" + "x".repeat(140) + "\n"
+        val parameters = OpenAiParameters(
+            maxOutputTokens = 2048,
+            temperature = 0.3,
+            topP = 0.9,
+            reasoningLevel = "high",
+            parallelToolCalls = false,
+            stopSequences = listOf("STOP_A", "STOP_B"),
+        )
+        val compat = OpenAiChatConfig.Compat(
+            maxTokensField = "max_tokens",
+            reasoningField = "reasoning_content",
+            replayReasoning = true,
+            streamUsage = false,
+            explicitCacheControl = true,
+            schemaProfile = SchemaProfile.BASIC,
+        )
+        val v1Settings = OpenAiProviderSettings(
+            providerId = "chat",
+            baseUrl = "https://legacy.example/v1",
+            model = longAndControlModel,
+            parameters = parameters,
+            compat = compat,
+        )
+        val v1Bytes = ProviderSettingsCodec.encode(v1Settings, "sk-legacy-secret-123")
+        val migrated = ProviderSettingsCodec.decodeCatalog(v1Bytes)
+
+        assertEquals(DEFAULT_PROFILE_ID, migrated.activeProfileId)
+        assertEquals(1, migrated.profiles.size)
+        val profile = migrated.active
+        assertTrue(validProfileDisplayName(profile.displayName))
+        assertTrue(profile.displayName.length <= MAX_PROFILE_NAME_CHARS)
+        assertFalse(profile.displayName.contains('\t'))
+        assertFalse(profile.displayName.contains('\n'))
+        // Original model identifier, parameters, compat, and key MUST be preserved verbatim!
+        assertEquals(longAndControlModel, profile.settings.model)
+        assertEquals(parameters.maxOutputTokens, profile.settings.parameters.maxOutputTokens)
+        assertEquals(parameters.temperature, profile.settings.parameters.temperature)
+        assertEquals(parameters.topP, profile.settings.parameters.topP)
+        assertEquals(parameters.reasoningLevel, profile.settings.parameters.reasoningLevel)
+        assertEquals(parameters.parallelToolCalls, profile.settings.parameters.parallelToolCalls)
+        assertEquals(parameters.stopSequences, profile.settings.parameters.stopSequences)
+        assertEquals(compat.maxTokensField, profile.settings.compat.maxTokensField)
+        assertEquals(compat.reasoningField, profile.settings.compat.reasoningField)
+        assertEquals(compat.replayReasoning, profile.settings.compat.replayReasoning)
+        assertEquals(compat.streamUsage, profile.settings.compat.streamUsage)
+        assertEquals(compat.explicitCacheControl, profile.settings.compat.explicitCacheControl)
+        assertEquals(compat.schemaProfile, profile.settings.compat.schemaProfile)
+        assertEquals("https://legacy.example/v1", profile.settings.baseUrl)
+        assertEquals("sk-legacy-secret-123", profile.key)
+        assertFalse(profile.noAuth)
+
+        // Control-char-only / whitespace edge fallback produces DEFAULT_PROFILE_ID safely.
+        assertEquals(DEFAULT_PROFILE_ID, fallbackProfileDisplayName("\t\u0007\n"))
+    }
 }

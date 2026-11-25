@@ -14,6 +14,43 @@ import kotlinx.coroutines.withContext
 
 internal fun ProviderProfileSummary.headerLabel(): String = "$displayName · ${settings.model}"
 
+/** Coordinates chat quick-switching so new runs wait for write completion and errors are retryable. */
+internal class ProfileQuickSwitchController {
+    var switching by mutableStateOf(false)
+        private set
+    var error by mutableStateOf<Int?>(null)
+        private set
+    var failedProfileId by mutableStateOf<String?>(null)
+        private set
+
+    fun clearError() {
+        error = null
+        failedProfileId = null
+    }
+
+    suspend fun switchTo(
+        profileId: String,
+        select: suspend (String) -> ProviderProfileSummary,
+    ): Boolean {
+        if (switching) return false
+        switching = true
+        error = null
+        return try {
+            withContext(Dispatchers.IO) { select(profileId) }
+            failedProfileId = null
+            true
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            failedProfileId = profileId
+            error = R.string.chat_profile_switch_failed
+            false
+        } finally {
+            switching = false
+        }
+    }
+}
+
 /** State shared by the profile UI and its load/recovery actions; contains no saved key. */
 internal class ProviderSettingsEditor {
     var form by mutableStateOf(ProviderSettingsForm())

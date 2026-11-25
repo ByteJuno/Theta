@@ -33,6 +33,7 @@ internal fun providerFailureText(failure: ProviderSettingsException.Failure): In
     ProviderSettingsException.Failure.ENDPOINT_CHANGED -> R.string.chat_provider_new_key
     ProviderSettingsException.Failure.READ_FAILED, ProviderSettingsException.Failure.INVALID_DATA -> R.string.chat_provider_read_failed
     ProviderSettingsException.Failure.WRITE_FAILED -> R.string.chat_provider_failed
+    ProviderSettingsException.Failure.CATALOG_RECOVERED -> R.string.chat_provider_catalog_recovered
 }
 
 @Composable
@@ -102,6 +103,13 @@ private fun ProviderProfile(
                 }
                 if (editor.replacingUnreadable) {
                     Text(strings.get(R.string.chat_provider_reenter_notice), style = MaterialTheme.typography.bodySmall)
+                    if (!imageProfile) {
+                        Text(
+                            strings.get(R.string.chat_provider_replace_catalog_warning),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
                 }
                 if (!imageProfile && editor.editable && !editor.replacingUnreadable) {
                     if (editor.profiles.isNotEmpty()) {
@@ -355,7 +363,13 @@ private fun ProviderProfile(
                         secret = ""
                         onClose()
                     } catch (cancelled: CancellationException) { throw cancelled }
-                    catch (failure: ProviderSettingsException) { error = providerFailureText(failure.failure) }
+                    catch (failure: ProviderSettingsException) {
+                        if (!imageProfile && failure.failure == ProviderSettingsException.Failure.CATALOG_RECOVERED) {
+                            secret = ""
+                            editor.load(store, imageProfile = false)
+                        }
+                        error = providerFailureText(failure.failure)
+                    }
                     catch (_: IllegalArgumentException) { error = R.string.chat_provider_invalid }
                     catch (_: Exception) { error = R.string.chat_provider_failed }
                     finally { busy = false }

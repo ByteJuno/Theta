@@ -451,4 +451,9 @@
     <string name="chat_provider_no_auth_notice">请求不携带 Authorization 头。关闭后可填写 API 密钥。</string>
     <string name="chat_system_prompt">自定义系统提示词（可选）</string>
     <string name="chat_system_prompt_notice">最多 %1$d 个字符。作为稳定系统消息前缀注入新运行，不混入时间等易变内容。</string>
+    <string name="chat_provider_replace_catalog_warning">注意：此处保存将替换整个无法读取的配置档案目录，原有已保存的全部档案和密钥将被清空。</string>
+    <string name="chat_provider_catalog_recovered">已保存的配置档案已恢复可读。已保留全部原有档案并重新加载，未执行覆盖。</string>
+    <string name="chat_profile_switching">正在切换当前配置档案…</string>
+    <string name="chat_profile_switch_failed">切换配置档案失败，已保留原选择；请重试或前往模型配置检查。</string>
+    <string name="chat_profile_switch_retry">重试切换</string>
 </resources>
