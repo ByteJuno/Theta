@@ -261,9 +261,11 @@
     <string name="chat_current_session">当前会话</string>
     <string name="chat_more_sessions">加载更多会话</string>
     <string name="chat_close">关闭</string>
-    <string name="chat_approval_warning">此工具需要你的审批。批准仅授权本次请求。</string>
+    <string name="chat_approval_warning">此工具需要你的审批。可选择本次批准、本会话允许、始终允许或拒绝。</string>
     <string name="chat_unknown_warning">先前操作的影响未知，请核对实际情况后再批准后续操作。</string>
     <string name="chat_allow">批准一次</string>
+    <string name="chat_allow_session">本会话允许</string>
+    <string name="chat_allow_always">始终允许</string>
     <string name="chat_deny">拒绝</string>
     <string name="chat_recovery_warning">上次进程已结束。仅确认你已核对的情况；此操作不会撤销影响或重新执行工具。</string>
     <string name="chat_verified_clear">已核实可解除隔离</string>
@@ -388,4 +390,23 @@
     <string name="chat_compat_reasoning">推理字段（可选）</string>
     <string name="chat_compat_reasoning_notice">留空即关闭。使用字母、数字或下划线，以字母或下划线开头；不能使用消息保留字段。</string>
     <string name="chat_compat_replay">在后续请求中回放推理内容</string>
+    <string name="chat_approval_settings">审批模式</string>
+    <string name="chat_approval_mode_intro">控制有人值守聊天的默认工具询问策略。工具定义摘要变更后，已有长期授权会自动失效重问。</string>
+    <string name="chat_approval_mode_balanced">省心模式（默认）</string>
+    <string name="chat_approval_mode_balanced_desc">读取与写入工具免弹窗直通；设备控制与 Root 工具仍须确认（已有有效授权除外）。</string>
+    <string name="chat_approval_mode_full_auto">全自动模式</string>
+    <string name="chat_approval_mode_full_auto_desc">有人值守下读取、写入、设备控制与 Root 工具均直接放行。仅在确认当前模型与任务可控时开启。</string>
+    <string name="chat_approval_mode_strict">严格模式</string>
+    <string name="chat_approval_mode_strict_desc">仅内置只读工具自动放行；所有写入、第三方插件、MCP、设备控制与 Root 工具在未获授权前均须询问。</string>
+    <string name="chat_approval_full_auto_confirm_warning">全自动模式会在有人值守对话中免询问执行设备控制与 Root 工具，提示注入或模型误判可能立即在本机生效。</string>
+    <string name="chat_approval_full_auto_confirm_check">我已知晓风险并确认开启全自动审批。</string>
+    <string name="chat_approval_full_auto_enable">确认开启全自动</string>
+    <string name="chat_approval_root_long_term">允许 Root 工具长期授权</string>
+    <string name="chat_approval_root_long_term_desc">开启后，Root 风险审批卡片将提供“本会话允许”与“始终允许”选项（默认关闭）。</string>
+    <string name="chat_approval_safety_invariants">显式拒绝规则、未核对的未知副作用（UNKNOWN）以及无人值守后台任务均不继承省心或全自动放宽。</string>
+    <string name="chat_approval_save_failed">无法保存审批模式设置。</string>
+    <string name="chat_full_auto_banner">全自动审批已开启 · 设备控制与 Root 工具将免询问执行</string>
+    <string name="chat_full_auto_switch_balanced">切回省心模式</string>
+    <string name="chat_root_long_term_hint">Root 工具默认仅支持单次批准；如需本会话允许或始终允许，可在“审批模式”中开启。</string>
+    <string name="chat_root_long_term_disabled">当前未开启 Root 工具长期授权，请在“审批模式”设置中开启。</string>
 </resources>
