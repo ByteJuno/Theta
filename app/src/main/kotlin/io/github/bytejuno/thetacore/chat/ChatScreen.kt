@@ -22,6 +22,7 @@ import io.github.bytejuno.thetacore.R
 import io.github.bytejuno.thetacore.agent.ledger.*
 import io.github.bytejuno.thetacore.agent.protocol.*
 import io.github.bytejuno.thetacore.agent.run.RunState
+import io.github.bytejuno.thetacore.plugin.PluginToolProgress
 import io.github.bytejuno.thetacore.provider.ProviderProfilesCatalog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -173,6 +174,7 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
                         is ContentPart.ToolCall -> ToolCard(
                             call = part,
                             record = state.records[part.binding.callId],
+                            progress = state.toolProgress[part.binding.callId],
                             recovery = state.recoveries[part.binding.callId],
                             allowRootLongTerm = approvalSettings.allowRootLongTerm,
                             owner = owner,
@@ -305,6 +307,7 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
 private fun ToolCard(
     call: ContentPart.ToolCall,
     record: InvocationRecord?,
+    progress: PluginToolProgress?,
     recovery: RecoveryRequest?,
     allowRootLongTerm: Boolean,
     owner: ChatSessionOwner,
@@ -317,6 +320,14 @@ private fun ToolCard(
             val imageCall = record?.input?.definition?.toolKey == IMAGE_TOOL_KEY
             Text(if (imageCall) strings.get(R.string.chat_image_title) else call.name, style = MaterialTheme.typography.titleSmall)
             Text(strings.get(toolState(record))) // never hidden by collapsing details
+            if (record?.state == Status.RUNNING && progress != null) {
+                if (progress.text.isNotBlank()) {
+                    Text(progress.text, style = MaterialTheme.typography.bodySmall)
+                }
+                progress.fraction?.let { fraction ->
+                    LinearProgressIndicator(progress = { fraction }, modifier = Modifier.fillMaxWidth())
+                }
+            }
             if (imageCall && record != null) {
                 imageResultLabel(record)?.let { Text(strings.get(it)) }
                 if (shouldLoadChatImage(record)) ChatImage(record, owner)

@@ -395,6 +395,13 @@ class InvocationLedger(
     }
     fun cancel(callId: String): Mutation = finishLocally(callId, Status.CANCELLED)
     fun timeout(callId: String): Mutation = finishLocally(callId, Status.TIMED_OUT)
+    /** Host admission rejection. A submitted instance must retain its execution and effect history. */
+    fun rejectUnsubmitted(callId: String, reason: String): Mutation = gate.withGate {
+        val r = get(callId) ?: return@withGate Mutation.Conflict("Unknown call")
+        if (r.state.terminal) return@withGate Mutation.AlreadyApplied(r)
+        if (r.instance != null) return@withGate Mutation.Conflict("Invocation already submitted")
+        update(r, terminal(r, Status.REJECTED, Effect.NONE, reason))
+    }
     private fun finishLocally(callId: String, status: Status): Mutation = gate.withGate {
         val r = get(callId) ?: return@withGate Mutation.Conflict("Unknown call")
         if (r.state.terminal) return@withGate Mutation.AlreadyApplied(r)

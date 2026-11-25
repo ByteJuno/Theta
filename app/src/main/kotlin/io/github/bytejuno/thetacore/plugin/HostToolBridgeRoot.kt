@@ -16,7 +16,9 @@ internal class HostToolBridgeRoot(
 ) {
     // Startup is one-shot, so reading trusted host metadata must not lose a race against plugin
     // entry listeners that hold shared slots for their lifetime. Tool bodies still use [budget].
-    private val metadataBudget = PluginExecutionBudget(processSlots = 1, perPluginSlots = 1, cancellationThreads = 1)
+    // Allow 4 concurrent metadata slots with 1 per plugin domain so one slow dex plugin cannot
+    // starve other plugins or host metadata capture.
+    private val metadataBudget = PluginExecutionBudget(processSlots = 4, perPluginSlots = 1, cancellationThreads = 2)
     private val mutex = Mutex()
     private var attempted = false
     private var service: HostToolExecutionService? = null
