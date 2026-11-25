@@ -1,12 +1,16 @@
 # Issue #132 Testing Summary
 
 ## Scope
-- Base commit (`origin/main`): `5614b1067ae986e96c89fc7e75b765395386ae5b`
-- Validated implementation commit: `4d97f2908c1999a7d56090a639b864a8203569a5`
+- Base commit (`origin/main`): `eb675203e7bc65ffbbf3829956d1fea1a5133b84`
+- Validated implementation commit: `5f0cda89412e94cddc22205ba6cf5c32d238bc13`
 - Branch: `auto/132-dex-tool-bridge`
 - Summary:
-  - Added external dex plugin tool registration and revocation (`registerPlugin`, `revokePluginTool`, `revokePlugin`, `pluginToolKeys`) to `FrozenToolCatalog.kt` with strict `<pluginId>/<toolId>` key validation, `host/` and `mcp/` prefix rejection, `Source.THIRD_PARTY` + `owner = pluginId` attribution, monotonic per-key `generation`, bounded 5-second metadata capture with `Schema202012Validator` checks, per-plugin metadata budget isolation (`HostToolBridgeRoot.kt`), and fail-closed `gate.uninstall` cleanup on failed/timed-out captures.
-  - Added `PluginToolBridge.kt` hooked directly into `PluginRegistrations.tracked` (sharing the same `PluginRegistrations` close gate) and wired into `PluginManager` / `HostPluginContext`: `onEnable` tools activate only after durable `completeStart`, runtime `ctx.register(tool)` captures sequentially per plugin without self-contention, and `Registration.revoke()`, plugin disable, uninstall, or fault isolation (`beginClose`) synchronously remove tools from `FrozenToolCatalog` and `DefinitionGate` immediately.
+  - Added external dex plugin tool registration and revocation (`registerPlugin`, `registerPluginAtomically`, `revokePluginTool`, `revokePlugin`, `pluginToolKeys`) to `FrozenToolCatalog.kt` with strict `<pluginId>/<toolId>` key validation, `host/` and `mcp/` prefix rejection, `Source.THIRD_PARTY` + `owner = pluginId` attribution, monotonic per-key `generation`, bounded 5-second metadata capture with `Schema202012Validator` checks, per-plugin metadata budget isolation (`HostToolBridgeRoot.kt`), and fail-closed `gate.uninstall` cleanup on failed/timed-out captures.
+  - Addressed PR #142 `[REVIEW:RETURN]` (`IC_kwDOVkrS_s8AAAABqn2zzw`):
+    1. Unified registration validity checks (`stillCurrent`) and catalog installation (`gate.install`) inside one atomic commit boundary (`registerPluginAtomically`, strict lock order `PluginRegistrations.lock -> PluginToolBridge.lock -> DefinitionGate`), and revoked in-flight captures immediately so revoked tools never publish, reappear, or execute after `revoke()` returns.
+    2. Distinguished local metadata capture timeout (`MetadataCaptureTimeoutException`, preserving `TimeoutCancellationException` cause) from bridge coroutine cancellation, recording timeout failures and resuming subsequent healthy registrations once the timed-out worker releases its actual slot (`lease.actualExited`).
+    3. Kept temporary metadata capacity exhaustion (`MetadataCapacityUnavailableException`) pending via event-driven slot release notifications (`PluginExecutionBudget.nextSlotRelease`) without marking tools permanently failed or relaxing capacity/timeouts.
+    4. Wired chat bridge invocations (`HostToolExecutionService.dispatchLocked`, `beforeExecution`, `monitor`) into `PluginToolFailureWindow` (shared with `HostPluginContext`), recording each invocation's unique terminal status exactly once and blocking new submissions once quarantined.
   - Exposed active tool progress snapshots from `HostToolExecutionService` (`activeProgress`, `activeProgressSnapshot`) into `ChatState.toolProgress` (`ChatSessionOwner.kt`) and `ChatScreen.kt` `ToolCard`, while preserving idle-timeout reset + 10-minute hard total cap and ledger-backed `env.requestApproval` dynamic risk escalation (`effectiveRisk` persisted before returning `true`; `unattended` denied unless a matching `ALLOW_ALWAYS` grant exists).
 
 ## Automated Validation Executed
@@ -15,9 +19,9 @@
   .\gradlew.bat ":agent-core:test" ":app:verifyUiResources" ":app:testDebugUnitTest" ":app:assembleDebug" ":app:lintDebug" --no-daemon --configuration-cache --configuration-cache-problems=fail "-Pandroid.overridePathCheck=true"
   ```
   - `:agent-core:test`: Passed (`total=579`, `passed=578`, `skipped=1`, `failed=0`).
-  - `:app:verifyUiResources`: Passed (`451` English/Chinese keys; Kotlin PSI + XML checks passed).
-  - `:app:testDebugUnitTest`: Passed (`total=646`, `passed=645`, `skipped=1`, `failed=0`; includes `PluginToolBridgeTest` covering ID/prefix validation, lifecycle sync & immediate `STALE` revocation on `revoke()`/`beginClose()`, `ChatSessionOwner` discovery/execution across `BALANCED` and `STRICT` approval modes + digest invalidation, per-plugin `PluginExecutionBudget` & cross-session `exclusiveResource` leases, `env.progress` idle-timeout reset + hard cap + `ChatState.toolProgress` sync, and `env.requestApproval` durable `effectiveRisk` persistence + `unattended` policy; 1 existing Windows POSIX skip).
-  - `:app:assembleDebug`: Passed (`app-debug.apk` SHA-256: `0c8a94150e05aebe9096a4a466685ac4de895252c518465002e1fb9026442898`).
+  - `:app:verifyUiResources`: Passed (`467` English/Chinese keys; Kotlin PSI + XML checks passed).
+  - `:app:testDebugUnitTest`: Passed (`total=654`, `passed=653`, `skipped=1`, `failed=0`; includes `PluginToolBridgeTest` with 4 new regression tests covering atomic revocation during capture, local metadata timeout vs. cancellation + post-slot-release continuation, temporary capacity exhaustion recovery, and once-per-terminal failure counting + quarantine blocking; 1 existing Windows POSIX skip).
+  - `:app:assembleDebug`: Passed (`app-debug.apk` SHA-256: `53c50b49981d5325e48a6b999118f86b4f2ff60e0e07f6e65c9cf8fb11c44e67`).
   - `:app:lintDebug`: Passed.
   - Configuration cache: Reused cleanly with `--configuration-cache-problems=fail`.
 
