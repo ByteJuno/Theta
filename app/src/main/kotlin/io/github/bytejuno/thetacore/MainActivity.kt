@@ -582,6 +582,7 @@ private fun PluginList(
                 manifest = plugin.manifest,
                 environment = hostEnvironment,
                 onOpenAccessibility = onOpenAccessibility,
+                showAdvisoryNotice = false,
             )
             Text(strings.get(plugin.status))
             Row {
@@ -620,6 +621,7 @@ private fun PluginList(
                 )
             }
         }
+        Text(strings.get(R.string.plugin_env_advisory_notice), style = MaterialTheme.typography.bodySmall)
         io.github.bytejuno.thetacore.hook.HookDiagnosticsPanel()
     }
 }
@@ -661,19 +663,23 @@ private fun PluginManifestEnvironmentSummary(
     manifest: PluginManifest,
     environment: HostEnvironmentStatus,
     onOpenAccessibility: () -> Unit,
+    showAdvisoryNotice: Boolean = true,
 ) {
     val strings = uiStrings()
     val evaluation = manifest.requires.evaluate(environment)
-    Text(strings.get(
-        R.string.package_capabilities,
-        manifest.provides.takeIf { it.isNotEmpty() }?.joinToString() ?: strings.get(R.string.none),
-        manifest.declares.takeIf { it.isNotEmpty() }?.joinToString() ?: strings.get(R.string.none),
-    ))
+    Text(
+        strings.get(
+            R.string.package_capabilities,
+            manifest.provides.takeIf { it.isNotEmpty() }?.joinToString() ?: strings.get(R.string.none),
+            manifest.declares.takeIf { it.isNotEmpty() }?.joinToString() ?: strings.get(R.string.none),
+        ),
+        style = MaterialTheme.typography.bodySmall,
+    )
     if (!evaluation.hasRequirements) {
-        Text(strings.get(R.string.plugin_env_none_required))
+        Text(strings.get(R.string.plugin_env_none_required), style = MaterialTheme.typography.bodySmall)
     } else {
         if (evaluation.isRootFree) {
-            Text(strings.get(R.string.plugin_env_root_free))
+            Text(strings.get(R.string.plugin_env_root_free), style = MaterialTheme.typography.bodySmall)
         }
         val tags = evaluation.checks.map { check ->
             when (check.key) {
@@ -699,25 +705,27 @@ private fun PluginManifestEnvironmentSummary(
                 })
             }
         }
-        Text(tags.joinToString())
+        Text(tags.joinToString(), style = MaterialTheme.typography.bodySmall)
         if (evaluation.missingAccessibility) {
-            Text(strings.get(R.string.plugin_env_accessibility_guide))
+            Text(strings.get(R.string.plugin_env_accessibility_guide), style = MaterialTheme.typography.bodySmall)
             TextButton(onClick = onOpenAccessibility) {
                 Text(strings.get(R.string.plugin_env_open_accessibility))
             }
         }
         when (evaluation.shizukuReadiness) {
-            EnvironmentReadiness.DETECTED_UNVERIFIED -> Text(strings.get(R.string.plugin_env_shizuku_unverified_guide))
-            EnvironmentReadiness.UNAVAILABLE -> Text(strings.get(R.string.plugin_env_shizuku_guide))
+            EnvironmentReadiness.DETECTED_UNVERIFIED -> Text(strings.get(R.string.plugin_env_shizuku_unverified_guide), style = MaterialTheme.typography.bodySmall)
+            EnvironmentReadiness.UNAVAILABLE -> Text(strings.get(R.string.plugin_env_shizuku_guide), style = MaterialTheme.typography.bodySmall)
             EnvironmentReadiness.READY, null -> Unit
         }
         if (evaluation.rootReadiness == EnvironmentReadiness.DETECTED_UNVERIFIED) {
-            Text(strings.get(R.string.plugin_env_root_unverified_guide))
+            Text(strings.get(R.string.plugin_env_root_unverified_guide), style = MaterialTheme.typography.bodySmall)
         }
         if (evaluation.rootReadiness == EnvironmentReadiness.UNAVAILABLE ||
             evaluation.lsposedReadiness == EnvironmentReadiness.UNAVAILABLE) {
-            Text(strings.get(R.string.plugin_env_privileged_guide))
+            Text(strings.get(R.string.plugin_env_privileged_guide), style = MaterialTheme.typography.bodySmall)
         }
     }
-    Text(strings.get(R.string.plugin_env_advisory_notice))
+    if (showAdvisoryNotice) {
+        Text(strings.get(R.string.plugin_env_advisory_notice), style = MaterialTheme.typography.bodySmall)
+    }
 }
