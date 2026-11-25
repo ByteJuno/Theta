@@ -2,7 +2,11 @@ package io.github.bytejuno.thetacore.plugin
 
 import io.github.bytejuno.thetacore.sdk.PluginClosedException
 
-internal data class RegisteredExtension<out T>(val id: String, val value: T)
+internal data class RegisteredExtension<out T>(
+    val id: String,
+    val value: T,
+    val registrationId: Long = 0L,
+)
 
 /** 登记和关闭共用一把锁；资源清理在锁外执行，避免插件回调重入死锁。 */
 internal class PluginRegistrations<T> private constructor(
@@ -18,6 +22,7 @@ internal class PluginRegistrations<T> private constructor(
         ): PluginRegistrations<T> = PluginRegistrations(publish, onEntriesChanged)
     }
     private class Entry<T>(
+        val registrationId: Long,
         val id: String?,
         var value: T?,
         var cleanup: (() -> Unit)?,
@@ -25,13 +30,14 @@ internal class PluginRegistrations<T> private constructor(
 
     private val lock = Any()
     private val entries = mutableListOf<Entry<T>>()
+    private var nextRegistrationId = 0L
     private var closed = false
 
     fun register(id: String, value: T): () -> Unit {
         val entry = synchronized(lock) {
             checkOpen()
             require(entries.none { it.id == id }) { "Duplicate extension id: $id" }
-            Entry(id, value, null).also {
+            Entry(++nextRegistrationId, id, value, null).also {
                 entries += it
                 publishExtensions()
             }
@@ -42,7 +48,7 @@ internal class PluginRegistrations<T> private constructor(
     fun onCleanup(action: () -> Unit): () -> Unit {
         val entry = synchronized(lock) {
             checkOpen()
-            Entry<T>(null, null, action).also { entries += it }
+            Entry<T>(++nextRegistrationId, null, null, action).also { entries += it }
         }
         return { revoke(entry) }
     }
@@ -93,7 +99,7 @@ internal class PluginRegistrations<T> private constructor(
         val snapshot = entries.mapNotNull { entry ->
             val id = entry.id ?: return@mapNotNull null
             val value = entry.value ?: return@mapNotNull null
-            RegisteredExtension(id, value)
+            RegisteredExtension(id, value, entry.registrationId)
         }
         publish(snapshot.map { it.value })
         onEntriesChanged(snapshot, closed)

@@ -4,10 +4,14 @@ import io.github.bytejuno.thetacore.sdk.Extension
 import io.github.bytejuno.thetacore.sdk.Tool
 import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -44,9 +48,13 @@ internal fun validateVersion(version: String) {
  * `PluginRegistrations.lock` -> `PluginToolBridge.lock` -> `DefinitionGate` -> `PluginExecutionBudget.gate`.
  *
  * Revocations, plugin disable/uninstall, and fault-boundary closures synchronously remove tools
- * from [FrozenToolCatalog] and `DefinitionGate` immediately. New tool metadata captures run
- * sequentially per plugin on [scope] so multi-tool plugins never contend for their own single
- * per-plugin metadata budget slot, while independent plugins capture concurrently.
+ * from [FrozenToolCatalog] and `DefinitionGate` immediately. Each registration carries a unique
+ * monotonic `registrationId` so stale captures or failures from an earlier registration can never
+ * publish into or poison a re-registration of the same [Tool] object instance.
+ *
+ * Background slot-release / actual-exit waits never block host startup (`attachCatalog`) or
+ * `PluginManager` operation locks (`awaitInitialPass`), while still resuming pending registrations
+ * once capacity frees.
  */
 internal class PluginToolBridge(
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
@@ -60,10 +68,13 @@ internal class PluginToolBridge(
         var active: Boolean = false,
         var closed: Boolean = false,
         var tools: List<RegisteredExtension<Tool>> = emptyList(),
-        val registered: MutableMap<String, Tool> = linkedMapOf(),
-        val failed: MutableMap<String, Tool> = linkedMapOf(),
+        // Keyed strictly by unique registrationId so re-registering the same Tool instance gets a clean slate.
+        val registered: MutableMap<Long, String> = linkedMapOf(),
+        val failed: MutableSet<Long> = linkedSetOf(),
         var inFlight: RegisteredExtension<Tool>? = null,
         var syncJob: Job? = null,
+        // Completes when syncJob finishes OR parks awaiting background slot release / actual exit.
+        var initialPassSettled: CompletableDeferred<Unit> = CompletableDeferred(Unit),
     )
 
     private val lock = Any()
@@ -110,7 +121,7 @@ internal class PluginToolBridge(
             if (binding.closed) return
             binding.tools = entries.mapNotNull { entry ->
                 val tool = entry.value as? Tool ?: return@mapNotNull null
-                RegisteredExtension(entry.id, tool)
+                RegisteredExtension(entry.id, tool, entry.registrationId)
             }
             if (binding.active) {
                 reconcileLocked(binding)
@@ -138,7 +149,11 @@ internal class PluginToolBridge(
         }
     }
 
-    /** Attaches the process-wide [FrozenToolCatalog] and awaits initial sync of already-active plugins. */
+    /**
+     * Attaches the process-wide [FrozenToolCatalog] and awaits only the non-blocking initial pass
+     * of already-active plugins (never blocking host startup on non-cooperative worker exit or
+     * background capacity waits).
+     */
     suspend fun attachCatalog(target: FrozenToolCatalog) {
         val activeIds = synchronized(lock) {
             catalog = target
@@ -147,10 +162,22 @@ internal class PluginToolBridge(
                 .onEach { reconcileLocked(it) }
                 .map { it.pluginId }
         }
-        activeIds.forEach { awaitPending(it) }
+        coroutineScope {
+            activeIds.map { id -> async { awaitInitialPass(id) } }.awaitAll()
+        }
     }
 
-    /** Awaits currently scheduled metadata captures for [pluginId] (bounded by catalog capture timeout). */
+    /**
+     * Awaits the initial registration attempt for [pluginId] without blocking on background
+     * slot-release / actual-exit waits. Used by host startup and plugin enable paths so a
+     * non-cooperative metadata timeout never stalls host initialization or plugin management locks.
+     */
+    suspend fun awaitInitialPass(pluginId: String) {
+        val settled = synchronized(lock) { plugins[pluginId]?.initialPassSettled } ?: return
+        settled.await()
+    }
+
+    /** Awaits full draining of pending metadata captures for [pluginId] (including slot-release retries). */
     suspend fun awaitPending(pluginId: String) {
         while (true) {
             val job = synchronized(lock) { plugins[pluginId]?.syncJob } ?: return
@@ -167,43 +194,43 @@ internal class PluginToolBridge(
         binding.inFlight = null
         binding.syncJob?.cancel()
         binding.syncJob = null
+        binding.initialPassSettled.complete(Unit)
         catalog?.revokePlugin(binding.pluginId)
     }
 
     private fun reconcileLocked(binding: PluginBinding) {
         val target = catalog ?: return
-        val desired = linkedMapOf<String, Tool>()
-        binding.tools.forEach { entry ->
-            desired[entry.id] = entry.value
-        }
-        val revokedIds = linkedSetOf<String>()
+        val desiredByRegId = binding.tools.associateBy { it.registrationId }
+        val revokedToolIds = linkedSetOf<String>()
+
         val removedRegistered = binding.registered.entries
-            .filter { (toolId, tool) -> desired[toolId] !== tool }
-            .map { it.key }
-        removedRegistered.forEach { toolId ->
-            binding.registered.remove(toolId)
-            revokedIds += toolId
+            .filter { (regId, _) -> regId !in desiredByRegId }
+            .map { it.key to it.value }
+        removedRegistered.forEach { (regId, toolId) ->
+            binding.registered.remove(regId)
+            revokedToolIds += toolId
         }
         binding.inFlight?.let { activeCapture ->
-            if (desired[activeCapture.id] !== activeCapture.value) {
+            if (activeCapture.registrationId !in desiredByRegId) {
                 binding.inFlight = null
-                revokedIds += activeCapture.id
+                revokedToolIds += activeCapture.id
             }
         }
-        revokedIds.forEach { toolId ->
-            if (validPluginToolId(toolId)) {
+        val activeRegisteredToolIds = binding.registered.values.toSet()
+        revokedToolIds.forEach { toolId ->
+            if (toolId !in activeRegisteredToolIds && validPluginToolId(toolId)) {
                 target.revoke("${binding.pluginId}/$toolId")
             }
         }
-        val removedFailed = binding.failed.entries
-            .filter { (toolId, tool) -> desired[toolId] !== tool }
-            .map { it.key }
-        removedFailed.forEach { binding.failed.remove(it) }
 
-        val hasPending = desired.any { (toolId, tool) ->
-            binding.registered[toolId] !== tool && binding.failed[toolId] !== tool
+        val removedFailed = binding.failed.filter { it !in desiredByRegId }
+        binding.failed.removeAll(removedFailed.toSet())
+
+        val hasPending = binding.tools.any { entry ->
+            entry.registrationId !in binding.registered && entry.registrationId !in binding.failed
         }
         if (hasPending && binding.syncJob == null) {
+            binding.initialPassSettled = CompletableDeferred()
             binding.syncJob = scope.launch { drainPluginRegistrations(binding, target) }
         }
     }
@@ -215,14 +242,16 @@ internal class PluginToolBridge(
                     if (binding.closed || !binding.active || catalog !== target) {
                         binding.inFlight = null
                         binding.syncJob = null
+                        binding.initialPassSettled.complete(Unit)
                         return
                     }
                     val candidate = binding.tools.firstOrNull { entry ->
-                        binding.registered[entry.id] !== entry.value && binding.failed[entry.id] !== entry.value
+                        entry.registrationId !in binding.registered && entry.registrationId !in binding.failed
                     }
                     if (candidate == null) {
                         binding.inFlight = null
                         binding.syncJob = null
+                        binding.initialPassSettled.complete(Unit)
                         return
                     }
                     binding.inFlight = candidate
@@ -230,9 +259,9 @@ internal class PluginToolBridge(
                 }
                 if (!validPluginToolId(next.id)) {
                     synchronized(lock) {
-                        if (binding.inFlight === next) binding.inFlight = null
-                        if (!binding.closed && binding.tools.any { it.id == next.id && it.value === next.value }) {
-                            binding.failed[next.id] = next.value
+                        if (binding.inFlight?.registrationId == next.registrationId) binding.inFlight = null
+                        if (!binding.closed && binding.tools.any { it.registrationId == next.registrationId }) {
+                            binding.failed += next.registrationId
                         }
                     }
                     onRegistrationError(binding.pluginId, next.id, IllegalArgumentException("Invalid plugin tool id"))
@@ -250,35 +279,40 @@ internal class PluginToolBridge(
                             val stillCurrent = !binding.closed &&
                                 binding.active &&
                                 catalog === target &&
-                                binding.tools.any { it.id == next.id && it.value === next.value }
+                                binding.tools.any { it.registrationId == next.registrationId }
                             if (!stillCurrent) {
-                                if (binding.inFlight === next) binding.inFlight = null
+                                if (binding.inFlight?.registrationId == next.registrationId) binding.inFlight = null
                                 return@synchronized null
                             }
                             install().also {
-                                binding.registered[next.id] = next.value
-                                if (binding.inFlight === next) binding.inFlight = null
+                                binding.registered[next.registrationId] = next.id
+                                if (binding.inFlight?.registrationId == next.registrationId) binding.inFlight = null
                             }
                         }
                     }
                     synchronized(lock) {
-                        if (binding.inFlight === next) binding.inFlight = null
+                        if (binding.inFlight?.registrationId == next.registrationId) binding.inFlight = null
                     }
                 } catch (capacity: MetadataCapacityUnavailableException) {
                     val shouldRetry = synchronized(lock) {
-                        if (binding.inFlight === next) binding.inFlight = null
+                        if (binding.inFlight?.registrationId == next.registrationId) binding.inFlight = null
+                        // Do not block host initialization or plugin operations while awaiting slot release.
+                        binding.initialPassSettled.complete(Unit)
                         !binding.closed && binding.active && catalog === target && !target.isBudgetClosed()
                     }
                     if (!shouldRetry) return
                     capacity.nextRelease.await()
                 } catch (timeout: MetadataCaptureTimeoutException) {
                     val hasMorePending = synchronized(lock) {
-                        if (binding.inFlight === next) binding.inFlight = null
-                        if (!binding.closed && binding.tools.any { it.id == next.id && it.value === next.value }) {
-                            binding.failed[next.id] = next.value
+                        if (binding.inFlight?.registrationId == next.registrationId) binding.inFlight = null
+                        if (!binding.closed && binding.tools.any { it.registrationId == next.registrationId }) {
+                            binding.failed += next.registrationId
                         }
+                        // Unblock host startup and plugin management locks immediately after timeout;
+                        // background slot-release continuation proceeds asynchronously.
+                        binding.initialPassSettled.complete(Unit)
                         !binding.closed && binding.active && catalog === target && binding.tools.any { entry ->
-                            binding.registered[entry.id] !== entry.value && binding.failed[entry.id] !== entry.value
+                            entry.registrationId !in binding.registered && entry.registrationId !in binding.failed
                         }
                     }
                     onRegistrationError(binding.pluginId, next.id, timeout)
@@ -290,17 +324,17 @@ internal class PluginToolBridge(
                         throw cancelled
                     }
                     synchronized(lock) {
-                        if (binding.inFlight === next) binding.inFlight = null
-                        if (!binding.closed && binding.tools.any { it.id == next.id && it.value === next.value }) {
-                            binding.failed[next.id] = next.value
+                        if (binding.inFlight?.registrationId == next.registrationId) binding.inFlight = null
+                        if (!binding.closed && binding.tools.any { it.registrationId == next.registrationId }) {
+                            binding.failed += next.registrationId
                         }
                     }
                     onRegistrationError(binding.pluginId, next.id, cancelled)
                 } catch (error: Throwable) {
                     synchronized(lock) {
-                        if (binding.inFlight === next) binding.inFlight = null
-                        if (!binding.closed && binding.tools.any { it.id == next.id && it.value === next.value }) {
-                            binding.failed[next.id] = next.value
+                        if (binding.inFlight?.registrationId == next.registrationId) binding.inFlight = null
+                        if (!binding.closed && binding.tools.any { it.registrationId == next.registrationId }) {
+                            binding.failed += next.registrationId
                         }
                     }
                     onRegistrationError(binding.pluginId, next.id, error)
@@ -309,6 +343,7 @@ internal class PluginToolBridge(
         } finally {
             synchronized(lock) {
                 binding.inFlight = null
+                binding.initialPassSettled.complete(Unit)
                 if (binding.syncJob === coroutineContext[Job]) {
                     binding.syncJob = null
                 }

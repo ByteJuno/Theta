@@ -670,7 +670,7 @@ internal class PluginManager(context: Context) {
             )
             if (!published) handleFault(plugin, runtime)
             else {
-                pluginToolBridge.awaitPending(manifest.id)
+                pluginToolBridge.awaitInitialPass(manifest.id)
                 try {
                     plugin.updateObservation = withContext(Dispatchers.IO) { updates.observation(manifest.id) }
                 } catch (error: Exception) {

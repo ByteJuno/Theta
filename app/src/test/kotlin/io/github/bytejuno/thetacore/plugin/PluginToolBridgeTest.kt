@@ -21,6 +21,7 @@ import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -1221,6 +1222,210 @@ class PluginToolBridgeTest {
             budget.close()
             store?.close()
             root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun attachCatalogAndOperationLockDoNotHangOnNonCooperativeMetadataTimeout(): Unit = runBlocking {
+        val metadataBudget = PluginExecutionBudget(processSlots = 4, perPluginSlots = 1, cancellationThreads = 2)
+        val owner = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val allowHungExitA = CountDownLatch(1)
+        val allowHungExitC = CountDownLatch(1)
+        try {
+            val gate = DefinitionGate()
+            val validator = Schema202012Validator()
+            val catalog = FrozenToolCatalog(
+                gate = gate,
+                budget = metadataBudget,
+                owner = owner,
+                validator = validator,
+                metadataCaptureTimeoutMs = 200L,
+            )
+            val errors = CopyOnWriteArrayList<Pair<String, Throwable>>()
+            val bridge = PluginToolBridge(owner) { _, toolId, error -> errors += toolId to error }
+
+            // Part A: Host startup (attachCatalog) must become available even when plugin A has a
+            // non-cooperative timed-out metadata worker and another pending tool, while plugin B succeeds.
+            val pluginA = "com.example.hungstart"
+            val tokenA = Any()
+            val hungToolA = object : Tool {
+                override val id = "hung_a"
+                override val spec: ToolSpec
+                    get() {
+                        while (!allowHungExitA.await(20, TimeUnit.MILLISECONDS)) {
+                            // non-cooperative wait
+                        }
+                        return ToolSpec("hung_a", "Hung", emptySchema, risk = ToolRisk.READ)
+                    }
+                override suspend fun call(args: JsonObject, env: ToolEnv): ToolResult = ToolResult("never")
+            }
+            val queuedToolA = simpleTool("queued_a", risk = ToolRisk.READ)
+            bridge.attachPlugin(pluginA, "1", tokenA)
+            val regsA = PluginRegistrations.tracked<Extension> { entries, closed ->
+                bridge.onRegistrationsChanged(pluginA, tokenA, entries, closed)
+            }
+            regsA.register(hungToolA.id, hungToolA)
+            regsA.register(queuedToolA.id, queuedToolA)
+            bridge.activatePlugin(pluginA, tokenA)
+
+            val pluginB = "com.example.faststart"
+            val tokenB = Any()
+            val fastToolB = simpleTool("fast_b", risk = ToolRisk.READ)
+            bridge.attachPlugin(pluginB, "1", tokenB)
+            val regsB = PluginRegistrations.tracked<Extension> { entries, closed ->
+                bridge.onRegistrationsChanged(pluginB, tokenB, entries, closed)
+            }
+            regsB.register(fastToolB.id, fastToolB)
+            bridge.activatePlugin(pluginB, tokenB)
+
+            // attachCatalog MUST return promptly after hung_a's 200ms timeout without waiting for allowHungExitA.
+            withTimeout(2_000) {
+                bridge.attachCatalog(catalog)
+            }
+            assertEquals(setOf("$pluginB/fast_b"), catalog.pluginToolKeys(pluginB))
+            assertTrue(errors.any { it.first == "hung_a" && it.second is MetadataCaptureTimeoutException })
+            assertTrue(catalog.pluginToolKeys(pluginA).isEmpty())
+
+            // Releasing hung_a's worker later still lets queued_a register in the background.
+            allowHungExitA.countDown()
+            bridge.awaitPending(pluginA)
+            assertEquals(setOf("$pluginA/queued_a"), catalog.pluginToolKeys(pluginA))
+
+            // Part B: Simulated PluginManager operation lock + disable/uninstall must NEVER block
+            // waiting for a non-cooperative metadata worker to exit.
+            val operations = kotlinx.coroutines.sync.Mutex()
+            val pluginC = "com.example.hungop"
+            val tokenC = Any()
+            val hungToolC = object : Tool {
+                override val id = "hung_c"
+                override val spec: ToolSpec
+                    get() {
+                        while (!allowHungExitC.await(20, TimeUnit.MILLISECONDS)) {
+                            // non-cooperative wait
+                        }
+                        return ToolSpec("hung_c", "Hung C", emptySchema, risk = ToolRisk.READ)
+                    }
+                override suspend fun call(args: JsonObject, env: ToolEnv): ToolResult = ToolResult("never")
+            }
+            val queuedToolC = simpleTool("queued_c", risk = ToolRisk.READ)
+            val regsC = PluginRegistrations.tracked<Extension> { entries, closed ->
+                bridge.onRegistrationsChanged(pluginC, tokenC, entries, closed)
+            }
+            withTimeout(2_000) {
+                operations.withLock {
+                    bridge.attachPlugin(pluginC, "1", tokenC)
+                    regsC.register(hungToolC.id, hungToolC)
+                    regsC.register(queuedToolC.id, queuedToolC)
+                    bridge.activatePlugin(pluginC, tokenC)
+                    bridge.awaitInitialPass(pluginC)
+                }
+            }
+            // Operation mutex is free and disable/uninstall completes immediately while hung_c is still stuck.
+            withTimeout(1_000) {
+                operations.withLock {
+                    regsC.beginClose()
+                    bridge.deactivatePlugin(pluginC, tokenC)
+                }
+            }
+            assertTrue(catalog.pluginToolKeys(pluginC).isEmpty())
+            assertTrue(catalog.freeze("run-after-hung-disable").values.none { it.owner == pluginC })
+        } finally {
+            allowHungExitA.countDown()
+            allowHungExitC.countDown()
+            owner.cancel()
+            metadataBudget.close()
+        }
+    }
+
+    @Test
+    fun sameToolInstanceReregistrationIsNotPoisonedByStaleFailureOrPublish(): Unit = runBlocking {
+        val metadataBudget = PluginExecutionBudget(processSlots = 4, perPluginSlots = 1, cancellationThreads = 2)
+        val owner = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            val gate = DefinitionGate()
+            val validator = Schema202012Validator()
+            val catalog = FrozenToolCatalog(gate, metadataBudget, owner, validator)
+            val bridge = PluginToolBridge(owner)
+            bridge.attachCatalog(catalog)
+
+            val pluginId = "com.example.reregister"
+            val token = Any()
+            bridge.attachPlugin(pluginId, "1", token)
+            val registrations = PluginRegistrations.tracked<Extension> { entries, closed ->
+                bridge.onRegistrationsChanged(pluginId, token, entries, closed)
+            }
+            bridge.activatePlugin(pluginId, token)
+
+            // Case A: Stale failure from registration #1 must NOT poison re-registration #2 of the SAME Tool object.
+            val failCaptureCount = AtomicInteger()
+            val firstFailEntered = CompletableDeferred<Unit>()
+            val releaseFirstFail = CountDownLatch(1)
+            val reusedFailTool = object : Tool {
+                override val id = "reused_fail"
+                override val spec: ToolSpec
+                    get() {
+                        val attempt = failCaptureCount.incrementAndGet()
+                        if (attempt == 1) {
+                            firstFailEntered.complete(Unit)
+                            releaseFirstFail.await(5, TimeUnit.SECONDS)
+                            throw IllegalStateException("stale failure from reg 1")
+                        }
+                        return ToolSpec("reused_fail", "Fresh registration 2", emptySchema, risk = ToolRisk.READ)
+                    }
+                override suspend fun call(args: JsonObject, env: ToolEnv): ToolResult = ToolResult("ok")
+            }
+
+            val revoke1 = registrations.register(reusedFailTool.id, reusedFailTool)
+            firstFailEntered.await()
+            revoke1()
+            val revoke2 = registrations.register(reusedFailTool.id, reusedFailTool)
+            releaseFirstFail.countDown()
+            bridge.awaitPending(pluginId)
+
+            assertEquals(setOf("$pluginId/reused_fail"), catalog.pluginToolKeys(pluginId))
+            val frozenA = catalog.freeze("run-reregister-a")
+            assertEquals(
+                "Fresh registration 2",
+                frozenA.values.single { it.toolKey == "$pluginId/reused_fail" }.description,
+            )
+            revoke2()
+
+            // Case B: Stale successful capture from registration #1 must NOT publish stale metadata under reg #2.
+            val publishCaptureCount = AtomicInteger()
+            val firstPublishEntered = CompletableDeferred<Unit>()
+            val releaseFirstPublish = CountDownLatch(1)
+            val reusedPublishTool = object : Tool {
+                override val id = "reused_pub"
+                override val spec: ToolSpec
+                    get() {
+                        val attempt = publishCaptureCount.incrementAndGet()
+                        if (attempt == 1) {
+                            firstPublishEntered.complete(Unit)
+                            releaseFirstPublish.await(5, TimeUnit.SECONDS)
+                            return ToolSpec("reused_pub", "Stale registration 1", emptySchema, risk = ToolRisk.READ)
+                        }
+                        return ToolSpec("reused_pub", "Fresh registration 2", emptySchema, risk = ToolRisk.READ)
+                    }
+                override suspend fun call(args: JsonObject, env: ToolEnv): ToolResult = ToolResult("ok")
+            }
+
+            val revokePub1 = registrations.register(reusedPublishTool.id, reusedPublishTool)
+            firstPublishEntered.await()
+            revokePub1()
+            val revokePub2 = registrations.register(reusedPublishTool.id, reusedPublishTool)
+            releaseFirstPublish.countDown()
+            bridge.awaitPending(pluginId)
+
+            assertEquals(setOf("$pluginId/reused_pub"), catalog.pluginToolKeys(pluginId))
+            val frozenB = catalog.freeze("run-reregister-b")
+            assertEquals(
+                "Fresh registration 2",
+                frozenB.values.single { it.toolKey == "$pluginId/reused_pub" }.description,
+            )
+            revokePub2()
+        } finally {
+            owner.cancel()
+            metadataBudget.close()
         }
     }
 
