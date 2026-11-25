@@ -72,7 +72,7 @@ internal class ChatSessionOwner(
     private val imageAttachments: ImageAttachments? = null,
     private val presence: ChatTaskPresence = ChatTaskPresence.None,
     private val targetWithMediaForRun: ((OpenAiRunSnapshot, MediaContentReader) -> ModelTarget)? = null,
-    private val userImageValidator: (ByteArray) -> ValidatedUserImage = ::inspectUserImage,
+    private val userImageValidator: (ByteArray) -> ValidatedUserImage = ::validateAndDecodeAndroidUserImage,
 ) {
     private val mutable = MutableStateFlow(ChatState())
     val state = mutable.asStateFlow()

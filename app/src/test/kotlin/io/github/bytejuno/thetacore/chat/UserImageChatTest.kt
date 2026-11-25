@@ -15,7 +15,6 @@ import java.io.ByteArrayInputStream
 import java.io.File
 import java.net.InetAddress
 import java.net.InetSocketAddress
-import java.nio.ByteBuffer
 import java.nio.file.Files
 import java.util.Base64
 import java.util.concurrent.atomic.AtomicInteger
@@ -30,69 +29,20 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class UserImageChatTest {
-    private fun pngHeader(width: Int, height: Int): ByteArray = ByteBuffer.allocate(33).apply {
-        put(byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A))
-        putInt(13)
-        put("IHDR".toByteArray(Charsets.US_ASCII))
-        putInt(width)
-        putInt(height)
-        put(8)
-        put(2)
-        put(0)
-        put(0)
-        put(0)
-        putInt(0)
-    }.array()
-
-    private fun jpegHeader(width: Int, height: Int): ByteArray = ByteBuffer.allocate(20).apply {
-        put(0xFF.toByte()); put(0xD8.toByte()) // SOI
-        put(0xFF.toByte()); put(0xC0.toByte()) // SOF0
-        putShort(11)
-        put(8)
-        putShort(height.toShort())
-        putShort(width.toShort())
-        put(3)
-        put(byteArrayOf(1, 0x11, 0))
-    }.array()
-
-    private fun webpVp8xHeader(width: Int, height: Int): ByteArray {
-        val b = ByteArray(30)
-        "RIFF".toByteArray().copyInto(b, 0)
-        "WEBP".toByteArray().copyInto(b, 8)
-        "VP8X".toByteArray().copyInto(b, 12)
-        val w = width - 1
-        val h = height - 1
-        b[24] = (w and 0xFF).toByte(); b[25] = ((w ushr 8) and 0xFF).toByte(); b[26] = ((w ushr 16) and 0xFF).toByte()
-        b[27] = (h and 0xFF).toByte(); b[28] = ((h ushr 8) and 0xFF).toByte(); b[29] = ((h ushr 16) and 0xFF).toByte()
-        return b
-    }
+    private val samplePng = byteArrayOf(
+        0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+        0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+        0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02,
+        0x08, 0x02, 0x00, 0x00, 0x00, 0xFD.toByte(), 0xD4.toByte(), 0x9A.toByte(), 0x73,
+    )
 
     @Test
-    fun inspectUserImageAcceptsValidPngJpegWebpAndRejectsCorruptOversizedAndIllegalMime() {
-        val png = inspectUserImage(pngHeader(800, 600))
-        assertEquals("image/png", png.mimeType)
-        assertEquals(800, png.width)
-        assertEquals(600, png.height)
-
-        val jpg = inspectUserImage(jpegHeader(1024, 768))
-        assertEquals("image/jpeg", jpg.mimeType)
-        assertEquals(1024, jpg.width)
-        assertEquals(768, jpg.height)
-
-        val webp = inspectUserImage(webpVp8xHeader(640, 480))
-        assertEquals("image/webp", webp.mimeType)
-        assertEquals(640, webp.width)
-        assertEquals(480, webp.height)
-
-        // Illegal MIME (GIF / SVG / plain text)
-        assertThrows(IllegalArgumentException::class.java) { inspectUserImage("GIF89a\u0001\u0000\u0001\u0000".toByteArray()) }
-        assertThrows(IllegalArgumentException::class.java) { inspectUserImage("<svg></svg>".toByteArray()) }
-        // Corrupt/truncated header
-        assertThrows(IllegalArgumentException::class.java) { inspectUserImage(byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte())) }
-        // Oversized dimensions (> 4096px edge and > 4 MP total pixels)
-        assertThrows(IllegalArgumentException::class.java) { inspectUserImage(pngHeader(4097, 100)) }
-        assertThrows(IllegalArgumentException::class.java) { inspectUserImage(pngHeader(3000, 2000)) }
-        // Oversized byte stream (> 8 MiB)
+    fun readBoundedImageStreamEnforcesByteLimitAndNonEmptyStream() {
+        val ok = readBoundedImageStream(ByteArrayInputStream(samplePng))
+        assertArrayEquals(samplePng, ok)
+        assertThrows(IllegalArgumentException::class.java) {
+            readBoundedImageStream(ByteArrayInputStream(ByteArray(0)))
+        }
         assertThrows(IllegalArgumentException::class.java) {
             readBoundedImageStream(ByteArrayInputStream(ByteArray(ImageLimits.BYTES + 1)))
         }
@@ -114,7 +64,10 @@ class UserImageChatTest {
             assertFalse(store.readSettings().compat.supportsImageInput)
             assertFalse(ProviderSettingsForm.loaded(store.readSettings()).supportsImageInput)
 
-            assertEquals(io.github.bytejuno.thetacore.uiText(R.string.chat_image_input_disabled), diagnosticReason("Image input disabled for active model"))
+            assertEquals(
+                io.github.bytejuno.thetacore.uiText(R.string.chat_image_input_disabled),
+                diagnosticReason("Image input disabled for active model"),
+            )
         } finally {
             dir.deleteRecursively()
         }
@@ -167,27 +120,31 @@ class UserImageChatTest {
                 },
                 targetForRun = sharedTargetFactory(transport),
                 targetWithMediaForRun = sharedTargetWithMediaFactory(transport),
-                userImageValidator = ::inspectUserImage,
+                // Pure-JVM test injects a deterministic validator seam instead of Android ImageDecoder.
+                userImageValidator = { bytes ->
+                    require(bytes.contentEquals(samplePng)) { "Invalid test image" }
+                    ValidatedUserImage("image/png", 2, 2, bytes)
+                },
             )
             owner.open().join()
             val sessionId = requireNotNull(owner.state.value.sessionId)
-            val validPng = pngHeader(120, 80)
 
             // 1. supportsImageInput=false -> rejected locally before network call, history untouched!
-            owner.send("Check this", listOf(PendingUserImage(mimeType = "image/png", bytes = validPng))).join()
+            owner.send("Check this", listOf(PendingUserImage(mimeType = "image/png", bytes = samplePng))).join()
             assertEquals(R.string.chat_image_input_disabled, owner.state.value.error)
             assertEquals(0, requestCount.get())
             assertTrue(owner.state.value.messages.isEmpty())
             assertEquals(0L, owner.state.value.acceptedMessages)
 
-            // 2. Enable supportsImageInput -> invalid image rejected locally!
+            // 2. Enable supportsImageInput -> invalid image rejected by validator before network or storage!
             allowImages = true
             owner.send("Bad img", listOf(PendingUserImage(mimeType = "image/png", bytes = "not-an-image".toByteArray()))).join()
             assertEquals(R.string.chat_image_invalid, owner.state.value.error)
             assertEquals(0, requestCount.get())
+            assertTrue(owner.state.value.messages.isEmpty())
 
             // 3. Valid text + image sends full OpenAI image_url payload over loopback HTTP!
-            owner.send("Explain this", listOf(PendingUserImage(mimeType = "image/png", bytes = validPng))).join()
+            owner.send("Explain this", listOf(PendingUserImage(mimeType = "image/png", bytes = samplePng))).join()
             withTimeout(10_000) {
                 while (owner.state.value.active) delay(20)
             }
@@ -197,14 +154,14 @@ class UserImageChatTest {
             val content = reqJson.getValue("messages").jsonArray[0].jsonObject.getValue("content").jsonArray
             assertEquals("Explain this", content[0].jsonObject.getValue("text").jsonPrimitive.content)
             assertEquals(
-                "data:image/png;base64,${Base64.getEncoder().encodeToString(validPng)}",
+                "data:image/png;base64,${Base64.getEncoder().encodeToString(samplePng)}",
                 content[1].jsonObject.getValue("image_url").jsonObject.getValue("url").jsonPrimitive.content,
             )
 
             // Stored user image is readable for current session and removed on session deletion!
             val userMsg = owner.state.value.messages.first()
             val mediaPart = userMsg.parts.filterIsInstance<ContentPart.Media>().single()
-            assertArrayEquals(validPng, owner.userImage(sessionId, mediaPart.blob.id))
+            assertArrayEquals(samplePng, owner.userImage(sessionId, mediaPart.blob.id))
 
             owner.deleteCurrentSession().join()
             assertNull(agentStore.privateImages.readUserImage(sessionId, mediaPart.blob.id))

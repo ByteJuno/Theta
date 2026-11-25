@@ -69,6 +69,7 @@ class AgentRunLoop(
     private var cacheDisabled = false
     private var summaryFailed = false
     private var persistedPause: String? = null
+    private var localMediaFailure: String? = null
     private var activeInputCount = 0
     private var admissionPending = false
     private var accountingActive = false
@@ -147,12 +148,23 @@ class AgentRunLoop(
             }
         }
         if (reconciled && saved?.pauseClass in setOf("ADMITTED", "SUMMARY_RESERVED", "REVIEW")) admissionPending = true
-        val policy = contextPolicy ?: return
+        val policy = contextPolicy
+        if (policy == null) {
+            if (hasUnsupportedMedia(target, config.model, source.messages)) {
+                localMediaFailure = "Image input disabled for active model"
+            }
+            return
+        }
         require(policy.priorMessageCount <= source.messages.size)
         validateHistorySequence(source.messages.subList(0, policy.priorMessageCount), history !is SqliteRunHistory)
         validateHistorySequence(source.messages.subList(policy.priorMessageCount, source.messages.size), history !is SqliteRunHistory)
         require(policy.resumeCheckpointId == null && policy.readmitBudgetCheckpointId == null || disk != null) { "Continuation requires persistent history" }
-        if (disk == null) return
+        if (disk == null) {
+            if (hasUnsupportedMedia(target, config.model, source.messages)) {
+                localMediaFailure = "Image input disabled for active model"
+            }
+            return
+        }
         if (policy.readmitBudgetCheckpointId != null) {
             require(saved != null && saved.id == policy.readmitBudgetCheckpointId && saved.kind == "PAUSED" &&
                 saved.pauseClass == "BUDGET" && !saved.serverUnresolved)
@@ -162,12 +174,19 @@ class AgentRunLoop(
             require(saved.budgetKey != budgetKey()) { "Choose a changed window or summary configuration" }
             val records = tools.currentCheckpointRecords(sourceRecords)
             require(records.map { it.atLedgerPrecision() } == saved.ledger.map { it.atLedgerPrecision() } && !tools.checkpointBlocked(records))
+            val existingView = loadReusableView(disk, source, policy, sourceRecords)
+            val effectiveMessages = existingView?.messages(source.messages) ?: source.messages
+            val rejectedReadmit = saved.reason.contains("CONTEXT_TOO_LONG") ||
+                saved.reason == "Truncated response; checkpoint required"
+            if (isDefiniteMediaRejection(source, effectiveMessages, policy, existingView != null, rejectedReadmit)) {
+                localMediaFailure = "Image input disabled for active model"
+                return
+            }
             disk.saveCheckpoint(saved.copy(pauseClass = "ADMITTED", reason = "Budget readmission reserved"))
             admissionPending = true
             // Both a rejected input and an output that exhausted context require a smaller
             // request view before another generation. Keep recognizing persisted checkpoints.
-            rejectedContextReadmission = saved.reason.contains("CONTEXT_TOO_LONG") ||
-                saved.reason == "Truncated response; checkpoint required"
+            rejectedContextReadmission = rejectedReadmit
         }
         if (policy.resumeCheckpointId != null) {
             require(saved != null && saved.id == policy.resumeCheckpointId && saved.kind == "CONTINUATION")
@@ -176,30 +195,73 @@ class AgentRunLoop(
             require(matches(saved, source, settingsKey(target.id, config, target.provider.contextConfigurationKey()))) { "Stale checkpoint or changed run settings" }
             val records = tools.currentCheckpointRecords(sourceRecords)
             require(records.map { it.atLedgerPrecision() } == saved.ledger.map { it.atLedgerPrecision() } && !tools.checkpointBlocked(records))
+            val resumedView = saved.copy(kind = "VIEW", nextRunId = null)
+            if (hasUnsupportedMedia(target, config.model, resumedView.messages(source.messages))) {
+                localMediaFailure = "Image input disabled for active model"
+                return
+            }
             // Counter restoration above uses this checkpoint only for legacy sessions.
             // The continuation's initial summary is a stable view; future appends keep it valid.
-            contextView = saved.copy(kind = "VIEW", nextRunId = null)
+            contextView = resumedView
             // Consume admission before submission. A crash must not allow the same continuation
             // token to replay work whose response may never have reached history.
             disk.saveCheckpoint(saved.copy(kind = "PAUSED", nextRunId = null, summary = null, pauseClass = "ADMITTED",
                 reason = "Continuation admitted; reconcile journal before another attempt"))
             admissionPending = true
         } else {
-            val view = disk.loadView() ?: saved?.takeIf { it.kind == "VIEW" }
-            if (view != null && view.sourceCount <= policy.priorMessageCount &&
-                view.catalog == tools.definitions.sortedBy { it.modelName } &&
-                matches(view, source, settingsKey(target.id, config, target.provider.contextConfigurationKey()))) {
-                val records = tools.currentCheckpointRecords(sourceRecords)
-                // Ordinary prior-history compaction (2.11) is not checkpoint continuation: after
-                // actual exit and a recorded decision, the ledger keeps enforcing UNKNOWN approvals.
-                if (tools.compactionBlocked(records)) return
-                val durableRecords = records.map { it.atLedgerPrecision() }.associateBy { it.callId }
-                // A derived view whose ledger snapshot no longer matches (e.g. late exit evidence)
-                // is stale, not a session lock: fall back to raw history, which may re-compact.
-                if (view.ledger.any { old -> durableRecords[old.callId] != old.atLedgerPrecision() }) return
+            val view = loadReusableView(disk, source, policy, sourceRecords)
+            if (view != null) {
                 contextView = view
             }
+            if (policy.readmitBudgetCheckpointId == null) {
+                val effectiveMessages = view?.messages(source.messages) ?: source.messages
+                if (isDefiniteMediaRejection(source, effectiveMessages, policy, view != null, rejectedReadmission = false)) {
+                    localMediaFailure = "Image input disabled for active model"
+                    return
+                }
+            }
         }
+    }
+
+    private fun loadReusableView(
+        disk: SqliteRunHistory,
+        source: HistorySnapshot,
+        policy: ContextPolicy,
+        sourceRecords: List<InvocationRecord>,
+    ): ContextCheckpoint? {
+        val saved = disk.loadCheckpoint()
+        val view = disk.loadView() ?: saved?.takeIf { it.kind == "VIEW" } ?: return null
+        if (view.sourceCount > policy.priorMessageCount ||
+            view.catalog != tools.definitions.sortedBy { it.modelName } ||
+            !matches(view, source, settingsKey(target.id, config, target.provider.contextConfigurationKey()))
+        ) return null
+        val records = tools.currentCheckpointRecords(sourceRecords)
+        if (tools.compactionBlocked(records)) return null
+        val durableRecords = records.map { it.atLedgerPrecision() }.associateBy { it.callId }
+        if (view.ledger.any { old -> durableRecords[old.callId] != old.atLedgerPrecision() }) return null
+        return view
+    }
+
+    private fun isDefiniteMediaRejection(
+        source: HistorySnapshot,
+        effectiveMessages: List<Message>,
+        policy: ContextPolicy,
+        hasReusableView: Boolean,
+        rejectedReadmission: Boolean,
+    ): Boolean {
+        val activeMessages = source.messages.subList(policy.priorMessageCount, source.messages.size)
+        if (hasUnsupportedMedia(target, config.model, activeMessages)) return true
+        if (!hasUnsupportedMedia(target, config.model, effectiveMessages)) return false
+        if (hasReusableView || policy.priorMessageCount == 0) return true
+        val summaryModel = policy.summaryModel ?: return true
+        val priorMessages = source.messages.subList(0, policy.priorMessageCount)
+        if (hasUnsupportedMedia(summaryModel.target, summaryModel.request.model, priorMessages)) return true
+        if (rejectedReadmission || !requestViewLimit.admits(effectiveMessages)) return false
+        val probeReq = copyRequest(config, cachedView(effectiveMessages))
+        val estimate = budget.tokens(probeReq)
+        val capacity = budget.limit(probeReq.model)
+        val exceedsBudget = estimate != null && capacity != null && estimate > capacity
+        return !exceedsBudget
     }
 
     private fun sourceDigestOf(source: HistorySnapshot, count: Int): String =
@@ -386,6 +448,7 @@ class AgentRunLoop(
         activeInputCount = view.messages.size
         restoreContext(view)
         persistedPause?.let { return result(RunState.PAUSED, it, serverUnknown) }
+        localMediaFailure?.let { return RunResult(RunState.FAILED, it, steps, retries, false) }
         accountingActive = true
         // Cold recovery must know attendance even if the process dies during the first request.
         persistAccounting()
@@ -641,11 +704,15 @@ class AgentRunLoop(
         target.provider.canReplayMessage(m, request.model)
     }
 
-    private fun mediaSupported(target: ModelTarget, request: ChatRequest): Boolean = request.messages.all { m ->
-        m.parts.filterIsInstance<ContentPart.Media>().all { media ->
-            target.provider.supportsMediaInput(media.kind, request.model)
+    private fun hasUnsupportedMedia(target: ModelTarget, model: String, messages: List<Message>): Boolean =
+        messages.any { m ->
+            m.parts.filterIsInstance<ContentPart.Media>().any { media ->
+                !target.provider.supportsMediaInput(media.kind, model)
+            }
         }
-    }
+
+    private fun mediaSupported(target: ModelTarget, request: ChatRequest): Boolean =
+        !hasUnsupportedMedia(target, request.model, request.messages)
 
     private suspend fun recover(decision: RecoveryDecision, error: ModelError?, request: ChatRequest): Boolean {
         val action = decision.action ?: return false
@@ -690,6 +757,7 @@ class AgentRunLoop(
         if (action == RecoveryAction.REMOVE_PARAMETER && !removed(error?.param, request, next)) return false
         if (action == RecoveryAction.FALLBACK && proposal.target == target && next.model == request.model) return false
         if (!compatible(proposal.target, next)) { checkpointRequired = true; return false }
+        if (!mediaSupported(proposal.target, next)) return false
         retries++
         persistAccounting()
         delay(decision.delayMs)

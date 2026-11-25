@@ -256,6 +256,393 @@ class MultimodalImageInputTest {
         }
     }
 
+    @Test
+    fun contextTooLongAndPriorCompactionWithImagesConsumeActualImageContentOrPauseSafely(): Unit = runBlocking {
+        val dir = Files.createTempDirectory("theta-mm-compaction")
+        val expectedDataUrl = "data:image/png;base64,${Base64.getEncoder().encodeToString(samplePng)}"
+        try {
+            // Part A: CONTEXT_TOO_LONG -> summary model ACTUALLY receives image_url -> CONTINUATION -> resume completes,
+            // while durable SQLite history retains ONLY BlobRef (never base64).
+            val sessionA = "session-mm-ctl"
+            val imageIdA = UUID.randomUUID().toString()
+            val summaryCapturedBodies = mutableListOf<String>()
+            val summaryTransport = ModelTransport { _, body, _ ->
+                summaryCapturedBodies += body
+                flow {
+                    emit(TransportEvent.Headers(200, "text/event-stream", null))
+                    val sse = "data: {\"id\":\"sum-1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Image shows a 2x2 PNG chart.\"}}]}\n\n" +
+                        "data: {\"id\":\"sum-1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
+                        "data: [DONE]\n\n"
+                    emit(TransportEvent.Bytes(sse.toByteArray(Charsets.UTF_8)))
+                }
+            }
+            var mainCallsA = 0
+            val mainTransportA = ModelTransport { _, _, _ ->
+                mainCallsA++
+                flow {
+                    if (mainCallsA == 1) {
+                        emit(TransportEvent.Headers(400, "application/json", null))
+                        emit(TransportEvent.Bytes("""{"error":{"code":"context_length_exceeded","message":"context too long"}}""".toByteArray()))
+                    } else {
+                        emit(TransportEvent.Headers(200, "text/event-stream", null))
+                        val sse = "data: {\"id\":\"main-2\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Resumed from image summary.\"}}]}\n\n" +
+                            "data: {\"id\":\"main-2\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
+                            "data: [DONE]\n\n"
+                        emit(TransportEvent.Bytes(sse.toByteArray(Charsets.UTF_8)))
+                    }
+                }
+            }
+            AgentDatabase.open(dir.resolve("a.db"), BundledSQLiteDriver()).use { db ->
+                val images = PrivateImageStore(db)
+                images.putUserImage(sessionA, imageIdA, samplePng)
+                val reader = MediaContentReader { blob -> images.readUserImage(sessionA, blob.id) }
+                val visionCfg = OpenAiChatConfig("chat", "https://api.example.com/v1", compat = OpenAiChatConfig.Compat(supportsImageInput = true))
+                val codec = OpenAiChatCodec(visionCfg, reader)
+                val mainProvider = OpenAiChatProvider(visionCfg, mainTransportA, reader)
+                val sumProvider = OpenAiChatProvider(visionCfg, summaryTransport, reader)
+                val sumBudget = ContextBudget({ r -> 256L + codec.estimateRequestBytes(r) }, { 200_000L })
+                val sumModel = SummaryModel(
+                    ModelTarget("chat", sumProvider, ApiKeyCredentials("sk-test")),
+                    chatRequest("vision-summary") {
+                        toolChoice = ToolChoice.None
+                        maxOutputTokens = 1024
+                    },
+                    sumBudget,
+                )
+                SqliteRunHistory.create(db, sessionA).use { history ->
+                    history.append(
+                        0L,
+                        listOf(
+                            message(
+                                Role.USER,
+                                textPart("Analyze this chart"),
+                                mediaPart(ProtocolMediaKind.IMAGE, blobRef(imageIdA, "image/png", samplePng.size.toLong())),
+                            ),
+                        ),
+                    )
+                    val first = AgentRunLoop(
+                        RunIdentity("chain-a", sessionA, "run-a-1"),
+                        ModelTarget("chat", mainProvider, ApiKeyCredentials("sk-test")),
+                        chatRequest("vision-main") { maxOutputTokens = 1024 },
+                        history,
+                        emptyToolExecutor(),
+                        StoredRunJournal(history),
+                        contextPolicy = ContextPolicy(goal = "Analyze chart", summaryModel = sumModel),
+                    ).run()
+                    assertEquals(RunState.PAUSED, first.state)
+                    assertEquals("Summary model must have been called once", 1, summaryCapturedBodies.size)
+                    val sumJson = Json.parseToJsonElement(summaryCapturedBodies.single()).jsonObject
+                    val sumContent = sumJson.getValue("messages").jsonArray[0].jsonObject.getValue("content").jsonArray
+                    assertTrue(
+                        "Summary request must include real image_url content, not just storage reference",
+                        sumContent.any {
+                            it.jsonObject["type"]?.jsonPrimitive?.content == "image_url" &&
+                                it.jsonObject["image_url"]?.jsonObject?.get("url")?.jsonPrimitive?.content == expectedDataUrl
+                        },
+                    )
+                    val cp = requireNotNull(history.checkpointInfo())
+                    assertTrue("Continuation must be offered after image-consuming summary", cp.canContinue)
+                    assertEquals("CONTINUATION", cp.kind)
+
+                    val resumed = AgentRunLoop(
+                        requireNotNull(cp.nextIdentity),
+                        ModelTarget("chat", mainProvider, ApiKeyCredentials("sk-test")),
+                        chatRequest("vision-main") { maxOutputTokens = 1024 },
+                        history,
+                        emptyToolExecutor(),
+                        StoredRunJournal(history),
+                        contextPolicy = ContextPolicy(goal = "Analyze chart", summaryModel = sumModel, resumeCheckpointId = cp.id),
+                    ).run()
+                    assertEquals(RunState.COMPLETED, resumed.state)
+                    val persisted = history.snapshot().messages
+                    assertEquals(2, persisted.size)
+                    val encodedOrig = HistoryCodec.json.encodeToString(HistoryCodec.encodeMessage(persisted[0]))
+                    assertFalse("Durable history must keep only BlobRef, never base64", encodedOrig.contains(Base64.getEncoder().encodeToString(samplePng)))
+                }
+            }
+
+            // Part B: If SummaryModel cannot process images (supportsImageInput=false), fail closed to PAUSED
+            // WITHOUT calling summary network and WITHOUT offering a reference-only CONTINUATION.
+            val sessionB = "session-mm-nosum"
+            val imageIdB = UUID.randomUUID().toString()
+            val textOnlySummaryCalls = AtomicInteger()
+            val textOnlySummaryTransport = ModelTransport { _, _, _ ->
+                textOnlySummaryCalls.incrementAndGet()
+                flow { emit(TransportEvent.Headers(200, "text/event-stream", null)) }
+            }
+            val ctlTransportB = ModelTransport { _, _, _ ->
+                flow {
+                    emit(TransportEvent.Headers(400, "application/json", null))
+                    emit(TransportEvent.Bytes("""{"error":{"code":"context_length_exceeded","message":"context too long"}}""".toByteArray()))
+                }
+            }
+            AgentDatabase.open(dir.resolve("b.db"), BundledSQLiteDriver()).use { db ->
+                val images = PrivateImageStore(db)
+                images.putUserImage(sessionB, imageIdB, samplePng)
+                val reader = MediaContentReader { blob -> images.readUserImage(sessionB, blob.id) }
+                val visionCfg = OpenAiChatConfig("chat", "https://api.example.com/v1", compat = OpenAiChatConfig.Compat(supportsImageInput = true))
+                val noImgCfg = OpenAiChatConfig("chat", "https://api.example.com/v1", compat = OpenAiChatConfig.Compat(supportsImageInput = false))
+                val mainProvider = OpenAiChatProvider(visionCfg, ctlTransportB, reader)
+                val noImgSummaryProvider = OpenAiChatProvider(noImgCfg, textOnlySummaryTransport, reader)
+                val sumBudget = ContextBudget({ 500L }, { 200_000L })
+                val sumModel = SummaryModel(
+                    ModelTarget("chat", noImgSummaryProvider, ApiKeyCredentials("sk-test")),
+                    chatRequest("text-only-summary") {
+                        toolChoice = ToolChoice.None
+                        maxOutputTokens = 1024
+                    },
+                    sumBudget,
+                )
+                SqliteRunHistory.create(db, sessionB).use { history ->
+                    history.append(
+                        0L,
+                        listOf(
+                            message(
+                                Role.USER,
+                                textPart("Analyze image"),
+                                mediaPart(ProtocolMediaKind.IMAGE, blobRef(imageIdB, "image/png", samplePng.size.toLong())),
+                            ),
+                        ),
+                    )
+                    val res = AgentRunLoop(
+                        RunIdentity("chain-b", sessionB, "run-b-1"),
+                        ModelTarget("chat", mainProvider, ApiKeyCredentials("sk-test")),
+                        chatRequest("vision-main") { maxOutputTokens = 1024 },
+                        history,
+                        emptyToolExecutor(),
+                        StoredRunJournal(history),
+                        contextPolicy = ContextPolicy(goal = "Analyze image", summaryModel = sumModel),
+                    ).run()
+                    assertEquals(RunState.PAUSED, res.state)
+                    assertEquals("Summary model without image support must never be called", 0, textOnlySummaryCalls.get())
+                    val cp = requireNotNull(history.checkpointInfo())
+                    assertFalse("Must not offer reference-only CONTINUATION", cp.canContinue)
+                    assertEquals("PAUSED", cp.kind)
+                }
+            }
+
+            // Part C: Old-history compaction (compactPrior) with image in prior messages consumes real image content
+            // and compacts into a VIEW so the new turn succeeds within budget.
+            val sessionC = "session-mm-prior"
+            val imageIdC = UUID.randomUUID().toString()
+            val priorSumBodies = mutableListOf<String>()
+            val priorSumTransport = ModelTransport { _, body, _ ->
+                priorSumBodies += body
+                flow {
+                    emit(TransportEvent.Headers(200, "text/event-stream", null))
+                    val sse = "data: {\"id\":\"sum-p\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Earlier user shared a 2x2 PNG.\"}}]}\n\n" +
+                        "data: {\"id\":\"sum-p\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
+                        "data: [DONE]\n\n"
+                    emit(TransportEvent.Bytes(sse.toByteArray(Charsets.UTF_8)))
+                }
+            }
+            val priorMainBodies = mutableListOf<String>()
+            val priorMainTransport = ModelTransport { _, body, _ ->
+                priorMainBodies += body
+                flow {
+                    emit(TransportEvent.Headers(200, "text/event-stream", null))
+                    val sse = "data: {\"id\":\"main-p\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Follow-up answered.\"}}]}\n\n" +
+                        "data: {\"id\":\"main-p\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
+                        "data: [DONE]\n\n"
+                    emit(TransportEvent.Bytes(sse.toByteArray(Charsets.UTF_8)))
+                }
+            }
+            AgentDatabase.open(dir.resolve("c.db"), BundledSQLiteDriver()).use { db ->
+                val images = PrivateImageStore(db)
+                images.putUserImage(sessionC, imageIdC, samplePng)
+                val reader = MediaContentReader { blob -> images.readUserImage(sessionC, blob.id) }
+                val visionCfg = OpenAiChatConfig("chat", "https://api.example.com/v1", compat = OpenAiChatConfig.Compat(supportsImageInput = true))
+                val codec = OpenAiChatCodec(visionCfg, reader)
+                val mainProvider = OpenAiChatProvider(visionCfg, priorMainTransport, reader)
+                val sumProvider = OpenAiChatProvider(visionCfg, priorSumTransport, reader)
+                // Main window fits text-only compacted view (~1500 bytes + 256 reserve) but NOT raw prior image (+4096 bytes).
+                val mainBudget = ContextBudget({ r -> codec.estimateRequestBytes(r) }, { 3_500L })
+                val sumBudget = ContextBudget({ r -> codec.estimateRequestBytes(r) }, { 50_000L })
+                val sumModel = SummaryModel(
+                    ModelTarget("chat", sumProvider, ApiKeyCredentials("sk-test")),
+                    chatRequest("vision-summary") {
+                        toolChoice = ToolChoice.None
+                        maxOutputTokens = 256
+                    },
+                    sumBudget,
+                )
+                SqliteRunHistory.create(db, sessionC).use { history ->
+                    history.append(
+                        0L,
+                        listOf(
+                            message(
+                                Role.USER,
+                                textPart("Old image turn"),
+                                mediaPart(ProtocolMediaKind.IMAGE, blobRef(imageIdC, "image/png", samplePng.size.toLong())),
+                            ),
+                            message(Role.ASSISTANT, textPart("I saw it.")),
+                            message(Role.USER, textPart("Now give me a concise follow-up")),
+                        ),
+                    )
+                    val res = AgentRunLoop(
+                        RunIdentity("chain-c", sessionC, "run-c-1"),
+                        ModelTarget("chat", mainProvider, ApiKeyCredentials("sk-test")),
+                        chatRequest("vision-main") { maxOutputTokens = 256 },
+                        history,
+                        emptyToolExecutor(),
+                        StoredRunJournal(history),
+                        budget = mainBudget,
+                        contextPolicy = ContextPolicy(goal = "Follow-up", priorMessageCount = 2, summaryModel = sumModel),
+                    ).run()
+                    assertEquals(RunState.COMPLETED, res.state)
+                    assertEquals(1, priorSumBodies.size)
+                    assertTrue(
+                        "Prior compaction summary request must carry real image_url",
+                        priorSumBodies.single().contains(expectedDataUrl),
+                    )
+                    assertEquals(1, priorMainBodies.size)
+                    assertTrue(priorMainBodies.single().contains("Earlier user shared a 2x2 PNG."))
+                }
+            }
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun disabledImageInputRejectsBeforeSummaryAndBudgetReadmissionWithoutAdmittedOrReconciliation(): Unit = runBlocking {
+        val dir = Files.createTempDirectory("theta-mm-no-admit")
+        try {
+            val sessionId = "session-mm-budget"
+            val imageId = UUID.randomUUID().toString()
+            val mainCalls = AtomicInteger()
+            val summaryCalls = AtomicInteger()
+            val mainTransport = ModelTransport { _, _, _ ->
+                mainCalls.incrementAndGet()
+                flow {
+                    emit(TransportEvent.Headers(200, "text/event-stream", null))
+                    val sse = "data: {\"id\":\"m-ok\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Budget recovered with image.\"}}]}\n\n" +
+                        "data: {\"id\":\"m-ok\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
+                        "data: [DONE]\n\n"
+                    emit(TransportEvent.Bytes(sse.toByteArray(Charsets.UTF_8)))
+                }
+            }
+            val summaryTransport = ModelTransport { _, _, _ ->
+                summaryCalls.incrementAndGet()
+                flow { emit(TransportEvent.Headers(200, "text/event-stream", null)) }
+            }
+            AgentDatabase.open(dir.resolve("budget.db"), BundledSQLiteDriver()).use { db ->
+                val images = PrivateImageStore(db)
+                images.putUserImage(sessionId, imageId, samplePng)
+                val reader = MediaContentReader { blob -> images.readUserImage(sessionId, blob.id) }
+                val visionCfg = OpenAiChatConfig("chat", "https://api.example.com/v1", compat = OpenAiChatConfig.Compat(supportsImageInput = true))
+                val disabledCfg = OpenAiChatConfig("chat", "https://api.example.com/v1", compat = OpenAiChatConfig.Compat(supportsImageInput = false))
+                val visionProvider = OpenAiChatProvider(visionCfg, mainTransport, reader)
+                val disabledProvider = OpenAiChatProvider(disabledCfg, mainTransport, reader)
+                val summaryProvider = OpenAiChatProvider(visionCfg, summaryTransport, reader)
+                val codec = OpenAiChatCodec(visionCfg, reader)
+
+                SqliteRunHistory.create(db, sessionId).use { history ->
+                    history.append(
+                        0L,
+                        listOf(
+                            message(
+                                Role.USER,
+                                textPart("Inspect screenshot"),
+                                mediaPart(ProtocolMediaKind.IMAGE, blobRef(imageId, "image/png", samplePng.size.toLong())),
+                            ),
+                        ),
+                    )
+                    // 1. Ordinary run with supportsImageInput=false, exceeded budget, and summaryModel configured:
+                    //    must reject locally BEFORE calling summaryModel or main model, leaving NO ADMITTED/SUMMARY_RESERVED.
+                    val tightBudget = ContextBudget({ r -> codec.estimateRequestBytes(r) }, { 1_000L })
+                    val sumModel = SummaryModel(
+                        ModelTarget("chat", summaryProvider, ApiKeyCredentials("sk-test")),
+                        chatRequest("vision-summary") {
+                            toolChoice = ToolChoice.None
+                            maxOutputTokens = 256
+                        },
+                        ContextBudget({ r -> codec.estimateRequestBytes(r) }, { 50_000L }),
+                    )
+                    val rejectedOrdinary = AgentRunLoop(
+                        RunIdentity("chain-1", sessionId, "run-reject-ordinary"),
+                        ModelTarget("chat", disabledProvider, ApiKeyCredentials("sk-test")),
+                        chatRequest("text-only") { maxOutputTokens = 256 },
+                        history,
+                        emptyToolExecutor(),
+                        StoredRunJournal(history),
+                        budget = tightBudget,
+                        contextPolicy = ContextPolicy(goal = "Inspect screenshot", summaryModel = sumModel),
+                    ).run()
+                    assertEquals(RunState.FAILED, rejectedOrdinary.state)
+                    assertEquals("Image input disabled for active model", rejectedOrdinary.reason)
+                    assertEquals(0, mainCalls.get())
+                    assertEquals(0, summaryCalls.get())
+                    assertNull("Definite local rejection must not persist ADMITTED/SUMMARY_RESERVED checkpoint", history.checkpointInfo())
+                    assertNull(history.retryReconciliation())
+
+                    // 2. Now pause genuinely on budget (supportsImageInput=true, tight window, no summaryModel).
+                    val pausedBudget = AgentRunLoop(
+                        RunIdentity("chain-1", sessionId, "run-pause-budget"),
+                        ModelTarget("chat", visionProvider, ApiKeyCredentials("sk-test")),
+                        chatRequest("vision-model") { maxOutputTokens = 256 },
+                        history,
+                        emptyToolExecutor(),
+                        StoredRunJournal(history),
+                        budget = tightBudget,
+                        contextPolicy = ContextPolicy(goal = "Inspect screenshot"),
+                    ).run()
+                    assertEquals(RunState.PAUSED, pausedBudget.state)
+                    val budgetCp = requireNotNull(history.checkpointInfo())
+                    assertEquals("PAUSED", budgetCp.kind)
+                    assertEquals("BUDGET", budgetCp.pauseClass)
+
+                    // 3. Attempt budget readmission with a wider window BUT supportsImageInput=false:
+                    //    must fail locally BEFORE consuming readmission (NO ADMITTED, NO reconciliation, 0 network calls).
+                    val wideBudget = ContextBudget({ r -> codec.estimateRequestBytes(r) }, { 50_000L })
+                    val rejectedReadmit = AgentRunLoop(
+                        RunIdentity("chain-1", sessionId, "run-readmit-disabled"),
+                        ModelTarget("chat", disabledProvider, ApiKeyCredentials("sk-test")),
+                        chatRequest("vision-model") { maxOutputTokens = 256 },
+                        history,
+                        emptyToolExecutor(),
+                        StoredRunJournal(history),
+                        budget = wideBudget,
+                        contextPolicy = ContextPolicy(
+                            goal = "Inspect screenshot",
+                            summaryModel = sumModel,
+                            readmitBudgetCheckpointId = budgetCp.id,
+                        ),
+                    ).run()
+                    assertEquals(RunState.FAILED, rejectedReadmit.state)
+                    assertEquals("Image input disabled for active model", rejectedReadmit.reason)
+                    assertEquals(0, mainCalls.get())
+                    assertEquals(0, summaryCalls.get())
+                    val afterRejectCp = requireNotNull(history.checkpointInfo())
+                    assertEquals("BUDGET checkpoint must remain intact, not ADMITTED", "BUDGET", afterRejectCp.pauseClass)
+                    assertEquals(budgetCp.id, afterRejectCp.id)
+                    assertNull("No reconciliation must be required after definite local rejection", history.retryReconciliation())
+
+                    // 4. Subsequent retry with supportsImageInput=true and the SAME budget checkpoint ID succeeds cleanly!
+                    val recovered = AgentRunLoop(
+                        RunIdentity("chain-1", sessionId, "run-readmit-enabled"),
+                        ModelTarget("chat", visionProvider, ApiKeyCredentials("sk-test")),
+                        chatRequest("vision-model") { maxOutputTokens = 256 },
+                        history,
+                        emptyToolExecutor(),
+                        StoredRunJournal(history),
+                        budget = wideBudget,
+                        contextPolicy = ContextPolicy(
+                            goal = "Inspect screenshot",
+                            readmitBudgetCheckpointId = budgetCp.id,
+                        ),
+                    ).run()
+                    assertEquals(RunState.COMPLETED, recovered.state)
+                    assertEquals(1, mainCalls.get())
+                    assertEquals(0, summaryCalls.get())
+                    assertNull(history.retryReconciliation())
+                }
+            }
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
+
     private fun emptyToolExecutor(): LedgerToolExecutor {
         val gate = DefinitionGate()
         val store = object : InvocationStore {
