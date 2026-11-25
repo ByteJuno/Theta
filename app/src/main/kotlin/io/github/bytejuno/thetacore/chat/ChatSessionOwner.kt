@@ -10,6 +10,7 @@ import io.github.bytejuno.thetacore.agent.run.*
 import io.github.bytejuno.thetacore.agent.transport.ModelTransport
 import io.github.bytejuno.thetacore.agent.transport.OkHttpModelTransport
 import io.github.bytejuno.thetacore.plugin.HostToolExecutionService
+import io.github.bytejuno.thetacore.plugin.PluginToolProgress
 import io.github.bytejuno.thetacore.provider.ProviderSettingsException
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -31,6 +32,7 @@ internal data class ChatState(
     val sessionId: String? = null,
     val messages: List<Message> = emptyList(),
     val records: Map<String, InvocationRecord> = emptyMap(),
+    val toolProgress: Map<String, PluginToolProgress> = emptyMap(),
     val recoveries: Map<String, RecoveryRequest> = emptyMap(),
     val older: HistoryCursor? = null,
     val showingOlder: Boolean = false,
@@ -225,7 +227,8 @@ internal class ChatSessionOwner(
         val journal = disk.journalPage(includeUnfinished = active == null)
         val checkpoint = if (active == null) disk.checkpointInfo() else null
         val reconciliation = if (active == null) disk.retryReconciliation() else null
-        mutable.update { it.copy(messages = messages, records = records,
+        val progress = host.activeProgressSnapshot(records.keys)
+        mutable.update { it.copy(messages = messages, records = records, toolProgress = progress,
             recoveries = host.ledger.pendingRecoveries().filter { it.callId in records }.associateBy { it.callId }, older = page.older,
             showingOlder = before != null, pending = pending != null,
             draft = previewText(), journal = journal.replies, olderJournal = journal.older,

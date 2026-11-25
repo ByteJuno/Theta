@@ -46,6 +46,44 @@ class InvocationLedgerTest {
         assertEquals("{}", f.prepare(f.input(args = "")).executionArgs)
     }
 
+    @Test fun hostRejectionPersistsWithoutChangingSubmittedOrTerminalCalls(): Unit = Fixture().use { f ->
+        val ready = f.ready()
+        val rejected = assertIs<Mutation.Applied>(f.ledger.rejectUnsubmitted(ready.callId, "Tool quarantined")).record
+        assertEquals(Status.REJECTED, rejected.state)
+        assertEquals(Effect.NONE, rejected.result!!.effect)
+        assertNull(rejected.instance)
+        assertIs<Mutation.Conflict>(f.ledger.claimExecution(ready.callId, ready.revision))
+        assertEquals(rejected, assertIs<Mutation.AlreadyApplied>(f.ledger.rejectUnsubmitted(ready.callId, "again")).record)
+        val running = f.claim(f.ready()).record
+        assertIs<Mutation.Conflict>(f.ledger.rejectUnsubmitted(running.callId, "Tool quarantined"))
+        assertEquals(running, f.ledger.get(running.callId))
+        val cancelled = assertIs<Mutation.Applied>(f.ledger.cancel(running.callId)).record
+        assertEquals(cancelled, assertIs<Mutation.AlreadyApplied>(f.ledger.rejectUnsubmitted(running.callId, "again")).record)
+        f.reopen()
+        assertEquals(rejected, f.ledger.get(rejected.callId))
+    }
+
+    @Test fun hostRejectionAndClaimAreMutuallyExclusive(): Unit = Fixture().use { f ->
+        repeat(10) {
+            val ready = f.ready()
+            val outcomes = race(
+                { f.ledger.rejectUnsubmitted(ready.callId, "Tool quarantined") },
+                { f.ledger.claimExecution(ready.callId, ready.revision) },
+            )
+            assertEquals(1, outcomes.count { it is Mutation.Applied })
+            assertEquals(1, outcomes.count { it is Mutation.Conflict })
+            val current = requireNotNull(f.ledger.get(ready.callId))
+            if (current.state == Status.REJECTED) {
+                assertNull(current.instance)
+                assertEquals(Effect.NONE, current.result!!.effect)
+            } else {
+                assertEquals(Status.RUNNING, current.state)
+                assertNotNull(current.instance)
+                assertNull(current.result)
+            }
+        }
+    }
+
     @Test fun policySourcesSessionAndUnattended(): Unit = Fixture().use { f ->
         assertEquals(Status.READY, f.prepare().state)
         val d = definition(source = Source.THIRD_PARTY)
