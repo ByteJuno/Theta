@@ -39,12 +39,8 @@ internal fun readPluginDataManifest(bytes: ByteArray, hostApiLevel: Int): Plugin
     dataRequire(versionCode >= 1, "Invalid data versionCode")
     dataRequire(api in 1L..hostApiLevel.toLong(), "Unsupported data API level")
     if ("requires" in json) {
-        val requires = json["requires"] as? JsonObject
-            ?: throw PluginPackageException("requires must be an object")
-        dataRequire(requires.keys.all { it == "root" || it == "lsposed" }, "Unknown requirement")
-        requires.values.forEach { value ->
-            dataRequire(value == JsonPrimitive(false), "Data ZIP cannot require native execution")
-        }
+        val requires = parsePluginRequirements(json)
+        dataRequire(!requires.requiresAny, "Data ZIP cannot require native execution")
     }
     if ("hooks" in json) {
         val hooks = json["hooks"] as? JsonArray
@@ -189,19 +185,19 @@ internal fun dataString(json: JsonObject, key: String): String {
     return value
 }
 
-private fun dataInteger(json: JsonObject, key: String): Long {
+internal fun dataInteger(json: JsonObject, key: String): Long {
     val value = json[key] as? JsonPrimitive
     dataRequire(value != null && !value.isString && dataJsonInteger.matches(value.content), "$key must be an integer")
     return value!!.content.toLongOrNull() ?: throw PluginPackageException("$key exceeds integer range")
 }
 
-private fun dataStrings(json: JsonObject, key: String): List<String> {
+internal fun dataStrings(json: JsonObject, key: String): List<String> {
     if (key !in json) return emptyList()
     val values = json[key] as? JsonArray ?: throw PluginPackageException("$key must be an array")
     dataRequire(values.size <= 64, "Too many $key")
     return values.map { element ->
         val value = dataQuotedString(element, key)
-        dataRequire(value.isNotBlank() && value.length <= 128 && value.none { it < ' ' }, "Invalid $key")
+        dataRequire(value.isNotBlank() && value.length <= 128 && value.none { it < ' ' || it.isISOControl() }, "Invalid $key")
         value
     }.also { dataRequire(it.distinct().size == it.size, "Duplicate $key") }
 }
