@@ -73,7 +73,10 @@ internal class PluginToolBridge(
         val failed: MutableSet<Long> = linkedSetOf(),
         var inFlight: RegisteredExtension<Tool>? = null,
         var syncJob: Job? = null,
-        // Completes when syncJob finishes OR parks awaiting background slot release / actual exit.
+        // Only the registrations present at the first pass belong to startup. Runtime additions
+        // must not extend this wait or create a new startup barrier after it has settled.
+        var initialRegistrations: MutableSet<Long>? = null,
+        // Completes when that snapshot settles OR work parks on background slot release / exit.
         var initialPassSettled: CompletableDeferred<Unit> = CompletableDeferred(Unit),
     )
 
@@ -200,6 +203,10 @@ internal class PluginToolBridge(
 
     private fun reconcileLocked(binding: PluginBinding) {
         val target = catalog ?: return
+        if (binding.initialRegistrations == null) {
+            binding.initialRegistrations = binding.tools.mapTo(linkedSetOf()) { it.registrationId }
+            binding.initialPassSettled = CompletableDeferred()
+        }
         val desiredByRegId = binding.tools.associateBy { it.registrationId }
         val revokedToolIds = linkedSetOf<String>()
 
@@ -225,14 +232,22 @@ internal class PluginToolBridge(
 
         val removedFailed = binding.failed.filter { it !in desiredByRegId }
         binding.failed.removeAll(removedFailed.toSet())
+        settleInitialPassLocked(binding)
 
         val hasPending = binding.tools.any { entry ->
             entry.registrationId !in binding.registered && entry.registrationId !in binding.failed
         }
         if (hasPending && binding.syncJob == null) {
-            binding.initialPassSettled = CompletableDeferred()
             binding.syncJob = scope.launch { drainPluginRegistrations(binding, target) }
         }
+    }
+
+    private fun settleInitialPassLocked(binding: PluginBinding) {
+        val pending = binding.initialRegistrations ?: return
+        pending.retainAll(binding.tools.mapTo(hashSetOf()) { it.registrationId })
+        pending.removeAll(binding.registered.keys)
+        pending.removeAll(binding.failed)
+        if (pending.isEmpty()) binding.initialPassSettled.complete(Unit)
     }
 
     private suspend fun drainPluginRegistrations(binding: PluginBinding, target: FrozenToolCatalog) {
@@ -245,6 +260,7 @@ internal class PluginToolBridge(
                         binding.initialPassSettled.complete(Unit)
                         return
                     }
+                    settleInitialPassLocked(binding)
                     val candidate = binding.tools.firstOrNull { entry ->
                         entry.registrationId !in binding.registered && entry.registrationId !in binding.failed
                     }

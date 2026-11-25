@@ -1338,6 +1338,76 @@ class PluginToolBridgeTest {
     }
 
     @Test
+    fun runtimeRegistrationsDoNotExtendInitialPassOrBlockPluginOperations(): Unit = runBlocking {
+        // Cover catalog attachment at startup and enable under PluginManager's operation mutex.
+        for (attachAtStartup in listOf(true, false)) {
+            val metadataBudget = PluginExecutionBudget(processSlots = 4, perPluginSlots = 1, cancellationThreads = 2)
+            val owner = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+            val releaseRuntimeCapture = CountDownLatch(1)
+            try {
+                val catalog = FrozenToolCatalog(DefinitionGate(), metadataBudget, owner, Schema202012Validator())
+                val bridge = PluginToolBridge(owner)
+                if (!attachAtStartup) bridge.attachCatalog(catalog)
+                val pluginId = "com.example.runtimeinitial"
+                val token = Any()
+                val runtimeEntered = CompletableDeferred<Unit>()
+                val runtimeTool = object : Tool {
+                    override val id = "runtime"
+                    override val spec: ToolSpec
+                        get() {
+                            runtimeEntered.complete(Unit)
+                            releaseRuntimeCapture.await()
+                            return ToolSpec(id, "Runtime tool", emptySchema, risk = ToolRisk.READ)
+                        }
+                    override suspend fun call(args: JsonObject, env: ToolEnv) = ToolResult("runtime")
+                }
+                bridge.attachPlugin(pluginId, "1", token)
+                val registrations = PluginRegistrations.tracked<Extension> { entries, closed ->
+                    bridge.onRegistrationsChanged(pluginId, token, entries, closed)
+                }
+                val initialTool = object : Tool {
+                    override val id = "initial"
+                    override val spec: ToolSpec
+                        get() {
+                            registrations.register(runtimeTool.id, runtimeTool)
+                            return ToolSpec(id, "Initial tool", emptySchema, risk = ToolRisk.READ)
+                        }
+                    override suspend fun call(args: JsonObject, env: ToolEnv) = ToolResult("initial")
+                }
+                registrations.register(initialTool.id, initialTool)
+                val operations = kotlinx.coroutines.sync.Mutex()
+                val enabling = owner.async {
+                    operations.withLock {
+                        bridge.activatePlugin(pluginId, token)
+                        if (attachAtStartup) bridge.attachCatalog(catalog)
+                        else bridge.awaitInitialPass(pluginId)
+                    }
+                }
+                withTimeout(2_000) { runtimeEntered.await() }
+                // Runtime metadata is still in progress, well before the unchanged 5-second
+                // capture deadline. The original registration alone must settle startup.
+                withTimeout(1_000) { enabling.await() }
+                assertEquals(setOf("$pluginId/initial"), catalog.pluginToolKeys(pluginId))
+                withTimeout(1_000) {
+                    bridge.awaitInitialPass(pluginId)
+                    operations.withLock {
+                        registrations.beginClose()
+                        bridge.deactivatePlugin(pluginId, token)
+                    }
+                }
+                assertTrue(catalog.pluginToolKeys(pluginId).isEmpty())
+                releaseRuntimeCapture.countDown()
+                awaitUntil { metadataBudget.occupiedSlots() == 0 }
+                assertTrue(catalog.freeze("after-runtime-disable").values.none { it.owner == pluginId })
+            } finally {
+                releaseRuntimeCapture.countDown()
+                owner.cancel()
+                metadataBudget.close()
+            }
+        }
+    }
+
+    @Test
     fun sameToolInstanceReregistrationIsNotPoisonedByStaleFailureOrPublish(): Unit = runBlocking {
         val metadataBudget = PluginExecutionBudget(processSlots = 4, perPluginSlots = 1, cancellationThreads = 2)
         val owner = CoroutineScope(SupervisorJob() + Dispatchers.Default)
