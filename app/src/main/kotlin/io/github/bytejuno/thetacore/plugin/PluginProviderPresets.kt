@@ -4,7 +4,6 @@ import io.github.bytejuno.thetacore.agent.provider.openai.OpenAiChatConfig
 import io.github.bytejuno.thetacore.agent.provider.openai.OpenAiProviderSettings
 import io.github.bytejuno.thetacore.agent.provider.openai.SchemaProfile
 import io.github.bytejuno.thetacore.provider.validProfileDisplayName
-import java.net.URI
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -85,10 +84,8 @@ private const val MAX_TEMPLATE_BASE_URL_CHARS = 4096
 
 internal fun extractTargetHost(endpoint: String): String? =
     runCatching {
-        val trimmed = endpoint.trim()
-        val uri = URI(trimmed)
-        if (uri.scheme !in setOf("http", "https")) return@runCatching null
-        uri.host?.takeIf { it.isNotBlank() }
+        // Use the request's URL parser, including scheme and internationalized-host normalization.
+        OpenAiChatConfig("preview", endpoint.trim()).targetHost
     }.getOrNull()
 
 internal fun parseProviderTemplate(
@@ -111,13 +108,8 @@ internal fun parseProviderTemplate(
     val baseUrl = dataString(json, "baseUrl").trim()
     dataRequire(baseUrl.length <= MAX_TEMPLATE_BASE_URL_CHARS, "Provider baseUrl is too long")
 
-    val host = try {
-        // Reuse OpenAiChatConfig's exact HTTPS / private-cleartext / no-userinfo / no-query URL validation.
-        OpenAiChatConfig("template", baseUrl)
-        extractTargetHost(baseUrl) ?: throw PluginPackageException("Invalid provider baseUrl")
-    } catch (_: IllegalArgumentException) {
-        throw PluginPackageException("Invalid provider baseUrl")
-    }
+    // Reuse the request's HTTPS / private-cleartext / no-userinfo / no-query URL validation.
+    val host = extractTargetHost(baseUrl) ?: throw PluginPackageException("Invalid provider baseUrl")
 
     val models = parseTemplateModels(json)
     val compat = parseTemplateCompat(json, protocol)
