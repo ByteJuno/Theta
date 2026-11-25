@@ -141,7 +141,7 @@ def run(host, probe, hello):
     adb("install", "-r", host, timeout=300)
     adb("shell", "am", "start", "-W", "-n", f"{PACKAGE}/.MainActivity")
     tap_text("Plugins and diagnostics")
-    wait_for("host shows up", lambda t: t == "No plugins installed")
+    wait_for("host shows up", lambda t: t == "No plugins installed", sweep=True)
 
     if hello:
         step("install Hello")
