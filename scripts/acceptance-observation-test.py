@@ -362,6 +362,58 @@ class LifecycleSearch(unittest.TestCase):
 
 
 class Observations(unittest.TestCase):
+    def host_readiness(self, *, empty_list_present):
+        # The recorded R8 screen ends at the data section; the code list is below it.
+        state = {'clock': 0, 'position': 0, 'swipes': []}
+
+        def screen():
+            labels = ['Theta', 'Device runtime environment', 'No selected data packages']
+            if state['position'] > 0 and empty_list_present:
+                labels += ['Code packages', 'No plugins installed']
+            return [ET.Element('node', text=text) for text in labels]
+
+        def adb(*args, **kwargs):
+            if args == ('shell', 'wm', 'size'):
+                return 'Physical size: 1080x2340'
+            if args[:3] == ('shell', 'input', 'swipe'):
+                down = int(args[4]) > int(args[6])
+                state['swipes'].append(down)
+                state['position'] = max(0, min(1, state['position'] + (1 if down else -1)))
+            return ''
+
+        def sleep(seconds):
+            state['clock'] += seconds
+
+        class ReadyForPlugin(Exception):
+            pass
+
+        with patch.object(em, 'adb', side_effect=adb), \
+                patch.object(em, 'tap_text'), patch.object(em, 'screen', side_effect=screen), \
+                patch.object(em, 'crashed', return_value=False), \
+                patch.object(em, 'install_plugin', side_effect=ReadyForPlugin) as install, \
+                patch.object(em.time, 'monotonic', side_effect=lambda: state['clock']), \
+                patch.object(em.time, 'sleep', side_effect=sleep), patch.object(em, 'TIMEOUT', 8):
+            if empty_list_present:
+                with self.assertRaises(ReadyForPlugin):
+                    em.run('host.apk', 'probe.apk', None)
+                install.assert_called_once_with('probe.apk', 'Probe')
+            else:
+                with self.assertRaisesRegex(em.TestFailure, 'host shows up: timed out'):
+                    em.run('host.apk', 'probe.apk', None)
+                install.assert_not_called()
+        return state
+
+    def test_host_readiness_finds_empty_code_list_below_environment_and_data(self):
+        state = self.host_readiness(empty_list_present=True)
+        self.assertEqual([True], state['swipes'])
+        self.assertLess(state['clock'], 8)
+
+    def test_host_readiness_missing_empty_code_list_keeps_deadline_and_blocks_install(self):
+        state = self.host_readiness(empty_list_present=False)
+        self.assertIn(True, state['swipes'])
+        self.assertIn(False, state['swipes'])
+        self.assertEqual(8, state['clock'])
+
     def test_return_to_hello_sweeps_below_language_controls(self):
         class ReachedReturn(Exception):
             pass
