@@ -30,6 +30,20 @@ internal class HostToolExecutionService(
     private val active = mutableMapOf<String, PluginInvocation>()
     private val retiringRuns = mutableSetOf<String>()
 
+    fun activeProgress(callId: String): PluginToolProgress? =
+        gate.withGate { active[callId] }?.progress?.value
+
+    fun activeProgressSnapshot(callIds: Collection<String>): Map<String, PluginToolProgress> {
+        val pairs = gate.withGate {
+            callIds.mapNotNull { id -> active[id]?.let { id to it } }
+        }
+        return buildMap {
+            pairs.forEach { (id, invocation) ->
+                invocation.progress.value?.let { put(id, it) }
+            }
+        }
+    }
+
     /** The history owner has committed or reconciled the pending step. A late return can
      * still need the frozen reader until the last observer records actual exit. */
     fun finishChatRun(runId: String) = gate.withGate {
@@ -201,6 +215,9 @@ internal class HostToolExecutionService(
         }
         if (record.state != Status.READY) return@withGate checked
         val entry = catalog.current(requireNotNull(record.input.definition)) ?: return@withGate Mutation.Blocked("Definition unavailable")
+        if (entry.failureWindow?.isQuarantined(entry.tool) == true) {
+            return@withGate observe(ledger.rejectUnsubmitted(callId, "Plugin tool quarantined after repeated failures"))
+        }
         var invocation: PluginInvocation? = null
         val executionDomain = entry.definition.builtinToolKey ?: entry.definition.owner
         val reservation = budget.reserve(executionDomain, owner,
@@ -230,13 +247,13 @@ internal class HostToolExecutionService(
                 gate.withGate {
                     val failure = ledger.executionAdmissionFailure()
                     failure?.let(::observe)
-                    !storageFailed && failure == null
+                    !storageFailed && failure == null && entry.failureWindow?.isQuarantined(entry.tool) != true
                 }
             })
         active[ticket.callId] = invocation
         logicalResults[ticket.callId] = CompletableDeferred()
         // Observer lifetime is independent of run cancellation; no plugin callbacks on IO.
-        observations[ticket.callId] = control.async { monitor(ticket, invocation) }
+        observations[ticket.callId] = control.async { monitor(ticket, invocation, entry) }
         return invocation
     }
 
@@ -309,7 +326,7 @@ internal class HostToolExecutionService(
         is Mutation.AlreadyApplied -> mutation.record
         else -> error("Invocation transition not acknowledged: $mutation")
     }
-    private suspend fun monitor(ticket: ExecutionTicket, call: PluginInvocation) {
+    private suspend fun monitor(ticket: ExecutionTicket, call: PluginInvocation, entry: FrozenToolCatalog.Entry) {
         val normalization = ReturnNormalization()
         try {
             val logical = call.terminal.await()
@@ -318,7 +335,18 @@ internal class HostToolExecutionService(
                     PluginInvocationStatus.CANCELLED -> observe(ledger.cancel(ticket.callId))
                     PluginInvocationStatus.TIMED_OUT -> observe(ledger.timeout(ticket.callId))
                     else -> outcome(ticket, logical, call.bodyEntered, normalization)
-                }).also { wakeApproval(ticket.callId) }
+                }).also { record ->
+                    wakeApproval(ticket.callId)
+                    val failureStatus = when {
+                        logical.status == PluginInvocationStatus.REJECTED -> PluginInvocationStatus.REJECTED
+                        record.state == Status.FAILED -> PluginInvocationStatus.FAILED
+                        record.state == Status.TIMED_OUT -> PluginInvocationStatus.TIMED_OUT
+                        record.state == Status.SUCCEEDED -> PluginInvocationStatus.SUCCEEDED
+                        record.state == Status.CANCELLED -> PluginInvocationStatus.CANCELLED
+                        else -> PluginInvocationStatus.REJECTED
+                    }
+                    entry.failureWindow?.record(entry.tool, failureStatus)
+                }
             }
             gate.withGate { logicalResults[ticket.callId] }?.complete(Unit)
             coroutineScope {

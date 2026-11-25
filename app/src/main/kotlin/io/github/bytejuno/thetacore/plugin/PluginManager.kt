@@ -90,6 +90,7 @@ internal class PluginManager(context: Context) {
         // Multiple manager instances must never multiply the process execution allowance.
         val executionBudget = PluginExecutionBudget()
         val hostToolBridge = HostToolBridgeRoot(executionBudget)
+        val pluginToolBridge = PluginToolBridge(onRegistrationError = { _, _, error -> logHostFailure(error) })
     }
 
     /** Application startup owns the store and the single recovery attempt, never an Activity. */
@@ -103,6 +104,8 @@ internal class PluginManager(context: Context) {
                 io.github.bytejuno.thetacore.chat.ImageAttachments((store as AndroidAgentStore).privateImages)) },
             policy = policy) {
             AndroidAgentStore.open(app)
+        }.also { service ->
+            pluginToolBridge.attachCatalog(service.catalog)
         }
     private val stageCleanup = PluginStageCleanup()
     private val store = PluginStore(app.filesDir, app.cacheDir, PlatformPluginSignatureVerifier(app.packageManager), stageCleanup)
@@ -643,6 +646,8 @@ internal class PluginManager(context: Context) {
             val settings = withContext(Dispatchers.IO) { PluginSettingsStorage.android(manifest.id, dataDir) }
             val context = HostPluginContext(
                 manifest.id, app, dataDir, host, executionBudget, settings,
+                version = manifest.versionCode.toString(),
+                toolBridge = pluginToolBridge,
             ) { faultContext ->
                 // Enqueue only: load/restore already holds operations. Never wait here.
                 postPluginOperation(host, Dispatchers.Main, operations, ::logHostFailure) {
@@ -683,10 +688,13 @@ internal class PluginManager(context: Context) {
                 },
             )
             if (!published) handleFault(plugin, runtime)
-            else try {
-                plugin.updateObservation = withContext(Dispatchers.IO) { updates.observation(manifest.id) }
-            } catch (error: Exception) {
-                reportPluginFailure(failures::add, "${manifest.id}: observation notice unavailable", error)
+            else {
+                pluginToolBridge.awaitInitialPass(manifest.id)
+                try {
+                    plugin.updateObservation = withContext(Dispatchers.IO) { updates.observation(manifest.id) }
+                } catch (error: Exception) {
+                    reportPluginFailure(failures::add, "${manifest.id}: observation notice unavailable", error)
+                }
             }
         } catch (error: Throwable) {
             val runtime = plugin.runtime
@@ -790,15 +798,20 @@ internal class HostPluginContext(
     private val host: CoroutineScope,
     private val executionBudget: PluginExecutionBudget,
     private val settings: PluginSettingsStorage,
+    private val version: String = "1",
+    private val toolBridge: PluginToolBridge? = null,
     onFault: (HostPluginContext) -> Unit,
 ) : PluginContext {
+    private val toolFailures = PluginToolFailureWindow()
+    init {
+        toolBridge?.attachPlugin(pluginId, version, this, toolFailures)
+    }
     override val hostApiLevel = THETA_API_LEVEL
     override val prefs: PluginPrefs get() = settings.prefs
     override val secrets: PluginSecrets get() = settings.secrets
     private var extensionsActive = false
     private val entryAttempts = IdentityHashMap<EntryAdapter, PluginEntryRuntime>()
     private val calls = IdentityHashMap<PluginInvocation, Tool>()
-    private val toolFailures = PluginToolFailureWindow()
     private val countedCalls = java.util.Collections.newSetFromMap(IdentityHashMap<PluginInvocation, Boolean>())
     var entryCapacityExceeded by mutableStateOf(false)
         private set
@@ -819,7 +832,9 @@ internal class HostPluginContext(
         } catch (error: Throwable) { logHostFailure(error) }
     }
     private fun publicationSnapshot(): List<Extension> = publication.current()
-    private val registrations = PluginRegistrations<Extension>(publication::update)
+    private val registrations = PluginRegistrations.tracked<Extension>(publication::update) { entries, closed ->
+        toolBridge?.onRegistrationsChanged(pluginId, this, entries, closed)
+    }
     private val closeLock = Any()
     private var pendingCleanup: List<() -> Unit>? = null
     val faults = PluginFaultBoundary(::closeAdmission, { onFault(this) }, ::logHostFailure)
@@ -829,6 +844,7 @@ internal class HostPluginContext(
         extensionsActive = true
         extensions = publicationSnapshot()
         synchronizeExtensions()
+        toolBridge?.activatePlugin(pluginId, this)
     }
 
     private fun synchronizeExtensions() {
@@ -910,6 +926,7 @@ internal class HostPluginContext(
     fun beginClose(): List<() -> Unit> {
         faults.close()
         closeAdmission()
+        toolBridge?.deactivatePlugin(pluginId, this)
         extensionsActive = false
         synchronizeExtensions()
         extensions = emptyList() // Caller is the serialized Main host operation.
