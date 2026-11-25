@@ -637,7 +637,7 @@ class AgentRunLoop(
     }
 
     private fun compatible(target: ModelTarget, request: ChatRequest): Boolean = request.messages.all { m ->
-        m.parts.all { p -> p.replay?.let { target.provider.canReplay(it, request.model) } != false }
+        target.provider.canReplayMessage(m, request.model)
     }
 
     private suspend fun recover(decision: RecoveryDecision, error: ModelError?, request: ChatRequest): Boolean {

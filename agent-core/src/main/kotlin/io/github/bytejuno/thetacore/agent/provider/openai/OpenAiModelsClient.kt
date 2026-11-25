@@ -34,9 +34,10 @@ class OpenAiModelsClient internal constructor(client: OkHttpClient) {
             val endpoint = chat.newBuilder().removePathSegment(chat.pathSize - 1)
                 .removePathSegment(chat.pathSize - 2).addPathSegment("models").build()
             val token = credentials.accessToken()
-            if (!validApiKey(token)) fail(ModelsRequestException.Failure.INVALID_SETTINGS)
-            val request = Request.Builder().url(endpoint).get().header("Accept", "application/json")
-                .header("Authorization", "Bearer $token").build()
+            if (token.isNotEmpty() && !validApiKey(token)) fail(ModelsRequestException.Failure.INVALID_SETTINGS)
+            val builder = Request.Builder().url(endpoint).get().header("Accept", "application/json")
+            if (token.isNotEmpty()) builder.header("Authorization", "Bearer $token")
+            val request = builder.build()
             // OkHttp cannot deliver its timeout callback until a blocking DNS lookup returns.
             // Bound the caller's wait independently; cancellation also cancels the underlying call.
             return withTimeoutOrNull(30_000) { read(request) }

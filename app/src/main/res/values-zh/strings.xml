@@ -435,4 +435,20 @@
     <string name="plugin_env_root_unverified_guide">已被动检测到 su 文件（未主动请求授权），实际 Root 授权状态需在运行时确认。</string>
     <string name="plugin_env_privileged_guide">Root 或 LSPosed 尚未就绪。若此插件依赖对应能力，请在 Root 管理器或 LSPosed 管理器中启用后重试。</string>
     <string name="plugin_env_advisory_notice">环境与能力标签仅为被动告知与引导：不会主动弹窗索权、不会阻止安装，也不构成同进程 dex 插件的权限隔离沙箱。</string>
+    <string name="chat_profiles_title">已保存的配置档案</string>
+    <string name="chat_profile_chip_active">%1$s（当前）</string>
+    <string name="chat_profile_new">新建档案</string>
+    <string name="chat_profile_activate">设为当前</string>
+    <string name="chat_profile_delete">删除档案</string>
+    <string name="chat_profile_name">档案名称（可选）</string>
+    <string name="chat_profile_name_notice">留空则默认使用模型名称。保存后将作为后续新运行的当前激活档案。</string>
+    <string name="chat_profile_unconfigured">选择模型</string>
+    <string name="chat_profile_switch_title">切换模型档案</string>
+    <string name="chat_profile_switch_notice">仅对后续新发起的对话运行生效，绝不中途更改正在执行的任务。</string>
+    <string name="chat_profile_active_badge">当前激活档案</string>
+    <string name="chat_profile_manage">管理档案</string>
+    <string name="chat_provider_no_auth">免认证（本地接口）</string>
+    <string name="chat_provider_no_auth_notice">请求不携带 Authorization 头。关闭后可填写 API 密钥。</string>
+    <string name="chat_system_prompt">自定义系统提示词（可选）</string>
+    <string name="chat_system_prompt_notice">最多 %1$d 个字符。作为稳定系统消息前缀注入新运行，不混入时间等易变内容。</string>
 </resources>

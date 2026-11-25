@@ -36,6 +36,9 @@ class OpenAiChatProvider(
         put("schema", config.compat.schemaProfile.name); put("cache", config.compat.explicitCacheControl)
     }.toString()
     override fun canReplay(data: ReplayData, targetModel: String): Boolean = codec.canReplay(data, targetModel)
+    override fun canReplayMessage(message: Message, targetModel: String): Boolean =
+        super.canReplayMessage(message, targetModel) &&
+            message.parts.filterIsInstance<ContentPart.Reasoning>().all { !config.compat.replayReasoning || it.replay != null }
     override fun executionMode(request: ChatRequest): ModelExecutionMode =
         if (request.extraBody.isEmpty()) ModelExecutionMode.GENERATION_ONLY else ModelExecutionMode.MAY_EXECUTE_SERVER_TOOLS
 

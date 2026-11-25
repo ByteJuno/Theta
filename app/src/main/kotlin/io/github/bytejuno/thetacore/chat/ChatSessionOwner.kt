@@ -575,7 +575,11 @@ internal class ChatSessionOwner(
             val target = targetForRun(config)
             val codec = OpenAiChatCodec(config.settings.adapterConfig())
             val requestBudget = ContextBudget({ candidate ->
-                256L + codec.encode(candidate).toByteArray(Charsets.UTF_8).size
+                try {
+                    256L + codec.encode(candidate).toByteArray(Charsets.UTF_8).size
+                } catch (_: IllegalArgumentException) {
+                    null
+                }
             }, { window })
             val summary = context.summaryWindowTokens?.let { window ->
                 SummaryModel(target, chatRequest(config.settings.model) {
