@@ -183,6 +183,35 @@ def signer_digest(text):
     return next(iter(certs))
 
 
+# Discard the rest of a credential assignment line: values may contain spaces,
+# quoted keys, or escaped quotes, and diagnostic output need not retain them.
+SENSITIVE_LINE = re.compile(r'''(?i)(password|secret|token|api[_-]?key|store[_-]?pass)(["']?\s*[:=]).*''')
+# A home-directory name may contain spaces; stop at its path separator.
+HOME_PATH = re.compile(r'(?:/(?:home|Users)/[^/\r\n]+|[A-Za-z]:\\Users\\[^\\\r\n]+)')
+
+
+def failure_excerpt(log, max_lines=50, max_chars=4000):
+    """Return a short sanitized excerpt from a failed command log for CI diagnosis."""
+    try:
+        text = Path(log).read_text(encoding='utf-8', errors='replace')
+    except OSError:
+        return ''
+    lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return ''
+    # Prefer from the first compiler/Gradle failure marker when near the end, else tail.
+    marker = next((i for i, l in enumerate(lines)
+                   if l.startswith(('e: ', 'FAILURE:', '* What went wrong:')) or 'Execution failed for task' in l), None)
+    selected = lines[marker:marker + max_lines] if marker is not None and len(lines) - marker <= max_lines * 3 else lines[-max_lines:]
+    sanitized = []
+    for line in selected:
+        line = HOME_PATH.sub('~', line)
+        line = SENSITIVE_LINE.sub(r'\1\2<redacted>', line)
+        sanitized.append(line)
+    out = '\n'.join(sanitized)
+    return out[-max_chars:] if len(out) > max_chars else out
+
+
 def command(argv, cwd, env, log, record, timeout):
     record.update(command=[str(a) for a in argv], cwd=str(cwd), started=now(), timeout_seconds=timeout)
     save(log.with_suffix('.command.json'), record)
@@ -191,6 +220,11 @@ def command(argv, cwd, env, log, record, timeout):
             process = subprocess.run(record['command'], cwd=cwd, env=env,
                                      stdout=stream, stderr=subprocess.STDOUT, timeout=timeout)
         record['exit'] = process.returncode
+        if process.returncode != 0:
+            excerpt = failure_excerpt(log)
+            if excerpt:
+                print('--- failure excerpt (sanitized) ---\n' + excerpt + '\n--- end excerpt ---',
+                      file=sys.stderr, flush=True)
         require(process.returncode == 0, f'Command exit {process.returncode}: {log}')
     except BaseException as error:
         record['error'] = str(error)

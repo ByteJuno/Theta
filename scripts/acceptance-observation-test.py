@@ -363,7 +363,7 @@ class LifecycleSearch(unittest.TestCase):
 
 class Observations(unittest.TestCase):
     def host_readiness(self, *, empty_list_present):
-        # The recorded R8 screen ends at the data section; the code list is below it.
+        # The recorded R8 screen ends at the data section; the code list sits below it.
         state = {'clock': 0, 'position': 0, 'swipes': []}
 
         def screen():
