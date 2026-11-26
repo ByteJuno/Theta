@@ -665,6 +665,32 @@ class McpIntegrationTest {
         } } finally { server.stop(0); dir.deleteRecursively() }
     }
 
+    @Test fun headerMappedIntegerRepresentationsPassAdmissionAndDispatchUnchanged() = runBlocking {
+        val annotated = Json.parseToJsonElement("""{"type":"object","properties":{"n":{"type":"integer","x-mcp-header":"N"}},"required":["n"]}""").jsonObject
+        for (literal in listOf("1.0", "1e0", "9007199254740991.0")) {
+            val received = java.util.concurrent.CopyOnWriteArrayList<JsonObject>()
+            Server { request ->
+                received += request.getValue("params").jsonObject.getValue("arguments").jsonObject
+                buildJsonObject { putJsonObject("result") { putJsonArray("content") {} } }
+            }.use { server -> Fixture().use { f ->
+                val client = McpClient(McpEndpoint(server.url))
+                f.catalog.replaceMcp("connection", "v1", listOf(McpTool(client,
+                    McpToolDefinition("remote", "Original", annotated, null, mcpHeaderParameters(annotated)!!))))
+                val definition = f.catalog.freeze("run").values.single()
+                val args = """{"n":$literal}"""
+                val record = f.approve(f.prepare(definition, args = args))
+                f.service.dispatch(record.callId)
+                f.service.awaitObservedExit(record.callId)
+                val done = f.ledger.get(record.callId)!!
+                assertEquals(Status.SUCCEEDED, done.state)
+                assertEquals(Effect.APPLIED, done.result!!.effect)
+                assertEquals(args, done.input.argsJson)
+                assertEquals(listOf(Json.parseToJsonElement(args).jsonObject), received)
+                assertEquals(1, server.calls)
+            } }
+        }
+    }
+
     @Test fun realHostInputAcceptDeclineAndCancellationAreScopedToLiveCall() = runBlocking {
         for (mode in listOf("accept", "decline", "cancel")) {
             val requests = java.util.concurrent.CopyOnWriteArrayList<JsonObject>()

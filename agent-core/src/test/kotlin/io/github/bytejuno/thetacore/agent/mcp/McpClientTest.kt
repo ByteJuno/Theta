@@ -221,6 +221,21 @@ class McpClientTest {
         assertThrows(McpException::class.java) { mcpParameterHeaders(parameters, buildJsonObject { put("n", Long.MAX_VALUE) }) }
     }
 
+    @Test fun integerHeaderMirrorsAcceptExactJsonNumbersWithoutRounding() {
+        val parameters = listOf(McpHeaderParameter(listOf("n"), "N", "integer"))
+        for ((literal, expected) in mapOf("1.0" to "1", "1e0" to "1", "-0.0" to "0",
+            "9007199254740991.0" to "9007199254740991", "-9007199254740991e0" to "-9007199254740991")) {
+            val args = Json.parseToJsonElement("""{"n":$literal}""").jsonObject
+            assertEquals(mapOf("Mcp-Param-N" to expected), mcpParameterHeaders(parameters, args))
+            assertEquals(literal, args.getValue("n").toString())
+        }
+        for (literal in listOf("1.5", "1e-1", "9007199254740992.0", "-9007199254740992",
+            "1e1000000000", "1e-1000000000", "\"1.0\"", "true", "null")) {
+            val args = Json.parseToJsonElement("""{"n":$literal}""").jsonObject
+            assertThrows(literal, McpException::class.java) { mcpParameterHeaders(parameters, args) }
+        }
+    }
+
     @Test fun legacyHttpErrorsWithNullIdRetainStatusAndNegotiateWithoutLeakingBody() = runBlocking {
         for (status in listOf(400, 404)) MockWebServer().use { server ->
             val methods = mutableListOf<String>()

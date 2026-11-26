@@ -54,7 +54,9 @@ fun mcpParameterHeaders(parameters: List<McpHeaderParameter>, args: JsonObject):
             "string" -> { if (!value.isString) throw McpException(); value.content }
             "boolean" -> { if (value.isString || value.booleanOrNull == null) throw McpException(); value.content }
             else -> {
-                val n = if (value.isString) null else value.longOrNull
+                // JSON Schema integers also include exact decimal/exponent forms such as 1.0
+                // and 1e0. Normalize only the HTTP mirror, preserving the original arguments.
+                val n = if (value.isString) null else runCatching { value.content.toBigDecimal().longValueExact() }.getOrNull()
                 if (n == null || n !in -9007199254740991L..9007199254740991L) throw McpException()
                 n.toString()
             }
