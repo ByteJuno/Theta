@@ -49,13 +49,12 @@ internal fun toolState(record: InvocationRecord?): Int = when {
 internal fun showApproval(record: InvocationRecord): Boolean = record.pending != null && !record.input.unattended
 
 @Composable
-internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
+internal fun ChatScreen(host: ThetaApplication, drafts: ChatComposerDrafts, onPlugins: () -> Unit) {
     val strings = uiStrings()
     val context = LocalContext.current
     val owner = remember(host) { host.chat }
     val launchTask = rememberChatTaskLauncher(host)
     val state by owner.state.collectAsState()
-    val drafts = rememberChatComposerDrafts(owner)
     val composer = drafts[state.sessionId]
     var pickerSession by rememberSaveable { mutableStateOf<String?>(null) }
     var settings by rememberSaveable { mutableStateOf(false) }

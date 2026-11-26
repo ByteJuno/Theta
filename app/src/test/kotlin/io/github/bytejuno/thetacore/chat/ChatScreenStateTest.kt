@@ -2,6 +2,7 @@ package io.github.bytejuno.thetacore.chat
 
 import androidx.sqlite.driver.bundled.BundledSQLiteDriver
 import androidx.compose.runtime.saveable.SaverScope
+import androidx.compose.runtime.saveable.SaveableStateRegistry
 import io.github.bytejuno.thetacore.R
 import io.github.bytejuno.thetacore.agent.ledger.*
 import io.github.bytejuno.thetacore.plugin.AndroidAgentStore
@@ -22,6 +23,24 @@ class ChatScreenStateTest {
 
     private val session = "shared"
     private fun image(id: String) = PendingUserImage(id, "image/png", id.toByteArray())
+
+    @Test fun activityCanRestoreLatestDraftWhenSavedOnPluginPage() {
+        val files = draftsFor(listOf(session))
+        val saver = ChatComposerDrafts.saver(files)
+        val drafts = ChatComposerDrafts(files)
+        val activity = SaveableStateRegistry(null) { true }
+        activity.registerProvider("drafts") { with(saver) { saverScope.save(drafts) } }
+        drafts[session].edit("before")
+        activity.performSave()
+        drafts[session].edit("after")
+        drafts[session].images = listOf(image("pending"))
+        // ChatScreen has left composition; the Activity still owns the draft provider.
+        val restoredActivity = SaveableStateRegistry(activity.performSave()) { true }
+        val restored = requireNotNull(saver.restore(requireNotNull(restoredActivity.consumeRestored("drafts"))))[session]
+        assertEquals("after", restored.input)
+        assertEquals("pending", restored.images.single().localId)
+        assertArrayEquals("pending".toByteArray(), restored.images.single().bytes)
+    }
 
     @Test fun attachmentOnlyPagePreservesAnotherPagesTextAfterDatabaseReopen() {
         val root = temp.newFolder()
