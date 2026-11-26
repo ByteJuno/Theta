@@ -82,6 +82,8 @@ class AgentRunLoop(
     }
 
     private fun irreducible(source: HistorySnapshot): Boolean {
+        val active = source.messages.subList(contextPolicy?.priorMessageCount ?: 0, activeInputCount)
+        if (active.any { !ImagePayloadBudget.admitsMessages(listOf(it)) }) return true
         val capacity = budget.limit(config.model) ?: return false
         val base = copyRequest(config, emptyList())
         if ((budget.tokens(base) ?: 0) > capacity) return true

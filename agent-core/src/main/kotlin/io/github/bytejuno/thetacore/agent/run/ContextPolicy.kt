@@ -182,6 +182,7 @@ internal class ContextSummarizer(
         model.request.model.length + model.request.stopSequences.sumOf { it.length.toLong() } +
         (model.request.responseSchema?.toString()?.length ?: 0)
     private fun memoryFits(pieces: List<String>, media: List<ContentPart.Media> = emptyList()): Boolean {
+        if (!ImagePayloadBudget.admits(media.asSequence())) return false
         var remaining = model.memoryLimit.maxChars - overhead
         for (piece in pieces) {
             remaining -= piece.length

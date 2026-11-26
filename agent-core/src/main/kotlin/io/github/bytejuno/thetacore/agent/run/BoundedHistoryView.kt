@@ -12,7 +12,7 @@ internal class HistoryViewLimitException : IllegalStateException("History transa
 data class RequestViewLimit(val maxMessages: Int = 4096, val maxChars: Long = 2L * 1024 * 1024) {
     init { require(maxMessages > 0 && maxChars > 0) }
     internal fun admits(messages: List<Message>): Boolean {
-        if (messages.size > maxMessages) return false
+        if (messages.size > maxMessages || !ImagePayloadBudget.admitsMessages(messages)) return false
         var remaining = maxChars
         for (m in messages) {
             // Charge structure as well as strings (including opaque replay and tool bindings).

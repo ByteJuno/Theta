@@ -40,7 +40,11 @@ class OpenAiChatCodec(
         return units
     }
 
-    fun encode(request: ChatRequest): String = encodeInternal(request, includeMediaPayload = true)
+    fun encode(request: ChatRequest): String {
+        // Preflight the entire request before the first media read or base64 allocation.
+        require(ImagePayloadBudget.admitsMessages(request.messages)) { "Image request exceeds memory budget" }
+        return encodeInternal(request, includeMediaPayload = true)
+    }
 
     /**
      * Conservative byte/token budget estimate for [request] without reading media bytes or

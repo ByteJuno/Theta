@@ -643,6 +643,121 @@ class MultimodalImageInputTest {
         }
     }
 
+    // The review reproduction used 15 rounds with four valid 3,148,927-byte PNGs each.
+    // References alone are enough to prove admission happens before ANY image allocation.
+    private fun imageRounds(rounds: Int, count: Int, bytes: Long): List<Message> = buildList {
+        repeat(rounds) { round ->
+            add(message(Role.USER, textPart("Inspect round $round"),
+                *Array(count) { image -> mediaPart(ProtocolMediaKind.IMAGE,
+                    blobRef("round-$round-image-$image", "image/png", bytes)) }))
+            add(message(Role.ASSISTANT, textPart("observed")))
+        }
+    }
+
+    @Test fun sixtyLegalImagesAreRejectedBeforeReadingEncodingOrTransportWithUnknownWindow(): Unit = runBlocking {
+        val messages = imageRounds(15, 4, 3_148_927)
+        var reads = 0
+        var calls = 0
+        val config = OpenAiChatConfig("chat", "https://example.invalid/v1")
+        val reader = MediaContentReader { reads++; error("oversized request must not read images") }
+        val codec = OpenAiChatCodec(config, reader)
+        val request = chatRequest("vision") { this.messages = messages }
+        assertFalse("image references must be charged for their encoded payload", RequestViewLimit().admits(messages))
+        try { codec.encode(request); fail("codec must independently enforce the memory ceiling") }
+        catch (_: IllegalArgumentException) { }
+        val provider = OpenAiChatProvider(config, ModelTransport { _, _, _ ->
+            calls++; error("oversized request must not reach transport")
+        }, reader)
+        val failure = provider.chat(request, NoAuthCredentials).toList().filterIsInstance<ModelEvent.Failed>().single()
+        assertEquals(ModelErrorCode.INVALID_REQUEST, failure.error.code)
+        val history = MemoryRunHistory(messages)
+        val result = AgentRunLoop(RunIdentity("chain", "session", "run"),
+            ModelTarget("chat", provider, NoAuthCredentials), chatRequest("vision"), history,
+            emptyToolExecutor(), MemoryRunJournal(),
+            budget = ContextBudget({ 1L }, { null })).run()
+        assertEquals(RunState.PAUSED, result.state)
+        assertTrue(result.reason.contains("memory budget"))
+        assertEquals(messages, history.snapshot().messages)
+        assertEquals(0, reads); assertEquals(0, calls)
+    }
+
+    @Test fun imageSummaryChunksFitEncodingBudgetAndRetainAllOriginalImages(): Unit = runBlocking {
+        val dir = Files.createTempDirectory("theta-image-memory-summary")
+        try {
+            // Each transaction fits; their aggregate exceeds the independent memory ceiling.
+            val source = imageRounds(15, 4, 512L * 1024)
+            val seen = mutableListOf<String>()
+            var summaryCalls = 0
+            var mainCalls = 0
+            val reader = MediaContentReader { blob -> seen += blob.id; ByteArray(blob.sizeBytes.toInt()) }
+            fun response() = flow {
+                emit(TransportEvent.Headers(200, "text/event-stream", null))
+                emit(TransportEvent.Bytes(("data: {\"id\":\"ok\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"summary\"},\"finish_reason\":\"stop\"}]}\n\n" +
+                    "data: [DONE]\n\n").toByteArray()))
+            }
+            val config = OpenAiChatConfig("chat", "https://example.invalid/v1")
+            val summaryProvider = OpenAiChatProvider(config, ModelTransport { _, body, _ ->
+                summaryCalls++
+                assertTrue("individual serialized requests remain bounded", body.length < 16 * 1024 * 1024)
+                response()
+            }, reader)
+            val mainProvider = OpenAiChatProvider(config, ModelTransport { _, _, _ -> mainCalls++; response() }, reader)
+            AgentDatabase.open(dir.resolve("history.db"), BundledSQLiteDriver()).use { db ->
+                SqliteRunHistory.create(db, "session").use { history ->
+                    val original = source + message(Role.USER, textPart("Continue"))
+                    history.append(0, original)
+                    val result = AgentRunLoop(RunIdentity("chain", "session", "run"),
+                        ModelTarget("chat", mainProvider, NoAuthCredentials), chatRequest("vision"), history,
+                        emptyToolExecutor(), StoredRunJournal(history),
+                        budget = ContextBudget({ 1L }, { null }), limits = RunLimits(maxSteps = 40, maxRetries = 32),
+                        contextPolicy = ContextPolicy("Continue", source.size, SummaryModel(
+                            ModelTarget("chat", summaryProvider, NoAuthCredentials),
+                            chatRequest("vision-summary") { toolChoice = ToolChoice.None; maxOutputTokens = 128 },
+                            ContextBudget({ 1L }, { Long.MAX_VALUE })))).run()
+                    assertEquals(RunState.COMPLETED, result.state)
+                    assertTrue("aggregate must be split into several summary requests", summaryCalls > 1)
+                    assertEquals(1, mainCalls)
+                    val expected = source.flatMap { it.parts.filterIsInstance<ContentPart.Media>() }.map { it.blob.id }
+                    assertEquals(expected.sorted(), seen.sorted())
+                    assertEquals(original, history.snapshot().messages.take(original.size))
+                    assertNull(history.retryReconciliation())
+                }
+            }
+        } finally { dir.toFile().deleteRecursively() }
+    }
+
+    @Test fun oversizedSingleImageTransactionPausesWithoutSummaryReservationOrLosingHistory(): Unit = runBlocking {
+        val dir = Files.createTempDirectory("theta-image-memory-pause")
+        try {
+            for (window in listOf<Long?>(null, Long.MAX_VALUE)) {
+                var calls = 0; var reads = 0
+                val config = OpenAiChatConfig("chat", "https://example.invalid/v1")
+                val provider = OpenAiChatProvider(config, ModelTransport { _, _, _ ->
+                    calls++; error("oversized single input must pause")
+                }, MediaContentReader { reads++; error("must not read images") })
+                AgentDatabase.open(dir.resolve("history-$window.db"), BundledSQLiteDriver()).use { db ->
+                    SqliteRunHistory.create(db, "session").use { history ->
+                        val original = imageRounds(1, 4, 3_148_927).take(1)
+                        history.append(0, original)
+                        val result = AgentRunLoop(RunIdentity("chain", "session", "run"),
+                            ModelTarget("chat", provider, NoAuthCredentials), chatRequest("vision"), history,
+                            emptyToolExecutor(), StoredRunJournal(history), budget = ContextBudget({ 1L }, { null }),
+                            contextPolicy = ContextPolicy("inspect", summaryModel = SummaryModel(
+                                ModelTarget("chat", provider, NoAuthCredentials),
+                                chatRequest("summary") { toolChoice = ToolChoice.None; maxOutputTokens = 128 },
+                                ContextBudget({ 1L }, { window })))).run()
+                        assertEquals(RunState.PAUSED, result.state)
+                        assertEquals("BUDGET", history.checkpointInfo()!!.pauseClass)
+                        assertFalse(history.checkpointInfo()!!.canContinue)
+                        assertEquals(original, history.snapshot().messages)
+                        assertNull(history.retryReconciliation())
+                        assertEquals(0, calls); assertEquals(0, reads)
+                    }
+                }
+            }
+        } finally { dir.toFile().deleteRecursively() }
+    }
+
     private fun emptyToolExecutor(): LedgerToolExecutor {
         val gate = DefinitionGate()
         val store = object : InvocationStore {
