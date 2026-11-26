@@ -49,9 +49,9 @@ class McpIntegrationTest {
             catalog.registerHost("host/blob_read", "1", io.github.bytejuno.thetacore.plugin.tools.HostBlobReadTool(ledger))
             return catalog.freeze(run).values.first { it.source == Source.MCP }
         }
-        suspend fun prepare(definition: FrozenDefinition, index: Int = 0): InvocationRecord {
+        suspend fun prepare(definition: FrozenDefinition, index: Int = 0, args: String = "{}"): InvocationRecord {
             val input = InvocationInput(BindingValue("test", "request", null, index, null, UUID.randomUUID().toString()),
-                "chain", "session", "run", "step", index, "{}", definition, false, Risk.WRITE)
+                "chain", "session", "run", "step", index, args, definition, false, Risk.WRITE)
             return (service.prepare(input) as Mutation.Applied).record
         }
         suspend fun approve(r: InvocationRecord): InvocationRecord =
@@ -379,6 +379,193 @@ class McpIntegrationTest {
                 put("requestedSchema", Json.parseToJsonElement("""{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}"""))
             }
         } }
+    }
+
+    private fun directoryResponse(request: JsonObject, inputSchema: JsonObject = schema): JsonObject? =
+        when (request["method"]?.jsonPrimitive?.content) {
+            "server/discover" -> buildJsonObject { putJsonObject("result") {
+                putJsonArray("supportedVersions") { add("2026-07-28") }
+            } }
+            "tools/list" -> buildJsonObject { putJsonObject("result") {
+                put("ttlMs", 60_000); putJsonArray("tools") { add(buildJsonObject {
+                    put("name", "remote"); put("description", "Original"); put("inputSchema", inputSchema)
+                }) }
+            } }
+            else -> null
+        }
+
+    @Test fun connectionDisableAndDeleteCancelHostInputAndRejectLateAnswers() = runBlocking {
+        for (delete in listOf(false, true)) {
+            val requests = java.util.concurrent.CopyOnWriteArrayList<JsonObject>()
+            Server { request ->
+                requests += request
+                directoryResponse(request) ?: buildJsonObject { put("result", requiredInput()) }
+            }.use { server -> Fixture().use { f ->
+                val dir = Files.createTempDirectory("theta-mcp-disable-input").toFile()
+                try {
+                    val key = KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
+                    val store = McpConnectionStore(dir, AesGcmSecretCipher("mcp") { key })
+                    store.save(McpConnection("connection", "Local", server.url, true))
+                    val manager = McpManager(store, f.owner); manager.attach(f.catalog)
+                    await { manager.connections.value.single().state == "ready" }
+                    val definition = f.catalog.freeze("run").values.single()
+                    val record = f.approve(f.prepare(definition)); f.service.dispatch(record.callId)
+                    await { f.service.activeInputs(listOf(record.callId)).isNotEmpty() }
+                    val input = f.service.activeInputs(listOf(record.callId)).getValue(record.callId)
+                    // A refreshed session shares revocation with the still-waiting old client.
+                    manager.refresh("connection")
+                    await { manager.connections.value.single().state == "ready" }
+                    if (delete) manager.delete("connection") else manager.enable("connection", false)
+                    assertTrue(f.catalog.mcpKeys("connection").isEmpty())
+                    assertTrue(f.service.activeInputs(listOf(record.callId)).isEmpty())
+                    assertFalse(f.service.respondInput("session", record.callId, input.id, buildJsonObject { put("name", "late") }))
+                    f.service.awaitObservedExit(record.callId)
+                    val done = f.ledger.get(record.callId)!!
+                    assertEquals(Status.CANCELLED, done.state)
+                    assertEquals(Effect.UNKNOWN, done.result!!.effect)
+                    assertEquals(InstanceState.EXIT_CONFIRMED, done.instance!!.state)
+                    assertEquals(1, requests.count { it["method"] == JsonPrimitive("tools/call") })
+                    done.validate()
+                } finally { dir.deleteRecursively() }
+            } }
+        }
+    }
+
+    @Test fun connectionRevocationClosesInFlightResponseAndKeepsUnknownEffect() = runBlocking {
+        for (delete in listOf(false, true)) {
+            val entered = java.util.concurrent.CountDownLatch(1)
+            val disconnected = java.util.concurrent.CountDownLatch(1)
+            val release = java.util.concurrent.CountDownLatch(1)
+            val calls = java.util.concurrent.atomic.AtomicInteger()
+            val executor = java.util.concurrent.Executors.newCachedThreadPool()
+            val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+            server.executor = executor
+            server.createContext("/mcp") { exchange ->
+                try {
+                    val request = Json.parseToJsonElement(exchange.requestBody.readBytes().toString(Charsets.UTF_8)).jsonObject
+                    if (request["method"] == JsonPrimitive("tools/call")) {
+                        calls.incrementAndGet()
+                        exchange.responseHeaders.add("Content-Type", "text/event-stream")
+                        exchange.sendResponseHeaders(200, 0)
+                        exchange.responseBody.write(": ready\n\n".toByteArray()); exchange.responseBody.flush()
+                        entered.countDown()
+                        while (!release.await(10, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                            exchange.responseBody.write(": heartbeat\n\n".toByteArray()); exchange.responseBody.flush()
+                        }
+                    } else {
+                        val bytes = buildJsonObject {
+                            put("jsonrpc", "2.0"); put("id", request["id"] ?: JsonNull)
+                            (directoryResponse(request) ?: buildJsonObject { putJsonObject("result") {} }).forEach { (k,v) -> put(k,v) }
+                        }.toString().toByteArray()
+                        exchange.responseHeaders.add("Content-Type", "application/json")
+                        exchange.sendResponseHeaders(200, bytes.size.toLong()); exchange.responseBody.write(bytes)
+                    }
+                } catch (_: java.io.IOException) { disconnected.countDown() }
+                finally { exchange.close() }
+            }
+            server.start()
+            val dir = Files.createTempDirectory("theta-mcp-disable-stream").toFile()
+            try { Fixture().use { f ->
+                val key = KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
+                val store = McpConnectionStore(dir, AesGcmSecretCipher("mcp") { key })
+                store.save(McpConnection("connection", "Local", "http://127.0.0.1:${server.address.port}/mcp", true))
+                val manager = McpManager(store, f.owner); manager.attach(f.catalog)
+                await { manager.connections.value.single().state == "ready" }
+                val record = f.approve(f.prepare(f.catalog.freeze("run").values.single()))
+                f.service.dispatch(record.callId)
+                await { entered.count == 0L }
+                if (delete) manager.delete("connection") else manager.enable("connection", false)
+                f.service.awaitObservedExit(record.callId)
+                await { disconnected.count == 0L }
+                val done = f.ledger.get(record.callId)!!
+                assertEquals(Status.CANCELLED, done.state); assertEquals(Effect.UNKNOWN, done.result!!.effect)
+                assertEquals(InstanceState.EXIT_CONFIRMED, done.instance!!.state); assertEquals(1, calls.get())
+                done.validate()
+            } } finally { release.countDown(); server.stop(0); executor.shutdownNow(); dir.deleteRecursively() }
+        }
+    }
+
+    @Test fun everyCredentialReadFailureRevokesAllConnectionsWithoutReplacingCiphertext() = runBlocking {
+        for (operation in listOf("reload", "save", "enable", "disable", "delete", "replace")) {
+            Server { request -> directoryResponse(request) ?: buildJsonObject { putJsonObject("result") {} } }.use { server ->
+                Fixture().use { f ->
+                    val dir = Files.createTempDirectory("theta-mcp-read-failure").toFile()
+                    try {
+                        var unreadable = false
+                        var replacements = 0
+                        val key = KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
+                        val delegate = AesGcmSecretCipher("mcp") { key }
+                        val cipher = object : SecretCipher {
+                            override fun encrypt(plaintext: ByteArray) = delegate.encrypt(plaintext)
+                            override fun decrypt(ciphertext: ByteArray): ByteArray {
+                                if (unreadable) throw java.io.IOException("transient")
+                                return delegate.decrypt(ciphertext)
+                            }
+                            override fun encryptForReplacement(plaintext: ByteArray): ByteArray { replacements++; return delegate.encrypt(plaintext) }
+                        }
+                        val store = McpConnectionStore(dir, cipher)
+                        for (id in listOf("connection", "other")) store.save(McpConnection(id, id, server.url, true))
+                        val original = dir.resolve("mcp-connections.bin").readBytes()
+                        val manager = McpManager(store, f.owner); manager.attach(f.catalog)
+                        await { manager.connections.value.all { it.state == "ready" } }
+                        unreadable = true
+                        try {
+                            when (operation) {
+                                "reload" -> manager.reload()
+                                "save" -> manager.save("connection", "Local", server.url, true, null, "Authorization")
+                                "enable" -> manager.enable("connection", true)
+                                "disable" -> manager.enable("connection", false)
+                                "delete" -> manager.delete("connection")
+                                else -> manager.replaceUnreadable("New", server.url, "new-token", "Authorization")
+                            }
+                            assertEquals("Only reload consumes the settings exception", "reload", operation)
+                        } catch (_: McpSettingsException) { }
+                        assertTrue(manager.loadFailed.value); assertFalse(manager.replacementAllowed.value)
+                        assertTrue(manager.connections.value.all { it.state == "failed" && it.tools == 0 })
+                        assertTrue(f.catalog.mcpKeys("connection").isEmpty()); assertTrue(f.catalog.mcpKeys("other").isEmpty())
+                        assertEquals(0, replacements); assertArrayEquals(original, dir.resolve("mcp-connections.bin").readBytes())
+                    } finally { dir.deleteRecursively() }
+                }
+            }
+        }
+    }
+
+    @Test fun headerAnnotationSurvivesDirectorySchemaAdmissionAndRealHostDispatch() = runBlocking {
+        val annotated = Json.parseToJsonElement("""{"type":"object","properties":{"scope":{"type":"string","minLength":2,"x-mcp-header":"Scope"}},"required":["scope"],"additionalProperties":false}""").jsonObject
+        val seen = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/mcp") { exchange ->
+            val request = Json.parseToJsonElement(exchange.requestBody.readBytes().toString(Charsets.UTF_8)).jsonObject
+            if (request["method"] == JsonPrimitive("tools/call")) seen += exchange.requestHeaders.getFirst("Mcp-Param-Scope")
+            val bytes = buildJsonObject {
+                put("jsonrpc", "2.0"); put("id", request["id"] ?: JsonNull)
+                (directoryResponse(request, annotated) ?: buildJsonObject { putJsonObject("result") { putJsonArray("content") {} } })
+                    .forEach { (k,v) -> put(k,v) }
+            }.toString().toByteArray()
+            exchange.responseHeaders.add("Content-Type", "application/json")
+            exchange.sendResponseHeaders(200, bytes.size.toLong()); exchange.responseBody.write(bytes); exchange.close()
+        }
+        server.start()
+        val dir = Files.createTempDirectory("theta-mcp-header").toFile()
+        try { Fixture().use { f ->
+            val key = KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
+            val store = McpConnectionStore(dir, AesGcmSecretCipher("mcp") { key })
+            store.save(McpConnection("connection", "Local", "http://127.0.0.1:${server.address.port}/mcp", true))
+            val manager = McpManager(store, f.owner); manager.attach(f.catalog)
+            await { manager.connections.value.single().state == "ready" }
+            val definition = f.catalog.freeze("run").values.single()
+            assertEquals(annotated.toString(), definition.inputSchema)
+            assertFalse(f.validator.valid(definition.inputSchema, """{"scope":"x"}"""))
+            assertFalse(f.validator.valid(definition.inputSchema, """{"scope":42}"""))
+            assertFalse(f.validator.supported("""{"type":"object","allOf":[{"type":"string","x-mcp-header":"Scope"}]}"""))
+            assertFalse(f.validator.supported("""{"type":"object","properties":{"scope":{"type":"string","x-mcp-header":"bad name"}}}"""))
+            val invalid = f.prepare(definition, args = """{"scope":"x"}""")
+            assertEquals(Status.REJECTED, invalid.state); assertTrue(seen.isEmpty())
+            val record = f.approve(f.prepare(definition, 1, """{"scope":"中文"}""")); f.service.dispatch(record.callId)
+            f.service.awaitObservedExit(record.callId)
+            assertEquals(Status.SUCCEEDED, f.ledger.get(record.callId)!!.state)
+            assertEquals(listOf("=?base64?${java.util.Base64.getEncoder().encodeToString("中文".toByteArray(Charsets.UTF_8))}?="), seen)
+        } } finally { server.stop(0); dir.deleteRecursively() }
     }
 
     @Test fun realHostInputAcceptDeclineAndCancellationAreScopedToLiveCall() = runBlocking {

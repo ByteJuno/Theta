@@ -31,13 +31,29 @@ internal class HostToolExecutionService(
     private val retiringRuns = mutableSetOf<String>()
     private val inputRequests = ToolInputRequests(validator)
 
+    init {
+        catalog.onMcpRevoked = { connection ->
+            active.forEach { (callId, invocation) ->
+                val definition = ledger.get(callId)?.input?.definition
+                if (definition?.source == Source.MCP && definition.owner == "mcp/$connection") {
+                    invocation.cancel()
+                    inputRequests.cancel(callId)
+                    wakeApproval(callId)
+                }
+            }
+        }
+    }
+
     fun activeInputs(callIds: Collection<String>): Map<String, ToolInputRequest> = gate.withGate {
-        inputRequests.snapshot(callIds.filter { ledger.get(it)?.state == Status.RUNNING })
+        inputRequests.snapshot(callIds.filter {
+            active[it]?.terminal?.isCompleted == false && ledger.get(it)?.state == Status.RUNNING
+        })
     }
 
     fun respondInput(sessionId: String, callId: String, requestId: String, answer: JsonObject?): Boolean = gate.withGate {
         val record = ledger.get(callId) ?: return@withGate false
-        if (storageFailed || record.state != Status.RUNNING || record.input.unattended ||
+        if (storageFailed || active[callId]?.terminal?.isCompleted != false ||
+            record.state != Status.RUNNING || record.input.unattended ||
             record.input.sessionId != sessionId) return@withGate false
         inputRequests.respond(callId, requestId, answer)
     }
@@ -256,6 +272,7 @@ internal class HostToolExecutionService(
             requestApproval = { summary, risk -> requestRuntimeApproval(ticket, summary, Risk.valueOf(risk.name), beforeResume) },
             requestInput = { prompt, schema ->
                 val allowed = gate.withGate { !storageFailed && !record.input.unattended &&
+                    active[ticket.callId]?.terminal?.isCompleted == false &&
                     ledger.get(ticket.callId)?.state == Status.RUNNING }
                 if (allowed) inputRequests.request(ticket.callId, prompt, schema) else null
             },

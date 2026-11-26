@@ -44,6 +44,8 @@ internal class FrozenToolCatalog(
     private val generations = mutableMapOf<String, Long>()
     private val pluginEpochs = mutableMapOf<String, Long>()
     private val pluginFailureWindows = mutableMapOf<String, PluginToolFailureWindow>()
+    /** Installed by the process execution owner; runs under the definition gate. */
+    var onMcpRevoked: (String) -> Unit = {}
 
     /** Trusted MCP metadata is already detached; publish the entire refresh in one scheduling gate. */
     fun replaceMcp(connection: String, version: String, tools: List<io.github.bytejuno.thetacore.mcp.McpTool>) = gate.withGate {
@@ -73,6 +75,7 @@ internal class FrozenToolCatalog(
     fun revokeMcp(connection: String) = gate.withGate {
         gate.clearFreshness("mcp/$connection")
         mcpKeys(connection).forEach(::revoke)
+        onMcpRevoked(connection)
     }
 
     fun isBudgetClosed(): Boolean = budget.isClosed() || !owner.isActive

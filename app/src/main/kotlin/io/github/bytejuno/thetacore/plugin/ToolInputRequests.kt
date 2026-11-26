@@ -28,6 +28,8 @@ internal class ToolInputRequests(private val validator: Schema202012Validator) {
         callIds.mapNotNull { id -> pending[id]?.request?.let { id to it } }.toMap()
     }
 
+    fun cancel(callId: String) = synchronized(lock) { pending.remove(callId)?.answer?.cancel(); Unit }
+
     fun respond(callId: String, requestId: String, answer: JsonObject?): Boolean = synchronized(lock) {
         val p = pending[callId]?.takeIf { it.request.id == requestId } ?: return false
         if (answer != null && !validator.valid(p.request.schema.toString(), answer.toString())) return false

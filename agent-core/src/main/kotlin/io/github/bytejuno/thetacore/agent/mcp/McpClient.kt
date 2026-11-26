@@ -41,8 +41,28 @@ data class McpToolDefinition(val name: String, val description: String,
     val inputSchema: JsonObject, val outputSchema: JsonObject?, val headers: List<McpHeaderParameter> = emptyList())
 data class McpDirectory(val tools: List<McpToolDefinition>, val ttlMs: Long)
 
+/** Shared by every session generation of one enabled connection. Closing is irreversible. */
+class McpRequestScope {
+    private val lock = Any()
+    private var closed = false
+    private val requests = mutableMapOf<Call, () -> Unit>()
+
+    internal fun start(call: Call, abort: () -> Unit, enqueue: () -> Unit) = synchronized(lock) {
+        if (closed) throw CancellationException("MCP connection disabled")
+        requests[call] = abort
+        enqueue()
+    }
+    internal fun finish(call: Call) = synchronized(lock) { requests.remove(call); Unit }
+    fun close() = synchronized(lock) {
+        closed = true
+        requests.toMap().forEach { (call, abort) -> call.cancel(); abort() }
+        requests.clear()
+    }
+}
+
 /** A single connection/session. Requests are never replayed, including after a 404 or disconnect. */
 class McpClient(private val endpoint: McpEndpoint, private val sessionInvalid: () -> Unit = {},
+    private val requests: McpRequestScope = McpRequestScope(),
     private val changed: () -> Unit = {}) {
     @Volatile private var session: String? = null
     @Volatile var version: String = "2026-07-28"
@@ -264,6 +284,7 @@ class McpClient(private val endpoint: McpEndpoint, private val sessionInvalid: (
                 }
             }.build()
         val call = SharedHttpClient.instance.newCall(request)
+        requests.start(call, { close(CancellationException("MCP connection disabled")) }) {
         call.enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) { if (!call.isCanceled()) close(McpException()) }
             override fun onResponse(call: Call, response: Response) {
@@ -313,7 +334,8 @@ class McpClient(private val endpoint: McpEndpoint, private val sessionInvalid: (
                 job.invokeOnCompletion { response.close() }
             }
         })
-        awaitClose { call.cancel() }
+        }
+        awaitClose { call.cancel(); requests.finish(call) }
     }
 
     companion object {

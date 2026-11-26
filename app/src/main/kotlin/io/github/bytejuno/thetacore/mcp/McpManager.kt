@@ -25,6 +25,7 @@ internal class McpManager(private val store: McpConnectionStore, private val sco
     private val bindings = mutableMapOf<String, Binding>()
     private class Binding(val connection: McpConnection) {
         val version = connection.revision
+        val requests = McpRequestScope()
         lateinit var client: McpClient
         val clientGeneration = AtomicLong()
         var initialized = false
@@ -41,7 +42,7 @@ internal class McpManager(private val store: McpConnectionStore, private val sco
     suspend fun reload() = withContext(Dispatchers.IO) {
         mutex.withLock {
             try {
-                val records = store.read()
+                val records = credentials { store.read() }
                 errors.value = false
                 recovery.value = false
                 states.value = records.map { record ->
@@ -50,21 +51,19 @@ internal class McpManager(private val store: McpConnectionStore, private val sco
                 }
                 records.filter { it.enabled && it.id !in bindings }.forEach(::startLocked)
             } catch (e: Exception) {
-                errors.value = true
-                recovery.value = (e as? McpSettingsException)?.replacementAllowed == true
-                bindings.keys.toList().forEach(::stopLocked)
-                states.value = emptyList()
+                if (e is CancellationException) throw e
+                credentialFailure(e)
             }
         }
     }
     suspend fun save(id: String?, name: String, url: String, enabled: Boolean, token: String?, header: String) =
         withContext(Dispatchers.IO) { mutex.withLock {
-            val old = store.read().firstOrNull { it.id == id }
+            val old = credentials { store.read() }.firstOrNull { it.id == id }
             if (token == null && old?.hasCredentials() == true && (old.url != url || old.header != header))
                 throw McpSettingsException()
             val value = McpConnection(id ?: UUID.randomUUID().toString(), name.trim(), validateMcpUrl(url.trim()),
                 enabled, token ?: old?.token.orEmpty(), header)
-            store.save(value)
+            credentials { store.save(value) }
             stopLocked(value.id)
             states.value = (states.value.filterNot { it.id == value.id } + view(value, if (enabled) "refreshing" else "disabled"))
             if (enabled) startLocked(value)
@@ -73,23 +72,23 @@ internal class McpManager(private val store: McpConnectionStore, private val sco
         withContext(Dispatchers.IO) { mutex.withLock {
             val value = McpConnection(UUID.randomUUID().toString(), name.trim(), validateMcpUrl(url.trim()),
                 false, token, header)
-            store.replaceUnreadable(value)
+            credentials { store.replaceUnreadable(value) }
             bindings.keys.toList().forEach(::stopLocked)
             states.value = listOf(view(value, "disabled"))
             errors.value = false; recovery.value = false
         } }
     suspend fun enable(id: String, enabled: Boolean) = withContext(Dispatchers.IO) { mutex.withLock {
-        val record = store.read().first { it.id == id }.enabled(enabled)
-        // Revocation precedes durable IO; a failed write remains visibly blocked in this process.
+        // Disabling is local and immediate even when credentials cannot be read or persisted.
         stopLocked(id)
         update(id, "disabled", 0)
-        store.save(record)
+        val record = credentials { store.read() }.first { it.id == id }.enabled(enabled)
+        credentials { store.save(record) }
         states.value = states.value.map { if (it.id == id) view(record, if (enabled) "refreshing" else "disabled") else it }
         if (enabled) startLocked(record)
     } }
     suspend fun delete(id: String) = withContext(Dispatchers.IO) { mutex.withLock {
         stopLocked(id); update(id, "disabled", 0)
-        store.delete(id)
+        credentials { store.delete(id) }
         states.value = states.value.filterNot { it.id == id }
     } }
     suspend fun refresh(id: String) = mutex.withLock {
@@ -111,7 +110,7 @@ internal class McpManager(private val store: McpConnectionStore, private val sco
         val connection = b.connection
         val generation = catalog?.gate?.withGate { b.clientGeneration.incrementAndGet() }
             ?: b.clientGeneration.incrementAndGet()
-        return McpClient(McpEndpoint(connection.url, connection.token, connection.header), sessionInvalid = {
+        return McpClient(McpEndpoint(connection.url, connection.token, connection.header), requests = b.requests, sessionInvalid = {
             catalog?.gate?.withGate {
                 if (b.clientGeneration.get() != generation) return@withGate
                 b.invalidations.incrementAndGet()
@@ -137,12 +136,25 @@ internal class McpManager(private val store: McpConnectionStore, private val sco
         }
     }
     private fun stopLocked(id: String) {
-        catalog?.revokeMcp(id)
-        bindings.remove(id)?.let {
-            catalog?.gate?.withGate { it.clientGeneration.incrementAndGet() } ?: it.clientGeneration.incrementAndGet()
-            it.refresh?.cancel(); it.listener?.cancel(); it.timer?.cancel()
+        val stop = {
+            catalog?.revokeMcp(id)
+            bindings.remove(id)?.let {
+                it.clientGeneration.incrementAndGet()
+                it.requests.close()
+                it.refresh?.cancel(); it.listener?.cancel(); it.timer?.cancel()
+            }
+            Unit
         }
+        catalog?.gate?.withGate(stop) ?: stop()
     }
+    private fun credentialFailure(error: Exception) {
+        errors.value = true
+        recovery.value = (error as? McpSettingsException)?.replacementAllowed == true
+        bindings.keys.toList().forEach(::stopLocked)
+        states.value = states.value.map { it.copy(state = "failed", tools = 0) }
+    }
+    private inline fun <T> credentials(action: () -> T): T = try { action() }
+        catch (e: McpSettingsException) { credentialFailure(e); throw e }
     private fun requestRefreshLocked(b: Binding) {
         val target = catalog ?: return
         val epoch = target.gate.withGate {
