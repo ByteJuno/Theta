@@ -61,3 +61,9 @@ On the candidate, the development test endpoint selected the f512 runner and all
 新增三项数据库重开回归，保留既有发送回执、删除和恢复断言。theta-gpu-test 定向 38/38 通过。Windows 严格配置缓存 preflight 通过，应用 745 项通过、1 项跳过，agent-core 631 项通过、1 项跳过。
 
 本轮验证覆盖 JVM 和 SQLite 数据库重开。未生成 APK，设备冷启动、实际图片选择与发送、界面、API 33 及 R8 运行行为未验证。新提交的 CI、独立审核和正式回归待发布后执行。
+
+## PR 164 第八轮：从聊天切到插件页
+
+在 `0e3cec0` 上，JVM 探针模拟聊天页退出组合：保存文字 before，改为 after 并加一张图片，随后注销聊天页的保存回调。重新读取时仍为 before，附件为零；1 项用例失败。
+
+修复提交 `5fc5b1cb0a779b9e43ab6779fb4a86cb88dcc641` 将草稿保存在 Activity 的共同上层。插件页显示期间，系统仍能保存最新编辑。gpu-bai 定向运行 ChatScreenStateTest，12/12 通过，包括文字及图片字节恢复。未生成 APK，未实测页面点击或渲染；最终提交的 CI 和模拟器回归由外层执行。
