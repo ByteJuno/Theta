@@ -1,0 +1,13 @@
+# Issue 150 validation
+
+Implementation commit: `cd06a518e1f49b707251662c2282ac29ba675c4b`
+Branch: `auto/150-schema-profiles`
+Base: `6d11d8191ced3d77188710e9e58bd3574137a85f`
+
+Implemented agent-core bounded local definition references, three SchemaProfile projections, per-tool exclusions and request-scoped diagnostics. OpenAiChatConfig.schemaProfile defaults to the existing Compat profile (FULL by default), preserving callers. Model projection never changes FrozenDefinition or original-schema validation. External/dynamic/cyclic/missing references, excessive nesting/expansion and non-schema pointer targets are rejected. Reference siblings preserve 2020-12 evaluation scope. BASIC and top-level projections describe removed constraints and avoid introducing restrictions through unevaluated keywords or tuple-tail items.
+
+Final preflight: passed in 155.78s. Executed `python scripts/preflight.py` with strict `--configuration-cache --configuration-cache-problems=fail`, four workers and Android path override. Configuration cache reused. `:agent-core:test`: 604 tests, 603 passed, 1 platform skip; `:app:testDebugUnitTest`: 668 tests, 667 passed, 1 platform skip. Total 1272 tests, 1270 passed, 2 skipped, zero failures/errors. All 14 SchemaProfilesTest cases passed. `:app:verifyUiResources` verified 486 English/Chinese keys; `:app:lintDebug`, storage-fixture source verification and `:samples:storage-fixture:compileDebugKotlin` passed. Earlier targeted run passed 67/67 before the final three added regressions; its results are not substituted for final-source evidence.
+
+Tested worktree hashes and committed blobs were compared, allowing only Git line-ending normalization. Evidence is stored outside Git in this round's preflight-publication directory and source-commit-verification.json. No test failure occurred; read/encoding/tool-path diagnostic failures remain in current_round. Historical sample XML copied by the evidence collector is excluded from reported counts.
+
+Limits: no APK generated (APK SHA: not generated); no device, emulator, visual, API33 runtime, R8, physical power-loss or live third-party model acceptance. No App UI/configuration files changed; App configuration/diagnostic presentation wiring remains with #159/#154. FULL supports the existing bounded validator vocabulary; unsupported schemas are excluded with reasons. BASIC false subschemas and constraint descriptions over 8 KiB are conservatively excluded; source/expanded limits are 32/128 KiB. Structured exclusions are available through the provider callback; no GUI acceptance is claimed. Independent review, new-head CI and prescribed emulator regression remain pending the authorized reviewer. Writer did not push, create/update a PR or merge.
