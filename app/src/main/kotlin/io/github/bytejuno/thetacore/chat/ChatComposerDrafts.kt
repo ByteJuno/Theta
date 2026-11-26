@@ -59,8 +59,10 @@ internal class ChatComposerDrafts(private val store: () -> SessionComposerStore?
     fun checkpoint(): Int {
         for ((id, draft) in sessions) {
             val identity = draft.identity()
-            if (id != null && identity != saved[id]) {
-                requireNotNull(store()).save(id, draft.snapshot(), saved[id]?.imageIds.orEmpty())
+            val baseline = saved[id]
+            if (id != null && identity != baseline) {
+                val textChanged = baseline?.version != identity.version || baseline.emptyText != identity.emptyText
+                requireNotNull(store()).save(id, draft.snapshot(), baseline?.imageIds.orEmpty(), textChanged)
                 saved[id] = identity
             }
         }

@@ -20,6 +20,77 @@ class ChatScreenStateTest {
 
     private val saverScope = SaverScope { true }
 
+    private val session = "shared"
+    private fun image(id: String) = PendingUserImage(id, "image/png", id.toByteArray())
+
+    @Test fun attachmentOnlyPagePreservesAnotherPagesTextAfterDatabaseReopen() {
+        val root = temp.newFolder()
+        AndroidAgentStore.open(root, BundledSQLiteDriver()).use { store ->
+            store.createHistory(session).close()
+            val writer = ChatComposerDrafts { store.composerDrafts }
+            writer[session].edit("old")
+            writer.checkpoint()
+            val stale = ChatComposerDrafts { store.composerDrafts }
+            val old = stale[session]
+            writer[session].edit("new text")
+            writer.checkpoint()
+            old.images = listOf(image("new-picture"))
+            stale.checkpoint()
+        }
+        AndroidAgentStore.open(root, BundledSQLiteDriver()).use { store ->
+            val saved = store.composerDrafts.read(session)
+            assertEquals("new text", saved.text)
+            assertEquals("new-picture", saved.images.single().id)
+        }
+    }
+
+    @Test fun twoPagesPersistOnlyFourOrderedImagesAcrossDatabaseReopen() {
+        val root = temp.newFolder()
+        val latest = listOf("z", "a", "c", "b")
+        AndroidAgentStore.open(root, BundledSQLiteDriver()).use { store ->
+            store.createHistory(session).close()
+            val first = ChatComposerDrafts { store.composerDrafts }
+            val second = ChatComposerDrafts { store.composerDrafts }
+            first[session].images = listOf("e", "f", "g", "h").map(::image)
+            second[session].images = latest.map(::image)
+            first.checkpoint()
+            second.checkpoint()
+        }
+        BundledSQLiteDriver().open(root.resolve(AgentDatabase.FILE_NAME).path).use { db ->
+            db.prepare("SELECT count(*) FROM composer_chunks").use { rows ->
+                assertTrue(rows.step())
+                assertEquals(4L, rows.getLong(0))
+            }
+        }
+        AndroidAgentStore.open(root, BundledSQLiteDriver()).use { store ->
+            val images = store.composerDrafts.read(session).images
+            assertEquals(latest, images.map { it.id })
+            images.forEach { assertArrayEquals(it.id.toByteArray(), it.bytes) }
+        }
+    }
+
+    @Test fun reopeningAnOlderOversizeDraftPrunesExcessRowsAndChunks() {
+        val root = temp.newFolder()
+        AndroidAgentStore.open(root, BundledSQLiteDriver()).use { it.createHistory(session).close() }
+        val path = root.resolve(AgentDatabase.FILE_NAME).path
+        BundledSQLiteDriver().open(path).use { db ->
+            for (i in 0 until 8) {
+                db.prepare("INSERT INTO composer_parts VALUES('shared','image','i$i',$i,'image/png')").use { it.step() }
+                db.prepare("INSERT INTO composer_chunks VALUES('shared','image','i$i',0,X'01')").use { it.step() }
+            }
+        }
+        AndroidAgentStore.open(root, BundledSQLiteDriver()).use { store ->
+            assertEquals(listOf("i0", "i1", "i2", "i3"), store.composerDrafts.read(session).images.map { it.id })
+        }
+        BundledSQLiteDriver().open(path).use { db ->
+            db.prepare("SELECT (SELECT count(*) FROM composer_parts), (SELECT count(*) FROM composer_chunks)").use {
+                assertTrue(it.step())
+                assertEquals(4L, it.getLong(0))
+                assertEquals(4L, it.getLong(1))
+            }
+        }
+    }
+
     private fun draftsFor(ids: List<String>): () -> SessionComposerStore {
         val store = AndroidAgentStore.open(temp.newFolder(), BundledSQLiteDriver()).also { stores += it }
         ids.forEach { store.createHistory(it).close() }

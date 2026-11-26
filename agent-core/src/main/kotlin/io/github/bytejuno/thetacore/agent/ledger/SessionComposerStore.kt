@@ -24,10 +24,22 @@ class SessionComposerStore(private val database: AgentDatabase) {
     private val db get() = database.connection
 
     fun read(session: String): ComposerSnapshot = database.access {
+        // Older checkpoints could merge several pages beyond the send limit.
+        val overflow = """SELECT id FROM composer_parts WHERE session_id=? AND kind='image'
+            AND value IS NOT NULL ORDER BY position,id LIMIT -1 OFFSET ${ImageLimits.PER_MESSAGE}"""
+        if (db.prepare(overflow).use { it.bindText(1, session); it.step() }) {
+            database.transaction {
+                db.prepare("DELETE FROM composer_parts WHERE session_id=? AND kind='image' AND id IN ($overflow)").use {
+                    it.bindText(1, session)
+                    it.bindText(2, session)
+                    it.step()
+                }
+            }
+        }
         var version: String? = null
         var text = ""
         val images = mutableListOf<ComposerImage>()
-        db.prepare("SELECT kind,id,value FROM composer_parts WHERE session_id=? AND value IS NOT NULL ORDER BY position").use { rows ->
+        db.prepare("SELECT kind,id,value FROM composer_parts WHERE session_id=? AND value IS NOT NULL ORDER BY position,id").use { rows ->
             rows.bindText(1, session)
             while (rows.step()) {
                 val id = rows.getText(1)
@@ -52,39 +64,60 @@ class SessionComposerStore(private val database: AgentDatabase) {
         ComposerSnapshot(version, text, images)
     }
 
-    fun save(session: String, draft: ComposerSnapshot, previousImages: List<String>) = database.transaction {
+    fun save(session: String, draft: ComposerSnapshot, previousImages: List<String>, textChanged: Boolean = true) = database.transaction {
         // A stale page can outlive its session. Never bootstrap a session while saving a draft.
         db.prepare("SELECT 1 FROM sessions WHERE session_id=?").use {
             it.bindText(1, session)
             if (!it.step()) return@transaction
         }
         val version = requireNotNull(draft.version)
-        if (!consumed(session, "text", version)) {
+        if (textChanged && !consumed(session, "text", version)) {
             db.prepare("DELETE FROM composer_parts WHERE session_id=? AND kind='text' AND value IS NOT NULL").use {
                 it.bindText(1, session)
                 it.step()
             }
             put(session, "text", version, 0, draft.text)
+        } else if (!textChanged && draft.text.isEmpty()) {
+            // An image-only draft still needs a stable initial receipt identity.
+            db.prepare("""INSERT INTO composer_parts SELECT ?, 'text', ?, 0, ''
+                WHERE NOT EXISTS (SELECT 1 FROM composer_parts WHERE session_id=? AND kind='text')""").use {
+                it.bindText(1, session)
+                it.bindText(2, version)
+                it.bindText(3, session)
+                it.step()
+            }
         }
-        val ids = draft.images.map { it.id }.toSet()
-        for (removed in previousImages - ids) {
+        if (draft.images.map { it.id } != previousImages) saveImages(session, draft.images, previousImages)
+    }
+
+    private fun saveImages(session: String, images: List<ComposerImage>, previous: List<String>) {
+        val stored = db.prepare("""SELECT id FROM composer_parts WHERE session_id=?
+            AND kind='image' AND value IS NOT NULL ORDER BY position,id""").use { rows ->
+            rows.bindText(1, session)
+            buildList { while (rows.step()) add(rows.getText(0)) }
+        }
+        val selected = images.associateBy { it.id }
+        // Keep this edit in picker order, then other pages' live additions in storage order.
+        // Unchanged ids removed or consumed by another page must stay removed.
+        val live = selected.keys.filter { it in stored || (it !in previous && !consumed(session, "image", it)) }
+        val order = (live + (stored - previous.toSet() - selected.keys)).take(ImageLimits.PER_MESSAGE)
+        for (removed in stored - order.toSet()) {
             db.prepare("DELETE FROM composer_parts WHERE session_id=? AND kind='image' AND id=? AND value IS NOT NULL").use {
                 it.bindText(1, session)
                 it.bindText(2, removed)
                 it.step()
             }
         }
-        draft.images.forEachIndexed { position, image ->
-            if (image.id in previousImages) {
-                if (previousImages.indexOf(image.id) != position) {
-                    db.prepare("UPDATE composer_parts SET position=? WHERE session_id=? AND kind='image' AND id=? AND value IS NOT NULL").use {
-                        it.bindLong(1, position.toLong())
-                        it.bindText(2, session)
-                        it.bindText(3, image.id)
-                        it.step()
-                    }
+        order.forEachIndexed { position, id ->
+            if (id in stored) {
+                db.prepare("UPDATE composer_parts SET position=? WHERE session_id=? AND kind='image' AND id=? AND value IS NOT NULL").use {
+                    it.bindLong(1, position.toLong())
+                    it.bindText(2, session)
+                    it.bindText(3, id)
+                    it.step()
                 }
-            } else if (!consumed(session, "image", image.id)) {
+            } else {
+                val image = selected.getValue(id)
                 require(image.bytes.size in 1..ImageLimits.BYTES)
                 put(session, "image", image.id, position, image.mime)
                 db.prepare("INSERT INTO composer_chunks VALUES(?,'image',?,?,?)").use { chunks ->
