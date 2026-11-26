@@ -1,21 +1,31 @@
-# Issue 136 validation (pending publication)
+# Issue 136 validation
 
-Source: `2a7a1212f7d385734b84379690da0788103b6cd7`. Base: `7edaa707de5785aa334366c81e37a3102f1d95cc`.
-APK: not generated; SHA-256 unavailable. No phone or emulator accessed.
+Implementation source commit: `c0085726980e339e1d6161f7749dd4971cc37dbb`
+Base main: `6d11d8191ced3d77188710e9e58bd3574137a85f`
+Reviewed predecessor: `70ab21f208b6e43c2d1d631cbbb627fecf713acd`
+RETURN: `IC_kwDOVkrS_s8AAAABq_kcbQ`
+Owner scope decision: 2026-11-26T02:02:12Z, input_required accepted; OAuth deferred.
 
-18/18 targeted tests passed. Full required check: agent-core 589 passed / 1 platform skipped; app 673 passed / 1 platform skipped; no failures/errors. lintDebug, 505-key bilingual resource guard and storage-fixture compile passed. Strict configuration cache; 126.57 seconds.
+Credential recovery, HTTP error fallback, explicit session renegotiation, host/chat input accept/decline/cancel, unattended decline, and localized progress are implemented. Session failures retain UNKNOWN effects and close admission; no automatic tools/call replay. Existing key failure classification and encryptForReplacement are reused; read/transient failures preserve ciphertext and keys.
 
-Actual loopback HTTP/SSE covers 2026 discovery/request metadata/standard and custom headers/subscriptions, 2025 initialize/session, 135-tool pagination, progress, cancellation identity, 3xx credential isolation, no Retry-After or stream-disconnect replay, JSON-RPC classification, header annotation and encoding. Host tests cover WRITE/MCP approval, refresh/TTL submission gates, unchanged refresh recovery, changed-definition rejection, destination-revision grant isolation, disable/delete, UNKNOWN effects and confirmed actual exit, full structured/text/resource/media BlobStore storage and cross-session read denial. Real encrypted files and real data ZIP lifecycle tested.
+## Actual checks
 
-Visual unverified: connection list/editor and add/edit/enable/disable/delete/refresh, English/Chinese, OAuth/manual-Token warning and domain, loading/empty/error/retry, small screen, large fonts, light/dark await dedicated rendering. AndroidKeyStore runtime, API33, Release/R8 and real third-party service unverified. Final CI and reviewer emulator regression pending publication.
+- `python scripts/preflight.py` with strict `--configuration-cache --configuration-cache-problems=fail`: passed in 150.51 seconds; configuration cache reused.
+- agent-core: 603 tests, 602 passed, 1 platform skip, zero failures/errors.
+- app: 683 tests, 682 passed, 1 platform skip, zero failures/errors.
+- lintDebug, storage-fixture source check/compile and 525 English/Chinese resource keys: passed.
+- Designated GPU test entry: 36 targeted tests, zero failures, 52.91 seconds. Same source hashes; 256 MiB test heap. Packaging used the unchanged Git LF gradlew blob because the Windows checkout contains CRLF.
+- Working source SHA-256 manifest matches the tested worktree; committed source blobs match Git-normalized worktree bytes. Protected files and docs/testing/136/summary.md were not changed by the writer.
+- No dependency additions. Pinned SDK review and storage decision are documented in the PR body; no upstream source copied.
 
-Failed attempts retained outside Git in validation-issue11/issue136-be087611-*: UI parser protocol constants, missing test-store method, non-void JUnit signature, and header test fixture mismatch corrected. No assertion or timeout weakened. Protected files unchanged.
+## Failure history retained outside Git
 
-Sources checked (no source copied):
-https://github.com/modelcontextprotocol/kotlin-sdk/blob/main/kotlin-sdk-client/src/commonMain/kotlin/io/modelcontextprotocol/kotlin/sdk/client/StreamableHttpClientTransport.kt
-https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/2026-07-28/schema.ts
-https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/docs/specification/2026-07-28/basic/transports/streamable-http.mdx
+The first targeted run failed UI literal checks on JSON field names in the composable source. Protocol parsing moved into the presentation helper. Two session-test fixture attempts were blocked by existing ledger UNKNOWN/admission and monotonic-order rules; corrected preparation ordering preserved the gate and assertions. Initial GPU launcher returned 127 before tests due to CRLF; LF packaging retry passed. No assertion deletion, timeout enlargement, empty commit, or device-result substitution.
 
-These define session headers, metadata, subscription filters and safe custom header mapping. Reuse Theta ledger, normalizer, schema validator and Material UI.
+## Limits and remaining evidence
 
-Publication blocked: Automatic approval review rejected the combined evidence-save/summary-commit/push/PR-create command before execution: blocked by policy. No detailed reason supplied. Local implementation commit and all validation evidence preserved; no push or new PR.
+APK: not generated; SHA-256: not applicable. No phone or emulator accessed. Visual behavior is unverified: credential replacement confirmation; form accept/decline/stop; English/Chinese progress; small screen, large font, light/dark themes. Formal new-head CI and dedicated-emulator regression belong to the independent reviewer. No API33 runtime, R8 release, physical power-loss, or third-party MCP service acceptance claimed.
+
+Only scalar form elicitation is displayed. Unsupported schemas/modes fail closed or can be declined; sampling, URL/OAuth, state-only load shedding and arbitrary nested/multiselect form rendering are outside this implementation. Eight input rounds and existing execution budgets bound interaction; input waits do not pause execution budgets. UNKNOWN side effects require the existing reconciliation process.
+
+Raw evidence remains in event-runs/9f0c2389-3007-45e7-a04a-6c62479d1351/ and validation-issue11/issue136-9f0c2389-*. It is not part of the repository.
