@@ -1,31 +1,19 @@
 # Issue 136 validation
 
-Implementation source commit: `c0085726980e339e1d6161f7749dd4971cc37dbb`
-Base main: `6d11d8191ced3d77188710e9e58bd3574137a85f`
-Reviewed predecessor: `70ab21f208b6e43c2d1d631cbbb627fecf713acd`
-RETURN: `IC_kwDOVkrS_s8AAAABq_kcbQ`
-Owner scope decision: 2026-11-26T02:02:12Z, input_required accepted; OAuth deferred.
+Implementation commit: `53b4679991565d1c767ea42215d91a226123e1fc`.
+Branch: `auto/136-mcp-http`; PR #149; verified RETURN `IC_kwDOVkrS_s8AAAABrAPXyw` on remote head `18238649f98f8011fe6f699ba7a61c945cea2803`.
 
-Credential recovery, HTTP error fallback, explicit session renegotiation, host/chat input accept/decline/cancel, unattended decline, and localized progress are implemented. Session failures retain UNKNOWN effects and close admission; no automatic tools/call replay. Existing key failure classification and encryptForReplacement are reused; read/transient failures preserve ciphertext and keys.
+Connection disable/delete now revokes the directory and cancels live host invocations under the definition gate, removes input waiters, rejects late answers, and closes in-flight HTTP responses. All session generations share an irreversible request scope so old clients cannot continue after revocation. The existing ledger tracks actual worker exit and retains returned evidence or UNKNOWN for sent calls; no call is replayed.
 
-## Actual checks
+All credential catalog access paths now revoke enabled connections and publish the classified failure state. Disable/delete revoke before reading credentials. Transient errors preserve ciphertext/keys and do not authorize replacement. The original schema retains validated x-mcp-header annotations through registration, argument validation and real HTTP header mapping; illegal names/locations remain rejected.
 
-- `python scripts/preflight.py` with strict `--configuration-cache --configuration-cache-problems=fail`: passed in 150.51 seconds; configuration cache reused.
-- agent-core: 603 tests, 602 passed, 1 platform skip, zero failures/errors.
-- app: 683 tests, 682 passed, 1 platform skip, zero failures/errors.
-- lintDebug, storage-fixture source check/compile and 525 English/Chinese resource keys: passed.
-- Designated GPU test entry: 36 targeted tests, zero failures, 52.91 seconds. Same source hashes; 256 MiB test heap. Packaging used the unchanged Git LF gradlew blob because the Windows checkout contains CRLF.
-- Working source SHA-256 manifest matches the tested worktree; committed source blobs match Git-normalized worktree bytes. Protected files and docs/testing/136/summary.md were not changed by the writer.
-- No dependency additions. Pinned SDK review and storage decision are documented in the PR body; no upstream source copied.
+Checks on this source (worktree hashes retained outside Git; committed source verified equal):
+- Full `python scripts/preflight.py` passed in 149.63s: agent-core 603 tests = 602 passed + 1 platform skip; app 687 tests = 686 passed + 1 platform skip; no failures/errors.
+- lintDebug, storage-fixture source/compile checks and 525 English/Chinese resource keys passed; strict configuration cache reused with problems=fail.
+- Local targeted tests: 29/29 passed in 108.11s. Designated `/opt/homelab-report/theta-gpu-test`: 29/29 passed in 56.90s, same source archive and unchanged LF wrapper blob, 256 MiB test heap.
+- New end-to-end regressions cover disable and delete during host input (including an older refreshed session), actual streamed-response disconnect and UNKNOWN effect, every catalog access failure with two active connections, and original-schema validation plus actual header emission.
+- No protected files, dependencies, probe files or raw evidence committed. Existing untracked scripts cache and two stashes preserved.
 
-## Failure history retained outside Git
+Failure history: prior reviewer reproduced all three defects on 18238649; verdict and old-head CI failure log retained in this round output. That CI failed `PluginToolBridgeTest.attachCatalogAndOperationLockDoNotHangOnNonCooperativeMetadataTimeout`; the test was not changed, and passed in this round local targeted/full and GPU targeted runs. This does not establish that CI cannot recur. Earlier round failures remain in their existing output directories. Initial text-read encoding/output issue corrected; diagnostic jcmd was attempted after test process exit and supplies no test evidence.
 
-The first targeted run failed UI literal checks on JSON field names in the composable source. Protocol parsing moved into the presentation helper. Two session-test fixture attempts were blocked by existing ledger UNKNOWN/admission and monotonic-order rules; corrected preparation ordering preserved the gate and assertions. Initial GPU launcher returned 127 before tests due to CRLF; LF packaging retry passed. No assertion deletion, timeout enlargement, empty commit, or device-result substitution.
-
-## Limits and remaining evidence
-
-APK: not generated; SHA-256: not applicable. No phone or emulator accessed. Visual behavior is unverified: credential replacement confirmation; form accept/decline/stop; English/Chinese progress; small screen, large font, light/dark themes. Formal new-head CI and dedicated-emulator regression belong to the independent reviewer. No API33 runtime, R8 release, physical power-loss, or third-party MCP service acceptance claimed.
-
-Only scalar form elicitation is displayed. Unsupported schemas/modes fail closed or can be declined; sampling, URL/OAuth, state-only load shedding and arbitrary nested/multiselect form rendering are outside this implementation. Eight input rounds and existing execution budgets bound interaction; input waits do not pause execution budgets. UNKNOWN side effects require the existing reconciliation process.
-
-Raw evidence remains in event-runs/9f0c2389-3007-45e7-a04a-6c62479d1351/ and validation-issue11/issue136-9f0c2389-*. It is not part of the repository.
+Limits: no APK generated (APK SHA unavailable); no phone, device, emulator or visual verification. Existing input form, progress and credential recovery UI still need independent reviewer rendering/interaction acceptance. API33 runtime, R8, physical power loss and third-party MCP interoperability unverified. OAuth/sampling/URL elicitation remain deferred as documented previously. New-head GitHub CI, independent review and prescribed final emulator regression remain required. Writer did not push, update/create PR, merge, or create scheduling.
