@@ -29,6 +29,18 @@ internal class HostToolExecutionService(
     private val control = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val active = mutableMapOf<String, PluginInvocation>()
     private val retiringRuns = mutableSetOf<String>()
+    private val inputRequests = ToolInputRequests(validator)
+
+    fun activeInputs(callIds: Collection<String>): Map<String, ToolInputRequest> = gate.withGate {
+        inputRequests.snapshot(callIds.filter { ledger.get(it)?.state == Status.RUNNING })
+    }
+
+    fun respondInput(sessionId: String, callId: String, requestId: String, answer: JsonObject?): Boolean = gate.withGate {
+        val record = ledger.get(callId) ?: return@withGate false
+        if (storageFailed || record.state != Status.RUNNING || record.input.unattended ||
+            record.input.sessionId != sessionId) return@withGate false
+        inputRequests.respond(callId, requestId, answer)
+    }
 
     fun activeProgress(callId: String): PluginToolProgress? =
         gate.withGate { active[callId] }?.progress?.value
@@ -242,6 +254,11 @@ internal class HostToolExecutionService(
             Json.parseToJsonElement(ticket.argsJson).jsonObject,
             ToolInvocationRequest(record.input.runId, record.input.sessionId, ticket.callId, record.input.unattended),
             requestApproval = { summary, risk -> requestRuntimeApproval(ticket, summary, Risk.valueOf(risk.name), beforeResume) },
+            requestInput = { prompt, schema ->
+                val allowed = gate.withGate { !storageFailed && !record.input.unattended &&
+                    ledger.get(ticket.callId)?.state == Status.RUNNING }
+                if (allowed) inputRequests.request(ticket.callId, prompt, schema) else null
+            },
             frozenSpec = entry.spec, reservation = reservation, unattendedApprovalPolicy = true, clock = invocationClock,
             beforeExecution = {
                 gate.withGate {

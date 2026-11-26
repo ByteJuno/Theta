@@ -88,7 +88,7 @@ class McpClientTest {
             client.initialize()
             val result = client.call("tool", buildJsonObject {}, "call") { t, f -> progress += t to f }
             assertEquals(JsonPrimitive(true), result["structuredContent"]!!.jsonObject["ok"])
-            assertEquals(listOf("MCP tool running" to .5f), progress)
+            assertEquals(listOf(MCP_PROGRESS_RUNNING to .5f), progress)
             assertEquals(1, changed); assertEquals(2, server.requestCount)
         }
     }
@@ -219,5 +219,112 @@ class McpClientTest {
         assertEquals(mapOf("Mcp-Param-N" to "42"), mcpParameterHeaders(parameters, buildJsonObject { put("n", 42) }))
         assertTrue(mcpParameterHeaders(parameters, buildJsonObject {}).isEmpty())
         assertThrows(McpException::class.java) { mcpParameterHeaders(parameters, buildJsonObject { put("n", Long.MAX_VALUE) }) }
+    }
+
+    @Test fun legacyHttpErrorsWithNullIdRetainStatusAndNegotiateWithoutLeakingBody() = runBlocking {
+        for (status in listOf(400, 404)) MockWebServer().use { server ->
+            val methods = mutableListOf<String>()
+            server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse {
+                    val body = Json.parseToJsonElement(request.body!!.utf8()).jsonObject
+                    val method = body.getValue("method").jsonPrimitive.content
+                    methods += method
+                    return when (method) {
+                        "server/discover" -> MockResponse.Builder().code(status).addHeader("Content-Type", "application/json")
+                            .body("""{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"Missing session secret"}}""").build()
+                        "initialize" -> response(reply(body, buildJsonObject { put("protocolVersion", "2025-11-25") }))
+                        else -> MockResponse.Builder().code(202).build()
+                    }
+                }
+            }
+            server.start()
+            val client = McpClient(McpEndpoint(server.url("/").toString()))
+            client.initialize()
+            assertEquals("2025-11-25", client.version)
+            assertEquals(listOf("server/discover", "initialize", "notifications/initialized"), methods)
+        }
+    }
+
+    private fun inputResult(state: String = "opaque-state") = buildJsonObject {
+        put("resultType", "input_required"); put("requestState", state)
+        putJsonObject("inputRequests") { putJsonObject("destination") {
+            put("method", "elicitation/create")
+            putJsonObject("params") {
+                put("mode", "form"); put("message", "Destination")
+                put("requestedSchema", Json.parseToJsonElement("""{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}"""))
+            }
+        } }
+    }
+
+    @Test fun inputContinuationUsesNewIdSameCallAndOpaqueStateWithAcceptOrDecline() = runBlocking {
+        for (accept in listOf(true, false)) MockWebServer().use { server ->
+            val bodies = mutableListOf<JsonObject>()
+            server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse {
+                    val body = Json.parseToJsonElement(request.body!!.utf8()).jsonObject
+                    bodies += body
+                    return response(reply(body, if (bodies.size == 1) inputResult()
+                        else buildJsonObject { put("resultType", "complete"); put("content", JsonArray(emptyList())) }))
+                }
+            }
+            server.start()
+            var prompts = 0
+            McpClient(McpEndpoint(server.url("/").toString())).call("write", buildJsonObject { put("arg", 1) }, "internal",
+                input = { prompt, _ -> prompts++; assertEquals("Destination", prompt)
+                    if (accept) buildJsonObject { put("name", "chosen") } else null }) { _, _ -> }
+            assertEquals(1, prompts); assertEquals(2, bodies.size)
+            assertNotEquals(bodies[0]["id"], bodies[1]["id"])
+            val params = bodies[1].getValue("params").jsonObject
+            assertEquals(JsonPrimitive("opaque-state"), params["requestState"])
+            assertEquals(bodies[0]["params"]!!.jsonObject["arguments"], params["arguments"])
+            assertEquals(JsonPrimitive("internal"), params["_meta"]!!.jsonObject["progressToken"])
+            val answer = params["inputResponses"]!!.jsonObject["destination"]!!.jsonObject
+            assertEquals(JsonPrimitive(if (accept) "accept" else "decline"), answer["action"])
+            if (!accept) assertFalse("content" in answer)
+        }
+    }
+
+    @Test fun cancellingInputWaitNeverSendsContinuationAndCancelsOriginalRequest() = runBlocking {
+        MockWebServer().use { server ->
+            val entered = CompletableDeferred<Unit>()
+            server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse {
+                    val body = Json.parseToJsonElement(request.body!!.utf8()).jsonObject
+                    return if (body["method"] == JsonPrimitive("tools/call")) response(reply(body, inputResult()))
+                    else MockResponse.Builder().code(202).build()
+                }
+            }
+            server.start()
+            val job = launch {
+                McpClient(McpEndpoint(server.url("/").toString())).call("write", buildJsonObject {}, "call",
+                    input = { _, _ -> entered.complete(Unit); awaitCancellation() }) { _, _ -> }
+            }
+            withTimeout(5000) { entered.await(); job.cancelAndJoin() }
+            val original = Json.parseToJsonElement(server.takeRequest()!!.body!!.utf8()).jsonObject
+            val cancellation = Json.parseToJsonElement(server.takeRequest()!!.body!!.utf8()).jsonObject
+            assertEquals(JsonPrimitive("notifications/cancelled"), cancellation["method"])
+            assertEquals(original["id"], cancellation["params"]!!.jsonObject["requestId"])
+            assertEquals(2, server.requestCount)
+        }
+    }
+
+    @Test fun invalidInputAndFailedContinuationNeverReplay() = runBlocking {
+        for (invalid in listOf(true, false)) MockWebServer().use { server ->
+            val calls = AtomicInteger()
+            server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse {
+                    val body = Json.parseToJsonElement(request.body!!.utf8()).jsonObject
+                    return if (calls.incrementAndGet() == 1) response(reply(body, inputResult()))
+                    else MockResponse.Builder().code(503).body("secret").build()
+                }
+            }
+            server.start()
+            try {
+                McpClient(McpEndpoint(server.url("/").toString())).call("write", buildJsonObject {}, "call",
+                    input = { _, _ -> if (invalid) buildJsonObject { put("name", 123) } else buildJsonObject { put("name", "ok") } }) { _, _ -> }
+                fail()
+            } catch (_: McpException) { }
+            assertEquals(if (invalid) 1 else 2, calls.get())
+        }
     }
 }

@@ -11,6 +11,7 @@ import io.github.bytejuno.thetacore.agent.transport.ModelTransport
 import io.github.bytejuno.thetacore.agent.transport.OkHttpModelTransport
 import io.github.bytejuno.thetacore.plugin.HostToolExecutionService
 import io.github.bytejuno.thetacore.plugin.PluginToolProgress
+import io.github.bytejuno.thetacore.plugin.ToolInputRequest
 import io.github.bytejuno.thetacore.provider.ProviderSettingsException
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -19,6 +20,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 import java.util.UUID
 
@@ -33,6 +35,7 @@ internal data class ChatState(
     val messages: List<Message> = emptyList(),
     val records: Map<String, InvocationRecord> = emptyMap(),
     val toolProgress: Map<String, PluginToolProgress> = emptyMap(),
+    val toolInputs: Map<String, ToolInputRequest> = emptyMap(),
     val recoveries: Map<String, RecoveryRequest> = emptyMap(),
     val older: HistoryCursor? = null,
     val showingOlder: Boolean = false,
@@ -229,6 +232,7 @@ internal class ChatSessionOwner(
         val reconciliation = if (active == null) disk.retryReconciliation() else null
         val progress = host.activeProgressSnapshot(records.keys)
         mutable.update { it.copy(messages = messages, records = records, toolProgress = progress,
+            toolInputs = host.activeInputs(records.keys),
             recoveries = host.ledger.pendingRecoveries().filter { it.callId in records }.associateBy { it.callId }, older = page.older,
             showingOlder = before != null, pending = pending != null,
             draft = previewText(), journal = journal.replies, olderJournal = journal.older,
@@ -370,6 +374,12 @@ internal class ChatSessionOwner(
         val readmitId = checkpoint?.takeIf { it.kind == "PAUSED" && it.pauseClass == "BUDGET" }?.id
         start(snapshot, null, identity, resumeId, readmitId)
     }
+    fun respondInput(callId: String, requestId: String, answer: JsonObject?) = launchOperation {
+        val host = requireNotNull(tools)
+        check(host.respondInput(requireNotNull(history).sessionId, callId, requestId, answer))
+        refresh()
+    }
+
     fun decide(callId: String, requestId: String, decision: Decision) = launchOperation {
         val host = requireNotNull(tools)
         val r = requireNotNull(host.ledger.get(callId))

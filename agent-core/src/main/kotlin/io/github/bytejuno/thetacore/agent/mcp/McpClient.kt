@@ -3,6 +3,7 @@ package io.github.bytejuno.thetacore.agent.mcp
 import io.github.bytejuno.thetacore.agent.provider.openai.SseDecoder
 import io.github.bytejuno.thetacore.agent.provider.openai.isPrivateCleartextHost
 import io.github.bytejuno.thetacore.agent.transport.SharedHttpClient
+import io.github.bytejuno.thetacore.agent.execution.Schema202012Validator
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.*
@@ -16,8 +17,9 @@ import java.io.IOException
 import java.util.UUID
 
 /** Messages never retain an HTTP body, endpoint, credentials, or remote exception text. */
-class McpException(val code: Int? = null) : IOException("MCP request failed")
+class McpException(val code: Int? = null, val httpStatus: Int? = null) : IOException("MCP request failed")
 class McpUnknownToolException : IOException("MCP tool is unavailable")
+const val MCP_PROGRESS_RUNNING = "theta:mcp:running"
 
 fun validateMcpUrl(url: String): String {
     val u = url.toHttpUrl()
@@ -40,7 +42,8 @@ data class McpToolDefinition(val name: String, val description: String,
 data class McpDirectory(val tools: List<McpToolDefinition>, val ttlMs: Long)
 
 /** A single connection/session. Requests are never replayed, including after a 404 or disconnect. */
-class McpClient(private val endpoint: McpEndpoint, private val changed: () -> Unit = {}) {
+class McpClient(private val endpoint: McpEndpoint, private val sessionInvalid: () -> Unit = {},
+    private val changed: () -> Unit = {}) {
     @Volatile private var session: String? = null
     @Volatile var version: String = "2026-07-28"
         private set
@@ -48,7 +51,9 @@ class McpClient(private val endpoint: McpEndpoint, private val changed: () -> Un
 
     suspend fun initialize() {
         val discovered = try { rpc("server/discover", buildJsonObject {}) }
-        catch (e: McpException) { if (e.code in setOf(-32601, -32022, 400, 404)) null else throw e }
+        catch (e: McpException) {
+            if (e.code in setOf(-32601, -32022) || e.httpStatus in setOf(400, 404)) null else throw e
+        }
         if (discovered != null) {
             val supported = discovered["supportedVersions"]?.jsonArray?.map { it.jsonPrimitive.content }.orEmpty()
             val selected = VERSIONS.firstOrNull { it in supported }
@@ -61,7 +66,7 @@ class McpClient(private val endpoint: McpEndpoint, private val changed: () -> Un
         version = "2025-11-25"
         val result = rpc("initialize", buildJsonObject {
             put("protocolVersion", "2025-11-25")
-            put("capabilities", buildJsonObject {})
+            put("capabilities", capabilities())
             put("clientInfo", buildJsonObject { put("name", "Theta"); put("version", "1") })
         })
         val selected = result["protocolVersion"]?.jsonPrimitive?.content ?: throw McpException()
@@ -98,16 +103,27 @@ class McpClient(private val endpoint: McpEndpoint, private val changed: () -> Un
     }
 
     suspend fun call(name: String, arguments: JsonObject, callId: String, headers: Map<String, String> = emptyMap(),
+        input: suspend (String, JsonObject) -> JsonObject? = { _, _ -> null },
         progress: (String, Float?) -> Unit): JsonObject {
-        val id = UUID.randomUUID().toString()
+        var id = UUID.randomUUID().toString()
         try {
-            val result = rpc("tools/call", buildJsonObject {
-                put("name", name); put("arguments", arguments)
-                put("_meta", buildJsonObject { put("progressToken", callId) })
-            }, id, callId, progress, headers)
-            if (result["resultType"]?.jsonPrimitive?.content?.let { it != "complete" } == true)
-                throw McpException() // input_required is deliberately outside this first phase.
-            return result
+            var continuation: JsonObject? = null
+            repeat(8) {
+                currentCoroutineContext().ensureActive()
+                val result = rpc("tools/call", buildJsonObject {
+                    put("name", name); put("arguments", arguments)
+                    put("_meta", buildJsonObject { put("progressToken", callId) })
+                    continuation?.forEach { (key, value) -> put(key, value) }
+                }, id, callId, progress, headers)
+                when (result["resultType"]?.jsonPrimitive?.content ?: "complete") {
+                    "complete" -> return result
+                    "input_required" -> continuation = inputContinuation(result, input)
+                    else -> throw McpException()
+                }
+                // Only an explicit input response continues a call; never retry a failed request.
+                id = UUID.randomUUID().toString()
+            }
+            throw McpException()
         } catch (cancelled: CancellationException) {
             withContext(NonCancellable) {
                 withTimeoutOrNull(1_000) {
@@ -119,6 +135,43 @@ class McpClient(private val endpoint: McpEndpoint, private val changed: () -> Un
         }
     }
 
+    private suspend fun inputContinuation(result: JsonObject,
+        input: suspend (String, JsonObject) -> JsonObject?): JsonObject {
+        val requests = result["inputRequests"] as? JsonObject ?: throw McpException()
+        if (requests.isEmpty() || requests.size > 16) throw McpException()
+        val validator = Schema202012Validator()
+        // Validate the entire batch before showing prompts. Sampling/URL auth are not advertised.
+        val forms = requests.map { (key, element) ->
+            val request = element as? JsonObject ?: throw McpException()
+            val params = request["params"] as? JsonObject ?: throw McpException()
+            val schema = params["requestedSchema"] as? JsonObject ?: throw McpException()
+            val prompt = params["message"]?.jsonPrimitive?.content ?: throw McpException()
+            if (key.isEmpty() || key.length > 256 || prompt.length > 4096 ||
+                request["method"] != JsonPrimitive("elicitation/create") ||
+                (params["mode"]?.jsonPrimitive?.content ?: "form") != "form" ||
+                !validator.supported(schema.toString())) throw McpException()
+            Triple(key, prompt, schema)
+        }
+        val state = result["requestState"]
+        if (state != null && (state !is JsonPrimitive || !state.isString)) throw McpException()
+        val responses = buildJsonObject {
+            for ((key, prompt, schema) in forms) {
+                currentCoroutineContext().ensureActive()
+                val answer = input(prompt, schema)
+                currentCoroutineContext().ensureActive()
+                if (answer != null && !validator.valid(schema.toString(), answer.toString())) throw McpException()
+                putJsonObject(key) {
+                    put("action", if (answer == null) "decline" else "accept")
+                    if (answer != null) put("content", answer)
+                }
+            }
+        }
+        return buildJsonObject {
+            put("inputResponses", responses)
+            state?.let { put("requestState", it) }
+        }
+    }
+
     /** Optional server event channel. No reconnect/replay loop; TTL still gates calls after loss. */
     suspend fun listen() {
         if (modern) {
@@ -126,17 +179,20 @@ class McpClient(private val endpoint: McpEndpoint, private val changed: () -> Un
                 put("jsonrpc", "2.0"); put("id", UUID.randomUUID().toString()); put("method", "subscriptions/listen")
                 put("params", requestParams(buildJsonObject { putJsonObject("notifications") { put("toolsListChanged", true) } }))
             }
-            exchange(body.toString()).collect { consumeNotification(it, null) { _, _ -> } }
+            exchange(body.toString()).collect { consumeNotification(it.value, null) { _, _ -> } }
         } else {
-            exchange(null).collect { event -> consumeNotification(event, null) { _, _ -> } }
+            exchange(null).collect { event -> consumeNotification(event.value, null) { _, _ -> } }
         }
     }
 
     private suspend fun rpc(method: String, params: JsonObject, id: String = UUID.randomUUID().toString(),
         progressToken: String? = null, progress: (String, Float?) -> Unit = { _, _ -> }, headers: Map<String, String> = emptyMap()): JsonObject {
         val body = buildJsonObject { put("jsonrpc", "2.0"); put("id", id); put("method", method); put("params", requestParams(params)) }
-        val response = exchange(body.toString(), headers).onEach { consumeNotification(it, progressToken, progress) }
-            .firstOrNull { it["id"] == JsonPrimitive(id) } ?: throw McpException()
+        val envelope = exchange(body.toString(), headers).onEach { consumeNotification(it.value, progressToken, progress) }
+            .firstOrNull { it.value["id"] == JsonPrimitive(id) ||
+                (it.status !in 200..299 && "error" in it.value && it.value["id"] in listOf(null, JsonNull)) }
+            ?: throw McpException()
+        val response = envelope.value
         val error = response["error"]?.jsonObject
         if (error != null) {
             val code = error["code"]?.jsonPrimitive?.intOrNull
@@ -144,7 +200,7 @@ class McpClient(private val endpoint: McpEndpoint, private val changed: () -> Un
             if (method == "tools/call" && code == -32602 &&
                 ("unknown tool" in text || "tool not found" in text || "no such tool" in text))
                 throw McpUnknownToolException()
-            throw McpException(code)
+            throw McpException(code, envelope.status)
         }
         return response["result"]?.jsonObject ?: throw McpException()
     }
@@ -155,7 +211,7 @@ class McpClient(private val endpoint: McpEndpoint, private val changed: () -> Un
             params["_meta"]?.jsonObject?.forEach { (k, v) -> put(k, v) }
             put("io.modelcontextprotocol/protocolVersion", version)
             putJsonObject("io.modelcontextprotocol/clientInfo") { put("name", "Theta"); put("version", "1") }
-            putJsonObject("io.modelcontextprotocol/clientCapabilities") { }
+            put("io.modelcontextprotocol/clientCapabilities", capabilities())
         }
     }
 
@@ -168,7 +224,7 @@ class McpClient(private val endpoint: McpEndpoint, private val changed: () -> Un
                 val n = p["progress"]?.jsonPrimitive?.doubleOrNull
                 val total = p["total"]?.jsonPrimitive?.doubleOrNull
                 // Remote messages can echo secrets; only fixed text and numeric progress escape.
-                progress("MCP tool running", if (n != null && total != null && total > 0)
+                progress(MCP_PROGRESS_RUNNING, if (n != null && total != null && total > 0)
                     (n / total).toFloat().takeIf { it.isFinite() }?.coerceIn(0f, 1f) else null)
             }
         }
@@ -178,7 +234,9 @@ class McpClient(private val endpoint: McpEndpoint, private val changed: () -> Un
         exchange(buildJsonObject { put("jsonrpc", "2.0"); put("method", method); put("params", params) }.toString()).collect()
     }
 
-    private fun exchange(body: String?, parameters: Map<String, String> = emptyMap()): Flow<JsonObject> = callbackFlow {
+    private fun capabilities() = buildJsonObject { putJsonObject("elicitation") { putJsonObject("form") {} } }
+    private data class Envelope(val value: JsonObject, val status: Int)
+    private fun exchange(body: String?, parameters: Map<String, String> = emptyMap()): Flow<Envelope> = callbackFlow {
         val request = Request.Builder().url(endpoint.url)
             .header("Accept", "application/json, text/event-stream")
             .header("MCP-Protocol-Version", version)
@@ -212,13 +270,14 @@ class McpClient(private val endpoint: McpEndpoint, private val changed: () -> Un
                 val job = launch(Dispatchers.IO) {
                     try {
                         response.use {
+                            if (it.code == 404 && session != null) sessionInvalid()
                             if (body == null && it.code in setOf(404, 405)) return@use
                             val type = it.header("Content-Type").orEmpty().substringBefore(';').trim()
                             // New MCP returns JSON-RPC errors with HTTP 400/404 too. Never follow
                             // redirects; only inspect a bounded JSON error envelope on these statuses.
                             if (!it.isSuccessful && !(it.code in setOf(400, 404) && type == "application/json"))
-                                throw McpException(it.code)
-                            it.header("Mcp-Session-Id")?.let { sid ->
+                                throw McpException(httpStatus = it.code)
+                            it.header("Mcp-Session-Id")?.takeIf { _ -> it.isSuccessful }?.let { sid ->
                                 if (sid.length !in 1..1024 || sid.any { ch -> ch !in '!'..'~' }) throw McpException()
                                 session = sid
                             }
@@ -232,7 +291,7 @@ class McpClient(private val endpoint: McpEndpoint, private val changed: () -> Un
                                 if (n == -1) break
                                 when (type) {
                                     "text/event-stream" -> sse.feed(buffer.copyOf(n)) { _, data, _ ->
-                                        if (data != null) send(Json.parseToJsonElement(data).jsonObject)
+                                        if (data != null) send(Envelope(Json.parseToJsonElement(data).jsonObject, it.code))
                                     }
                                     "application/json" -> {
                                         if (json.size() + n > MAX_RESPONSE) throw McpException()
@@ -244,8 +303,8 @@ class McpClient(private val endpoint: McpEndpoint, private val changed: () -> Un
                             if (type == "text/event-stream") sse.endOfInput()
                             else {
                                 val value = Json.parseToJsonElement(json.toString("UTF-8")).jsonObject
-                                if (!it.isSuccessful && "error" !in value) throw McpException(it.code)
-                                send(value)
+                                if (!it.isSuccessful && "error" !in value) throw McpException(httpStatus = it.code)
+                                send(Envelope(value, it.code))
                             }
                         }
                         close()

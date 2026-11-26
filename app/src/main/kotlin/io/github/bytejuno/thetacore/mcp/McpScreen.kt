@@ -20,6 +20,7 @@ internal fun McpScreen(host: ThetaApplication, close: () -> Unit) {
     val scope = rememberCoroutineScope()
     val connections by host.mcp.connections.collectAsState()
     val loadFailed by host.mcp.loadFailed.collectAsState()
+    val replacementAllowed by host.mcp.replacementAllowed.collectAsState()
     var presets by remember { mutableStateOf<List<McpPreset>>(emptyList()) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf(false) }
@@ -27,6 +28,7 @@ internal fun McpScreen(host: ThetaApplication, close: () -> Unit) {
     var editing by remember { mutableStateOf(false) }
     var selected by remember { mutableStateOf<McpConnectionView?>(null) }
     var preset by remember { mutableStateOf<McpPreset?>(null) }
+    var replacing by remember { mutableStateOf(false) }
     fun action(block: suspend () -> Unit) {
         busy = true; error = false
         scope.launch {
@@ -50,6 +52,9 @@ internal fun McpScreen(host: ThetaApplication, close: () -> Unit) {
                     TextButton(enabled = !busy, onClick = { action {
                         host.mcp.reload(); presets = host.plugins.activeMcpPresets()
                     } }) { Text(strings.get(R.string.mcp_retry)) }
+                    if (replacementAllowed) TextButton(enabled = !busy, onClick = {
+                        selected = null; preset = null; replacing = true; editing = true
+                    }) { Text(strings.get(R.string.mcp_replace)) }
                 }
                 if (!loading && connections.isEmpty()) Text(strings.get(R.string.mcp_empty))
                 connections.forEach { c ->
@@ -86,11 +91,11 @@ internal fun McpScreen(host: ThetaApplication, close: () -> Unit) {
                 }
             }
         }, confirmButton = { TextButton(enabled = !busy, onClick = close) { Text(strings.get(R.string.mcp_close)) } })
-    if (editing) McpEditor(host, selected, preset) { editing = false }
+    if (editing) McpEditor(host, selected, preset, replacing) { editing = false; replacing = false }
 }
 
 @Composable
-private fun McpEditor(host: ThetaApplication, selected: McpConnectionView?, preset: McpPreset?, close: () -> Unit) {
+private fun McpEditor(host: ThetaApplication, selected: McpConnectionView?, preset: McpPreset?, replacing: Boolean, close: () -> Unit) {
     val strings = uiStrings()
     val scope = rememberCoroutineScope()
     var name by remember { mutableStateOf(selected?.name ?: preset?.name.orEmpty()) }
@@ -100,11 +105,16 @@ private fun McpEditor(host: ThetaApplication, selected: McpConnectionView?, pres
     var apiKey by remember { mutableStateOf(selected?.isApiKey() == true || preset?.isApiKey() == true) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf(false) }
+    var confirmed by remember { mutableStateOf(false) }
     val destination = runCatching { URI(url).host }.getOrNull().orEmpty()
     val canReuse = selected?.hasToken == true && url == selected.url &&
         mcpHeader(apiKey) == selected.header
     AlertDialog(onDismissRequest = { if (!busy) close() }, title = { Text(strings.get(R.string.mcp_edit)) }, text = {
         Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (replacing) {
+                Text(strings.get(R.string.mcp_replace_notice), color = MaterialTheme.colorScheme.error)
+                Row { Checkbox(confirmed, { confirmed = it }, enabled = !busy); Text(strings.get(R.string.mcp_replace_confirm)) }
+            }
             if (preset?.requiresOAuth() == true) Text(strings.get(R.string.mcp_oauth_notice), color = MaterialTheme.colorScheme.error)
             Text(strings.get(R.string.mcp_destination, destination), style = MaterialTheme.typography.titleMedium)
             OutlinedTextField(name, { name = it }, enabled = !busy, label = { Text(strings.get(R.string.mcp_name)) })
@@ -122,12 +132,13 @@ private fun McpEditor(host: ThetaApplication, selected: McpConnectionView?, pres
             if (error) Text(strings.get(R.string.mcp_error), color = MaterialTheme.colorScheme.error)
         }
     }, confirmButton = {
-        TextButton(enabled = !busy && name.isNotBlank() && destination.isNotBlank() && (noAuth || token.isNotBlank() || canReuse),
+        TextButton(enabled = !busy && (!replacing || confirmed) && name.isNotBlank() && destination.isNotBlank() && (noAuth || token.isNotBlank() || canReuse),
             onClick = {
                 busy = true; error = false
                 scope.launch {
                     try {
-                        host.mcp.save(selected?.id, name, url, selected?.enabled ?: false,
+                        if (replacing) host.mcp.replaceUnreadable(name, url, if (noAuth) "" else token, mcpHeader(apiKey))
+                        else host.mcp.save(selected?.id, name, url, selected?.enabled ?: false,
                             if (noAuth) "" else token.takeIf { it.isNotEmpty() }, mcpHeader(apiKey))
                         close()
                     } catch (c: CancellationException) { throw c }

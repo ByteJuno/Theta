@@ -12,7 +12,8 @@ internal class McpTool(private val client: McpClient, definition: McpToolDefinit
     override val spec = ToolSpec(definition.name, definition.description, definition.inputSchema,
         definition.outputSchema, risk = ToolRisk.WRITE)
     override suspend fun call(args: JsonObject, env: ToolEnv): ToolResult {
-        val result = client.call(id, args, env.callId, mcpParameterHeaders(parameters, args), env::progress)
+        val result = client.call(id, args, env.callId, mcpParameterHeaders(parameters, args),
+            env::requestInput, env::progress)
         val content = result["content"]?.jsonArray.orEmpty().map { item ->
             val obj = item.jsonObject
             when (obj.getValue("type").jsonPrimitive.content) {

@@ -499,4 +499,14 @@
     <string name="mcp_new_token">Enter a credential for this destination. Changing the address requires a new credential.</string>
     <string name="mcp_save_notice">New connections are saved disabled. Enable after checking the destination.</string>
     <string name="mcp_save">Save</string>
+    <string name="mcp_running">MCP tool running</string>
+    <string name="mcp_replace">Re-enter connection credentials</string>
+    <string name="mcp_replace_notice">Saved MCP credentials cannot be decrypted. Saving here replaces all unreadable MCP connections with this disabled connection. Re-add any other connections afterwards.</string>
+    <string name="mcp_replace_confirm">Replace the unreadable MCP connections</string>
+    <string name="tool_input_title">Tool needs your input</string>
+    <string name="tool_input_notice">This request comes from the remote tool. Only submit information you want to share with it.</string>
+    <string name="tool_input_unsupported">This form cannot be displayed. Decline the request or stop the run.</string>
+    <string name="tool_input_invalid">Complete the required fields using the requested values.</string>
+    <string name="tool_input_send">Submit input</string>
+    <string name="tool_input_decline">Decline</string>
 </resources>

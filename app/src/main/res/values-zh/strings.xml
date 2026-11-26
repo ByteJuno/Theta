@@ -499,4 +499,14 @@
     <string name="mcp_new_token">请填写此目标的凭据。更改地址后需重新填写。</string>
     <string name="mcp_save_notice">新连接保存后默认停用，核对目标后可启用。</string>
     <string name="mcp_save">保存</string>
+    <string name="mcp_running">MCP 工具正在运行</string>
+    <string name="mcp_replace">重新填写连接凭据</string>
+    <string name="mcp_replace_notice">已保存的 MCP 凭据无法解密。在此保存会用当前连接替换全部无法读取的 MCP 连接，并保持停用。其他连接需要重新添加。</string>
+    <string name="mcp_replace_confirm">替换无法读取的 MCP 连接</string>
+    <string name="tool_input_title">工具需要你填写信息</string>
+    <string name="tool_input_notice">此请求来自远端工具，请只提交你愿意向它提供的信息。</string>
+    <string name="tool_input_unsupported">暂时无法显示此表单，请拒绝请求或停止运行。</string>
+    <string name="tool_input_invalid">请按要求填写必填项。</string>
+    <string name="tool_input_send">提交信息</string>
+    <string name="tool_input_decline">拒绝</string>
 </resources>

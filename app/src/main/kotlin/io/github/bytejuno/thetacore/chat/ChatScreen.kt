@@ -28,6 +28,8 @@ import io.github.bytejuno.thetacore.agent.ledger.*
 import io.github.bytejuno.thetacore.agent.protocol.*
 import io.github.bytejuno.thetacore.agent.run.RunState
 import io.github.bytejuno.thetacore.plugin.PluginToolProgress
+import io.github.bytejuno.thetacore.plugin.ToolInputRequest
+import io.github.bytejuno.thetacore.agent.mcp.MCP_PROGRESS_RUNNING
 import io.github.bytejuno.thetacore.provider.ProviderProfilesCatalog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -242,6 +244,7 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
                             call = part,
                             record = state.records[part.binding.callId],
                             progress = state.toolProgress[part.binding.callId],
+                            inputRequest = state.toolInputs[part.binding.callId],
                             recovery = state.recoveries[part.binding.callId],
                             allowRootLongTerm = approvalSettings.allowRootLongTerm,
                             owner = owner,
@@ -425,6 +428,7 @@ private fun ToolCard(
     call: ContentPart.ToolCall,
     record: InvocationRecord?,
     progress: PluginToolProgress?,
+    inputRequest: ToolInputRequest?,
     recovery: RecoveryRequest?,
     allowRootLongTerm: Boolean,
     owner: ChatSessionOwner,
@@ -439,11 +443,15 @@ private fun ToolCard(
             Text(strings.get(toolState(record))) // never hidden by collapsing details
             if (record?.state == Status.RUNNING && progress != null) {
                 if (progress.text.isNotBlank()) {
-                    Text(progress.text, style = MaterialTheme.typography.bodySmall)
+                    Text(if (record.input.definition?.source == Source.MCP && progress.text == MCP_PROGRESS_RUNNING)
+                        strings.get(R.string.mcp_running) else progress.text, style = MaterialTheme.typography.bodySmall)
                 }
                 progress.fraction?.let { fraction ->
                     LinearProgressIndicator(progress = { fraction }, modifier = Modifier.fillMaxWidth())
                 }
+            }
+            if (record?.state == Status.RUNNING && inputRequest != null) {
+                ToolInputForm(inputRequest) { answer -> owner.respondInput(call.binding.callId, inputRequest.id, answer) }
             }
             if (imageCall && record != null) {
                 imageResultLabel(record)?.let { Text(strings.get(it)) }
