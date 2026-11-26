@@ -58,6 +58,7 @@ internal fun PersonaPicker(host: ThetaApplication, enabled: Boolean) {
         ?: strings.get(R.string.chat_persona_none), style = MaterialTheme.typography.bodyMedium)
     Text(strings.get(R.string.chat_persona_next_run), style = MaterialTheme.typography.bodySmall)
     if (selection.unavailable) Text(strings.get(R.string.chat_persona_unavailable))
+    if (selection.recovered) Text(strings.get(R.string.chat_persona_recovered))
     if (error && !open) Text(strings.get(R.string.chat_persona_failed), color = MaterialTheme.colorScheme.error)
     if (open) AlertDialog(
         onDismissRequest = { if (!busy) open = false },
@@ -70,6 +71,7 @@ internal fun PersonaPicker(host: ThetaApplication, enabled: Boolean) {
                     TextButton(enabled = !busy, onClick = { load() }) { Text(strings.get(R.string.chat_provider_reload)) }
                 }
                 if (selection.unavailable) Text(strings.get(R.string.chat_persona_unavailable))
+                if (selection.recovered) Text(strings.get(R.string.chat_persona_recovered))
                 if (!busy && !error && data.personas.isEmpty()) Text(strings.get(R.string.chat_persona_empty))
                 LazyColumn(Modifier.heightIn(max = 320.dp)) {
                     item {

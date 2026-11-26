@@ -405,15 +405,17 @@ internal class PluginManager(context: Context) {
         }
         collected.flatMap { it.errors }.forEach { if (it !in failures) failures += it }
         PluginPromptData(collected.flatMap { it.skills }.sortedBy { it.id },
-            collected.flatMap { it.personas }.sortedBy { it.id })
+            collected.flatMap { it.personas }.sortedBy { it.id },
+            selections = collected.flatMap { it.selections.entries }.associate { it.toPair() })
     }
 
-    suspend fun readSkill(id: String, path: String): String = operation {
+    suspend fun readSkill(selection: SelectedPluginData, id: String, path: String): String = operation {
         restoreInternal()
         val pluginId = skillLocation(id, path).first
         val page = dataPlugins.singleOrNull { it.active && it.selection.manifest.id == pluginId }
             ?: throw PluginPackageException("Skill package unavailable")
-        withContext(Dispatchers.IO) { dataCatalog.readSkill(page.selection, id, path) }
+        dataRequire(isDataPageActive(page), "Skill package revoked")
+        withContext(Dispatchers.IO) { dataCatalog.readSkill(selection, id, path) }
     }
 
     /** Loads validated provider preset JSON templates from all currently enabled data plugins. */

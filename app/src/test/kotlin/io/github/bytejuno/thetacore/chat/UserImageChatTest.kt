@@ -112,7 +112,7 @@ class UserImageChatTest {
             val preference = PersonaSettings(root.resolve("settings"))
             preference.select("test.prompts/guide")
             val service = HostToolBridgeRoot(budget).initialize(
-                skillReader = { id, path -> catalog.readSkill(selected, id, path) },
+                skillReader = { selection, id, path -> catalog.readSkill(selection, id, path) },
             ) { agentStore }
 
             var allowImages = false
@@ -136,7 +136,8 @@ class UserImageChatTest {
                 targetWithMediaForRun = sharedTargetWithMediaFactory(transport),
                 promptSnapshot = {
                     val data = catalog.restore { fail(it) }.filter { it.active(false) }.map(catalog::promptData)
-                    preference.resolve(PluginPromptData(data.flatMap { it.skills }, data.flatMap { it.personas }))
+                    preference.resolve(PluginPromptData(data.flatMap { it.skills }, data.flatMap { it.personas },
+                        selections = data.flatMap { it.selections.entries }.associate { it.toPair() }))
                 },
                 // Pure-JVM test injects a deterministic validator seam instead of Android ImageDecoder.
                 userImageValidator = { bytes ->

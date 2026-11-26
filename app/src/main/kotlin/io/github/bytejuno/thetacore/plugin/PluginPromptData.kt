@@ -2,6 +2,9 @@ package io.github.bytejuno.thetacore.plugin
 
 import kotlinx.serialization.json.JsonPrimitive
 import java.text.Normalizer
+import org.yaml.snakeyaml.LoaderOptions
+import org.yaml.snakeyaml.Yaml
+import org.yaml.snakeyaml.constructor.SafeConstructor
 
 internal data class DataSkill(val id: String, val name: String, val description: String)
 internal data class DataPersona(val id: String, val name: String, val systemPrompt: String)
@@ -9,6 +12,7 @@ internal data class PluginPromptData(
     val skills: List<DataSkill> = emptyList(),
     val personas: List<DataPersona> = emptyList(),
     val errors: List<String> = emptyList(),
+    val selections: Map<String, SelectedPluginData> = emptyMap(),
 ) {
     /** Only metadata enters the stable prefix; full documents stay behind the read tool. */
     fun system(base: String?, persona: DataPersona?, readerName: String?): String? {
@@ -32,7 +36,19 @@ internal data class PluginPromptData(
     companion object { const val MAX_SKILL_INDEX_CHARS = 8_000 }
 }
 
+internal fun validPromptUnicode(value: String): Boolean {
+    var index = 0
+    while (index < value.length) {
+        val char = value[index++]
+        if (char.isHighSurrogate()) {
+            if (index == value.length || !value[index++].isLowSurrogate()) return false
+        } else if (char.isLowSurrogate()) return false
+    }
+    return true
+}
+
 private fun promptSegment(value: String): Boolean = value.isNotEmpty() && value.length <= 128 &&
+    validPromptUnicode(value) &&
     value !in setOf(".", "..") && !value.endsWith('.') && !value.endsWith(' ') &&
     value.none { it.isISOControl() || it in "/\\:*?\"<>|%" } &&
     Normalizer.isNormalized(value, Normalizer.Form.NFC)
@@ -52,10 +68,9 @@ private fun shortLine(text: String, max: Int): String = text.replace(Regex("\\s+
         it.take(if (it.length > max && it[max - 1].isHighSurrogate()) max - 1 else max)
     }
 
-/** A deliberately small data-only frontmatter reader: scalar strings and folded/literal blocks.
- * Unknown keys/tags are never interpreted. Markdown remains available verbatim through skill_read.
- */
+/** SafeConstructor accepts YAML data only. No arbitrary class tags or object construction. */
 internal fun parseDataSkill(pluginId: String, path: String, bytes: ByteArray): DataSkill {
+    dataRequire(bytes.size <= 1024 * 1024, "Skill exceeds size limit")
     val folder = path.removePrefix("skills/").removeSuffix("/SKILL.md")
     val id = "$pluginId/$folder"
     skillLocation(id)
@@ -64,27 +79,25 @@ internal fun parseDataSkill(pluginId: String, path: String, bytes: ByteArray): D
     var body = 0
     if (lines.firstOrNull()?.trim() == "---") {
         val end = (1 until lines.size).firstOrNull { lines[it].trim() in setOf("---", "...") }
+        dataRequire(end != null, "Unterminated skill frontmatter")
         if (end != null) {
             body = end + 1
-            var index = 1
-            while (index < end) {
-                val match = Regex("^(name|description):\\s*(.*)$").matchEntire(lines[index++]) ?: continue
-                val key = match.groupValues[1]
-                var value = match.groupValues[2].trim()
-                if (value in setOf("|", ">", "|-", ">-", "|+", ">+")) {
-                    value = buildString {
-                        while (index < end && (lines[index].startsWith(' ') || lines[index].isBlank())) {
-                            append(lines[index++].trim()).append(' ')
-                        }
-                    }
-                } else if (value.startsWith('"') && value.endsWith('"')) {
-                    value = runCatching {
-                        (kotlinx.serialization.json.Json.parseToJsonElement(value) as JsonPrimitive).content
-                    }.getOrDefault("")
-                } else if (value.startsWith('\'') && value.endsWith('\'')) {
-                    value = value.drop(1).dropLast(1).replace("''", "'")
-                } else if (value.startsWith('!') || value.startsWith('&') || value.startsWith('*')) value = ""
-                fields.putIfAbsent(key, value)
+            val yaml = lines.subList(1, end).joinToString("\n")
+            dataRequire(yaml.toByteArray(Charsets.UTF_8).size <= 16 * 1024, "Skill frontmatter exceeds limit")
+            val options = LoaderOptions().apply {
+                codePointLimit = 16 * 1024
+                nestingDepthLimit = 16
+                maxAliasesForCollections = 0
+                isAllowDuplicateKeys = false
+                setAllowRecursiveKeys(false)
+                tagInspector = org.yaml.snakeyaml.inspector.TagInspector { false }
+            }
+            val metadata = Yaml(SafeConstructor(options)).load<Any?>(yaml)
+            dataRequire(metadata == null || metadata is Map<*, *>, "Skill frontmatter must be a mapping")
+            for (key in listOf("name", "description")) {
+                val value = (metadata as? Map<*, *>)?.get(key) ?: continue
+                dataRequire(value is String && validPromptUnicode(value), "Invalid skill metadata string")
+                fields[key] = value as String
             }
         }
     }
@@ -104,9 +117,9 @@ internal fun parseDataPersona(pluginId: String, bytes: ByteArray): DataPersona {
     val id = dataString(json, "id")
     dataRequire(promptSegment(id), "Invalid persona id")
     val name = dataString(json, "name")
-    dataRequire(name.length <= 128 && name.none { it.isISOControl() }, "Invalid persona name")
+    dataRequire(name.length <= 128 && validPromptUnicode(name) && name.none { it.isISOControl() }, "Invalid persona name")
     val prompt = (json["systemPrompt"] as? JsonPrimitive)?.takeIf { it.isString }?.content
-    dataRequire(prompt != null && prompt.isNotBlank() && prompt.length <= 8_000, "Invalid persona prompt")
+    dataRequire(prompt != null && prompt.isNotBlank() && prompt.length <= 8_000 && validPromptUnicode(prompt), "Invalid persona prompt")
     return DataPersona("$pluginId/$id", name, prompt!!)
 }
 
@@ -125,14 +138,15 @@ internal fun PluginDataCatalog.promptData(selection: SelectedPluginData): Plugin
     }
     val duplicates = personas.groupingBy { it.id }.eachCount().filterValues { it > 1 }.keys
     duplicates.forEach { errors += "$it: duplicate persona id" }
-    return PluginPromptData(skills.sortedBy { it.id }, personas.filter { it.id !in duplicates }.sortedBy { it.id }, errors)
+    return PluginPromptData(skills.sortedBy { it.id }, personas.filter { it.id !in duplicates }.sortedBy { it.id }, errors,
+        mapOf(id to selection))
 }
 
 internal fun PluginDataCatalog.readSkill(selection: SelectedPluginData, id: String, path: String): String {
     val (pluginId, fullPath) = skillLocation(id, path)
     dataRequire(pluginId == selection.manifest.id, "Skill belongs to another package")
     val main = "skills/${id.substringAfter('/')}/SKILL.md"
-    val entries = readEntries(selection) { it == main || it == fullPath }
+    val entries = readEntries(selection, allowRetainedVersion = true) { it == main || it == fullPath }
     dataRequire(main in entries && fullPath in entries, "Skill document unavailable")
     return dataUtf8(entries.getValue(fullPath))
 }

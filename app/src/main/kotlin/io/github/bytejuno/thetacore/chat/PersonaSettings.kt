@@ -1,70 +1,112 @@
 package io.github.bytejuno.thetacore.chat
 
 import io.github.bytejuno.thetacore.plugin.*
+import androidx.datastore.core.CorruptionException
+import androidx.datastore.core.DataStore
+import androidx.datastore.core.DataStoreFactory
+import androidx.datastore.core.Serializer
+import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
+import androidx.datastore.core.okio.OkioSerializer
+import androidx.datastore.core.okio.OkioStorage
 import java.io.File
-import java.nio.ByteBuffer
-import java.nio.channels.FileChannel
+import java.io.InputStream
+import java.io.OutputStream
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
-import java.nio.file.StandardCopyOption.*
-import java.nio.file.StandardOpenOption.*
-import java.util.UUID
+import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.*
+import okio.BufferedSink
+import okio.BufferedSource
+import okio.FileSystem
+import okio.Path.Companion.toOkioPath
 
-internal data class PersonaSelection(val id: String? = null, val unavailable: Boolean = false)
+internal data class PersonaSelection(val id: String? = null, val unavailable: Boolean = false,
+    val recovered: Boolean = false)
 internal data class ChatPromptSnapshot(
     val data: PluginPromptData = PluginPromptData(),
     val persona: DataPersona? = null,
     val unavailable: Boolean = false,
+    val recovered: Boolean = false,
 )
 
-/** Non-secret global chat preference. It affects new runs, including new runs in saved sessions. */
+/** DataStore owns serialization of updates, fsync and atomic replacement. Application supplies
+ * noBackupFilesDir. The existing bounded JSON file is read in place; no lossy migration. */
 internal class PersonaSettings(directory: File) {
     private val root = directory.toPath().toAbsolutePath().normalize()
     private val file = root.resolve("chat-persona.json")
-    private val lock = locks[(file.hashCode() and Int.MAX_VALUE) % locks.size]
+    private val store: DataStore<PersonaSelection>
 
-    fun current(): PersonaSelection = synchronized(lock) { read() }
-    fun select(id: String?) = synchronized(lock) {
-        if (id != null) skillLocation(id)
-        write(PersonaSelection(id))
+    init {
+        checkRoot()
+        // One DataStore per file for this process, even when a settings wrapper is recreated.
+        store = synchronized(stores) {
+            stores.getOrPut(file.toString()) {
+                DataStoreFactory.create(storage = OkioStorage(FileSystem.SYSTEM, PersonaOkioSerializer,
+                    producePath = { file.toFile().toOkioPath() }),
+                    corruptionHandler = ReplaceFileCorruptionHandler { PersonaSelection(recovered = true) },
+                )
+            }
+        }
     }
-    fun resolve(data: PluginPromptData): ChatPromptSnapshot = synchronized(lock) {
-        val selection = read()
-        val persona = data.personas.singleOrNull { it.id == selection.id }
-        val unavailable = selection.unavailable || selection.id != null && persona == null
-        if (selection.id != null && persona == null) write(PersonaSelection(unavailable = true))
-        ChatPromptSnapshot(data, persona, unavailable)
+
+    suspend fun current(): PersonaSelection { checkRoot(); return store.data.first() }
+    suspend fun select(id: String?) {
+        if (id != null) skillLocation(id)
+        checkRoot()
+        store.updateData { PersonaSelection(id) }
+    }
+    suspend fun resolve(data: PluginPromptData): ChatPromptSnapshot {
+        checkRoot()
+        val selection = store.updateData { current ->
+            if (current.id != null && data.personas.none { it.id == current.id })
+                PersonaSelection(unavailable = true, recovered = current.recovered)
+            else current
+        }
+        return ChatPromptSnapshot(data, data.personas.singleOrNull { it.id == selection.id },
+            selection.unavailable, selection.recovered)
     }
     private fun checkRoot() {
         check(Files.notExists(root, NOFOLLOW_LINKS) || Files.isDirectory(root, NOFOLLOW_LINKS))
         check(Files.notExists(file, NOFOLLOW_LINKS) || Files.isRegularFile(file, NOFOLLOW_LINKS))
     }
-    private fun read(): PersonaSelection {
-        checkRoot()
-        if (Files.notExists(file, NOFOLLOW_LINKS)) return PersonaSelection()
-        check(Files.size(file) <= 4096)
-        val data = Files.newInputStream(file, READ, NOFOLLOW_LINKS).use { dataJson(it.readBytes()) }
-        val id = data["id"]?.takeIf { it != JsonNull }?.jsonPrimitive?.content
-        if (id != null) skillLocation(id)
-        return PersonaSelection(id, data["unavailable"]?.jsonPrimitive?.booleanOrNull ?: false)
-    }
-    private fun write(value: PersonaSelection) {
-        checkRoot()
-        Files.createDirectories(root)
-        val bytes = buildJsonObject {
-            put("id", value.id?.let(::JsonPrimitive) ?: JsonNull)
-            put("unavailable", value.unavailable)
-        }.toString().toByteArray(Charsets.UTF_8)
-        val temp = root.resolve("chat-persona-${UUID.randomUUID()}.tmp")
+    companion object { private val stores = mutableMapOf<String, DataStore<PersonaSelection>>() }
+}
+
+private object PersonaOkioSerializer : OkioSerializer<PersonaSelection> {
+    override val defaultValue = PersonaSelection()
+    override suspend fun readFrom(source: BufferedSource) = PersonaSerializer.readFrom(source.inputStream())
+    override suspend fun writeTo(t: PersonaSelection, sink: BufferedSink) = PersonaSerializer.writeTo(t, sink.outputStream())
+}
+
+internal object PersonaSerializer : Serializer<PersonaSelection> {
+    override val defaultValue = PersonaSelection()
+    override suspend fun readFrom(input: InputStream): PersonaSelection {
+        // IO failures propagate and never reset a possibly valid preference.
+        val bytes = input.readNBytes(4097)
         try {
-            FileChannel.open(temp, CREATE_NEW, WRITE, NOFOLLOW_LINKS).use { channel ->
-                val buffer = ByteBuffer.wrap(bytes)
-                while (buffer.hasRemaining()) channel.write(buffer)
-                channel.force(true)
+            require(bytes.size <= 4096)
+            val data = dataJson(bytes)
+            val id = data["id"]?.takeIf { it != JsonNull }?.let {
+                require(it is JsonPrimitive && it.isString)
+                it.content.also { value -> skillLocation(value) }
             }
-            Files.move(temp, file, ATOMIC_MOVE, REPLACE_EXISTING)
-        } finally { Files.deleteIfExists(temp) }
+            fun flag(key: String): Boolean = data[key]?.let {
+                require(it is JsonPrimitive && !it.isString)
+                requireNotNull(it.booleanOrNull)
+            } ?: false
+            return PersonaSelection(id, flag("unavailable"), flag("recovered"))
+        } catch (error: Exception) {
+            throw CorruptionException("Invalid persona preference", error)
+        }
     }
-    companion object { private val locks = Array(16) { Any() } }
+    override suspend fun writeTo(t: PersonaSelection, output: OutputStream) {
+        t.id?.let { skillLocation(it) }
+        val bytes = buildJsonObject {
+            put("id", t.id?.let(::JsonPrimitive) ?: JsonNull)
+            put("unavailable", t.unavailable)
+            put("recovered", t.recovered)
+        }.toString().toByteArray(Charsets.UTF_8)
+        require(bytes.size <= 4096)
+        output.write(bytes)
+    }
 }

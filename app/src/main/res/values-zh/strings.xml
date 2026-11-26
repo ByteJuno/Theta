@@ -473,6 +473,7 @@
     <string name="chat_persona">人设</string>
     <string name="chat_persona_next_run">应用于各会话后续的新运行，保留自定义系统提示词。</string>
     <string name="chat_persona_unavailable">原人设已不可用，已回退为不使用人设。</string>
+    <string name="chat_persona_recovered">保存的人设选择已损坏，现已重置。可继续使用无人设聊天；在设置中重新选择人设或“不使用人设”即可关闭此提示。</string>
     <string name="chat_persona_failed">无法加载或保存人设，请重新加载后重试。</string>
     <string name="chat_persona_empty">已启用的数据插件中没有人设。可导入并启用包含人设的数据插件。</string>
     <string name="chat_persona_none">不使用人设</string>

@@ -51,6 +51,7 @@ internal data class ChatState(
     val contextWindowTokens: Long? = null,
     val recovery: ChatRecoveryToken? = null,
     val personaUnavailable: Boolean = false,
+    val personaRecovered: Boolean = false,
 )
 
 internal fun sharedTargetFactory(transport: ModelTransport): (OpenAiRunSnapshot) -> ModelTarget =
@@ -605,7 +606,8 @@ internal class ChatSessionOwner(
             val window = context.contextWindowTokens
             val definitions = (tools!!.catalog.frozen(id.runId) ?: tools!!.catalog.freeze(id.runId)).values.toList()
             val prompts = promptSnapshot()
-            mutable.update { it.copy(personaUnavailable = prompts.unavailable) }
+            tools!!.bindSkills(id.runId, prompts.data)
+            mutable.update { it.copy(personaUnavailable = prompts.unavailable, personaRecovered = prompts.recovered) }
             val reader = definitions.firstOrNull { it.toolKey == "host/skill_read" }?.modelName
             val configured = config.request {
                 system = prompts.data.system(system, prompts.persona, reader)

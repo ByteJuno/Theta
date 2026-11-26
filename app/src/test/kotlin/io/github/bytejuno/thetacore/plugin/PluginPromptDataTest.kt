@@ -13,10 +13,10 @@ import kotlinx.serialization.json.*
 import org.junit.Assert.*
 import org.junit.Test
 
-internal fun installPromptBundle(catalog: PluginDataCatalog, entries: Map<String, String>, id: String = "test.prompts"): SelectedPluginData {
+internal fun installPromptBundle(catalog: PluginDataCatalog, entries: Map<String, String>, id: String = "test.prompts", version: Int = 1): SelectedPluginData {
     val out = ByteArrayOutputStream()
     ZipOutputStream(out).use { zip ->
-        (mapOf("theta-plugin.json" to """{"schema":1,"type":"data","id":"$id","name":"Prompts","version":"1","versionCode":1,"apiLevel":1}""") + entries).forEach { (path, content) ->
+        (mapOf("theta-plugin.json" to """{"schema":1,"type":"data","id":"$id","name":"Prompts","version":"$version","versionCode":$version,"apiLevel":1}""") + entries).forEach { (path, content) ->
             zip.putNextEntry(ZipEntry(path)); zip.write(content.toByteArray(Charsets.UTF_8)); zip.closeEntry()
         }
     }
@@ -25,11 +25,79 @@ internal fun installPromptBundle(catalog: PluginDataCatalog, entries: Map<String
 }
 
 class PluginPromptDataTest {
-    private fun root(action: (File, PluginDataCatalog) -> Unit) {
+    private fun root(action: suspend (File, PluginDataCatalog) -> Unit) = runBlocking {
         val dir = Files.createTempDirectory("theta-prompts").toFile()
         try { action(dir, PluginDataCatalog(dir, 1)) } finally { dir.deleteRecursively() }
     }
     private val persona = """{"id":"guide","name":"Guide","systemPrompt":"Be a careful guide.\nExplain your answer."}"""
+
+    @Test fun yamlSupportsCommentsMultilineScalarsAndYamlEscapes() {
+        fun description(yaml: String) = parseDataSkill("test.prompts", "skills/read/SKILL.md",
+            "---\n$yaml\n---\nFallback body".toByteArray()).description
+        assertEquals("Read and explain", description("description: >- # comment\n  Read\n  and explain"))
+        assertEquals("Read and explain", description("description: Read\n  and explain"))
+        assertEquals("A document", description("description: \"\\x41 document\""))
+        assertEquals("A # document", description("description: 'A # document' # comment"))
+        for (yaml in listOf("description: !!java.net.URL ['https://example.invalid']",
+            "description: one\ndescription: two", "description: [one, two]",
+            "a: &a [hello]\ndescription: *a", "description: \"\\uD800\"",
+            "description: " + "[".repeat(20) + "a" + "]".repeat(20),
+            "description: " + "x".repeat(16 * 1024))) {
+            assertThrows(Exception::class.java) { description(yaml) }
+        }
+        assertThrows(Exception::class.java) {
+            parseDataSkill("test.prompts", "skills/read/SKILL.md", ByteArray(1024 * 1024 + 1))
+        }
+    }
+
+    @Test fun personaRejectsUnpairedSurrogatesInEveryFieldAndAcceptsSupplementaryCharacters() {
+        for (field in listOf("id", "name", "systemPrompt")) {
+            for (invalid in listOf("\\uD800", "\\uDC00", "\\uD800x", "\\uDC00\\uD800")) {
+                val values = mutableMapOf("id" to "guide", "name" to "Guide", "systemPrompt" to "Explain")
+                values[field] = "x$invalid"
+                val text = values.entries.joinToString(",", "{", "}") { "\"${it.key}\":\"${it.value}\"" }
+                assertThrows("$field $invalid", Exception::class.java) { parseDataPersona("test.prompts", text.toByteArray()) }
+            }
+        }
+        val legal = parseDataPersona("test.prompts",
+            """{"id":"guide\uD83D\uDE00","name":"向导😀","systemPrompt":"Explain 😀"}""".toByteArray())
+        assertEquals("test.prompts/guide😀", legal.id)
+        assertEquals("向导😀", legal.name)
+        assertEquals("Explain 😀", legal.systemPrompt)
+    }
+
+    @Test fun runSnapshotsBindVersionAndDigestWhileCurrentLifecycleAlwaysRevokesReads() = root { dir, catalog ->
+        fun entries(n: Int) = mapOf("skills/read/SKILL.md" to "# Version $n\n\nDOCUMENT-$n",
+            "skills/read/notes.txt" to "NOTES-$n")
+        val reader = RunSkillReader { selection, id, path -> catalog.readSkill(selection, id, path) }
+        val v1 = installPromptBundle(catalog, entries(1))
+        reader.bind("old", catalog.promptData(v1))
+        val v2 = installPromptBundle(catalog, entries(2), version = 2)
+        assertTrue(reader.read("old", "test.prompts/read", "SKILL.md").contains("DOCUMENT-1"))
+        assertEquals("NOTES-1", reader.read("old", "test.prompts/read", "notes.txt"))
+        reader.bind("new", catalog.promptData(v2))
+        assertTrue(reader.read("new", "test.prompts/read", "SKILL.md").contains("DOCUMENT-2"))
+        assertThrows(Exception::class.java) { reader.bind("old", catalog.promptData(v2)) }
+        suspend fun denied(run: String) {
+            try { reader.read(run, "test.prompts/read", "SKILL.md"); fail("Expected refusal") }
+            catch (_: PluginPackageException) { }
+        }
+        catalog.setEnabled("test.prompts", false, v2); denied("old"); denied("new")
+        catalog.setEnabled("test.prompts", true)
+        val oldZip = dir.resolve("plugins/test.prompts/1/plugin.zip")
+        val original = oldZip.readBytes()
+        oldZip.writeBytes(dir.resolve("plugins/test.prompts/2/plugin.zip").readBytes())
+        denied("old") // Correct path/version with different bytes must not substitute v2.
+        oldZip.writeBytes(original)
+        installPromptBundle(catalog, entries(3), version = 3) // prunes v1
+        denied("old")
+        assertTrue(reader.read("new", "test.prompts/read", "SKILL.md").contains("DOCUMENT-2"))
+        catalog.beginDelete("test.prompts"); denied("new")
+        catalog.finishDelete("test.prompts"); denied("new")
+        reader.release("new")
+        try { reader.read("new", "test.prompts/read", "SKILL.md"); fail("Released run") }
+        catch (_: IllegalStateException) { }
+    }
 
     @Test fun markdownAndFrontmatterSummariesRemainDataAndStable() {
         val plain = parseDataSkill("test.prompts", "skills/read/SKILL.md", "# Reading\n\nRead carefully.\nUse context.\n\nLong body".toByteArray())
@@ -115,7 +183,8 @@ class PluginPromptDataTest {
             val text = "# Full document\n" + "中文正文 😀\n".repeat(8000)
             val selected = installPromptBundle(catalog, mapOf("skills/read/SKILL.md" to text))
             openTestStore(root.resolve("agent").apply { mkdirs() }).use { store ->
-                val service = HostToolBridgeRoot(budget).initialize(skillReader = { id, path -> catalog.readSkill(selected, id, path) }) { store }
+                val service = HostToolBridgeRoot(budget).initialize(skillReader = { selection, id, path -> catalog.readSkill(selection, id, path) }) { store }
+                service.bindSkills("run", catalog.promptData(selected))
                 val definitions = service.catalog.freeze("run").values
                 val reader = definitions.single { it.toolKey == "host/skill_read" }
                 assertEquals(Source.FIRST_PARTY, reader.source); assertEquals(Risk.READ, reader.declaredRisk)

@@ -107,6 +107,9 @@ dependencies {
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.compose.material3)
     implementation(libs.kotlinx.serialization.json)
+    implementation("org.yaml:snakeyaml:2.4")
+    implementation("androidx.datastore:datastore-core:1.1.7")
+    implementation("androidx.datastore:datastore-core-okio:1.1.7")
     testImplementation("junit:junit:4.13.2")
     // Real JSON parser for JVM policy tests, not Android's throwing stub.
     testImplementation("org.json:json:20240303")
