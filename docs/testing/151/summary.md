@@ -51,3 +51,13 @@ On the candidate, the development test endpoint selected the f512 runner and all
 本轮未生成 APK，视觉、设备冷启动、实际图片选择与发送、大附件耗时、API 33 和 R8 运行行为未验证。新提交的 CI、独立审核与正式回归待执行。
 
 本地预检重新执行的测试计数：{"app": {"tests": 743, "failures": 0, "errors": 0, "skipped": 1}, "agent-core": {"tests": 632, "failures": 0, "errors": 0, "skipped": 1}}。远端使用 gpu-bai，设备与视觉结果不在该 JVM 检查覆盖范围。
+
+## PR 164 第七轮多页面草稿
+
+实现提交 `5b3271e1789ca02dd01c4c3ccfcb46cdb6793dac`，验证树 `bc5eda2b6318186c905631cd00bdbe7eed006d68`。审核端在 `4a20b3fc57fc4c0a4890eb0026e638ad21d11def` 先保存新文字，再由旧页只加图片，重开数据库后读回 old。两个页面各选四张图片时，重开后读回八张。
+
+修复同一会话在多个页面保存草稿时的数据覆盖。只改附件的页面保留其他页已保存的文字。附件在事务中按最近编辑页的选择顺序保存，剩余名额保留其他页的附件，最多四张。旧数据库中超限的附件和数据块在首次读取该草稿时清理。
+
+新增三项数据库重开回归，保留既有发送回执、删除和恢复断言。theta-gpu-test 定向 38/38 通过。Windows 严格配置缓存 preflight 通过，应用 745 项通过、1 项跳过，agent-core 631 项通过、1 项跳过。
+
+本轮验证覆盖 JVM 和 SQLite 数据库重开。未生成 APK，设备冷启动、实际图片选择与发送、界面、API 33 及 R8 运行行为未验证。新提交的 CI、独立审核和正式回归待发布后执行。
