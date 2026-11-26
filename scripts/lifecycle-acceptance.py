@@ -158,17 +158,20 @@ def matching(description, predicate, timeout=None, *, for_tap=False, start_at_bo
         if not nodes:
             sweep["last"] = None  # A failed dump cannot establish a list boundary.
             return None
-        # Fault status is in the trailing code cards. Start there once, then
-        # use the ordinary overlapping sweep to find anything above the end.
-        if start_at_bottom and scroll(True, nodes, observations[-1], fling=True):
-            observations[-1].update(action="fling", direction="down")
+        signature = tuple((n.get("text", ""), n.get("bounds", "")) for n in nodes)
+        # A fling may only reach the first code card. Keep looking down until
+        # the viewport stops advancing, then sweep back over any skipped rows.
+        if start_at_bottom:
+            if signature != sweep["last"] and scroll(True, nodes, observations[-1], fling=True):
+                observations[-1].update(action="fling", direction="down")
+                sweep["last"] = signature
+                return None
             start_at_bottom = False
-            return None
+            sweep["last"] = None
         if sweep["retry_at"] is not None:
             if time.monotonic() < sweep["retry_at"]:
                 return None
             sweep.update(down=False, last=None, steps=0, retry_at=None)
-        signature = tuple((n.get("text", ""), n.get("bounds", "")) for n in nodes)
         if signature == sweep["last"]:
             if sweep["down"]:
                 sweep["retry_at"] = time.monotonic() + 2
