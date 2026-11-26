@@ -47,6 +47,12 @@ internal fun ChatApprovalDialog(host: ThetaApplication, onClose: () -> Unit) {
     var error by remember { mutableStateOf<Int?>(null) }
     var pendingFullAuto by remember { mutableStateOf(false) }
     var confirmFullAuto by remember { mutableStateOf(false) }
+    var manageTools by remember { mutableStateOf(false) }
+
+    if (manageTools) {
+        ToolApprovalDialog(host) { manageTools = false }
+        return
+    }
 
     LaunchedEffect(store) {
         withContext(Dispatchers.IO) { runCatching { store.ensureLoaded() } }
@@ -175,6 +181,9 @@ internal fun ChatApprovalDialog(host: ThetaApplication, onClose: () -> Unit) {
                     )
                 }
                 Text(strings.get(R.string.chat_approval_safety_invariants), style = MaterialTheme.typography.bodySmall)
+                TextButton(onClick = { manageTools = true }, enabled = !busy) {
+                    Text(strings.get(R.string.tool_rules_title))
+                }
                 error?.let { Text(strings.get(it), color = MaterialTheme.colorScheme.error) }
             }
         },

@@ -458,7 +458,7 @@ internal class HostToolExecutionService(
             val definition = frozen[call.name]
             InvocationInput(
                 io.github.bytejuno.thetacore.agent.ledger.BindingValue.copyOf(call.binding), taskChain, session, run, step, index,
-                call.argsJson, definition, unattended, definition?.declaredRisk ?: Risk.READ,
+                call.argsJson, definition, unattended, definition?.initialRisk ?: Risk.READ,
                 disposition == HistoryDisposition.NEEDS_CANCELLED_NONE_RESULTS, call.name)
         }
         // Entire step is registered before any dispatch, so partial storage failure cannot execute it.

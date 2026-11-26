@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="tool_rules_title">管理已授权与工具规则</string>
+    <string name="tool_rules_explanation">撤销授权会保留审批历史，后续调用仍按当前审批模式判断。拒绝规则优先拦截新的执行，不会停止已经运行的工具。风险调整从下一轮运行生效。</string>
+    <string name="tool_rules_failed">无法读取或保存工具规则，请在存储恢复后重试。已保存的规则无法读取时，会阻止工具执行，直至规则恢复。</string>
+    <string name="tool_rules_saved">已保存</string>
+    <string name="tool_rules_refresh">刷新</string>
+    <string name="tool_rules_grants">当前生效的永久授权</string>
+    <string name="tool_rules_no_grants">暂无生效的永久授权</string>
+    <string name="tool_rules_grant_detail">已授权风险：%1$s · 定义指纹：%2$s</string>
+    <string name="tool_rules_revoke">撤销</string>
+    <string name="tool_rules_revoke_all">撤销全部永久授权</string>
+    <string name="tool_rules_revoke_confirm">撤销全部永久授权（包括暂不可用工具的授权）？历史记录会保留，之后仍可重新明确授权。</string>
+    <string name="tool_rules_tools">已注册及历史使用过的工具</string>
+    <string name="tool_rules_no_tools">暂无可用工具</string>
+    <string name="tool_rules_declared">声明风险：%1$s</string>
+    <string name="tool_rules_deny">拒绝调用</string>
+    <string name="tool_rules_minimum_risk">后续运行的最低风险</string>
+    <string name="tool_rules_default">默认（声明风险）</string>
+    <string name="tool_rules_risk_read">读取</string>
+    <string name="tool_rules_risk_write">写入</string>
+    <string name="tool_rules_risk_device">设备控制</string>
+    <string name="tool_rules_risk_root">Root</string>
+</resources>

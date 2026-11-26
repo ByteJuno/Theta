@@ -46,7 +46,7 @@ internal class HostToolBridgeRoot(
                 check(recovery !is Mutation.StorageFailure && recovery !is Mutation.Conflict) {
                     "Host tool cold recovery failed: $recovery"
                 }
-                val catalog = FrozenToolCatalog(gate, metadataBudget, owner, validator, store.runCatalogStore())
+                val catalog = FrozenToolCatalog(gate, metadataBudget, owner, validator, store.runCatalogStore(), approvalPolicy = policy)
                 catalog.registerHost("host/clock", "1", hostTool)
                 screenBackend?.let {
                     catalog.registerHost("host/screen_info", "1", io.github.bytejuno.thetacore.plugin.tools.HostScreenTool(it))

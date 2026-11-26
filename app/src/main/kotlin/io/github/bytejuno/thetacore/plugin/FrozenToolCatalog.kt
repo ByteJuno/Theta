@@ -26,6 +26,7 @@ internal class FrozenToolCatalog(
     private val validator: Schema202012Validator,
     private val store: RunCatalogStore? = null,
     private val metadataCaptureTimeoutMs: Long = 5_000L,
+    private val approvalPolicy: ApprovalPolicy = ApprovalPolicy(),
 ) {
     init {
         require(metadataCaptureTimeoutMs in 1L..5_000L) {
@@ -411,7 +412,7 @@ internal class FrozenToolCatalog(
         }
         val names = ModelToolNames.allocate(entries.keys)
         val snapshot = entries.values.map { entry ->
-            entry.definition.copy(modelName = names.getValue(entry.definition.toolKey))
+            approvalPolicy.freezeRisk(entry.definition.copy(modelName = names.getValue(entry.definition.toolKey)))
         }.sortedBy { it.modelName }.associateBy { it.modelName }
         check(snapshot.size == entries.size) { "Model tool names must be unique" }
         store?.saveRunCatalog(runId, snapshot.values.toList())
@@ -474,6 +475,7 @@ internal class FrozenToolCatalog(
         Unit
     }
     fun definition(runId: String, name: String): FrozenDefinition? = gate.withGate { runs[runId]?.get(name) }
+    fun registeredDefinitions(): List<FrozenDefinition> = gate.withGate { entries.values.map { it.definition } }
     /** Null means this run has no frozen catalog here, which says nothing about whether a name is unknown. */
     fun frozen(runId: String): Map<String, FrozenDefinition>? = gate.withGate { runs[runId]?.let { LinkedHashMap(it) } }
     val frozenRunCount: Int get() = gate.withGate { runs.size }
