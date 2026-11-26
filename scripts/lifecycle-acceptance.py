@@ -93,7 +93,7 @@ def wait(description, predicate, timeout=None):
     raise FAIL(description + ": timed out")
 
 
-def scroll(down, nodes=None, observation=None):
+def scroll(down, nodes=None, observation=None, *, fling=False):
     # Use the observed scroll body, not display fractions which can fall outside
     # a short list or on a dialog's buttons. Reuse matching()'s dump per attempt.
     nodes = em.screen() if nodes is None else nodes
@@ -114,10 +114,10 @@ def scroll(down, nodes=None, observation=None):
     # A fast 60%-height swipe can fling from top straight to bottom, skipping
     # the actions between both dumps. Use short, slow drags with overlapping
     # viewports. The pixel cap also bounds velocity on very tall displays.
-    distance = min(400, (y2 - y1) // 4)
+    distance = (y2 - y1) * 3 // 4 if fling else min(400, (y2 - y1) // 4)
     top = (y1 + y2) // 2 - distance // 2
     bottom = top + distance
-    gesture = [x, bottom if down else top, x, top if down else bottom, 800]
+    gesture = [x, bottom if down else top, x, top if down else bottom, 200 if fling else 800]
     if observation is not None:
         observation.update(gesture=gesture, scroll_bounds=[x1, y1, x2, y2],
                            swipe_started_at=time.monotonic())
@@ -129,7 +129,7 @@ def scroll(down, nodes=None, observation=None):
     return True
 
 
-def matching(description, predicate, timeout=None, *, for_tap=False):
+def matching(description, predicate, timeout=None, *, for_tap=False, start_at_bottom=False):
     # Revisit offscreen content: asynchronous results may appear above the final
     # viewport after a complete sweep. Pause between sweeps without resetting
     # wait()'s deadline. Each direction retains the hard cap for changing XML.
@@ -144,6 +144,7 @@ def matching(description, predicate, timeout=None, *, for_tap=False):
         del observations[:-40]  # Retain a bounded tail, only write it on failure.
 
     def locate():
+        nonlocal start_at_bottom
         started = time.monotonic()
         nodes = em.screen()
         matches = [n for n in nodes if predicate(n.get("text", ""))]
@@ -156,6 +157,12 @@ def matching(description, predicate, timeout=None, *, for_tap=False):
                 return found
         if not nodes:
             sweep["last"] = None  # A failed dump cannot establish a list boundary.
+            return None
+        # Fault status is in the trailing code cards. Start there once, then
+        # use the ordinary overlapping sweep to find anything above the end.
+        if start_at_bottom and scroll(True, nodes, observations[-1], fling=True):
+            observations[-1].update(action="fling", direction="down")
+            start_at_bottom = False
             return None
         if sweep["retry_at"] is not None:
             if time.monotonic() < sweep["retry_at"]:
@@ -620,7 +627,8 @@ def managed_scope_fault(host, apks, hello, flavor):
     # An independent short deadline, not the generic 180s test timeout. The
     # Data packages section pushes the fixture card below the fold, so sweep.
     matching("managed scope disabled promptly",
-             lambda t: t == "Managed scope failed; disabled; restart required", timeout=20)
+             lambda t: t == "Managed scope failed; disabled; restart required", timeout=20,
+             start_at_bottom=True)
     require(adb("shell", "pidof", PACKAGE).strip() == pid, "Managed fault restarted/killed host")
     absent("Fixture page")
     tap("Hello")
@@ -639,7 +647,8 @@ def managed_scope_fault(host, apks, hello, flavor):
         page(flavor, 0)
         tap("Throw in managed scope")
     matching("automatic scope disable",
-             lambda t: t == "Managed scope failed; disabled; restart required", timeout=20)
+             lambda t: t == "Managed scope failed; disabled; restart required", timeout=20,
+             start_at_bottom=True)
     clear_logs()
     restart()
     text("Enable Fixture")
