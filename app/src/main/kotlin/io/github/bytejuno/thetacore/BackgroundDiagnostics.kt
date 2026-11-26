@@ -1,6 +1,10 @@
 package io.github.bytejuno.thetacore
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.os.PowerManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.material3.MaterialTheme
@@ -21,7 +25,12 @@ internal fun BackgroundDiagnostics() {
     val strings = uiStrings()
     var exempt by remember(context) { mutableStateOf<Boolean?>(null) }
     var settingsUnavailable by remember { mutableStateOf(false) }
+    var notificationsGranted by remember(context) { mutableStateOf(true) }
+    val requestNotifications = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
+        notificationsGranted = it
+    }
     LifecycleResumeEffect(context) {
+        notificationsGranted = context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
         exempt = try {
             context.getSystemService(PowerManager::class.java)?.isIgnoringBatteryOptimizations(context.packageName)
         } catch (_: SecurityException) {
@@ -42,6 +51,12 @@ internal fun BackgroundDiagnostics() {
         }) { Text(strings.get(R.string.background_open_settings)) }
         if (settingsUnavailable) {
             Text(strings.get(R.string.background_manual_path), color = MaterialTheme.colorScheme.error)
+        }
+        if (!notificationsGranted) {
+            Text(strings.get(R.string.chat_notifications_denied), style = MaterialTheme.typography.bodyMedium)
+            OutlinedButton(onClick = { requestNotifications.launch(Manifest.permission.POST_NOTIFICATIONS) }) {
+                Text(strings.get(R.string.background_enable_notifications))
+            }
         }
     }
 }

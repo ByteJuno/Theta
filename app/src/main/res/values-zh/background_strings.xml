@@ -6,5 +6,6 @@
     <string name="background_vendor_hint">如果切换应用或锁屏后回复中断，请检查 Theta 的耗电管理。在 ColorOS 中可开启「允许完全后台行为」。其他系统上可查找「无限制」，或在最近任务中锁定 Theta。即使已获 Android 电池优化豁免，厂商设置仍可能限制后台运行。</string>
     <string name="background_open_settings">打开系统应用设置</string>
     <string name="background_manual_path">请前往系统设置 → 应用 → Theta → 耗电管理，查看后台运行选项。</string>
-    <string name="background_first_task_hint">可在「插件与诊断」查看后台任务设置。</string>
+    <string name="background_first_task_hint">可在「插件与诊断」设置后台运行和任务通知。</string>
+    <string name="background_enable_notifications">允许任务通知</string>
 </resources>
