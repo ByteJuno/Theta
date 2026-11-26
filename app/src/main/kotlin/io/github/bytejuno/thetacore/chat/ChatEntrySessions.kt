@@ -1,12 +1,10 @@
 package io.github.bytejuno.thetacore.chat
 
-import io.github.bytejuno.thetacore.R
 import io.github.bytejuno.thetacore.agent.ledger.InvocationRecord
 import io.github.bytejuno.thetacore.agent.protocol.HistoryDisposition
 import io.github.bytejuno.thetacore.agent.protocol.ModelEvent
 import io.github.bytejuno.thetacore.agent.run.ModelAttempt
 import io.github.bytejuno.thetacore.agent.run.RunJournal
-import io.github.bytejuno.thetacore.agent.run.SessionPreview
 import io.github.bytejuno.thetacore.agent.run.ToolExecutionBridge
 import io.github.bytejuno.thetacore.plugin.HostToolExecutionService
 import io.github.bytejuno.thetacore.sdk.EntryRequest
@@ -28,10 +26,8 @@ import kotlinx.coroutines.withContext
 internal class ChatEntrySessions(
     private val gate: Mutex,
     private val scope: CoroutineScope,
-    private val host: suspend () -> HostToolExecutionService,
     private val state: () -> ChatState,
-    private val select: suspend (String?, List<SessionPreview>) -> Unit,
-    private val send: suspend (String) -> Unit,
+    private val bind: suspend (String?, String, (String) -> Unit) -> Unit,
 ) {
     private val lock = Any()
     private val handles = mutableSetOf<Handle>()
@@ -45,18 +41,17 @@ internal class ChatEntrySessions(
                 gate.withLock {
                     check(admitted())
                     require(request.text.length <= 32_000)
-                    val store = requireNotNull(host().sessionStore)
                     checkIdle()
                     val id = request.sessionId?.takeUnless { it.isEmpty() }
-                    // Validate a different history before releasing the owner's current binding.
-                    if (id != null && id != state().sessionId) store.openHistory(id).close()
+                    require(request.text.isEmpty() || request.text.isNotBlank())
                     synchronized(lock) { check(handles.size < 32) }
-                    select(id, store.sessionPreviews())
-                    val handle = Handle(requireNotNull(state().sessionId), admitted)
-                    undelivered = handle
-                    synchronized(lock) { handles += handle }
-                    if (request.text.isNotEmpty()) sendLocked(handle, request.text)
-                    handle
+                    bind(id, request.text) { key ->
+                        check(admitted())
+                        val handle = Handle(key, admitted)
+                        undelivered = handle
+                        synchronized(lock) { handles += handle }
+                    }
+                    requireNotNull(undelivered)
                 }
             }.also { undelivered = null }
         } catch (error: CancellationException) { throw error }
@@ -73,14 +68,9 @@ internal class ChatEntrySessions(
         check(!handle.closed.get() && handle.accepting && handle.admitted())
         checkIdle()
         require(text.isNotBlank() && text.length <= 32_000)
-        if (state().sessionId != handle.sessionId) {
-            val store = requireNotNull(host().sessionStore)
-            store.openHistory(handle.sessionId).close()
-            select(handle.sessionId, store.sessionPreviews())
-            checkIdle()
+        bind(handle.sessionId, text) {
+            check(!handle.closed.get() && handle.accepting && handle.admitted())
         }
-        check(!handle.closed.get() && handle.accepting && handle.admitted())
-        send(text)
     }
 
     fun modelEvent(sessionId: String, event: ModelEvent) = synchronized(lock) {
@@ -132,9 +122,8 @@ internal class ChatEntrySessions(
         }
     }
 
-    fun finished(current: ChatState) {
-        val id = current.sessionId ?: return
-        val event = if (current.error == null && current.notice == R.string.chat_complete && !current.pending)
+    fun finished(id: String, completed: Boolean) {
+        val event = if (completed)
             SessionEvent.Finished else SessionEvent.Failed("Chat stopped or needs attention in Theta")
         emit(id, event)
         synchronized(lock) { handles.filter { it.sessionId == id }.forEach { it.tools.clear(); it.approvals.clear() } }

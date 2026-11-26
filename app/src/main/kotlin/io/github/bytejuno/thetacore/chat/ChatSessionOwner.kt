@@ -87,7 +87,7 @@ internal class ChatSessionOwner(
     private val mutable = MutableStateFlow(ChatState())
     val state = mutable.asStateFlow()
     private val gate = Mutex()
-    internal val entrySessions = ChatEntrySessions(gate, scope, { tools ?: service().also { tools = it } }, { mutable.value }, ::selectInternal) { sendInternal(it, emptyList()) }
+    internal val entrySessions = ChatEntrySessions(gate, scope, { mutable.value }, ::bindEntry)
     private var history: SqliteRunHistory? = null
     private var tools: HostToolExecutionService? = null
     private var active: Job? = null
@@ -185,16 +185,35 @@ internal class ChatSessionOwner(
         val sessions = requireNotNull(host.sessionStore).sessionPreviews()
         selectInternal(sessions.firstOrNull()?.sessionId, sessions)
     }
-    private suspend fun selectInternal(id: String?, sessions: List<SessionPreview>) {
+    private suspend fun selectInternal(id: String?, sessions: List<SessionPreview>,
+        admit: (SqliteRunHistory) -> Unit = {}) {
         val host = requireNotNull(tools)
         val store = requireNotNull(host.sessionStore)
-        history?.close()
-        history = null
-        cachedPageSession = null
-        cachedPage = null
+        val previous = history
+        if (id != null && previous?.sessionId == id) {
+            admit(previous)
+            return
+        }
         val key = id ?: "${System.currentTimeMillis()}-${UUID.randomUUID()}"
         val disk = if (id == null) store.createHistory(key) else store.openHistory(key)
+        val next = try {
+            prepareSelectedHistory(disk, host)
+            val initial = ChatState(loading = false, acceptedDraft = mutable.value.acceptedDraft,
+                sessions = (listOf(store.sessionPreview(key)) + sessions).distinctBy { it.sessionId },
+                moreSessionsAvailable = sessions.size == 50, sessionId = key)
+            pageState(disk, null)(initial).also { admit(disk) }
+        } catch (error: Throwable) {
+            disk.close()
+            if (id == null) host.ledger.deleteSession(key)
+            throw error
+        }
+        previous?.close()
         history = disk
+        sessionCursor = sessions.lastOrNull()?.sessionId
+        mutable.value = next
+    }
+
+    private fun prepareSelectedHistory(disk: SqliteRunHistory, host: HostToolExecutionService) {
         // Preserve fully registered unsubmitted approvals. Never recoverPending over a live run.
         disk.chatTaskChainId() // Keep the saved chain before cold reconciliation consumes its step.
         val pending = disk.pendingStep(host.ledger)
@@ -206,11 +225,6 @@ internal class ChatSessionOwner(
                 host.finishChatRun(pending.identity.runId)
             }
         }
-        sessionCursor = sessions.lastOrNull()?.sessionId
-        mutable.value = ChatState(loading = false, acceptedDraft = mutable.value.acceptedDraft?.takeIf { it.sessionId == key },
-            sessions = (listOf(store.sessionPreview(key)) + sessions).distinctBy { it.sessionId },
-            moreSessionsAvailable = sessions.size == 50, sessionId = key)
-        refresh()
     }
     private fun restorePending(pending: PendingHistoryStep) {
         val host = requireNotNull(tools)
@@ -221,6 +235,15 @@ internal class ChatSessionOwner(
     }
     private suspend fun refresh(before: HistoryCursor? = null) {
         val disk = requireNotNull(history)
+        mutable.update(pageState(disk, before))
+        val records = mutable.value.records.values.filter { it.input.runId == activeRunId }
+        entrySessions.records(disk.sessionId, records)
+        if (active != null) mutable.value.executionId?.let { executionId ->
+            presence.update(executionId, taskProgress(records))
+        }
+    }
+
+    private suspend fun pageState(disk: SqliteRunHistory, before: HistoryCursor?): (ChatState) -> ChatState {
         val host = requireNotNull(tools)
         val page = if (before == null && active != null && cachedPageSession == disk.sessionId &&
             cachedPage?.revision == disk.revision()) {
@@ -239,10 +262,10 @@ internal class ChatSessionOwner(
             .mapNotNull { host.ledger.get(it.binding.callId) }.associateBy { it.callId }
         val journal = disk.journalPage(includeUnfinished = active == null)
         val checkpoint = if (active == null) disk.checkpointInfo() else null
-        val settingsChanged = checkpoint?.canContinue == true && checkpointSettingsChanged(checkpoint)
+        val settingsChanged = checkpoint?.canContinue == true && checkpointSettingsChanged(checkpoint, disk)
         val reconciliation = if (active == null) disk.retryReconciliation() else null
         val progress = host.activeProgressSnapshot(records.keys)
-        mutable.update { it.copy(messages = messages, records = records, toolProgress = progress,
+        return { it.copy(messages = messages, records = records, toolProgress = progress,
             toolInputs = host.activeInputs(records.keys),
             recoveries = host.ledger.pendingRecoveries().filter { it.callId in records }.associateBy { it.callId }, older = page.older,
             showingOlder = before != null, pending = pending != null,
@@ -252,10 +275,6 @@ internal class ChatSessionOwner(
             reconciliation = reconciliation, result = disk.chatResult(),
             summaryWindowTokens = disk.chatSummaryWindow(), contextWindowTokens = disk.chatContextWindow(),
             recovery = if (active == null) recoveryToken(disk, checkpoint, reconciliation) else null) }
-        entrySessions.records(disk.sessionId, records.values.filter { it.input.runId == activeRunId })
-        if (active != null) mutable.value.executionId?.let { executionId ->
-            presence.update(executionId, taskProgress(records.values.filter { it.input.runId == activeRunId }))
-        }
     }
     private fun recoveryToken(disk: SqliteRunHistory, checkpoint: CheckpointInfo? = disk.checkpointInfo(),
         reconciliation: RetryReconciliation? = disk.retryReconciliation()): ChatRecoveryToken? {
@@ -303,16 +322,27 @@ internal class ChatSessionOwner(
     }
     fun send(text: String, images: List<PendingUserImage> = emptyList(), draft: ChatDraftReceipt? = null) =
         launchOperation { sendInternal(text, images, draft) }
+
+    private suspend fun bindEntry(id: String?, text: String, admit: (String) -> Unit) {
+        val host = tools ?: service().also { tools = it }
+        val snapshot = if (text.isEmpty()) null else configuration()
+        var identity: RunIdentity? = null
+        selectInternal(id, requireNotNull(host.sessionStore).sessionPreviews()) { disk ->
+            admit(disk.sessionId)
+            if (snapshot != null) {
+                disk.checkChatAdmission(host)
+                identity = disk.appendUserInput(text, emptyList())
+            }
+        }
+        if (snapshot != null) startAccepted(snapshot, requireNotNull(identity), null)
+    }
+
     private suspend fun sendInternal(text: String, images: List<PendingUserImage>, draft: ChatDraftReceipt? = null) {
         check(active == null && (text.isNotBlank() || images.isNotEmpty()) && text.length <= 32_000)
         require(images.size <= MAX_USER_IMAGES_PER_MESSAGE) { "Too many attached images" }
         val disk = requireNotNull(history)
         check(draft == null || draft.sessionId == disk.sessionId)
-        check(disk.pendingStep(tools!!.ledger) == null)
-        val previousIdentity = disk.chatRecoveryIdentity()
-        check(previousIdentity?.unattended != true)
-        if (disk.retryReconciliation() != null || disk.checkpointInfo()?.kind in setOf("PAUSED", "CONTINUATION"))
-            check(previousIdentity != null)
+        disk.checkChatAdmission(requireNotNull(tools))
         val snapshot = configuration() // validate/decrypt before acknowledging a new message
         if (images.isNotEmpty() && !snapshot.settings.compat.supportsImageInput) {
             mutable.update { it.copy(loading = false, error = R.string.chat_image_input_disabled) }
@@ -330,19 +360,16 @@ internal class ChatSessionOwner(
             store.privateImages.putUserImage(disk.sessionId, blobId, valid.bytes)
             mediaPart(ProtocolMediaKind.IMAGE, blobRef(blobId, valid.mimeType, valid.bytes.size.toLong()))
         }
-        val userParts = buildList<ContentPart> {
-            if (text.isNotBlank()) add(textPart(text))
-            addAll(mediaParts)
-        }
-        val chain = disk.chatTaskChainId() // Capture checkpoint identity before the history revision advances.
-        if (disk.chatContext() == null) disk.saveChatContext(ChatTaskContext(chain, text.trim().ifEmpty { IMAGE_ONLY_GOAL_FALLBACK },
-            Math.toIntExact(disk.page(null, 1).totalMessages), disk.chatSummaryWindow(), disk.chatContextWindow()))
-        val identity = RunIdentity(chain, disk.sessionId, UUID.randomUUID().toString())
-        disk.appendChatInput(disk.revision(), message(Role.USER, *userParts.toTypedArray()), identity)
-        val entry = store.sessionPreview(disk.sessionId)
-        mutable.update { it.copy(acceptedMessages = it.acceptedMessages + 1, acceptedDraft = draft ?: it.acceptedDraft, error = null,
-            sessions = it.sessions.map { saved -> if (saved.sessionId == entry.sessionId) entry else saved }) }
+        startAccepted(snapshot, disk.appendUserInput(text, mediaParts), draft)
+    }
+
+    private fun startAccepted(snapshot: OpenAiRunSnapshot, identity: RunIdentity, draft: ChatDraftReceipt?) {
+        mutable.update { it.copy(acceptedMessages = it.acceptedMessages + 1, acceptedDraft = draft ?: it.acceptedDraft) }
         start(snapshot, null, identity)
+        try {
+            val entry = requireNotNull(tools?.sessionStore).sessionPreview(identity.sessionId)
+            mutable.update { it.copy(sessions = it.sessions.map { saved -> if (saved.sessionId == entry.sessionId) entry else saved }) }
+        } catch (error: Exception) { report(error) }
     }
     fun resume(summaryWindowTokens: Long? = null, reconcileId: String? = null) = launchOperation {
         resumeInternal(summaryWindowTokens, reconcileId)
@@ -525,7 +552,8 @@ internal class ChatSessionOwner(
     private fun start(snapshot: OpenAiRunSnapshot?, pending: PendingHistoryStep?, identity: RunIdentity? = null,
         resumeId: String? = null, readmitId: String? = null, executionId: String = UUID.randomUUID().toString()) {
         check(active == null)
-        activeRunId = requireNotNull(identity ?: pending?.identity).runId
+        val running = requireNotNull(identity ?: pending?.identity)
+        activeRunId = running.runId
         mutable.update { it.copy(active = true, error = null, notice = null, draft = "", executionId = executionId) }
         active = scope.launch(Dispatchers.IO, start = CoroutineStart.LAZY) {
             var notice = R.string.chat_complete
@@ -586,14 +614,14 @@ internal class ChatSessionOwner(
                             if (!requireNotNull(history).hasPendingIntent()) host.finishChatRun(runId)
                             refresh()
                             observeLateExits(host, runId)
-                        } catch (error: Exception) { report(error) }
+                        } catch (error: Exception) { notice = R.string.chat_paused; report(error) }
                         val waiting = taskProgress(mutable.value.records.values.filter { it.input.runId == activeRunId })
                             .takeIf { it == ChatTaskProgress.Approval || it == ChatTaskProgress.Recovery }
                         try { presence.finish(executionId, waiting) }
-                        catch (error: Exception) { report(error) }
+                        catch (error: Exception) { notice = R.string.chat_paused; report(error) }
                         activeRunId = null
                         mutable.update { it.copy(active = false, draft = "", notice = notice, executionId = null) }
-                        entrySessions.finished(mutable.value)
+                        entrySessions.finished(running.sessionId, notice == R.string.chat_complete && !mutable.value.pending)
                     }
                 }
             }
@@ -684,8 +712,7 @@ internal class ChatSessionOwner(
         }
     }
 
-    private suspend fun checkpointSettingsChanged(checkpoint: CheckpointInfo): Boolean {
-        val disk = requireNotNull(history)
+    private suspend fun checkpointSettingsChanged(checkpoint: CheckpointInfo, disk: SqliteRunHistory = requireNotNull(history)): Boolean {
         val config = try { configuration() } catch (_: ProviderSettingsException) {
             // Existing provider feedback handles missing/decryption failures on an attempted run.
             return false

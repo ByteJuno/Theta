@@ -215,6 +215,43 @@ class ChatEntrySessionsTest {
         } finally { f.close() }
     }
 
+    @Test fun returningFromAnotherEntrySessionRestoresUnsubmittedTextAndImages() = runBlocking {
+        val f = Fixture(); f.initialize()
+        try {
+            f.owner.open().join()
+            val original = requireNotNull(f.owner.state.value.sessionId)
+            val drafts = ChatComposerDrafts()
+            val image = PendingUserImage(mimeType = "image/png", bytes = byteArrayOf(1))
+            drafts[original].edit("still editing")
+            drafts[original].images = listOf(image)
+            val entry = f.owner.entrySessions.open(EntryRequest("external"))
+            val other = requireNotNull(f.owner.state.value.sessionId)
+            assertNotEquals(original, other)
+            assertEquals("", drafts[other].input)
+            assertTrue(drafts[other].images.isEmpty())
+            withTimeout(10_000) { entry.events.first { it === SessionEvent.Finished } }
+            f.owner.select(original).join()
+            val restored = drafts[f.owner.state.value.sessionId]
+            assertEquals("still editing", restored.input)
+            assertEquals(listOf(image), restored.images)
+        } finally { f.close() }
+    }
+
+    @Test fun revocationAtAdmissionDiscardsOnlyTheUnpublishedNewSession() = runBlocking {
+        val f = Fixture(); f.initialize()
+        try {
+            f.owner.open().join()
+            val before = f.owner.state.value
+            var checks = 0
+            unavailable { f.owner.entrySessions.open(EntryRequest("first")) { ++checks == 1 } }
+            assertSame(before, f.owner.state.value)
+            assertEquals(listOf(before.sessionId), f.store.sessionIds())
+            assertEquals(0, f.requests.get())
+            f.owner.send("still bound").join()
+            assertEquals(1L, f.owner.state.value.acceptedMessages)
+        } finally { f.close() }
+    }
+
     @Test fun staleLedgerSnapshotCannotReviveApprovalAfterNewerRevision() = runBlocking {
         val f = Fixture(ToolRisk.WRITE); f.initialize()
         try {
@@ -291,6 +328,11 @@ class ChatEntrySessionsTest {
             unavailable { f.owner.entrySessions.open(EntryRequest("", "missing")) }
             assertEquals(original, f.owner.state.value.sessionId)
             unavailable { f.owner.entrySessions.open(EntryRequest("hello")) }
+            assertEquals(listOf(original), f.store.sessionIds())
+            assertEquals(original, f.owner.state.value.sessionId)
+            f.store.createHistory("other").close()
+            unavailable { f.owner.entrySessions.open(EntryRequest("hello", "other")) }
+            assertEquals(original, f.owner.state.value.sessionId)
             assertEquals(0, f.requests.get())
             assertEquals(0, f.owner.entrySessions.handleCount)
             assertEquals(0L, f.owner.state.value.acceptedMessages)
@@ -325,6 +367,22 @@ class ChatEntrySessionsTest {
             val event = withTimeout(10_000) { entry.events.first { it is SessionEvent.Failed } } as SessionEvent.Failed
             assertFalse(event.message.contains("internal"))
             assertEquals(0, f.requests.get()); assertEquals(0, f.executions.get())
+        } finally { f.close() }
+    }
+
+    @Test fun rejectedUiSendCannotChangeSuccessfulEntryTerminalEvent() = runBlocking {
+        val hold = CompletableDeferred<Unit>()
+        val f = Fixture(hold = hold); f.initialize()
+        try {
+            val entry = f.owner.entrySessions.open(EntryRequest("accepted"))
+            f.owner.send("too late").join()
+            assertNotNull(f.owner.state.value.error)
+            hold.complete(Unit)
+            val terminal = withTimeout(10_000) {
+                entry.events.first { it === SessionEvent.Finished || it is SessionEvent.Failed }
+            }
+            assertEquals(RunState.COMPLETED, f.owner.state.value.result?.state)
+            assertSame(SessionEvent.Finished, terminal)
         } finally { f.close() }
     }
 
