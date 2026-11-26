@@ -729,20 +729,24 @@ class MultimodalImageInputTest {
     @Test fun oversizedSingleImageTransactionPausesWithoutSummaryReservationOrLosingHistory(): Unit = runBlocking {
         val dir = Files.createTempDirectory("theta-image-memory-pause")
         try {
-            for (window in listOf<Long?>(null, Long.MAX_VALUE)) {
+            for (window in listOf<Long?>(null, Long.MAX_VALUE)) for (withPrior in listOf(false, true)) {
                 var calls = 0; var reads = 0
                 val config = OpenAiChatConfig("chat", "https://example.invalid/v1")
                 val provider = OpenAiChatProvider(config, ModelTransport { _, _, _ ->
                     calls++; error("oversized single input must pause")
                 }, MediaContentReader { reads++; error("must not read images") })
-                AgentDatabase.open(dir.resolve("history-$window.db"), BundledSQLiteDriver()).use { db ->
+                AgentDatabase.open(dir.resolve("history-$window-$withPrior.db"), BundledSQLiteDriver()).use { db ->
                     SqliteRunHistory.create(db, "session").use { history ->
-                        val original = imageRounds(1, 4, 3_148_927).take(1)
+                        val prior = if (withPrior) listOf(
+                            message(Role.USER, textPart("Earlier question")),
+                            message(Role.ASSISTANT, textPart("Earlier answer")),
+                        ) else emptyList()
+                        val original = prior + imageRounds(1, 4, 3_148_927).take(1)
                         history.append(0, original)
                         val result = AgentRunLoop(RunIdentity("chain", "session", "run"),
                             ModelTarget("chat", provider, NoAuthCredentials), chatRequest("vision"), history,
                             emptyToolExecutor(), StoredRunJournal(history), budget = ContextBudget({ 1L }, { null }),
-                            contextPolicy = ContextPolicy("inspect", summaryModel = SummaryModel(
+                            contextPolicy = ContextPolicy("inspect", priorMessageCount = prior.size, summaryModel = SummaryModel(
                                 ModelTarget("chat", provider, NoAuthCredentials),
                                 chatRequest("summary") { toolChoice = ToolChoice.None; maxOutputTokens = 128 },
                                 ContextBudget({ 1L }, { window })))).run()
@@ -752,6 +756,7 @@ class MultimodalImageInputTest {
                         assertEquals(original, history.snapshot().messages)
                         assertNull(history.retryReconciliation())
                         assertEquals(0, calls); assertEquals(0, reads)
+                        assertEquals(0, result.steps); assertEquals(0, result.retries)
                     }
                 }
             }

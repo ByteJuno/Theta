@@ -470,7 +470,7 @@ class AgentRunLoop(
             check(history.revision() == view.revision) { "History changed during active run" }
             val rawMessages = requestMessages(view)
             if (!requestViewLimit.admits(rawMessages)) {
-                if (compactPrior(view)) continue
+                if (!irreducible(view) && compactPrior(view)) continue
                 return pauseContext(view, "Request memory budget exceeded; checkpoint required")
             }
             val messages = cachedView(rawMessages).map { m ->
