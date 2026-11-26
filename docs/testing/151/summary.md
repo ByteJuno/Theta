@@ -37,3 +37,17 @@ On the candidate, the development test endpoint selected the f512 runner and all
 本轮未生成 APK，视觉、设备冷启动、实际图片选择与发送、大附件耗时、API 33 和 R8 运行行为未验证。新提交的 CI、独立审核与正式回归待执行。
 
 本地预检重新执行的测试计数：{"app": {"tests": 740, "failures": 0, "errors": 0, "skipped": 1}, "agent-core": {"tests": 632, "failures": 0, "errors": 0, "skipped": 1}}。远端使用 gpu-bai，设备与视觉结果不在该 JVM 检查覆盖范围。
+
+## PR 164 第六轮：发送前替换的文字与移除的附件
+
+实现提交 `1eabfe1a6d3f122fec58d2268a62e877283fff42`，验证树 `4e1c682fcdebecdf87b191571618930842e58209`。
+
+审核端在 `e7076dcc3e9850dd5b765d8af3aa1a40e5cfb70c` 重开数据库后读回 old text；另一场景中，已移除的 removed 附件仍可读回原有 3 字节。两种场景均已加入正式冷启动用例。
+
+入口聊天在点击发送时捕获已保存和本次提交的草稿标识。发送历史写入 SQLite 时一并消费旧稿和已移除的附件，后续新文字及新附件保留。
+
+定向 JVM 回归覆盖冷启动、删除后回写、延迟回执、附件顺序，以及既有长草稿、仅附件和提前关闭场景。theta-gpu-test 35/35 通过，Windows 严格配置缓存预检通过。
+
+本轮未生成 APK，视觉、设备冷启动、实际图片选择与发送、大附件耗时、API 33 和 R8 运行行为未验证。新提交的 CI、独立审核与正式回归待执行。
+
+本地预检重新执行的测试计数：{"app": {"tests": 743, "failures": 0, "errors": 0, "skipped": 1}, "agent-core": {"tests": 632, "failures": 0, "errors": 0, "skipped": 1}}。远端使用 gpu-bai，设备与视觉结果不在该 JVM 检查覆盖范围。
