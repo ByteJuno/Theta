@@ -36,6 +36,7 @@ class ThetaApplication : Application() {
             noBackupFilesDir, io.github.bytejuno.thetacore.storage.androidSecretCipher(
                 "theta.mcp.credentials.v1", "theta-mcp-credentials-v1", allowKeyRecovery = true)), hostToolsOwner) { crashRecovery.dataAdmissionAllowed }
     }
+    internal val personaSettings by lazy { io.github.bytejuno.thetacore.chat.PersonaSettings(noBackupFilesDir) }
     /** Process-wide shared HTTP transport so chat runs reuse one OkHttp connection pool. */
     internal val modelTransport by lazy {
         io.github.bytejuno.thetacore.agent.transport.OkHttpModelTransport()
@@ -47,6 +48,7 @@ class ThetaApplication : Application() {
             Log.e("ThetaChat", "Chat operation failed: ${error.javaClass.simpleName}")
         }, targetForRun = io.github.bytejuno.thetacore.chat.sharedTargetFactory(modelTransport),
             presence = chatTaskPresence,
+            promptSnapshot = { personaSettings.resolve(plugins.activePromptData()) },
             targetWithMediaForRun = io.github.bytejuno.thetacore.chat.sharedTargetWithMediaFactory(modelTransport),
             userImageValidator = { bytes ->
                 io.github.bytejuno.thetacore.chat.validateAndDecodeAndroidUserImage(bytes)

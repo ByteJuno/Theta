@@ -352,6 +352,7 @@ private fun ProviderProfile(
                     }
                 }
                 if (!imageProfile) {
+                    PersonaPicker(host, editable)
                     OutlinedTextField(
                         value = form.systemPrompt,
                         onValueChange = { error = null; form = form.withSystemPrompt(it) },

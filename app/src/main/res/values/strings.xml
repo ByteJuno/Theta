@@ -510,4 +510,14 @@
     <string name="tool_input_send">Submit input</string>
     <string name="tool_input_decline">Decline</string>
     <string name="mcp_recovery_blocked">MCP connections are paused by startup recovery. Resume extensions from the Plugins page, then restart the app.</string>
+    <string name="chat_persona">Persona</string>
+    <string name="chat_persona_next_run">Applies to new chat runs across sessions. Your custom system prompt is kept.</string>
+    <string name="chat_persona_unavailable">The previous persona is unavailable. Continuing without a persona.</string>
+    <string name="chat_persona_recovered">The saved persona choice was damaged and has been reset. Chat can continue without a persona. Select a persona or None in settings to dismiss this notice.</string>
+    <string name="chat_persona_failed">Could not load or save the persona. Reload and try again.</string>
+    <string name="chat_persona_empty">No personas in enabled data plugins. Import and enable a data plugin to add one.</string>
+    <string name="chat_persona_none">No persona</string>
+    <string name="chat_persona_none_selected">No persona · Selected</string>
+    <string name="chat_persona_selected">%1$s · Selected</string>
+    <string name="chat_persona_close">Done</string>
 </resources>

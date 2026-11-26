@@ -47,12 +47,15 @@ internal data class ChatState(
     val journal: List<JournalReply> = emptyList(),
     val olderJournal: Long? = null,
     val checkpoint: CheckpointInfo? = null,
+    val checkpointSettingsChanged: Boolean = false,
     val reconciliation: RetryReconciliation? = null,
     val result: RunResult? = null,
     val summaryWindowTokens: Long? = null,
     val executionId: String? = null,
     val contextWindowTokens: Long? = null,
     val recovery: ChatRecoveryToken? = null,
+    val personaUnavailable: Boolean = false,
+    val personaRecovered: Boolean = false,
 )
 
 internal fun sharedTargetFactory(transport: ModelTransport): (OpenAiRunSnapshot) -> ModelTarget =
@@ -76,6 +79,7 @@ internal class ChatSessionOwner(
     private val targetForRun: (OpenAiRunSnapshot) -> ModelTarget = defaultTargetForRun(),
     private val imageAttachments: ImageAttachments? = null,
     private val presence: ChatTaskPresence = ChatTaskPresence.None,
+    private val promptSnapshot: suspend () -> ChatPromptSnapshot = { ChatPromptSnapshot() },
     private val targetWithMediaForRun: ((OpenAiRunSnapshot, MediaContentReader) -> ModelTarget)? = null,
     private val userImageValidator: (ByteArray) -> ValidatedUserImage = ::validateAndDecodeAndroidUserImage,
 ) {
@@ -104,6 +108,7 @@ internal class ChatSessionOwner(
     private fun report(error: Exception) {
         diagnostic(error)
         val label = when (error) {
+            is CheckpointSettingsChangedException -> R.string.checkpoint_settings_changed
             is ChatTaskPresenceException -> R.string.chat_background_failed
             is ProviderSettingsException -> when (error.failure) {
                 ProviderSettingsException.Failure.NOT_CONFIGURED -> R.string.chat_configure_first
@@ -115,7 +120,10 @@ internal class ChatSessionOwner(
         mutable.update { it.copy(loading = false, error = label) }
     }
     fun open() = launchOperation {
-        if (history != null) return@launchOperation
+        if (history != null) {
+            if (active == null) refresh()
+            return@launchOperation
+        }
         tools = service()
         val store = requireNotNull(tools!!.sessionStore)
         val sessions = store.sessionPreviews()
@@ -229,6 +237,7 @@ internal class ChatSessionOwner(
             .mapNotNull { host.ledger.get(it.binding.callId) }.associateBy { it.callId }
         val journal = disk.journalPage(includeUnfinished = active == null)
         val checkpoint = if (active == null) disk.checkpointInfo() else null
+        val settingsChanged = checkpoint?.canContinue == true && checkpointSettingsChanged(checkpoint)
         val reconciliation = if (active == null) disk.retryReconciliation() else null
         val progress = host.activeProgressSnapshot(records.keys)
         mutable.update { it.copy(messages = messages, records = records, toolProgress = progress,
@@ -237,6 +246,7 @@ internal class ChatSessionOwner(
             showingOlder = before != null, pending = pending != null,
             draft = previewText(), journal = journal.replies, olderJournal = journal.older,
             checkpoint = checkpoint?.takeUnless { it.kind in setOf("VIEW", "COMPLETE") },
+            checkpointSettingsChanged = settingsChanged,
             reconciliation = reconciliation, result = disk.chatResult(),
             summaryWindowTokens = disk.chatSummaryWindow(), contextWindowTokens = disk.chatContextWindow(),
             recovery = if (active == null) recoveryToken(disk, checkpoint, reconciliation) else null) }
@@ -350,7 +360,7 @@ internal class ChatSessionOwner(
             ChatRecoveryAction.CONTINUE -> resumeInternal()
         }
     }
-    private fun resumeInternal(summaryWindowTokens: Long? = null, reconcileId: String? = null,
+    private suspend fun resumeInternal(summaryWindowTokens: Long? = null, reconcileId: String? = null,
         summarize: Boolean = true) {
         check(active == null)
         val disk = requireNotNull(history)
@@ -360,6 +370,10 @@ internal class ChatSessionOwner(
         val previous = requireNotNull(disk.chatRecoveryIdentity())
         check(!previous.unattended && previous.taskChainId == context.taskChainId)
         val checkpoint = disk.checkpointInfo()
+        if (checkpoint?.canContinue == true && checkpointSettingsChanged(checkpoint)) {
+            mutable.update { it.copy(checkpointSettingsChanged = true, error = R.string.checkpoint_settings_changed) }
+            return
+        }
         val identity = checkpoint?.takeIf { it.canContinue }?.nextIdentity
             ?: previous.copy(runId = UUID.randomUUID().toString())
         check(!identity.unattended && identity.sessionId == previous.sessionId && identity.taskChainId == previous.taskChainId)
@@ -612,12 +626,10 @@ internal class ChatSessionOwner(
             val context = requireNotNull(disk.chatContext())
             val window = context.contextWindowTokens
             val definitions = (tools!!.catalog.frozen(id.runId) ?: tools!!.catalog.freeze(id.runId)).values.toList()
-            val configured = config.request { tools = definitions.map {
-                modelTool(it.modelName, it.description, Json.parseToJsonElement(it.inputSchema).jsonObject)
-            } }
-            val request = if (window != null && configured.maxOutputTokens == null) object : ChatRequest by configured {
-                override val maxOutputTokens: Int = minOf(2048, (window / 4).toInt())
-            } else configured
+            val prompts = promptSnapshot()
+            tools!!.bindSkills(id.runId, prompts.data)
+            mutable.update { it.copy(personaUnavailable = prompts.unavailable, personaRecovered = prompts.recovered) }
+            val request = configuredRequest(config, prompts, definitions, window)
             val mediaReader = MediaContentReader { blob ->
                 tools?.sessionStore?.privateImages?.readUserImage(disk.sessionId, blob.id)
             }
@@ -659,5 +671,31 @@ internal class ChatSessionOwner(
                 RunState.FAILED -> R.string.chat_model_failed
             }
         }
+    }
+
+    private suspend fun checkpointSettingsChanged(checkpoint: CheckpointInfo): Boolean {
+        val disk = requireNotNull(history)
+        val config = try { configuration() } catch (_: ProviderSettingsException) {
+            // Existing provider feedback handles missing/decryption failures on an attempted run.
+            return false
+        }
+        val request = configuredRequest(config, promptSnapshot(), checkpoint.catalog, disk.chatContextWindow())
+        val reader = MediaContentReader { blob -> tools?.sessionStore?.privateImages?.readUserImage(disk.sessionId, blob.id) }
+        val target = targetWithMediaForRun?.invoke(config, reader) ?: targetForRun(config)
+        return !disk.checkpointSettingsMatch(checkpoint.id, target.id, request, target.provider.contextConfigurationKey())
+    }
+
+    private fun configuredRequest(config: OpenAiRunSnapshot, prompts: ChatPromptSnapshot,
+        definitions: List<FrozenDefinition>, window: Long?): ChatRequest {
+        val reader = definitions.firstOrNull { it.toolKey == "host/skill_read" }?.modelName
+        val configured = config.request {
+            system = prompts.data.system(system, prompts.persona, reader)
+            tools = definitions.map {
+                modelTool(it.modelName, it.description, Json.parseToJsonElement(it.inputSchema).jsonObject)
+            }
+        }
+        return if (window != null && configured.maxOutputTokens == null) object : ChatRequest by configured {
+            override val maxOutputTokens: Int = minOf(2048, (window / 4).toInt())
+        } else configured
     }
 }

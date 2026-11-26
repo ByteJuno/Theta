@@ -9,6 +9,11 @@ import io.github.bytejuno.thetacore.agent.transport.OkHttpModelTransport
 import io.github.bytejuno.thetacore.plugin.AndroidAgentStore
 import io.github.bytejuno.thetacore.plugin.HostToolBridgeRoot
 import io.github.bytejuno.thetacore.plugin.PluginExecutionBudget
+import io.github.bytejuno.thetacore.plugin.PluginDataCatalog
+import io.github.bytejuno.thetacore.plugin.PluginPromptData
+import io.github.bytejuno.thetacore.plugin.installPromptBundle
+import io.github.bytejuno.thetacore.plugin.promptData
+import io.github.bytejuno.thetacore.plugin.readSkill
 import io.github.bytejuno.thetacore.provider.OpenAiSettingsStore
 import io.github.bytejuno.thetacore.storage.AesGcmSecretCipher
 import java.io.ByteArrayInputStream
@@ -74,7 +79,7 @@ class UserImageChatTest {
     }
 
     @Test
-    fun chatSessionOwnerSendsImagesOverLoopbackBlocksWhenDisabledAndDeletesImagesWithSession(): Unit = runBlocking {
+    fun chatSessionOwnerSendsImagesWithDataPromptsAndFallsBackWhenDisabled(): Unit = runBlocking {
         val requestCount = AtomicInteger()
         val lastBody = AtomicReference<String?>()
         val server = HttpServer.create(InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0)
@@ -100,7 +105,15 @@ class UserImageChatTest {
             val dbDir = File(root, "db").apply { mkdirs() }
             val agentStore = AndroidAgentStore.open(dbDir, BundledSQLiteDriver())
             storeHandle = agentStore
-            val service = HostToolBridgeRoot(budget).initialize { agentStore }
+            val catalog = PluginDataCatalog(root, 1)
+            val selected = installPromptBundle(catalog, mapOf(
+                "skills/read/SKILL.md" to "---\ndescription: Read a document.\n---\nFull skill body stays on demand.",
+                "personas/guide.json" to """{"id":"guide","name":"Guide","systemPrompt":"Explain in small steps."}"""))
+            val preference = PersonaSettings(root.resolve("settings"))
+            preference.select("test.prompts/guide")
+            val service = HostToolBridgeRoot(budget).initialize(
+                skillReader = { selection, id, path -> catalog.readSkill(selection, id, path) },
+            ) { agentStore }
 
             var allowImages = false
             val transport = OkHttpModelTransport()
@@ -113,6 +126,7 @@ class UserImageChatTest {
                             CHAT_PROVIDER_ID,
                             baseUrl,
                             "vision-model",
+                            systemPrompt = "User system prompt.",
                             compat = OpenAiChatConfig.Compat(supportsImageInput = allowImages),
                         ),
                         NoAuthCredentials,
@@ -120,6 +134,11 @@ class UserImageChatTest {
                 },
                 targetForRun = sharedTargetFactory(transport),
                 targetWithMediaForRun = sharedTargetWithMediaFactory(transport),
+                promptSnapshot = {
+                    val data = catalog.restore { fail(it) }.filter { it.active(false) }.map(catalog::promptData)
+                    preference.resolve(PluginPromptData(data.flatMap { it.skills }, data.flatMap { it.personas },
+                        selections = data.flatMap { it.selections.entries }.associate { it.toPair() }))
+                },
                 // Pure-JVM test injects a deterministic validator seam instead of Android ImageDecoder.
                 userImageValidator = { bytes ->
                     require(bytes.contentEquals(samplePng)) { "Invalid test image" }
@@ -151,7 +170,17 @@ class UserImageChatTest {
             assertEquals(R.string.chat_complete, owner.state.value.notice)
             assertEquals(1, requestCount.get())
             val reqJson = Json.parseToJsonElement(requireNotNull(lastBody.get())).jsonObject
-            val content = reqJson.getValue("messages").jsonArray[0].jsonObject.getValue("content").jsonArray
+            val messages = reqJson.getValue("messages").jsonArray.map { it.jsonObject }
+            val system = messages.single { it.getValue("role").jsonPrimitive.content == "system" }
+                .getValue("content").jsonPrimitive.content
+            assertTrue(system.startsWith("Available skills"))
+            assertTrue(system.contains("test.prompts/read"))
+            assertTrue(system.contains("Explain in small steps."))
+            assertTrue(system.endsWith("User system prompt."))
+            assertFalse(system.contains("Full skill body"))
+            assertFalse(owner.state.value.personaUnavailable)
+            val content = messages.single { it.getValue("role").jsonPrimitive.content == "user" }
+                .getValue("content").jsonArray
             assertEquals("Explain this", content[0].jsonObject.getValue("text").jsonPrimitive.content)
             assertEquals(
                 "data:image/png;base64,${Base64.getEncoder().encodeToString(samplePng)}",
@@ -162,6 +191,25 @@ class UserImageChatTest {
             val userMsg = owner.state.value.messages.first()
             val mediaPart = userMsg.parts.filterIsInstance<ContentPart.Media>().single()
             assertArrayEquals(samplePng, owner.userImage(sessionId, mediaPart.blob.id))
+
+            // Disabling the data bundle falls back on the next image run without losing media support.
+            catalog.setEnabled("test.prompts", false, selected)
+            owner.send("Explain again", listOf(PendingUserImage(mimeType = "image/png", bytes = samplePng))).join()
+            withTimeout(10_000) { while (owner.state.value.active) delay(20) }
+            assertEquals(R.string.chat_complete, owner.state.value.notice)
+            assertEquals(2, requestCount.get())
+            assertTrue(owner.state.value.personaUnavailable)
+            assertNull(preference.current().id)
+            val fallbackMessages = Json.parseToJsonElement(requireNotNull(lastBody.get())).jsonObject
+                .getValue("messages").jsonArray.map { it.jsonObject }
+            assertEquals("User system prompt.", fallbackMessages.single {
+                it.getValue("role").jsonPrimitive.content == "system"
+            }.getValue("content").jsonPrimitive.content)
+            val fallbackContent = fallbackMessages.last {
+                it.getValue("role").jsonPrimitive.content == "user"
+            }.getValue("content").jsonArray
+            assertEquals("Explain again", fallbackContent[0].jsonObject.getValue("text").jsonPrimitive.content)
+            assertEquals(content[1], fallbackContent[1])
 
             owner.deleteCurrentSession().join()
             assertNull(agentStore.privateImages.readUserImage(sessionId, mediaPart.blob.id))
