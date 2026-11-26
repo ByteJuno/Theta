@@ -1,19 +1,17 @@
 # Issue 136 validation
 
-Implementation commit: `53b4679991565d1c767ea42215d91a226123e1fc`.
-Branch: `auto/136-mcp-http`; PR #149; verified RETURN `IC_kwDOVkrS_s8AAAABrAPXyw` on remote head `18238649f98f8011fe6f699ba7a61c945cea2803`.
+Implementation commit: `1dad56bc5a1633adf3b32b4987ffc23bdbf20b88`.
+Reviewed parent: `65596833e1df5b510019168d5c171290ff428b63`.
+RETURN: https://github.com/ByteJuno/Theta/pull/149#issuecomment-7181556232
 
-Connection disable/delete now revokes the directory and cancels live host invocations under the definition gate, removes input waiters, rejects late answers, and closes in-flight HTTP responses. All session generations share an irreversible request scope so old clients cannot continue after revocation. The existing ledger tracks actual worker exit and retains returned evidence or UNKNOWN for sent calls; no call is replayed.
+Changes and checks:
+- Unknown-tool errors after input_required retain FAILED/UNKNOWN, including accept and decline. Host-ledger regression confirms no automatic replay, rejects unattended same-argument retry and preserves prior effect. First-request unknown-tool rejection remains REJECTED/NONE.
+- MCP awaits the first existing PluginCrashRecovery admission decision, honoring manual skip_plugins and automatic skipData escalation. Startup, reload, enabled save, enable and refresh cannot bypass it. Both attach-before-restore and restore-before-attach are covered: blocked modes produce zero HTTP requests and zero registered MCP tools; normal mode loads tools; resume stays next-cold-start only.
+- Scalar form title/description/required/enum types are checked before rendering. Unsupported forms remain declinable; presentation helpers avoid unsafe casts. Valid scalar enum values retain their JSON types.
+- Header scanning visits only schema nodes. const/enum literal objects are preserved while invalid annotation positions remain rejected.
 
-All credential catalog access paths now revoke enabled connections and publish the classified failure state. Disable/delete revoke before reading credentials. Transient errors preserve ciphertext/keys and do not authorize replacement. The original schema retains validated x-mcp-header annotations through registration, argument validation and real HTTP header mapping; illegal names/locations remain rejected.
+Full preflight passed in 173.21s with strict --configuration-cache --configuration-cache-problems=fail (cache stored), lintDebug, storage-fixture checks and 526 English/Chinese resource keys. Agent-core: 604 tests, 603 passed, 1 platform skip, 0 failures/errors. App: 691 tests, 690 passed, 1 platform skip, 0 failures/errors. Local targeted regressions: 55/55 in 109.44s. Existing /opt/homelab-report/theta-gpu-test entry: 55/55, GRADLE_EXIT=0, 54.54s. GPU results are JVM tests, not device/emulator rendering.
 
-Checks on this source (worktree hashes retained outside Git; committed source verified equal):
-- Full `python scripts/preflight.py` passed in 149.63s: agent-core 603 tests = 602 passed + 1 platform skip; app 687 tests = 686 passed + 1 platform skip; no failures/errors.
-- lintDebug, storage-fixture source/compile checks and 525 English/Chinese resource keys passed; strict configuration cache reused with problems=fail.
-- Local targeted tests: 29/29 passed in 108.11s. Designated `/opt/homelab-report/theta-gpu-test`: 29/29 passed in 56.90s, same source archive and unchanged LF wrapper blob, 256 MiB test heap.
-- New end-to-end regressions cover disable and delete during host input (including an older refreshed session), actual streamed-response disconnect and UNKNOWN effect, every catalog access failure with two active connections, and original-schema validation plus actual header emission.
-- No protected files, dependencies, probe files or raw evidence committed. Existing untracked scripts cache and two stashes preserved.
+Test snapshot matches all 14 committed source files allowing only Git CRLF-to-LF normalization. Raw logs/XML/source archive and reviewer failure history remain outside Git in this event run. Initial encoding/output issues and the post-commit normalization assertion were resolved; no code/test failure occurred this round. A draft publication guard mistakenly matched English prose, and was corrected to validate actual closing references before writing the handoff.
 
-Failure history: prior reviewer reproduced all three defects on 18238649; verdict and old-head CI failure log retained in this round output. That CI failed `PluginToolBridgeTest.attachCatalogAndOperationLockDoNotHangOnNonCooperativeMetadataTimeout`; the test was not changed, and passed in this round local targeted/full and GPU targeted runs. This does not establish that CI cannot recur. Earlier round failures remain in their existing output directories. Initial text-read encoding/output issue corrected; diagnostic jcmd was attempted after test process exit and supplies no test evidence.
-
-Limits: no APK generated (APK SHA unavailable); no phone, device, emulator or visual verification. Existing input form, progress and credential recovery UI still need independent reviewer rendering/interaction acceptance. API33 runtime, R8, physical power loss and third-party MCP interoperability unverified. OAuth/sampling/URL elicitation remain deferred as documented previously. New-head GitHub CI, independent review and prescribed final emulator regression remain required. Writer did not push, update/create PR, merge, or create scheduling.
+APK: not generated; SHA-256 unavailable. Visual verification: not performed. Pending exact-build reviewer checks: input form unsupported/decline path, recovery notice and disabled MCP controls, both languages, small screen/large font/themes. Actual device cold-launch ordering, API33 runtime, R8, physical power loss and third-party interoperability remain unverified. No phone/emulator operated. New-head CI and prescribed final emulator regression remain pending the existing reviewer; prior-head results are not relabeled.
