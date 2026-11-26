@@ -40,10 +40,10 @@ class OpenAiChatCodec(
         return units
     }
 
-    fun encode(request: ChatRequest): String {
+    fun encode(request: ChatRequest, onSchemaDiagnostics: (ToolSchemaPreparation) -> Unit = {}): String {
         // Preflight the entire request before the first media read or base64 allocation.
         require(ImagePayloadBudget.admitsMessages(request.messages)) { "Image request exceeds memory budget" }
-        return encodeInternal(request, includeMediaPayload = true)
+        return encodeInternal(request, includeMediaPayload = true, onSchemaDiagnostics)
     }
 
     /**
@@ -60,7 +60,8 @@ class OpenAiChatCodec(
         return structural + mediaCost
     }
 
-    private fun encodeInternal(request: ChatRequest, includeMediaPayload: Boolean): String {
+    private fun encodeInternal(request: ChatRequest, includeMediaPayload: Boolean,
+        onSchemaDiagnostics: (ToolSchemaPreparation) -> Unit = {}): String {
         require(config.models.isEmpty() || request.model in config.models) { "Model not configured" }
         // Fail before sending/billing, not after receiving an otherwise valid response.
         reasoningFragmentUnits(request.model)
@@ -70,15 +71,19 @@ class OpenAiChatCodec(
         require(request.tools.map { it.name }.distinct().size == request.tools.size) { "Duplicate tool names" }
         request.tools.forEach {
             require(it.name.matches(Regex("[A-Za-z0-9_-]{1,64}"))) { "Invalid mapped tool name" }
-            checkSchema(it.inputSchema)
         }
-        if (request.toolChoice is ToolChoice.Named) require(request.tools.any { it.name == (request.toolChoice as ToolChoice.Named).name })
-        if (request.toolChoice == ToolChoice.Required) require(request.tools.isNotEmpty())
+        val preparation = ToolSchemaProfiles().prepare(request.tools, config.schemaProfile)
+        onSchemaDiagnostics(preparation)
+        val tools = preparation.tools
+        if (request.toolChoice is ToolChoice.Named) require(tools.any { it.name == (request.toolChoice as ToolChoice.Named).name }) {
+            "Named tool is unavailable for the schema profile"
+        }
+        if (request.toolChoice == ToolChoice.Required) require(tools.isNotEmpty()) { "No compatible tools available" }
         val history = encodeHistory(request, includeMediaPayload)
         return buildJsonObject {
             // Tool catalog first for a stable serialized prefix.
-            if (request.tools.isNotEmpty()) putJsonArray("tools") {
-                request.tools.sortedBy { it.name }.forEach { tool -> add(buildJsonObject {
+            if (tools.isNotEmpty()) putJsonArray("tools") {
+                tools.forEach { tool -> add(buildJsonObject {
                     put("type", "function")
                     putJsonObject("function") {
                         put("name", tool.name); put("description", tool.description); put("parameters", tool.inputSchema)
@@ -87,7 +92,7 @@ class OpenAiChatCodec(
             }
             put("model", request.model); put("messages", history); put("stream", true); put("n", 1)
             // Without tools these fields carry no meaning and strict servers reject them.
-            if (request.tools.isNotEmpty()) put("tool_choice", when (val choice = request.toolChoice) {
+            if (tools.isNotEmpty()) put("tool_choice", when (val choice = request.toolChoice) {
                 ToolChoice.Auto -> JsonPrimitive("auto")
                 ToolChoice.None -> JsonPrimitive("none")
                 ToolChoice.Required -> JsonPrimitive("required")
@@ -95,7 +100,7 @@ class OpenAiChatCodec(
                     put("type", "function"); putJsonObject("function") { put("name", choice.name) }
                 }
             })
-            if (request.tools.isNotEmpty()) request.parallelToolCalls?.let { put("parallel_tool_calls", it) }
+            if (tools.isNotEmpty()) request.parallelToolCalls?.let { put("parallel_tool_calls", it) }
             request.reasoningLevel?.let { put("reasoning_effort", it) }
             request.maxOutputTokens?.let { put(config.compat.maxTokensField, it) }
             request.temperature?.let { put("temperature", it) }
@@ -245,19 +250,6 @@ class OpenAiChatCodec(
         internal const val IMAGE_BUDGET_SIZE_DIVISOR = 128L
     }
 
-    private fun checkSchema(schema: JsonObject) {
-        if (config.compat.schemaProfile == SchemaProfile.NO_TOP_LEVEL_COMBINATORS)
-            require(schema.keys.none { it in setOf("oneOf", "anyOf", "allOf") }) { "Schema requires catalog downgrade" }
-        if (config.compat.schemaProfile == SchemaProfile.BASIC) {
-            val allowed = setOf("type", "properties", "items", "enum", "required", "description")
-            fun visit(node: JsonObject) {
-                require(node.keys.all { it in allowed }) { "Schema requires catalog downgrade" }
-                (node["properties"] as? JsonObject)?.values?.forEach { require(it is JsonObject); visit(it) }
-                node["items"]?.let { require(it is JsonObject); visit(it) }
-            }
-            visit(schema)
-        }
-    }
 }
 
 internal fun JsonObject.string(key: String): String? {

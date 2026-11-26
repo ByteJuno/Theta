@@ -524,9 +524,12 @@ class OpenAiChatTest {
     }
     @Test fun `schema downgrade is explicit and never silently drops constraints`() {
         val cfg = OpenAiChatConfig("test", "https://example.invalid", compat = OpenAiChatConfig.Compat(schemaProfile = SchemaProfile.BASIC))
-        assertFailsWith<IllegalArgumentException> { OpenAiChatCodec(cfg).encode(chatRequest("model") {
+        val wire = Json.parseToJsonElement(OpenAiChatCodec(cfg).encode(chatRequest("model") {
             tools = listOf(modelTool("read", "Read", Json.parseToJsonElement("""{"type":"object","additionalProperties":false}""").jsonObject))
-        }) }
+        })).jsonObject
+        val parameters = wire["tools"]!!.jsonArray.single().jsonObject["function"]!!.jsonObject["parameters"]!!.jsonObject
+        assertFalse("additionalProperties" in parameters)
+        assertTrue(parameters["description"]!!.jsonPrimitive.content.contains("\"additionalProperties\":false"))
     }
     @Test fun `empty and filtered responses are not replayable`() = runTest {
         assertEquals(HistoryDisposition.DISCARD, reducer(collect(sse(chunk(finish = "stop")))).historyDisposition())

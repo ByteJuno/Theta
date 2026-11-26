@@ -30,13 +30,14 @@ internal fun isPrivateCleartextHost(host: String): Boolean {
     return false
 }
 
-/** Schema is already mapped by the run catalog; this adapter never silently drops constraints. */
+/** Model-facing projection only; the host validates the original catalog schema. */
 enum class SchemaProfile { FULL, NO_TOP_LEVEL_COMBINATORS, BASIC }
 class OpenAiChatConfig(
     val providerId: String,
     baseUrl: String,
     models: Set<String> = emptySet(),
     val compat: Compat = Compat(),
+    val schemaProfile: SchemaProfile = compat.schemaProfile,
 ) {
     val models: Set<String> = java.util.Collections.unmodifiableSet(HashSet(models))
     val endpoint: HttpUrl
