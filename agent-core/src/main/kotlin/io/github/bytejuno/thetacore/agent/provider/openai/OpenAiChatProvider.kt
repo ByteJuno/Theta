@@ -47,6 +47,8 @@ class OpenAiChatProvider(
         kind == MediaKind.IMAGE && config.compat.supportsImageInput
     override fun executionMode(request: ChatRequest): ModelExecutionMode =
         if (request.extraBody.isEmpty()) ModelExecutionMode.GENERATION_ONLY else ModelExecutionMode.MAY_EXECUTE_SERVER_TOOLS
+    override fun toolNamesForExecution(request: ChatRequest): Set<String> =
+        ToolSchemaProfiles().prepare(request.tools, config.schemaProfile).tools.map { it.name }.toSet()
 
     /** No timeout/retry policy here: the host wraps this cold flow with validated(). */
     override fun chat(request: ChatRequest, auth: Credentials): Flow<ModelEvent> = flow {

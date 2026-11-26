@@ -82,9 +82,15 @@ internal fun sha256(value: String) = MessageDigest.getInstance("SHA-256")
     @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val nonExecutionReason: NonExecutionReason? = null,
+    /** Immutable model-request boundary. Persist with the first record so pending-step recovery
+     * cannot restore an excluded call to the executable directory. Older inputs default to false. */
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val toolAdmissionRejected: Boolean = false,
 ) {
     init {
         require(nonExecutionReason == null || cancelledBeforeExecution)
+        require(!toolAdmissionRejected || definition != null)
         require(listOf(taskChainId, sessionId, runId, stepId).all { it.isNotBlank() } && callOrder >= 0)
         if (definition != null) {
             require(modelName == definition.modelName)
@@ -145,6 +151,7 @@ internal fun sha256(value: String) = MessageDigest.getInstance("SHA-256")
         require(!restartRequiredUntilExit || (restartRequired && instance?.state == InstanceState.UNCONFIRMED &&
             state in setOf(Status.CANCELLED, Status.TIMED_OUT)))
         require(definitionDigest == input.definition?.digest && effectiveRisk >= input.initialRisk)
+        if (input.toolAdmissionRejected) require(state == Status.REJECTED && instance == null)
         if (input.definition == null) {
             require(state == if (input.cancelledBeforeExecution) Status.CANCELLED else Status.REJECTED)
             require(effectiveRisk == Risk.READ && result?.effect == Effect.NONE)

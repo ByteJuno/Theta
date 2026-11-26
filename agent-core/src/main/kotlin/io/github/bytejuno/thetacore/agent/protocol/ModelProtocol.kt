@@ -16,6 +16,9 @@ interface ModelProvider {
         message.parts.all { part -> part.replay?.let { canReplay(it, targetModel) } != false }
     /** True when this provider/model permits sending user media of [kind]. Default true per PROTOCOL 2.2. */
     fun supportsMediaInput(kind: MediaKind, model: String): Boolean = true
+    /** Pure request-local admission view matching the adapter's outgoing tool catalog. The host
+     * snapshots it before submission and persists rejected calls with their original definitions. */
+    fun toolNamesForExecution(request: ChatRequest): Set<String> = request.tools.map { it.name }.toSet()
     fun chat(request: ChatRequest, auth: Credentials): Flow<ModelEvent>
 }
 
