@@ -194,7 +194,9 @@ class AgentRunLoop(
             require(saved != null && saved.id == policy.resumeCheckpointId && saved.kind == "CONTINUATION")
             require(saved.identity() == identity && saved.goal == policy.goal && !saved.serverUnresolved)
             require(saved.catalog == tools.definitions.sortedBy { it.modelName }) { "Checkpoint catalog changed" }
-            require(matches(saved, source, settingsKey(target.id, config, target.provider.contextConfigurationKey()))) { "Stale checkpoint or changed run settings" }
+            val key = settingsKey(target.id, config, target.provider.contextConfigurationKey())
+            if (saved.settingsKey != key) throw CheckpointSettingsChangedException()
+            require(matches(saved, source, key)) { "Stale checkpoint or changed run settings" }
             val records = tools.currentCheckpointRecords(sourceRecords)
             require(records.map { it.atLedgerPrecision() } == saved.ledger.map { it.atLedgerPrecision() } && !tools.checkpointBlocked(records))
             val resumedView = saved.copy(kind = "VIEW", nextRunId = null)

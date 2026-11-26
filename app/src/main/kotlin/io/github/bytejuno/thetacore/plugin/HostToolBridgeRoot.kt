@@ -29,6 +29,7 @@ internal class HostToolBridgeRoot(
         invocationClock: InvocationClock = budget,
         imageTool: ((InvocationStore) -> Tool)? = null,
         policy: ApprovalPolicy = ApprovalPolicy(),
+        skillReader: (suspend (SelectedPluginData, String, String) -> String)? = null,
         openStore: () -> InvocationStore,
     ): HostToolExecutionService = withContext(Dispatchers.IO) {
         mutex.withLock {
@@ -51,10 +52,13 @@ internal class HostToolBridgeRoot(
                     catalog.registerHost("host/screen_info", "1", io.github.bytejuno.thetacore.plugin.tools.HostScreenTool(it))
                 }
                 catalog.registerHost("host/blob_read", "1", io.github.bytejuno.thetacore.plugin.tools.HostBlobReadTool(ledger))
+                val runSkills = skillReader?.let(::RunSkillReader)
+                runSkills?.let { catalog.registerHost("host/skill_read", "1", io.github.bytejuno.thetacore.plugin.tools.HostSkillReadTool(it::read)) }
                 imageTool?.let { catalog.registerHost("host/generate_image", "1", it(store)) }
                 HostToolExecutionService(
                     budget, owner, catalog, ledger, validator,
                     sessionStore = store as? AndroidAgentStore, invocationClock = invocationClock,
+                    runSkills = runSkills,
                 ).also { service = it }
             } catch (error: Throwable) {
                 owner.cancel()

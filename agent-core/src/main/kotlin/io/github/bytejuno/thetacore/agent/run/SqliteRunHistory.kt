@@ -375,6 +375,13 @@ open class SqliteRunHistory internal constructor(
         return if (valid) saved.info() else null
     }
 
+    /** UI hint only; continuation still validates source, catalog, ledger and effects in the loop. */
+    @Synchronized fun checkpointSettingsMatch(checkpointId: String, targetId: String,
+        request: ChatRequest, providerConfiguration: String): Boolean {
+        val saved = loadCheckpoint() ?: return false
+        return saved.id == checkpointId && saved.settingsKey == settingsKey(targetId, request, providerConfiguration)
+    }
+
     private inline fun <reified T> read(name: String): T {
         try {
             val input = valueInput(name)
