@@ -1,5 +1,6 @@
 package io.github.bytejuno.thetacore.agent.execution
 
+import io.github.bytejuno.thetacore.agent.mcp.mcpHeaderParameters
 import kotlinx.serialization.json.*
 
 /** No URI resolver is involved. Both admission and model projection use these limits. */
@@ -15,7 +16,7 @@ internal object LocalSchemaReferences {
     private val keywords = maps + arrays + singles + setOf("\$schema", "\$ref", "title", "description", "type",
         "required", "minItems", "maxItems", "uniqueItems", "minContains", "maxContains", "enum", "const",
         "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf", "minLength", "maxLength",
-        "minProperties", "maxProperties", "dependentRequired")
+        "minProperties", "maxProperties", "dependentRequired", "x-mcp-header")
 
     fun expand(source: String): JsonElement {
         require(source.length <= MAX_SOURCE_BYTES && source.toByteArray(Charsets.UTF_8).size <= MAX_SOURCE_BYTES)
@@ -46,6 +47,9 @@ internal object LocalSchemaReferences {
             }
         }
         index(root, "#", 0)
+        // Check the original locations before refs/combinators are projected away. Header
+        // mirrors must stay literal property paths in both catalog and model admission.
+        if (root is JsonObject) require(mcpHeaderParameters(root) != null)
         val budget = Budget()
         fun visit(node: JsonElement, depth: Int, refs: Set<String>): JsonElement {
             require(depth <= MAX_DEPTH)

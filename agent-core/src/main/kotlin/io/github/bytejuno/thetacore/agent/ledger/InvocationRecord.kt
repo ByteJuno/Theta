@@ -168,7 +168,10 @@ internal fun sha256(value: String) = MessageDigest.getInstance("SHA-256")
         require(instance == null || instance.state != InstanceState.NOT_SUBMITTED)
         require(instance == null || (UUID.fromString(instance.attemptId).toString() == instance.attemptId && instance.processEpoch.isNotBlank()))
         require(state !in setOf(Status.SUCCEEDED, Status.FAILED, Status.LOST) || instance != null)
-        require(state != Status.REJECTED || (instance == null && result?.effect == Effect.NONE))
+        require(state != Status.REJECTED || (result?.effect == Effect.NONE && (instance == null ||
+            (input.definition?.source == Source.MCP && evidence.any {
+                it.attemptId == instance.attemptId && it.outcome?.status == Status.REJECTED && it.outcome.effect == Effect.NONE
+            }))))
         require(result == null || instance != null || result.effect == Effect.NONE)
         require(result == null || result.inconsistentRead == (effectiveRisk == Risk.READ && result.effect != Effect.NONE))
         require(pending == null || (pending.internal == (state == Status.RUNNING)))

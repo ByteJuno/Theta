@@ -2,6 +2,9 @@ package io.github.bytejuno.thetacore.agent
 
 import io.github.bytejuno.thetacore.agent.execution.Schema202012Validator
 import io.github.bytejuno.thetacore.agent.ledger.*
+import io.github.bytejuno.thetacore.agent.mcp.McpHeaderParameter
+import io.github.bytejuno.thetacore.agent.mcp.mcpHeaderParameters
+import io.github.bytejuno.thetacore.agent.mcp.mcpParameterHeaders
 import io.github.bytejuno.thetacore.agent.protocol.*
 import io.github.bytejuno.thetacore.agent.provider.openai.*
 import io.github.bytejuno.thetacore.agent.transport.*
@@ -210,6 +213,54 @@ class SchemaProfilesTest {
             assertEquals(original, frozen.inputSchema)
             assertEquals(digest, frozen.digest)
             assertFalse(validator.valid(frozen.inputSchema, "{\"n\":1}"))
+        }
+    }
+
+    @Test fun localReferencesAndHeaderAnnotationsKeepOriginalValidationAndMirroringAcrossProfiles() {
+        val source = schema("""{"type":"object","@defs":{"positive":{"type":"integer","minimum":2}},"properties":{"n":{"@ref":"#/@defs/positive"},"scope":{"type":"string","minLength":2,"x-mcp-header":"Scope"}},"required":["n","scope"],"additionalProperties":false}""")
+        val frozen = FrozenDefinition("mcp/read", "read", "read", "Read", source.toString(), Risk.WRITE,
+            Source.MCP, "mcp", "1", 1, false, null, false, null)
+        val digest = frozen.digest
+        val headers = listOf(McpHeaderParameter(listOf("scope"), "Scope", "string"))
+        assertTrue(validator.supported(frozen.inputSchema))
+        assertEquals(headers, mcpHeaderParameters(source))
+        assertEquals(mapOf("Mcp-Param-Scope" to "chosen"), mcpParameterHeaders(headers, schema("""{"n":3,"scope":"chosen"}""")))
+        for (profile in SchemaProfile.entries) {
+            val result = ToolSchemaProfiles().prepare(listOf(modelTool("read", "Read", source)), profile)
+            assertTrue(result.excluded.isEmpty(), profile.name)
+            val projected = result.tools.single().inputSchema
+            assertFalse(projected.toString().contains("\$ref"))
+            val scope = projected["properties"]!!.jsonObject["scope"]!!.jsonObject
+            if (profile == SchemaProfile.BASIC) {
+                assertFalse("x-mcp-header" in scope)
+                assertTrue(scope["description"]!!.jsonPrimitive.content.contains("x-mcp-header"))
+            } else assertEquals(JsonPrimitive("Scope"), scope["x-mcp-header"])
+            assertTrue(validator.valid(frozen.inputSchema, """{"n":3,"scope":"chosen"}"""))
+            assertFalse(validator.valid(frozen.inputSchema, """{"n":1,"scope":"chosen"}"""))
+            assertFalse(validator.valid(frozen.inputSchema, """{"n":3,"scope":"x"}"""))
+            assertEquals(headers, mcpHeaderParameters(source))
+            assertEquals(digest, frozen.digest)
+        }
+    }
+
+    @Test fun modelProjectionCannotHideInvalidOriginalHeaderAnnotations() {
+        val bad = listOf(
+            """{"type":"object","properties":{"x":{"type":"string","x-mcp-header":"bad name"}}}""",
+            """{"type":"object","properties":{"x":{"type":"number","x-mcp-header":"X"}}}""",
+            """{"type":"object","properties":{"x":{"type":"string","x-mcp-header":"X"},"y":{"type":"string","x-mcp-header":"x"}}}""",
+            """{"type":"object","allOf":[{"properties":{"x":{"type":"string","x-mcp-header":"X"}}}]}""",
+            """{"type":"object","@defs":{"header":{"type":"string","x-mcp-header":"X"}},"properties":{"x":{"@ref":"#/@defs/header"}}}""",
+            """{"type":"object","@defs":{"unused":{"type":"string","x-mcp-header":"X"}}}"""
+        )
+        for (source in bad) {
+            val original = schema(source).toString()
+            assertFalse(validator.supported(original), source)
+            assertFailsWith<IllegalArgumentException> { validator.expanded(original) }
+            for (profile in SchemaProfile.entries) {
+                val result = ToolSchemaProfiles().prepare(listOf(tool(source, "bad"), tool("""{"type":"object"}""", "ok")), profile)
+                assertEquals(listOf("ok"), result.tools.map { it.name })
+                assertEquals(ToolSchemaExclusion("bad", profile, SchemaExclusionReason.UNSUPPORTED_SCHEMA), result.excluded.single())
+            }
         }
     }
 }

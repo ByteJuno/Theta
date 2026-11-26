@@ -205,7 +205,7 @@ internal fun androidSecretCipher(alias: String, associatedData: String,
                 secret
             } else {
                 if (store.containsAlias(alias)) throw UnusableSecretKeyException("Settings key unavailable")
-                if (!create) throw UnrecoverableKeyException("Settings key missing")
+                if (!create) throw UnusableSecretKeyException("Settings key missing")
                 KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore").apply {
                     init(KeyGenParameterSpec.Builder(alias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
                         .setBlockModes(KeyProperties.BLOCK_MODE_GCM)

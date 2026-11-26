@@ -147,7 +147,11 @@ internal class PluginManager(context: Context) {
         }
     }
 
-    suspend fun restore(skipPlugins: Boolean = false) = operation { restoreInternal(skipPlugins) }
+    suspend fun restore(skipPlugins: Boolean = false) = operation {
+        restoreInternal(skipPlugins)
+        // Application may attach MCP before or after restore. Both paths use the same latched policy.
+        (app as? io.github.bytejuno.thetacore.ThetaApplication)?.mcp?.reload()
+    }
 
     private suspend fun restoreInternal(skipPlugins: Boolean = false) {
         if (restored) return
@@ -419,6 +423,15 @@ internal class PluginManager(context: Context) {
     }
 
     /** Loads validated provider preset JSON templates from all currently enabled data plugins. */
+    suspend fun activeMcpPresets(): List<McpPreset> = operation {
+        restoreInternal()
+        val result = mutableListOf<McpPreset>()
+        for (page in dataPlugins.filter { it.active }) {
+            if (isDataPageActive(page)) result += withContext(Dispatchers.IO) { dataCatalog.readMcpPresets(page.selection) }
+        }
+        result.sortedBy { it.key }
+    }
+
     suspend fun activeProviderTemplates(): List<ProviderTemplate> = operation {
         restoreInternal()
         val activePages = dataPlugins.filter { it.active }

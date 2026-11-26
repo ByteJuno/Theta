@@ -187,6 +187,15 @@ internal class PluginInvocation(
                     }
                 }
             } catch (error: Throwable) {
+                if (tool is io.github.bytejuno.thetacore.mcp.McpTool &&
+                    error is io.github.bytejuno.thetacore.agent.mcp.McpUnknownToolException) {
+                    val rejected = PluginInvocationResult(PluginInvocationStatus.REJECTED,
+                        result = io.github.bytejuno.thetacore.sdk.ToolResult("MCP tool is unavailable", isError = true,
+                            effect = io.github.bytejuno.thetacore.sdk.ToolEffect.NONE))
+                    if (returnEvidence == null) capture(rejected)
+                    synchronized(budget.gate) { if (!expireIfDue()) finish(rejected) }
+                    return@action
+                }
                 if (returnEvidence == null) capture(PluginInvocationResult(PluginInvocationStatus.FAILED,
                     message = "Tool failed: ${pluginFailureIdentity(error).take(256)}"))
                 synchronized(budget.gate) {

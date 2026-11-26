@@ -421,6 +421,17 @@ class InvocationLedger(
     }
 
     /** Return evidence is NOT actual exit: children and cancellation handlers may still run. */
+    fun recordMcpUnknownTool(callId: String, attemptId: String): Mutation = gate.withGate {
+        val r = get(callId) ?: return@withGate Mutation.Conflict("Unknown call")
+        require(r.input.definition?.source == Source.MCP)
+        if (r.instance?.attemptId != attemptId) return@withGate Mutation.Conflict("Wrong attempt")
+        val text = "MCP tool is unavailable"
+        val ended = terminal(r, Status.REJECTED, Effect.NONE, text)
+        val evidence = ExitEvidence(attemptId, text, ended.result!!)
+        if (evidence in r.evidence) return@withGate Mutation.AlreadyApplied(r)
+        update(r, (if (r.state.terminal) r else ended).copy(evidence = r.evidence + evidence))
+    }
+
     fun recordOutcome(callId: String, attemptId: String, status: Status, text: String, effect: Effect? = null): Mutation = gate.withGate {
         require(status == Status.SUCCEEDED || status == Status.FAILED)
         val r = get(callId) ?: return@withGate Mutation.Conflict("Unknown call")
