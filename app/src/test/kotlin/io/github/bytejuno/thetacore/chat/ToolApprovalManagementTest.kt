@@ -17,6 +17,8 @@ class ToolApprovalManagementTest {
             val store = ChatApprovalSettingsStore(root)
             val key = "mcp/本地/with = spaces:工具"
             store.setToolRule(key, true, Risk.ROOT)
+            // MCP names accept these UTF-16 units; persisted rules must keep the exact key.
+            store.setToolRule("mcp/local/high\uD800-low\uDC00-emoji😀-literal\\ud800", true, Risk.DEVICE_CONTROL)
             store.revoke(setOf("receipt-one", "receipt-two"))
             store.setMode(ApprovalMode.FULL_AUTO)
             store.setAllowRootLongTerm(true)
@@ -27,6 +29,30 @@ class ToolApprovalManagementTest {
             assertTrue(runCatching { store.setToolRule(key, false, null) }.isFailure)
             assertEquals(before, store.current())
             assertTrue(ChatApprovalSettingsStore(root).current().rulesUnavailable)
+        } finally { root.deleteRecursively() }
+    }
+
+    @Test fun restoredRulesReloadAfterReadFailureWithoutTreatingMissingFileAsFreshInstall() {
+        val root = Files.createTempDirectory("theta-restored-rules").toFile()
+        try {
+            val original = ChatApprovalSettingsStore(root)
+            original.setToolRule("host/clock", true, Risk.ROOT)
+            original.revoke(setOf("saved-receipt"))
+            val file = File(root, "${ChatApprovalSettingsStore.DIRECTORY}/settings.properties")
+            val saved = file.readBytes()
+            assertTrue(file.delete())
+            assertTrue(file.mkdir())
+            val store = ChatApprovalSettingsStore(root)
+            assertTrue(store.ensureLoaded().rulesUnavailable)
+            assertTrue(file.delete())
+            assertTrue(store.ensureLoaded().rulesUnavailable)
+            assertTrue(runCatching { store.setMode(ApprovalMode.FULL_AUTO) }.isFailure)
+            file.writeBytes(saved)
+            assertEquals(original.current(), store.ensureLoaded())
+            store.setMode(ApprovalMode.STRICT)
+            assertEquals(original.current().deniedTools, store.current().deniedTools)
+            assertEquals(original.current().revokedReceipts, store.current().revokedReceipts)
+            assertEquals(store.current(), ChatApprovalSettingsStore(root).current())
         } finally { root.deleteRecursively() }
     }
 

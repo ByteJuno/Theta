@@ -48,8 +48,8 @@ internal class ChatApprovalSettingsStore(noBackupDirectory: File) {
     val state: StateFlow<ChatApprovalSettings> = mutableState.asStateFlow()
 
     fun ensureLoaded(): ChatApprovalSettings = synchronized(lock) {
-        if (!initialized) {
-            mutableState.value = readFromDisk()
+        if (!initialized || mutableState.value.rulesUnavailable) {
+            mutableState.value = readFromDisk(allowMissing = !initialized)
             initialized = true
         }
         mutableState.value
@@ -97,12 +97,14 @@ internal class ChatApprovalSettingsStore(noBackupDirectory: File) {
         return next
     }
 
-    private fun readFromDisk(): ChatApprovalSettings {
+    private fun readFromDisk(allowMissing: Boolean): ChatApprovalSettings {
         checkDirectories()
-        if (Files.notExists(file, NOFOLLOW_LINKS)) {
-            return ChatApprovalSettings(mode = ApprovalMode.BALANCED, allowRootLongTerm = false)
-        }
         return try {
+            if (Files.notExists(file, NOFOLLOW_LINKS)) {
+                // A failed read cannot be repaired by dropping the saved deny/revocation rules.
+                check(allowMissing) { "Previously unavailable approval rules must be restored" }
+                return ChatApprovalSettings(mode = ApprovalMode.BALANCED, allowRootLongTerm = false)
+            }
             check(Files.isRegularFile(file, NOFOLLOW_LINKS))
             check(Files.size(file) <= MAX_BYTES)
             val props = Properties()

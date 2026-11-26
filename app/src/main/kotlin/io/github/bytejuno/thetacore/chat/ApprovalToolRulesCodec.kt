@@ -1,7 +1,7 @@
 package io.github.bytejuno.thetacore.chat
 
 import io.github.bytejuno.thetacore.agent.ledger.Risk
-import java.io.StringWriter
+import java.io.ByteArrayOutputStream
 import java.util.Properties
 import kotlinx.serialization.json.*
 
@@ -14,9 +14,11 @@ internal object ApprovalToolRulesCodec {
             put("denied", JsonArray(settings.deniedTools.sorted().map(::JsonPrimitive)))
             put("risks", buildJsonObject { settings.riskOverrides.toSortedMap().forEach { (key, risk) -> put(key, risk.name) } })
         }
-        return StringWriter().also { writer ->
-            Properties().apply { setProperty("toolRules", value.toString()) }.store(writer, null)
-        }.toString()
+        // The byte-stream overload escapes UTF-16 code units, including unpaired surrogates
+        // accepted in MCP keys. A Writer followed by UTF-8 would replace those units with '?'.
+        return ByteArrayOutputStream().also { output ->
+            Properties().apply { setProperty("toolRules", value.toString()) }.store(output, null)
+        }.toString(Charsets.ISO_8859_1.name())
     }
 
     fun decode(props: Properties, base: ChatApprovalSettings): ChatApprovalSettings {
