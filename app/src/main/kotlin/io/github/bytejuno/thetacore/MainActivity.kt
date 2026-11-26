@@ -529,6 +529,7 @@ private fun PluginList(
         Text(stringResource(R.string.api_level, THETA_API_LEVEL))
         AppLanguageSetting()
         HostEnvironmentSummaryBar(hostEnvironment, onRefreshEnvironment, onOpenAccessibility)
+        BackgroundDiagnostics()
         if (recovery) Text(strings.get(R.string.recovery_requested))
         Button(onClick = onPick, enabled = !staging) { Text(strings.get(R.string.import_code)) }
         Button(onClick = onPickData, enabled = !staging && !dataRecoveryBlocked) { Text(strings.get(R.string.import_data)) }
