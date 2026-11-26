@@ -45,6 +45,36 @@ internal class FrozenToolCatalog(
     private val pluginEpochs = mutableMapOf<String, Long>()
     private val pluginFailureWindows = mutableMapOf<String, PluginToolFailureWindow>()
 
+    /** Trusted MCP metadata is already detached; publish the entire refresh in one scheduling gate. */
+    fun replaceMcp(connection: String, version: String, tools: List<io.github.bytejuno.thetacore.mcp.McpTool>) = gate.withGate {
+        require(io.github.bytejuno.thetacore.agent.mcp.validMcpName(connection))
+        val specs = tools.map { it to detachSpec(it.spec).also(::validateSpec) }
+        val prefix = "mcp/$connection/"
+        val keys = specs.map { prefix + it.first.id }.toSet()
+        entries.keys.filter { it.startsWith(prefix) && it !in keys }.toList().forEach(::revoke)
+        specs.forEach { (tool, spec) ->
+            val key = prefix + tool.id
+            val previous = entries[key]?.definition
+            val candidate = buildDefinition(key, spec, Source.MCP, "mcp/$connection", version,
+                previous?.generation ?: ((generations[key] ?: 0) + 1))
+            val definition = if (previous == candidate) previous else candidate.copy(
+                generation = (generations[key] ?: 0) + 1)
+            generations[key] = definition.generation
+            entries[key] = Entry(definition, tool, spec)
+            gate.install(definition)
+        }
+    }
+    fun beginMcpRefresh(connection: String) = gate.withGate {
+        mcpKeys(connection).forEach(gate::beginRefresh)
+    }
+    fun mcpKeys(connection: String): Set<String> = gate.withGate {
+        entries.keys.filterTo(linkedSetOf()) { it.startsWith("mcp/$connection/") }
+    }
+    fun revokeMcp(connection: String) = gate.withGate {
+        gate.clearFreshness("mcp/$connection")
+        mcpKeys(connection).forEach(::revoke)
+    }
+
     fun isBudgetClosed(): Boolean = budget.isClosed() || !owner.isActive
 
     private fun resolvePluginFailureWindow(
@@ -369,6 +399,7 @@ internal class FrozenToolCatalog(
             .mapTo(linkedSetOf()) { it.definition.toolKey }
     }
     fun freeze(runId: String): Map<String, FrozenDefinition> = gate.withGate {
+        gate.checkFreshness()
         runs[runId]?.let { return@withGate LinkedHashMap(it) }
         // Existing persisted runs MUST reuse their original frozen mapping across restarts,
         // never re-allocate aliases against the current tool directory.

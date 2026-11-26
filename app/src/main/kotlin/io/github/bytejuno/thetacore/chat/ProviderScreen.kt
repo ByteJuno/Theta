@@ -55,6 +55,7 @@ private fun ProviderProfile(
     var reload by remember { mutableIntStateOf(0) }
     var advanced by remember { mutableStateOf(false) }
     var approvalSettingsOpen by remember { mutableStateOf(false) }
+    var mcpOpen by remember { mutableStateOf(false) }
     var filter by remember { mutableStateOf("") }
     var providerTemplates by remember { mutableStateOf<List<ProviderTemplate>>(emptyList()) }
     val modelLists = remember(scope, store, imageProfile) {
@@ -82,6 +83,9 @@ private fun ProviderProfile(
         text = {
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(strings.get(R.string.chat_provider_notice))
+                OutlinedButton(enabled = !busy, onClick = { mcpOpen = true }) {
+                    Text(strings.get(R.string.mcp_title))
+                }
                 FlowRow {
                     TextButton(enabled = !busy && imageProfile, onClick = { clearTransientInputs(); onProfile(false) }) {
                         Text(strings.get(R.string.chat_text_profile))
@@ -456,6 +460,7 @@ private fun ProviderProfile(
         },
     )
     if (approvalSettingsOpen) ChatApprovalDialog(host) { approvalSettingsOpen = false }
+    if (mcpOpen) io.github.bytejuno.thetacore.mcp.McpScreen(host) { mcpOpen = false }
 }
 
 @Composable

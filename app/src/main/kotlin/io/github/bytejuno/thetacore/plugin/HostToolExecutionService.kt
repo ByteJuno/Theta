@@ -271,7 +271,8 @@ internal class HostToolExecutionService(
                 }
                 val record = requireNotNull(ledger.get(callId))
                 check(record.state.terminal)
-                if (record.state in setOf(Status.SUCCEEDED, Status.FAILED)) awaitObservedExit(callId)
+                if (record.state in setOf(Status.SUCCEEDED, Status.FAILED) ||
+                    (record.state == Status.REJECTED && record.instance != null)) awaitObservedExit(callId)
             }
             override fun requestCancel(callId: String) { gate.withGate { active[callId]?.cancel(); wakeApproval(callId) } }
         }
@@ -286,6 +287,8 @@ internal class HostToolExecutionService(
     }
     private fun outcome(ticket: ExecutionTicket, value: PluginInvocationResult, entered: Boolean,
         cache: ReturnNormalization): Mutation {
+        if (entered && ticket.definition.source == Source.MCP && value.status == PluginInvocationStatus.REJECTED)
+            return observe(ledger.recordMcpUnknownTool(ticket.callId, ticket.attemptId))
         val result = value.result
         val effect = if (!entered) Effect.NONE else result?.effect?.let { Effect.valueOf(it.name) }
         val error = value.status != PluginInvocationStatus.SUCCEEDED || result?.isError == true

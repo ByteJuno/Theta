@@ -8,6 +8,21 @@ class DefinitionGate {
     private val definitions = mutableMapOf<String, FrozenDefinition>()
     private val refreshing = mutableSetOf<String>()
     private val runs = mutableMapOf<String, Map<String, FrozenDefinition>>()
+    private data class Freshness(val keys: Set<String>, val expires: Long, val expired: () -> Unit)
+    private val freshness = mutableMapOf<String, Freshness>()
+    fun setFreshness(owner: String, keys: Set<String>, ttlMs: Long, expired: () -> Unit) = withGate {
+        freshness[owner] = Freshness(keys, System.nanoTime() + ttlMs * 1_000_000L, expired)
+    }
+    fun clearFreshness(owner: String) = withGate { freshness.remove(owner); Unit }
+    /** Checked under the exact same monitor as durable admission, not just by a delayed UI timer. */
+    fun checkFreshness() = withGate {
+        val expired = freshness.filterValues { System.nanoTime() - it.expires >= 0 }
+        expired.forEach { (owner, value) ->
+            freshness.remove(owner)
+            refreshing.addAll(value.keys)
+            value.expired()
+        }
+    }
     fun <T> withGate(block: () -> T): T = synchronized(this) { block() }
     fun install(definition: FrozenDefinition) = withGate {
         definitions[definition.toolKey] = definition
@@ -40,6 +55,7 @@ class DefinitionGate {
     val frozenRunCount: Int get() = withGate { runs.size }
     fun releaseRun(runId: String) = withGate { runs.remove(runId); Unit }
     internal fun check(input: InvocationInput): DefinitionState = withGate {
+        checkFreshness()
         val d = input.definition ?: return@withGate DefinitionState.STALE
         when {
             runs[input.runId]?.get(d.modelName) != d -> DefinitionState.STALE
@@ -72,6 +88,7 @@ class ApprovalPolicy(
         if (unknown.isNotEmpty()) return if (i.unattended) Verdict.DENY else Verdict.ASK
         val grant = all.any { other ->
             other.input.definition?.toolKey == definition.toolKey && other.definitionDigest == record.definitionDigest &&
+                (definition.source != Source.MCP || other.input.definition?.version == definition.version) &&
                 other.receipts.any { receipt ->
                     receipt.request.risk >= risk && receipt.request.unknownCalls.isEmpty() &&
                         (receipt.decision == Decision.ALLOW_ALWAYS ||

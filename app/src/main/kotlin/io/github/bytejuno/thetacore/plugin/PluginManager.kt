@@ -390,6 +390,15 @@ internal class PluginManager(context: Context) {
     }
 
     /** Loads validated provider preset JSON templates from all currently enabled data plugins. */
+    suspend fun activeMcpPresets(): List<McpPreset> = operation {
+        restoreInternal()
+        val result = mutableListOf<McpPreset>()
+        for (page in dataPlugins.filter { it.active }) {
+            if (isDataPageActive(page)) result += withContext(Dispatchers.IO) { dataCatalog.readMcpPresets(page.selection) }
+        }
+        result.sortedBy { it.key }
+    }
+
     suspend fun activeProviderTemplates(): List<ProviderTemplate> = operation {
         restoreInternal()
         val activePages = dataPlugins.filter { it.active }

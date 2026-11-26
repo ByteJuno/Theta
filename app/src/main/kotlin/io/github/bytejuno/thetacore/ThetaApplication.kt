@@ -31,6 +31,11 @@ class ThetaApplication : Application() {
     internal val approvalSettings by lazy { io.github.bytejuno.thetacore.chat.ChatApprovalSettingsStore.android(this) }
     internal val providerSettings by lazy { io.github.bytejuno.thetacore.provider.OpenAiSettingsStore.android(this) }
     internal val imageSettings by lazy { io.github.bytejuno.thetacore.provider.OpenAiSettingsStore.images(this) }
+    internal val mcp by lazy {
+        io.github.bytejuno.thetacore.mcp.McpManager(io.github.bytejuno.thetacore.mcp.McpConnectionStore(
+            noBackupFilesDir, io.github.bytejuno.thetacore.storage.androidSecretCipher(
+                "theta.mcp.credentials.v1", "theta-mcp-credentials-v1")), hostToolsOwner)
+    }
     /** Process-wide shared HTTP transport so chat runs reuse one OkHttp connection pool. */
     internal val modelTransport by lazy {
         io.github.bytejuno.thetacore.agent.transport.OkHttpModelTransport()
@@ -100,6 +105,7 @@ class ThetaApplication : Application() {
             try {
                 approvalSettings.ensureLoaded()
                 plugins.initializeHostTools(approvalSettings.policy()).also {
+                    mcp.attach(it.catalog)
                     Log.i("ThetaHostTools", "Host tools initialized")
                 }
             }

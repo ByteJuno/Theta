@@ -23,14 +23,18 @@ sealed interface TransportEvent {
     class Bytes(val bytes: ByteArray) : TransportEvent
 }
 
-class OkHttpModelTransport : ModelTransport {
-    private val client = OkHttpClient.Builder()
+object SharedHttpClient {
+    val instance: OkHttpClient = OkHttpClient.Builder()
         .retryOnConnectionFailure(false)
         .followRedirects(false)
         .followSslRedirects(false)
         .readTimeout(0, TimeUnit.MILLISECONDS)
         .callTimeout(0, TimeUnit.MILLISECONDS)
         .build()
+}
+
+class OkHttpModelTransport : ModelTransport {
+    private val client = SharedHttpClient.instance
 
     override fun exchange(url: String, body: String, token: String): Flow<TransportEvent> = callbackFlow {
         val parsed = url.toHttpUrl()
