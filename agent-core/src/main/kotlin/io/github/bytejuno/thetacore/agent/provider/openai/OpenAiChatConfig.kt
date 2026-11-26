@@ -40,6 +40,8 @@ class OpenAiChatConfig(
 ) {
     val models: Set<String> = java.util.Collections.unmodifiableSet(HashSet(models))
     val endpoint: HttpUrl
+    /** Canonical destination for host confirmation without exposing the transport's URL type. */
+    val targetHost: String get() = endpoint.host
     init {
         require(providerId.isNotBlank())
         // URL parser exceptions may embed userinfo/query credentials: never preserve their cause.

@@ -9,6 +9,20 @@ class ProviderSettingsFormTest {
         OpenAiParameters(123, 0.4, 0.9, "high", false, listOf("stop")),
         OpenAiChatConfig.Compat("max_tokens", "reasoning_content", true, false, SchemaProfile.BASIC, true))
 
+    @Test fun saveableEndpointsShowCanonicalDestinationForNewAndSavedProfiles() {
+        val endpoints = mapOf(
+            "https://api.example.com/v1" to "api.example.com",
+            "HTTPS://api.example.com/v1" to "api.example.com",
+            "https://例子.测试/v1" to "xn--fsqu00a.xn--0zwm56d",
+        )
+        endpoints.forEach { (endpoint, expectedHost) ->
+            val form = ProviderSettingsForm(endpoint = endpoint, model = "model")
+            val settings = form.settings("chat", image = false)
+            assertEquals(expectedHost, form.targetHost)
+            assertEquals(expectedHost, ProviderSettingsForm.loaded(settings).targetHost)
+        }
+    }
+
     @Test fun loadedFormPreservesParametersAndCompatWhenEditingModel() {
         val form = ProviderSettingsForm.loaded(saved())
         assertTrue(form.canReuseKey)

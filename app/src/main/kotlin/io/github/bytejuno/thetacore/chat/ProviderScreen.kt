@@ -15,6 +15,7 @@ import io.github.bytejuno.thetacore.*
 import io.github.bytejuno.thetacore.R
 import io.github.bytejuno.thetacore.agent.provider.openai.MAX_SYSTEM_PROMPT_CHARS
 import io.github.bytejuno.thetacore.agent.provider.openai.ModelsRequestException
+import io.github.bytejuno.thetacore.plugin.ProviderTemplate
 import io.github.bytejuno.thetacore.provider.ProviderSettingsException
 import kotlinx.coroutines.*
 
@@ -55,6 +56,7 @@ private fun ProviderProfile(
     var advanced by remember { mutableStateOf(false) }
     var approvalSettingsOpen by remember { mutableStateOf(false) }
     var filter by remember { mutableStateOf("") }
+    var providerTemplates by remember { mutableStateOf<List<ProviderTemplate>>(emptyList()) }
     val modelLists = remember(scope, store, imageProfile) {
         ProviderModels(scope) { endpoint, key ->
             if (imageProfile) store.fetchModels(endpoint, key)
@@ -64,6 +66,11 @@ private fun ProviderProfile(
     val discovery by modelLists.state.collectAsState()
     DisposableEffect(modelLists) { onDispose { modelLists.invalidate() } }
     LaunchedEffect(store, imageProfile, reload) { editor.load(store, imageProfile) }
+    LaunchedEffect(host.plugins, imageProfile, reload) {
+        providerTemplates = if (imageProfile) emptyList() else {
+            runCatching { host.plugins.activeProviderTemplates() }.getOrDefault(emptyList())
+        }
+    }
     fun resetModels() { modelLists.invalidate(); filter = "" }
     fun clearTransientInputs() { resetModels(); secret = ""; error = null }
     val editable = !busy && editor.editable
@@ -170,6 +177,64 @@ private fun ProviderProfile(
                             }
                         }
                     }
+                    if ((editor.creatingNew || editor.profiles.isEmpty()) && providerTemplates.isNotEmpty()) {
+                        Text(strings.get(R.string.chat_provider_templates_title), style = MaterialTheme.typography.labelLarge)
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            providerTemplates.forEach { template ->
+                                OutlinedCard(Modifier.fillMaxWidth()) {
+                                    Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        Text(template.name, style = MaterialTheme.typography.titleSmall)
+                                        Text(
+                                            strings.get(R.string.chat_provider_template_source, template.pluginName),
+                                            style = MaterialTheme.typography.bodySmall,
+                                        )
+                                        Text(
+                                            strings.get(R.string.chat_provider_template_host, template.host),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.primary,
+                                        )
+                                        if (template.authorUnverified) {
+                                            Text(
+                                                strings.get(R.string.chat_provider_template_unverified),
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.error,
+                                            )
+                                        }
+                                        if (template.supported) {
+                                            OutlinedButton(
+                                                enabled = editable,
+                                                onClick = {
+                                                    clearTransientInputs()
+                                                    editor.applyTemplate(template)
+                                                },
+                                            ) {
+                                                Text(strings.get(R.string.chat_provider_template_use))
+                                            }
+                                        } else {
+                                            Text(
+                                                strings.get(R.string.chat_provider_template_unsupported, template.protocol.wire),
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    form.templateSourceName?.let { sourceName ->
+                        Text(
+                            strings.get(R.string.chat_provider_template_copy_notice, sourceName),
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        if (form.templateAuthorUnverified) {
+                            Text(
+                                strings.get(R.string.chat_provider_template_unverified),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        }
+                    }
                     OutlinedTextField(
                         value = form.profileName,
                         onValueChange = { error = null; form = form.withProfileName(it) },
@@ -220,6 +285,19 @@ private fun ProviderProfile(
                     modifier = Modifier.fillMaxWidth(),
                     label = { Text(strings.get(R.string.chat_model)) },
                 )
+                if (!imageProfile && form.templateModels.isNotEmpty()) {
+                    Text(strings.get(R.string.chat_provider_template_models), style = MaterialTheme.typography.bodySmall)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        form.templateModels.forEach { presetModel ->
+                            FilterChip(
+                                selected = form.model.trim() == presetModel,
+                                enabled = editable,
+                                onClick = { error = null; form = form.copy(model = presetModel) },
+                                label = { Text(presetModel, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                            )
+                        }
+                    }
+                }
                 Text(strings.get(R.string.chat_models_manual), style = MaterialTheme.typography.bodySmall)
                 OutlinedButton(
                     enabled = editable && !discovery.loading && form.endpoint.isNotBlank() && hasKey,
@@ -323,6 +401,15 @@ private fun ProviderProfile(
                             editable,
                         ) { form = form.copy(supportsImageInput = it) }
                         Text(strings.get(R.string.chat_compat_image_input_notice), style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+                if (!imageProfile) {
+                    form.targetHost?.let { hostName ->
+                        Text(
+                            strings.get(R.string.chat_provider_target_host, hostName),
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
                     }
                 }
                 error?.let { Text(strings.get(it), color = MaterialTheme.colorScheme.error) }

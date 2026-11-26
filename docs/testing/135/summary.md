@@ -1,0 +1,70 @@
+# Issue #135 Testing Summary
+
+## Scope
+- Base commit (`origin/main`): `eb675203e7bc65ffbbf3829956d1fea1a5133b84`
+- Validated implementation commit: `9f54f9e733e6680f3c2b107a2c4854178d5cb9ad`
+- Branch: `auto/135-provider-presets`
+- Summary:
+  - Added strict fail-closed provider preset parser (`PluginProviderPresets.kt`) validating `providers/<name>.json` entries against the S3 schema (`id`, `name`, `protocol`, `baseUrl`, optional `compat` booleans, optional `models` array), validating `baseUrl` via `OpenAiChatConfig` / `OpenAiProviderSettings` (HTTPS or private/loopback HTTP only; rejecting credentials, query strings, fragments, and non-private cleartext), recognizing non-`openai-chat` protocols (`openai-responses`, `anthropic`, `gemini`) as unsupported for import, and rejecting unknown/malformed payloads without breaking other presets.
+  - Extended `PluginDataCatalog.readProviderTemplates` and `PluginManager.activeProviderTemplates` to expose templates exclusively from enabled, non-quarantined, non-`pendingDelete` data plugins, carrying source plugin name and unsigned/unverified author metadata.
+  - Updated `ProviderSettingsForm.kt` (`ProviderSettingsEditor.applyTemplate`) and `ProviderScreen.kt` so choosing a template always opens a new independent provider profile copy (never reusing an existing profile's API key), displays preset model quick-pick chips, marks unsigned plugin sources as unverified, blocks non-`openai-chat` templates with a clear unsupported label, and prominently shows the exact target host for explicit user confirmation before saving.
+  - Added bilingual English/Chinese UI resources (`values/strings.xml`, `values-zh/strings.xml`) with exact key parity and unit tests in `ProviderPresetsTest.kt` proving preset parsing, non-`openai-chat` blocking, 17 fail-closed invalid payload cases, and full independent-copy isolation across plugin update (domain redirect attempt), disable, and uninstall.
+
+## Automated Validation Executed
+- Command:
+  ```powershell
+  .\gradlew.bat ":agent-core:test" ":app:verifyUiResources" ":app:testDebugUnitTest" ":app:assembleDebug" ":app:lintDebug" --no-daemon --configuration-cache --configuration-cache-problems=fail "-Pandroid.overridePathCheck=true"
+  ```
+  - `:agent-core:test`: Passed (`total=579`, `passed=578`, `skipped=1`, `failed=0`).
+  - `:app:verifyUiResources`: Passed (`476` English/Chinese keys; Kotlin PSI + XML checks passed).
+  - `:app:testDebugUnitTest`: Passed (`total=648`, `passed=647`, `skipped=1`, `failed=0`; includes `ProviderPresetsTest`; 1 existing Windows POSIX skip).
+  - `:app:assembleDebug`: Passed (`app-debug.apk` SHA-256: `613245bc1552a27c657d0d596a2e453aa1d8c84b8c6b79cf49f3900539bac687`).
+  - `:app:lintDebug`: Passed.
+
+## Unverified Boundaries
+- Physical Android device / emulator UI visual layout, Android API 33 runtime behavior, real third-party data plugin ZIP import on device, and R8 Release builds were not executed locally in this slice.
+
+## Review Round 1 Correction
+- Reviewed PR head: `6d98f2e29a0f8f8a1da7b736b2ff807a6206272d`; prior writer returns: `0`.
+- Fixed implementation commit: `379ad384cac710bb282edbfe3460fef4010565f3`.
+- A GPU JVM probe installed an enabled data plugin containing four documented model metadata variants. Before the fix, only the baseline preset loaded: the `ToolSupport` object was rejected as non-boolean, and nullable model capabilities were rejected as non-integers. The probe failed (`total=1`, `failed=1`).
+- The parser now validates the `ToolSupport` object from PROTOCOL section 2.2 and accepts explicitly unknown nullable model metadata. Unknown fields and invalid types remain rejected. Regression tests cover catalog loading for each nullable model field, tool capability objects, and 18 invalid metadata cases. The original valid fixture now uses the documented object shape; no existing assertions were removed.
+- Targeted GPU validation on the fixed implementation: `/opt/homelab-report/theta-gpu-test :app:testDebugUnitTest --tests '*ProviderPresetsTest' --tests '*ProviderPresetsSchemaProbe*'` passed (`total=7`, `failed=0`). The unchanged probe loaded all four presets. Probe source remains untracked and is excluded from commits.
+- The earlier build, lint, and APK evidence applies to `9f54f9e733e6680f3c2b107a2c4854178d5cb9ad`; it is not a new APK result for this correction. Visual rendering of the template cards and model chips remains unverified. Final emulator regression is left to the review controller.
+
+## Review Round 2 Fix (Storage Fixture Standalone Compilation)
+- Addressed `[REVIEW:RETURN]` (`IC_kwDOVkrS_s8AAAABqoL27Q`) where `:samples:storage-fixture:compileDebugKotlin` failed because `:samples:storage-fixture` compiles `PluginDataCatalog.kt` directly without `PluginProviderPresets.kt` or `:agent-core`.
+- Validated implementation commit: `a37125800c9cf5a099375d3413e04acb935c454a`.
+- Replaced `PluginDataCatalog.readProviderTemplates` with a standalone generic `PluginDataCatalog.readEntries(selection, predicate)` and moved `PluginDataCatalog.readProviderTemplates` into `PluginProviderPresets.kt` as an internal extension function.
+- Command:
+  ```powershell
+  .\gradlew.bat ":samples:storage-fixture:compileDebugKotlin" ":samples:storage-fixture:testDebugUnitTest" ":agent-core:test" ":app:verifyUiResources" ":app:testDebugUnitTest" ":app:assembleDebug" ":app:lintDebug" --no-daemon --configuration-cache --configuration-cache-problems=fail "-Pandroid.overridePathCheck=true"
+  ```
+  - `:samples:storage-fixture:verifyStorageFixtureSources` + `:samples:storage-fixture:compileDebugKotlin`: Passed (`14` production sources, `2` fixture sources, self-only project edges).
+  - `:samples:storage-fixture:testDebugUnitTest`: Passed (`total=4`, `passed=4`, `skipped=0`, `failed=0`).
+  - `:agent-core:test`: Passed (`total=579`, `passed=578`, `skipped=1`, `failed=0`).
+  - `:app:verifyUiResources`: Passed (`476` English/Chinese keys; Kotlin PSI + XML checks passed).
+  - `:app:testDebugUnitTest`: Passed (`total=650`, `passed=649`, `skipped=1`, `failed=0`; 1 existing Windows POSIX skip).
+  - `:app:assembleDebug`: Passed (`app-debug.apk` SHA-256: `10ca337f12e600b64a5e05a58236a206034fa97c392968422570a25b53988a71`).
+  - `:app:lintDebug`: Passed.
+
+## Review Round 3 Fix (Offscreen Host Readiness)
+- Addressed RETURN `IC_kwDOVkrS_s8AAAABqpeW1A` on head `a34a0b91d2d42f9842d9b62bbcc6d77f17bafd72`; reviewer state records 2 cumulative writer returns.
+- Validated implementation commit: `4373f95713fe6fdaaf92f04635893c9001917dea`.
+- Read the original dedicated-emulator run `20261125-074447`: its log explicitly binds source `a34a0b91d2d42f9842d9b62bbcc6d77f17bafd72`, records `VERIFY_S1_EXIT=1` (410 seconds) and `SIGNATURES_EXIT=0` (2020 seconds), and fails at `host shows up`. The failure screenshot shows the plugin page down to the data-package section; the crash log is empty. The code-package empty state follows that section in `MainActivity`, but the readiness wait never scrolled. The original APK hash was not independently recovered, so this screenshot is diagnostic evidence from that recorded run, not visual acceptance for the new commit.
+- Enabled the existing list sweep for the exact `No plugins installed` readiness assertion. Kept its predicate, timeout, crash detection, and requirement to finish before any plugin installation unchanged. No app UI, signing checks, protected files, or review-controller configuration changed.
+- Added two deterministic regression cases that exercise the real `run` / `wait_for` / `scroll` path with simulated screen, clock, and transport: find the empty code list below environment/data sections; reject a genuinely missing empty list at the unchanged deadline without installing a plugin. Before the fix, the first case timed out and the second detected that no sweep occurred; original failures are retained outside Git.
+- Validation: `python -X utf8 -B scripts/acceptance-observation-test.py` passed **39/39** cases (0.520 seconds reported by unittest); `git diff --check` passed. These are script-level tests with simulated device I/O, not an emulator/device pass.
+- No new APK generated; APK SHA-256: **not generated**. Existing Gradle/app evidence above remains bound to its original commits. App sources and build inputs did not change in this correction, so Gradle and the full acceptance suite were not rerun locally. New-head CI and final dedicated-emulator regression remain the reviewer controller's gate. Provider-template visual behavior, real-device behavior, API 33 runtime and new-head R8 execution remain unverified by the writer.
+  - Configuration cache: Reused cleanly with `--configuration-cache-problems=fail`.
+
+## Review Round 4 Correction (Destination Confirmation)
+- Reviewed input head: `34318b398caaa37c4ad590a496d120c5ee6a5c32`; cumulative writer returns before this review: **3**.
+- Retained prior regression failure on `67c9ffcc`, dedicated-emulator run `20261125-092236`: `scopeThrow` failed at `managed scope disabled promptly: observation exceeded deadline`; `VERIFY_S1_EXIT=1` (3743 seconds), `SIGNATURES_EXIT=0` (2011 seconds). The recorded screen showed the host foreground and `Managed scope failed; disabled; restart required`. Plugin events reached disable completion and reverse cleanup; no crash was recorded, and the supplied 18:24:01–18:25:35 logcat window contained zero ANRs. This remains a failed run, not acceptance evidence.
+- The reviewed tree includes the plugin-list advisory deduplication from `fcafa4e210d708795ac55a4ec8388802a70e30e0`. The `scopeThrow` predicate and its 20-second deadline remain unchanged. No new device result is inferred from the layout change.
+- The first host-preview probe did not compile because the app test module does not expose core's OkHttp types; zero tests ran. After correcting only the probe to inspect the actual request URL, the GPU run failed (`total=1`, `failed=1`): both `HTTPS://api.example.com/v1` and `https://例子.测试/v1` passed settings validation but returned a null confirmation host. The request destinations were `api.example.com` and `xn--fsqu00a.xn--0zwm56d`; the ordinary lowercase HTTPS control displayed correctly.
+- Fixed implementation commit: `4d2498f738d5beee4709b2963faa17cebb803acd`. Host confirmation now uses the request configuration's canonical host and existing URL validation. Regression coverage checks both new drafts and loaded settings. No dependencies were added.
+- Targeted GPU validation: `/opt/homelab-report/theta-gpu-test :app:testDebugUnitTest --tests '*ProviderPresetHostPreviewProbe*' --tests '*ProviderPresetsTest' --tests '*ProviderSettingsFormTest'` passed (`total=11`, `failed=0`). The unchanged probe now displayed the actual host for all three inputs. The probe remains untracked; no raw test evidence was added to Git.
+- `git diff --check` passed. All 9 added UI resource keys have nonempty English and Chinese values with matching keys. The provider feature sources matched the previously validated `a37125800c9cf5a099375d3413e04acb935c454a` before this focused correction; that older APK is not acceptance evidence for the correction.
+- No APK or visual/device result was produced in this review. New-head CI and the final dedicated-emulator regression, including the retained `scopeThrow` failure case, remain the review controller's required merge gates. Template-card/model-chip rendering and real model API behavior remain unverified here.
+

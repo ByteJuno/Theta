@@ -389,6 +389,25 @@ internal class PluginManager(context: Context) {
         }
     }
 
+    /** Loads validated provider preset JSON templates from all currently enabled data plugins. */
+    suspend fun activeProviderTemplates(): List<ProviderTemplate> = operation {
+        restoreInternal()
+        val activePages = dataPlugins.filter { it.active }
+        val collected = mutableListOf<ProviderTemplate>()
+        for (page in activePages) {
+            if (!isDataPageActive(page)) continue
+            try {
+                val result = withContext(Dispatchers.IO) { dataCatalog.readProviderTemplates(page.selection) }
+                collected += result.templates
+                result.errors.forEach { failures += it }
+            } catch (error: Exception) {
+                quarantineDataPage(dataInventory, dataPlugins, page, error.message ?: "Invalid data content")
+                failures += "${page.selection.manifest.id}: provider templates isolated: ${error.message}"
+            }
+        }
+        collected.sortedWith(compareBy({ it.pluginId }, { it.entryPath }))
+    }
+
     suspend fun install(staged: StagedPlugin, session: PluginImportSession, allowCodeOnlyRollback: Boolean = false) = operation {
         restoreInternal()
         dataRequire(!session.closed && session.source == null && session.code === staged, "Unknown code confirmation", PluginFailureReason.CONFIRMATION_EXPIRED)

@@ -461,4 +461,13 @@
     <string name="chat_image_limit">Up to %1$d images can be attached per message.</string>
     <string name="chat_image_user_description">User attached image</string>
     <string name="chat_image_pending_count">Attached images (%1$d/%2$d)</string>
+    <string name="chat_provider_templates_title">Templates from enabled data plugins</string>
+    <string name="chat_provider_template_source">Source: %1$s</string>
+    <string name="chat_provider_template_host">Target host: %1$s</string>
+    <string name="chat_provider_template_unverified">Unsigned data package · Author identity unverified</string>
+    <string name="chat_provider_template_use">Use template</string>
+    <string name="chat_provider_template_unsupported">Protocol adapter not enabled yet (%1$s)</string>
+    <string name="chat_provider_template_copy_notice">Prefilled from %1$s. Saving creates an independent host profile copy that future plugin updates or removal will never redirect.</string>
+    <string name="chat_provider_template_models">Preset models (tap to select, or edit / fetch below)</string>
+    <string name="chat_provider_target_host">Confirm target host before saving: %1$s</string>
 </resources>

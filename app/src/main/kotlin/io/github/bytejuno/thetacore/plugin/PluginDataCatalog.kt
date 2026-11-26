@@ -182,6 +182,28 @@ internal class PluginDataCatalog(
         return PluginDataContent(paths.toList(), text)
     }
 
+    /** Validates an active data selection once and returns copies of entries matching [predicate] in path order. */
+    fun readEntries(
+        selection: SelectedPluginData,
+        predicate: (String) -> Boolean,
+    ): Map<String, ByteArray> {
+        val current = states.read(selection.manifest.id)
+            ?: throw PluginPackageException("Data page revoked", PluginFailureReason.DATA_PAGE_REVOKED)
+        dataRequire(
+            current == selection.state && current.enabled && !current.pendingDelete,
+            "Data page revoked",
+            PluginFailureReason.DATA_PAGE_REVOKED,
+        )
+        val rawEntries = linkedMapOf<String, ByteArray>()
+        val validatedManifest = validateSelection(selection.manifest.id, current) { name, bytes ->
+            if (predicate(name)) {
+                rawEntries[name] = bytes.copyOf()
+            }
+        }
+        dataRequire(validatedManifest == selection.manifest, "Selected manifest changed")
+        return rawEntries.entries.sortedBy { it.key }.associateTo(linkedMapOf()) { it.key to it.value }
+    }
+
     private fun selected(id: String, state: PluginDataState): SelectedPluginData =
         SelectedPluginData(validateSelection(id, state), state)
 
