@@ -460,4 +460,13 @@
     <string name="chat_provider_template_copy_notice">Prefilled from %1$s. Saving creates an independent host profile copy that future plugin updates or removal will never redirect.</string>
     <string name="chat_provider_template_models">Preset models (tap to select, or edit / fetch below)</string>
     <string name="chat_provider_target_host">Confirm target host before saving: %1$s</string>
+    <string name="chat_persona">Persona</string>
+    <string name="chat_persona_next_run">Applies to new chat runs across sessions. Your custom system prompt is kept.</string>
+    <string name="chat_persona_unavailable">The previous persona is unavailable. Continuing without a persona.</string>
+    <string name="chat_persona_failed">Could not load or save the persona. Reload and try again.</string>
+    <string name="chat_persona_empty">No personas in enabled data plugins. Import and enable a data plugin to add one.</string>
+    <string name="chat_persona_none">No persona</string>
+    <string name="chat_persona_none_selected">No persona · Selected</string>
+    <string name="chat_persona_selected">%1$s · Selected</string>
+    <string name="chat_persona_close">Done</string>
 </resources>

@@ -31,6 +31,7 @@ class ThetaApplication : Application() {
     internal val approvalSettings by lazy { io.github.bytejuno.thetacore.chat.ChatApprovalSettingsStore.android(this) }
     internal val providerSettings by lazy { io.github.bytejuno.thetacore.provider.OpenAiSettingsStore.android(this) }
     internal val imageSettings by lazy { io.github.bytejuno.thetacore.provider.OpenAiSettingsStore.images(this) }
+    internal val personaSettings by lazy { io.github.bytejuno.thetacore.chat.PersonaSettings(noBackupFilesDir) }
     /** Process-wide shared HTTP transport so chat runs reuse one OkHttp connection pool. */
     internal val modelTransport by lazy {
         io.github.bytejuno.thetacore.agent.transport.OkHttpModelTransport()
@@ -41,7 +42,8 @@ class ThetaApplication : Application() {
             providerSettings::snapshotForNewRun, diagnostic = { error ->
             Log.e("ThetaChat", "Chat operation failed: ${error.javaClass.simpleName}")
         }, targetForRun = io.github.bytejuno.thetacore.chat.sharedTargetFactory(modelTransport),
-            presence = chatTaskPresence)
+            presence = chatTaskPresence,
+            promptSnapshot = { personaSettings.resolve(plugins.activePromptData()) })
     }
     private val hostToolsOwner = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private lateinit var hostToolsStartup: Deferred<HostToolExecutionService>

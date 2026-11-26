@@ -28,6 +28,7 @@ import java.io.IOException
 import java.nio.file.Files
 import android.util.Log
 import kotlinx.coroutines.CoroutineExceptionHandler
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
@@ -102,7 +103,7 @@ internal class PluginManager(context: Context) {
             imageTool = { store -> io.github.bytejuno.thetacore.plugin.tools.HostImageGenerationTool(
                 io.github.bytejuno.thetacore.provider.OpenAiSettingsStore.images(app)::snapshotForNewRun,
                 io.github.bytejuno.thetacore.chat.ImageAttachments((store as AndroidAgentStore).privateImages)) },
-            policy = policy) {
+            policy = policy, skillReader = ::readSkill) {
             AndroidAgentStore.open(app)
         }.also { service ->
             pluginToolBridge.attachCatalog(service.catalog)
@@ -387,6 +388,32 @@ internal class PluginManager(context: Context) {
             failures += "${page.selection.manifest.id}: data page isolated: ${e.message}"
             throw e
         }
+    }
+
+    suspend fun activePromptData(): PluginPromptData = operation {
+        restoreInternal()
+        val collected = mutableListOf<PluginPromptData>()
+        for (page in dataPlugins.filter { it.active }) {
+            if (!isDataPageActive(page)) continue
+            try {
+                collected += withContext(Dispatchers.IO) { dataCatalog.promptData(page.selection) }
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+                quarantineDataPage(dataInventory, dataPlugins, page, "Invalid prompt archive")
+                failures += "${page.selection.manifest.id}: prompt archive isolated"
+            }
+        }
+        collected.flatMap { it.errors }.forEach { if (it !in failures) failures += it }
+        PluginPromptData(collected.flatMap { it.skills }.sortedBy { it.id },
+            collected.flatMap { it.personas }.sortedBy { it.id })
+    }
+
+    suspend fun readSkill(id: String, path: String): String = operation {
+        restoreInternal()
+        val pluginId = skillLocation(id, path).first
+        val page = dataPlugins.singleOrNull { it.active && it.selection.manifest.id == pluginId }
+            ?: throw PluginPackageException("Skill package unavailable")
+        withContext(Dispatchers.IO) { dataCatalog.readSkill(page.selection, id, path) }
     }
 
     /** Loads validated provider preset JSON templates from all currently enabled data plugins. */

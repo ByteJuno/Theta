@@ -207,10 +207,11 @@ private class DataZipHeaders(private val bytes: ByteArray, private val limits: P
         }
         val allowed = if (directory) {
             (parts.size == 1 && parts[0] in setOf("skills", "personas", "lang", "providers", "mcp")) ||
-                (parts.size == 2 && parts[0] == "skills")
+                (parts.size in 2..3 && parts[0] == "skills")
         } else {
             clean == "theta-plugin.json" ||
-                (parts.size == 3 && parts[0] == "skills" && parts[2] == "SKILL.md") ||
+                (parts.size in 3..4 && parts[0] == "skills" &&
+                    (parts.last().endsWith(".md") || parts.last().endsWith(".txt"))) ||
                 (parts.size == 2 && parts[0] in setOf("personas", "lang", "providers", "mcp") &&
                     parts[1].endsWith(".json") && parts[1].length > 5)
         }

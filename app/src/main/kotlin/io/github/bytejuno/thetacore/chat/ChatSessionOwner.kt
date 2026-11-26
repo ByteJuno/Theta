@@ -49,6 +49,7 @@ internal data class ChatState(
     val executionId: String? = null,
     val contextWindowTokens: Long? = null,
     val recovery: ChatRecoveryToken? = null,
+    val personaUnavailable: Boolean = false,
 )
 
 internal fun sharedTargetFactory(transport: ModelTransport): (OpenAiRunSnapshot) -> ModelTarget =
@@ -69,6 +70,7 @@ internal class ChatSessionOwner(
     private val targetForRun: (OpenAiRunSnapshot) -> ModelTarget = defaultTargetForRun(),
     private val imageAttachments: ImageAttachments? = null,
     private val presence: ChatTaskPresence = ChatTaskPresence.None,
+    private val promptSnapshot: suspend () -> ChatPromptSnapshot = { ChatPromptSnapshot() },
 ) {
     private val mutable = MutableStateFlow(ChatState())
     val state = mutable.asStateFlow()
@@ -569,9 +571,15 @@ internal class ChatSessionOwner(
             val context = requireNotNull(disk.chatContext())
             val window = context.contextWindowTokens
             val definitions = (tools!!.catalog.frozen(id.runId) ?: tools!!.catalog.freeze(id.runId)).values.toList()
-            val configured = config.request { tools = definitions.map {
-                modelTool(it.modelName, it.description, Json.parseToJsonElement(it.inputSchema).jsonObject)
-            } }
+            val prompts = promptSnapshot()
+            mutable.update { it.copy(personaUnavailable = prompts.unavailable) }
+            val reader = definitions.firstOrNull { it.toolKey == "host/skill_read" }?.modelName
+            val configured = config.request {
+                system = prompts.data.system(system, prompts.persona, reader)
+                tools = definitions.map {
+                    modelTool(it.modelName, it.description, Json.parseToJsonElement(it.inputSchema).jsonObject)
+                }
+            }
             val request = if (window != null && configured.maxOutputTokens == null) object : ChatRequest by configured {
                 override val maxOutputTokens: Int = minOf(2048, (window / 4).toInt())
             } else configured
