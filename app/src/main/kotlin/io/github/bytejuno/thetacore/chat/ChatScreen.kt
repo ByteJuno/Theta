@@ -48,16 +48,6 @@ internal fun toolState(record: InvocationRecord?): Int = when {
 }
 internal fun showApproval(record: InvocationRecord): Boolean = record.pending != null && !record.input.unattended
 
-internal fun reconcileDraftOnAccepted(
-    draft: String,
-    acceptedMessages: Long,
-    clearedAtAccepted: Long,
-): Pair<String, Long> = when {
-    acceptedMessages > clearedAtAccepted -> "" to acceptedMessages
-    acceptedMessages < clearedAtAccepted -> draft to acceptedMessages
-    else -> draft to clearedAtAccepted
-}
-
 @Composable
 internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
     val strings = uiStrings()
@@ -68,7 +58,7 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
     var input by rememberSaveable(state.sessionId) { mutableStateOf("") }
     var pendingImages by remember(state.sessionId) { mutableStateOf<List<PendingUserImage>>(emptyList()) }
     var attachmentError by remember(state.sessionId) { mutableStateOf<Int?>(null) }
-    var clearedAtAccepted by rememberSaveable { mutableLongStateOf(state.acceptedMessages) }
+    var textVersion by rememberSaveable(state.sessionId) { mutableStateOf(java.util.UUID.randomUUID().toString()) }
     var settings by rememberSaveable { mutableStateOf(false) }
     var stream by remember { mutableStateOf("") }
     LaunchedEffect(state.active) {
@@ -151,15 +141,10 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
         }
     }
     LaunchedEffect(owner) { owner.open() }
-    LaunchedEffect(state.acceptedMessages) {
-        val acceptedAdvanced = state.acceptedMessages > clearedAtAccepted
-        val (nextInput, nextCleared) = reconcileDraftOnAccepted(input, state.acceptedMessages, clearedAtAccepted)
-        input = nextInput
-        clearedAtAccepted = nextCleared
-        if (acceptedAdvanced) {
-            pendingImages = emptyList()
-            attachmentError = null
-        }
+    LaunchedEffect(state.acceptedDraft) {
+        val receipt = state.acceptedDraft ?: return@LaunchedEffect
+        if (receipt.clearsText(textVersion)) input = ""
+        pendingImages = receipt.remaining(pendingImages)
     }
     Column(Modifier.fillMaxSize().imePadding().padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(
@@ -338,7 +323,10 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
                 Text(strings.get(R.string.chat_image_take_photo))
             }
         }
-        OutlinedTextField(value = input, onValueChange = { if (it.length <= 32_000) input = it },
+        OutlinedTextField(value = input, onValueChange = { if (it.length <= 32_000 && it != input) {
+            input = it
+            textVersion = java.util.UUID.randomUUID().toString()
+        } },
             label = { Text(strings.get(R.string.chat_message)) }, modifier = Modifier.fillMaxWidth(),
             minLines = 1, maxLines = 5, enabled = !state.loading && !state.active && !state.pending)
         Button(
@@ -346,9 +334,10 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
                 val text = input
                 val images = pendingImages
                 attachmentError = null
-                launchTask { owner.send(text, images) }
+                val receipt = ChatDraftReceipt(requireNotNull(state.sessionId), textVersion, images.map { it.localId }.toSet())
+                launchTask { owner.send(text, images, receipt) }
             },
-            enabled = (input.isNotBlank() || pendingImages.isNotEmpty()) && !state.loading && !state.active && !state.pending,
+            enabled = state.sessionId != null && (input.isNotBlank() || pendingImages.isNotEmpty()) && !state.loading && !state.active && !state.pending,
             modifier = Modifier.fillMaxWidth(),
         ) { Text(strings.get(R.string.chat_send)) }
     }

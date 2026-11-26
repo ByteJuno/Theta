@@ -83,16 +83,22 @@ internal class ChatEntrySessions(
         send(text)
     }
 
-    fun modelEvent(sessionId: String, event: ModelEvent) {
-        if (event is ModelEvent.TextDelta) emit(sessionId, SessionEvent.Text(event.text))
+    fun modelEvent(sessionId: String, event: ModelEvent) = synchronized(lock) {
+        handles.filter { it.sessionId == sessionId }.forEach { it.text.accept(event) }
     }
 
     fun observeAttempts(sessionId: String, journal: RunJournal): RunJournal = object : RunJournal by journal {
         override fun finished(attempt: ModelAttempt) {
             journal.finished(attempt)
-            emit(sessionId, object : SessionEvent.AttemptEnded {
+            val boundary = object : SessionEvent.AttemptEnded {
                 override val discardText = attempt.cancelled || attempt.disposition == HistoryDisposition.DISCARD
-            })
+            }
+            synchronized(lock) {
+                handles.filter { it.sessionId == sessionId }.forEach {
+                    it.text.endAttempt()
+                    it.offer(boundary)
+                }
+            }
         }
     }
 
@@ -110,7 +116,10 @@ internal class ChatEntrySessions(
             records.sortedBy { it.input.callOrder }.forEach recordLoop@ { record ->
                 val name = record.input.definition?.modelName ?: return@recordLoop
                 val status = record.state.name
-                if (handle.tools.put(record.callId, status) != status) handle.offer(object : SessionEvent.ToolActivity {
+                val previous = handle.tools[record.callId]
+                if (previous != null && previous.revision >= record.revision) return@recordLoop
+                handle.tools[record.callId] = ToolSnapshot(record.revision, status)
+                if (previous?.status != status) handle.offer(object : SessionEvent.ToolActivity {
                     override val toolName = name
                     override val state = status
                 })
@@ -135,11 +144,14 @@ internal class ChatEntrySessions(
         handles.filter { it.sessionId == sessionId }.forEach { it.offer(event) }
     }
 
+    private class ToolSnapshot(val revision: Long, val status: String)
+
     private inner class Handle(val sessionId: String, val admitted: () -> Boolean) : EntrySession {
         val closed = AtomicBoolean()
-        val tools = mutableMapOf<String, String>()
+        val tools = mutableMapOf<String, ToolSnapshot>()
         val approvals = mutableSetOf<String>()
         private val queue = EntryEventQueue(scope, ::finish)
+        val text = EntryTextStream(queue)
         val accepting: Boolean get() = queue.accepting
         override val events: Flow<SessionEvent> = queue.events
 

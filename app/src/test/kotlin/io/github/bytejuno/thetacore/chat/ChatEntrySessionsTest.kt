@@ -26,7 +26,7 @@ import org.junit.Test
 class ChatEntrySessionsTest {
     private class Fixture(val risk: ToolRisk = ToolRisk.READ, val configured: Boolean = true,
         val hold: CompletableDeferred<Unit>? = null, val presenceFails: Boolean = false,
-        val disconnectFirst: Boolean = false) {
+        val disconnectFirst: Boolean = false, val interleaved: Boolean = false) {
         val root = Files.createTempDirectory("entry-session").toFile()
         val store = AndroidAgentStore.open(root, BundledSQLiteDriver())
         val budget = PluginExecutionBudget()
@@ -48,6 +48,16 @@ class ChatEntrySessionsTest {
             override fun chat(request: ChatRequest, auth: Credentials) = flow {
                 val turn = requests.incrementAndGet()
                 emit(Events.started("entry-$turn", "model"))
+                if (interleaved) {
+                    emit(Events.text(0, "A"))
+                    emit(Events.text(1, "C"))
+                    emit(Events.end(1))
+                    hold?.await()
+                    emit(Events.text(0, "B"))
+                    emit(Events.end(0))
+                    emit(Events.finished(FinishReason.STOP))
+                    return@flow
+                }
                 emit(Events.text(0, if (turn == 1) "before tool" else "answer"))
                 if (disconnectFirst && turn == 1) throw java.io.IOException("connection lost")
                 hold?.await()
@@ -164,6 +174,65 @@ class ChatEntrySessionsTest {
             assertEquals(RunState.COMPLETED, f.owner.state.value.result?.state)
             assertEquals(1L, f.owner.state.value.acceptedMessages)
             validateHistory(f.owner.state.value.messages)
+        } finally { f.close() }
+    }
+
+    @Test fun entryAdmissionPreservesUnsentChatDraft() = runBlocking {
+        val f = Fixture(); f.initialize()
+        try {
+            f.owner.open().join()
+            val state = f.owner.state.value
+            val entry = f.owner.entrySessions.open(EntryRequest("external", state.sessionId))
+            val after = f.owner.state.value
+            assertEquals(1L, after.acceptedMessages)
+            assertNull(after.acceptedDraft)
+            entry.close()
+            withTimeout(10_000) { f.owner.state.first { !it.active } }
+            val receipt = ChatDraftReceipt(requireNotNull(state.sessionId), "draft", emptySet())
+            f.owner.send("unsent", draft = receipt).join()
+            assertSame(receipt, f.owner.state.value.acceptedDraft)
+        } finally { f.close() }
+    }
+
+    @Test fun interleavedTextStreamsInStoredPartOrder() = runBlocking {
+        val hold = CompletableDeferred<Unit>()
+        val f = Fixture(hold = hold, interleaved = true); f.initialize()
+        try {
+            val entry = f.owner.entrySessions.open(EntryRequest("parts"))
+            val chunks = mutableListOf<String>()
+            withTimeout(10_000) {
+                entry.events.first {
+                    if (it is SessionEvent.Text) {
+                        chunks += it.delta
+                        hold.complete(Unit)
+                    }
+                    it === SessionEvent.Finished
+                }
+            }
+            val reply = f.owner.state.value.messages.last().parts.filterIsInstance<ContentPart.Text>()
+            assertEquals(listOf("AB", "C"), reply.map { it.text })
+            assertEquals("ABC", chunks.joinToString(""))
+        } finally { f.close() }
+    }
+
+    @Test fun staleLedgerSnapshotCannotReviveApprovalAfterNewerRevision() = runBlocking {
+        val f = Fixture(ToolRisk.WRITE); f.initialize()
+        try {
+            val entry = f.owner.entrySessions.open(EntryRequest("write"))
+            val state = withTimeout(10_000) { f.owner.state.first { it.records.values.any { r -> r.pending != null } } }
+            val record = state.records.values.single { it.pending != null }
+            val id = requireNotNull(state.sessionId)
+            val approval = requireNotNull(record.pending)
+            val next = record.copy(revision = record.revision + 1, pending = approval.copy(id = "next", summary = "new decision"))
+            val done = next.copy(revision = next.revision + 1, state = Status.REJECTED, pending = null)
+            f.owner.entrySessions.records(id, listOf(next, next, done, record))
+            f.owner.entrySessions.modelEvent(id, Events.text(0, "boundary"))
+            val seen = mutableListOf<SessionEvent>()
+            withTimeout(10_000) { entry.events.first { seen += it; it == SessionEvent.Text("boundary") } }
+            val activity = seen.filterIsInstance<SessionEvent.ToolActivity>().map { it.state }
+            assertEquals("REJECTED", activity.last())
+            assertEquals(1, activity.count { it == "WAITING_APPROVAL" })
+            assertEquals(listOf(approval.summary, "new decision"), seen.filterIsInstance<SessionEvent.NeedsApproval>().map { it.summary })
         } finally { f.close() }
     }
 
@@ -287,6 +356,20 @@ class ChatEntrySessionsTest {
             assertEquals(bound, f.owner.state.value.sessionId)
             assertEquals(1L, f.owner.state.value.acceptedMessages)
             entry.close()
+        } finally { f.close() }
+    }
+
+    @Test fun outOfOrderTextOverflowFailsOnlyTheEntry() = runBlocking {
+        val f = Fixture(); f.initialize()
+        try {
+            val entry = f.owner.entrySessions.open(EntryRequest(""))
+            val id = requireNotNull(f.owner.state.value.sessionId)
+            f.owner.entrySessions.modelEvent(id, Events.text(0, "early"))
+            repeat(9) { f.owner.entrySessions.modelEvent(id, Events.text(1, "x".repeat(8_000))) }
+            unavailable { entry.send("incomplete") }
+            val event = withTimeout(10_000) { entry.events.first { it is SessionEvent.Failed } }
+            assertTrue((event as SessionEvent.Failed).message.contains("out-of-order"))
+            assertEquals(0, f.owner.entrySessions.handleCount)
         } finally { f.close() }
     }
 

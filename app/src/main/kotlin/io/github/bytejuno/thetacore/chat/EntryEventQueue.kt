@@ -33,9 +33,13 @@ internal class EntryEventQueue(scope: CoroutineScope, private val detached: () -
 
     fun offer(event: SessionEvent) {
         if (closed.get()) return
-        if (input.trySend(event).isFailure && closed.compareAndSet(false, true)) {
+        if (input.trySend(event).isFailure) fail("Entry event consumer is too slow")
+    }
+
+    fun fail(message: String) {
+        if (closed.compareAndSet(false, true)) {
             while (input.tryReceive().isSuccess) { /* incomplete delivery is explicitly failed */ }
-            input.trySend(SessionEvent.Failed("Entry event consumer is too slow"))
+            input.trySend(SessionEvent.Failed(message))
             input.close()
             // Keep this handle counted until explicit close or collector completion.
         }

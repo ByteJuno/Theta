@@ -145,15 +145,13 @@ class ChatScreenStateTest {
     }
 
     @Test
-    fun draftSurvivesRotationAndReentryButClearsWhenNewMessageIsAccepted() {
-        assertEquals("" to 0L, reconcileDraftOnAccepted("", acceptedMessages = 0L, clearedAtAccepted = 0L))
-        assertEquals("" to 1L, reconcileDraftOnAccepted("hello", acceptedMessages = 1L, clearedAtAccepted = 0L))
-        assertEquals("unsent draft" to 1L, reconcileDraftOnAccepted("unsent draft", acceptedMessages = 1L, clearedAtAccepted = 1L))
-        assertEquals("" to 2L, reconcileDraftOnAccepted("unsent draft", acceptedMessages = 2L, clearedAtAccepted = 1L))
-
-        val (restoredDraft, rearmedWatermark) = reconcileDraftOnAccepted("restored draft", acceptedMessages = 0L, clearedAtAccepted = 2L)
-        assertEquals("restored draft", restoredDraft)
-        assertEquals(0L, rearmedWatermark)
-        assertEquals("" to 1L, reconcileDraftOnAccepted(restoredDraft, acceptedMessages = 1L, clearedAtAccepted = rearmedWatermark))
+    fun draftReceiptOnlyClearsSubmittedTextVersionAndAttachmentIds() {
+        val sent = PendingUserImage(mimeType = "image/png", bytes = byteArrayOf(1))
+        val added = PendingUserImage(mimeType = "image/png", bytes = byteArrayOf(1))
+        val receipt = ChatDraftReceipt("session", "submitted version", setOf(sent.localId))
+        assertTrue(receipt.clearsText("submitted version"))
+        assertFalse(receipt.clearsText("edited version"))
+        assertEquals(listOf(added), receipt.remaining(listOf(sent, added)))
+        assertEquals(listOf(added), receipt.remaining(listOf(added)))
     }
 }

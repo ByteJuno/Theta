@@ -28,6 +28,7 @@ internal const val CHAT_PROVIDER_ID = "chat"
 
 internal data class ChatState(
     val acceptedMessages: Long = 0,
+    val acceptedDraft: ChatDraftReceipt? = null,
     val loading: Boolean = true,
     val sessions: List<SessionPreview> = emptyList(),
     val moreSessionsAvailable: Boolean = false,
@@ -206,7 +207,7 @@ internal class ChatSessionOwner(
             }
         }
         sessionCursor = sessions.lastOrNull()?.sessionId
-        mutable.value = ChatState(loading = false,
+        mutable.value = ChatState(loading = false, acceptedDraft = mutable.value.acceptedDraft?.takeIf { it.sessionId == key },
             sessions = (listOf(store.sessionPreview(key)) + sessions).distinctBy { it.sessionId },
             moreSessionsAvailable = sessions.size == 50, sessionId = key)
         refresh()
@@ -300,11 +301,13 @@ internal class ChatSessionOwner(
         require(!pending.identity.unattended)
         start(null, pending)
     }
-    fun send(text: String, images: List<PendingUserImage> = emptyList()) = launchOperation { sendInternal(text, images) }
-    private suspend fun sendInternal(text: String, images: List<PendingUserImage>) {
+    fun send(text: String, images: List<PendingUserImage> = emptyList(), draft: ChatDraftReceipt? = null) =
+        launchOperation { sendInternal(text, images, draft) }
+    private suspend fun sendInternal(text: String, images: List<PendingUserImage>, draft: ChatDraftReceipt? = null) {
         check(active == null && (text.isNotBlank() || images.isNotEmpty()) && text.length <= 32_000)
         require(images.size <= MAX_USER_IMAGES_PER_MESSAGE) { "Too many attached images" }
         val disk = requireNotNull(history)
+        check(draft == null || draft.sessionId == disk.sessionId)
         check(disk.pendingStep(tools!!.ledger) == null)
         val previousIdentity = disk.chatRecoveryIdentity()
         check(previousIdentity?.unattended != true)
@@ -337,7 +340,7 @@ internal class ChatSessionOwner(
         val identity = RunIdentity(chain, disk.sessionId, UUID.randomUUID().toString())
         disk.appendChatInput(disk.revision(), message(Role.USER, *userParts.toTypedArray()), identity)
         val entry = store.sessionPreview(disk.sessionId)
-        mutable.update { it.copy(acceptedMessages = it.acceptedMessages + 1, error = null,
+        mutable.update { it.copy(acceptedMessages = it.acceptedMessages + 1, acceptedDraft = draft ?: it.acceptedDraft, error = null,
             sessions = it.sessions.map { saved -> if (saved.sessionId == entry.sessionId) entry else saved }) }
         start(snapshot, null, identity)
     }
