@@ -86,6 +86,7 @@ internal class ChatSessionOwner(
     private val mutable = MutableStateFlow(ChatState())
     val state = mutable.asStateFlow()
     private val gate = Mutex()
+    internal val entrySessions = ChatEntrySessions(gate, scope, { tools ?: service().also { tools = it } }, { mutable.value }, ::selectInternal) { sendInternal(it, emptyList()) }
     private var history: SqliteRunHistory? = null
     private var tools: HostToolExecutionService? = null
     private var active: Job? = null
@@ -250,6 +251,7 @@ internal class ChatSessionOwner(
             reconciliation = reconciliation, result = disk.chatResult(),
             summaryWindowTokens = disk.chatSummaryWindow(), contextWindowTokens = disk.chatContextWindow(),
             recovery = if (active == null) recoveryToken(disk, checkpoint, reconciliation) else null) }
+        entrySessions.records(disk.sessionId, records.values.filter { it.input.runId == activeRunId })
         if (active != null) mutable.value.executionId?.let { executionId ->
             presence.update(executionId, taskProgress(records.values.filter { it.input.runId == activeRunId }))
         }
@@ -298,7 +300,8 @@ internal class ChatSessionOwner(
         require(!pending.identity.unattended)
         start(null, pending)
     }
-    fun send(text: String, images: List<PendingUserImage> = emptyList()) = launchOperation {
+    fun send(text: String, images: List<PendingUserImage> = emptyList()) = launchOperation { sendInternal(text, images) }
+    private suspend fun sendInternal(text: String, images: List<PendingUserImage>) {
         check(active == null && (text.isNotBlank() || images.isNotEmpty()) && text.length <= 32_000)
         require(images.size <= MAX_USER_IMAGES_PER_MESSAGE) { "Too many attached images" }
         val disk = requireNotNull(history)
@@ -310,13 +313,13 @@ internal class ChatSessionOwner(
         val snapshot = configuration() // validate/decrypt before acknowledging a new message
         if (images.isNotEmpty() && !snapshot.settings.compat.supportsImageInput) {
             mutable.update { it.copy(loading = false, error = R.string.chat_image_input_disabled) }
-            return@launchOperation
+            return
         }
         val validatedImages = if (images.isEmpty()) emptyList() else try {
             images.map { userImageValidator(it.bytes) }
         } catch (_: Exception) {
             mutable.update { it.copy(loading = false, error = R.string.chat_image_invalid) }
-            return@launchOperation
+            return
         }
         val store = requireNotNull(tools!!.sessionStore)
         val mediaParts = validatedImages.map { valid ->
@@ -469,6 +472,7 @@ internal class ChatSessionOwner(
     }
     private suspend fun approval(request: ApprovalRequest): Decision? {
         val host = requireNotNull(tools)
+        entrySessions.records(requireNotNull(history).sessionId, listOfNotNull(host.ledger.get(request.callId)))
         while (true) {
             currentCoroutineContext().ensureActive()
             check(!host.submissionsClosed) { "Host tool storage unavailable" }
@@ -481,7 +485,7 @@ internal class ChatSessionOwner(
     private fun executor(definitions: List<FrozenDefinition>): LedgerToolExecutor {
         val host = requireNotNull(tools)
         val executionId = requireNotNull(mutable.value.executionId)
-        val bridge = object : ToolExecutionBridge by host.runBridge(beforeResume = { callId ->
+        val delegate = host.runBridge(beforeResume = { callId ->
             gate.withLock {
                 check(active?.isActive == true && mutable.value.executionId == executionId)
                 val record = requireNotNull(host.ledger.get(callId))
@@ -493,7 +497,8 @@ internal class ChatSessionOwner(
                     throw error
                 }
             }
-        }) {
+        })
+        val bridge = object : ToolExecutionBridge by entrySessions.observeTools(delegate, host, requireNotNull(history).sessionId) {
             override suspend fun beforeSubmit(callId: String) = gate.withLock {
                 currentCoroutineContext().ensureActive()
                 val record = requireNotNull(host.ledger.get(callId))
@@ -585,6 +590,7 @@ internal class ChatSessionOwner(
                         catch (error: Exception) { report(error) }
                         activeRunId = null
                         mutable.update { it.copy(active = false, draft = "", notice = notice, executionId = null) }
+                        entrySessions.finished(mutable.value)
                     }
                 }
             }
@@ -656,7 +662,9 @@ internal class ChatSessionOwner(
                     currentCoroutineContext().ensureActive()
                     presence.update(requireNotNull(mutable.value.executionId), ChatTaskProgress.Model)
                 } },
-                onEvent = { requestId, event -> synchronized(previewLock) {
+                onEvent = { requestId, event ->
+                    entrySessions.modelEvent(disk.sessionId, event)
+                    synchronized(previewLock) {
                     if (requestId != observedRequest) { observedRequest = requestId; preview.setLength(0) }
                     if (event is ModelEvent.TextDelta) {
                         preview.append(event.text)

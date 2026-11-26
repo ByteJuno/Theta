@@ -2,7 +2,7 @@ package io.github.bytejuno.thetacore.sdk
 
 import kotlinx.coroutines.flow.Flow
 
-/** First S1 entry contract. No agent/provider implementation is implied by registration. */
+/** A managed trigger into the host chat backend. */
 interface EntryAdapter : Extension {
     val displayName: String
     fun isAvailable(device: DeviceInfo): Boolean
@@ -26,11 +26,13 @@ interface EntrySession {
     fun close()
 }
 
-/** Text-only S1 subset; media, tool activity and approval events are not implemented yet. */
+/** Ordered events for an entry's bound session. Existing S1 types retain their ABI. */
 sealed interface SessionEvent {
     data class Text(val delta: String) : SessionEvent
     data object Finished : SessionEvent
     data class Failed(val message: String) : SessionEvent
+    interface ToolActivity : SessionEvent { val toolName: String; val state: String }
+    interface NeedsApproval : SessionEvent { val summary: String }
 }
 
 class EntryUnavailableException : IllegalStateException("Entry session backend is unavailable")

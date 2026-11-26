@@ -15,10 +15,58 @@ import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.emptyFlow
 import org.junit.Assert.*
 import org.junit.Test
 
 class PluginEntryRuntimeTest {
+    @Test fun closeDuringBackendOpenClosesLateHandleAndCannotReviveRuntime() = runBlocking {
+        val budget = PluginExecutionBudget()
+        val job = SupervisorJob()
+        val hostRef = CompletableDeferred<EntryHost>()
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val closed = java.util.concurrent.atomic.AtomicInteger()
+        val session = object : io.github.bytejuno.thetacore.sdk.EntrySession {
+            override val events = emptyFlow<io.github.bytejuno.thetacore.sdk.SessionEvent>()
+            override suspend fun send(text: String) = Unit
+            override fun close() { closed.incrementAndGet() }
+        }
+        val runtime = PluginEntryRuntime(budget, "p", CoroutineScope(job), adapter { host ->
+            host.ready(); hostRef.complete(host); awaitCancellation()
+        }, DeviceInfo(33), openSession = { _, _ -> entered.complete(Unit); release.await(); session })
+        try {
+            runtime.start()
+            val host = withTimeout(3_000) { hostRef.await() }
+            val opening = async { runCatching { host.open(EntryRequest("hello")) } }
+            withTimeout(3_000) { entered.await() }
+            runtime.close(); release.complete(Unit)
+            assertTrue(opening.await().exceptionOrNull() is EntryUnavailableException)
+            assertEquals(1, closed.get())
+            assertEquals(EntryRuntimeStatus.STOPPED, runtime.state.value.status)
+        } finally { release.complete(Unit); runtime.close(); job.cancel(); budget.close() }
+    }
+
+    @Test fun registrationRevocationRejectsRetainedHostBeforeMainRefresh() = runBlocking {
+        val budget = PluginExecutionBudget()
+        val job = SupervisorJob()
+        val hostRef = CompletableDeferred<EntryHost>()
+        val registered = java.util.concurrent.atomic.AtomicBoolean(true)
+        val opens = java.util.concurrent.atomic.AtomicInteger()
+        val runtime = PluginEntryRuntime(budget, "p", CoroutineScope(job), adapter { host ->
+            host.ready(); hostRef.complete(host); awaitCancellation()
+        }, DeviceInfo(33), openSession = { _, _ -> opens.incrementAndGet(); throw EntryUnavailableException() },
+            isRegistered = registered::get)
+        try {
+            runtime.start()
+            val host = withTimeout(3_000) { hostRef.await() }
+            registered.set(false)
+            try { host.open(EntryRequest("revoked")); fail("Revoked") } catch (_: EntryUnavailableException) { }
+            assertEquals(0, opens.get())
+        } finally { runtime.close(); job.cancel(); budget.close() }
+    }
+
     private fun adapter(attach: suspend (EntryHost) -> Unit) = object : EntryAdapter {
         override val id = "entry"
         override val displayName = "Entry"

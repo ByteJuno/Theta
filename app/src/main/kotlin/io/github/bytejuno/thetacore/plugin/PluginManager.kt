@@ -690,6 +690,7 @@ internal class PluginManager(context: Context) {
                 manifest.id, app, dataDir, host, executionBudget, settings,
                 version = manifest.versionCode.toString(),
                 toolBridge = pluginToolBridge,
+                openEntrySession = chatEntrySessionFactory(app),
             ) { faultContext ->
                 // Enqueue only: load/restore already holds operations. Never wait here.
                 postPluginOperation(host, Dispatchers.Main, operations, ::logHostFailure) {
@@ -842,6 +843,7 @@ internal class HostPluginContext(
     private val settings: PluginSettingsStorage,
     private val version: String = "1",
     private val toolBridge: PluginToolBridge? = null,
+    private val openEntrySession: suspend (io.github.bytejuno.thetacore.sdk.EntryRequest, () -> Boolean) -> io.github.bytejuno.thetacore.sdk.EntrySession = { _, _ -> throw io.github.bytejuno.thetacore.sdk.EntryUnavailableException() },
     onFault: (HostPluginContext) -> Unit,
 ) : PluginContext {
     private val toolFailures = PluginToolFailureWindow()
@@ -901,7 +903,8 @@ internal class HostPluginContext(
             current.filterIsInstance<EntryAdapter>().forEach { adapter ->
                 if (!entryAttempts.containsKey(adapter) && entryAttempts.size < 32) {
                     val runtime = PluginEntryRuntime(executionBudget, pluginId, scope, adapter,
-                        DeviceInfo(android.os.Build.VERSION.SDK_INT, android.os.Build.MANUFACTURER, android.os.Build.MODEL))
+                        DeviceInfo(android.os.Build.VERSION.SDK_INT, android.os.Build.MANUFACTURER, android.os.Build.MODEL),
+                        openSession = openEntrySession, isRegistered = { !faults.hasFault() && publicationSnapshot().any { it === adapter } })
                     entryAttempts[adapter] = runtime
                     runtime.start()
                 }

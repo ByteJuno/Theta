@@ -1,0 +1,239 @@
+package io.github.bytejuno.thetacore.chat
+
+import androidx.sqlite.driver.bundled.BundledSQLiteDriver
+import io.github.bytejuno.thetacore.agent.ledger.*
+import io.github.bytejuno.thetacore.agent.protocol.*
+import io.github.bytejuno.thetacore.agent.provider.openai.*
+import io.github.bytejuno.thetacore.agent.run.*
+import io.github.bytejuno.thetacore.plugin.*
+import io.github.bytejuno.thetacore.sdk.*
+import java.nio.file.Files
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flow
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonObject
+import org.junit.Assert.*
+import org.junit.Test
+
+class ChatEntrySessionsTest {
+    private class Fixture(val risk: ToolRisk = ToolRisk.READ, val configured: Boolean = true,
+        val hold: CompletableDeferred<Unit>? = null, val presenceFails: Boolean = false) {
+        val root = Files.createTempDirectory("entry-session").toFile()
+        val store = AndroidAgentStore.open(root, BundledSQLiteDriver())
+        val budget = PluginExecutionBudget()
+        val executions = AtomicInteger()
+        val requests = AtomicInteger()
+        val tool = object : Tool {
+            override val id = "read"
+            override val spec = ToolSpec("read", "Read fixture", Json.parseToJsonElement("""{"type":"object"}""").jsonObject, risk = risk)
+            override suspend fun call(args: JsonObject, env: ToolEnv): ToolResult {
+                executions.incrementAndGet()
+                return ToolResult("done", effect = ToolEffect.NONE)
+            }
+        }
+        lateinit var host: HostToolExecutionService
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val presence = CopyOnWriteArrayList<ChatTaskProgress?>()
+        val model = object : ModelProvider {
+            override fun executionMode(request: ChatRequest) = ModelExecutionMode.GENERATION_ONLY
+            override fun chat(request: ChatRequest, auth: Credentials) = flow {
+                val turn = requests.incrementAndGet()
+                emit(Events.started("entry-$turn", "model"))
+                emit(Events.text(0, if (turn == 1) "before tool" else "answer"))
+                hold?.await()
+                emit(Events.end(0))
+                if (turn == 1) {
+                    emit(Events.toolStart(1, "call", "host_clock"))
+                    emit(Events.toolDelta(1, "{}")); emit(Events.end(1))
+                }
+                emit(Events.finished(if (turn == 1) FinishReason.TOOL_CALLS else FinishReason.STOP))
+            }
+        }
+        val owner = ChatSessionOwner(scope, { host }, {
+            check(configured) { "secret/internal stack must not escape" }
+            OpenAiRunSnapshot(OpenAiProviderSettings("test", "https://example.invalid/v1", "model"), ApiKeyCredentials("test"))
+        }, targetForRun = { ModelTarget("test", model, Credentials { "test" }) }, presence = object : ChatTaskPresence {
+            override suspend fun update(executionId: String, progress: ChatTaskProgress) {
+                if (presenceFails) throw ChatTaskPresenceException(IllegalStateException("internal"))
+                presence += progress
+            }
+            override suspend fun finish(executionId: String, waiting: ChatTaskProgress?) { presence += waiting }
+        })
+        suspend fun initialize() { host = HostToolBridgeRoot(budget, tool).initialize { store } }
+        suspend fun close() {
+            hold?.complete(Unit)
+            owner.stop().join()
+            withTimeout(10_000) { owner.state.first { !it.active } }
+            scope.coroutineContext[Job]!!.cancelAndJoin()
+            budget.close(); store.close(); root.deleteRecursively()
+        }
+    }
+
+    private suspend fun unavailable(action: suspend () -> Unit) {
+        try { action(); fail("Expected safe rejection") }
+        catch (error: EntryUnavailableException) { assertFalse(error.message.orEmpty().contains("secret")) }
+    }
+
+    @Test fun readyEntryDrivesRealKernelAndRetainsOrderedEventsBeforeSubscription() = runBlocking {
+        val f = Fixture(); f.initialize()
+        val pluginScope = CoroutineScope(SupervisorJob())
+        val opened = CompletableDeferred<EntrySession>()
+        val hostRef = CompletableDeferred<EntryHost>()
+        val adapter = object : EntryAdapter {
+            override val id = "voice"
+            override val displayName = "Voice"
+            override fun isAvailable(device: DeviceInfo) = true
+            override suspend fun attach(host: EntryHost) {
+                unavailable { host.open(EntryRequest("too early")) }
+                host.ready(); hostRef.complete(host)
+                opened.complete(host.open(EntryRequest("goal")))
+                awaitCancellation()
+            }
+        }
+        val runtime = PluginEntryRuntime(f.budget, "entry", pluginScope, adapter, DeviceInfo(33),
+            openSession = f.owner.entrySessions::open)
+        try {
+            runtime.start()
+            val entry = withTimeout(10_000) { opened.await() }
+            val seen = CopyOnWriteArrayList<SessionEvent>()
+            val collect = launch { entry.events.collect { seen += it } }
+            withTimeout(10_000) { while (seen.none { it === SessionEvent.Finished }) delay(10) }
+            assertEquals("before toolanswer", seen.filterIsInstance<SessionEvent.Text>().joinToString("") { it.delta })
+            val toolIndex = seen.indexOfFirst { it is SessionEvent.ToolActivity }
+            assertTrue(toolIndex > seen.indexOfFirst { it is SessionEvent.Text })
+            assertTrue(seen.indexOfFirst { it === SessionEvent.Finished } > toolIndex)
+            assertTrue(seen.filterIsInstance<SessionEvent.ToolActivity>().any { it.state == "SUCCEEDED" })
+            assertEquals(1, f.executions.get())
+            assertEquals(ChatTaskProgress.Model, f.presence.first())
+            validateHistory(f.owner.state.value.messages)
+            entry.send("follow up")
+            withTimeout(10_000) { while (seen.count { it === SessionEvent.Finished } < 2) delay(10) }
+            assertEquals(2L, f.owner.state.value.acceptedMessages)
+            runtime.close()
+            unavailable { entry.send("after disable") }
+            unavailable { hostRef.await().open(EntryRequest("after disable")) }
+            withTimeout(10_000) { runtime.actualExited.await() }
+            collect.cancelAndJoin()
+            assertEquals(0, f.owner.entrySessions.handleCount)
+        } finally { runtime.close(); pluginScope.cancel(); f.close() }
+    }
+
+    @Test fun approvalAndConcurrentSendsNeverBypassUserDecision() = runBlocking {
+        val f = Fixture(ToolRisk.WRITE); f.initialize()
+        try {
+            val entry = f.owner.entrySessions.open(EntryRequest("write"))
+            val seen = CopyOnWriteArrayList<SessionEvent>()
+            val collect = launch { entry.events.collect { seen += it } }
+            withTimeout(10_000) { while (seen.none { it is SessionEvent.NeedsApproval }) delay(10) }
+            val session = f.owner.state.value.sessionId!!
+            withTimeout(10_000) { f.owner.state.first { it.records.values.any { record -> record.pending != null } } }
+            val pending = f.owner.state.value.records.values.single { it.pending != null }
+            unavailable { entry.send("interrupt") }
+            unavailable { f.owner.entrySessions.open(EntryRequest("other", session)) }
+            assertEquals(0, f.executions.get()); assertEquals(1, f.requests.get())
+            assertEquals(1L, f.owner.state.value.acceptedMessages)
+            entry.close(); entry.close()
+            unavailable { entry.send("closed") }
+            assertEquals(pending.pending, f.host.ledger.get(pending.callId)!!.pending)
+            f.owner.decide(pending.callId, pending.pending!!.id, Decision.DENY).join()
+            withTimeout(10_000) { f.owner.state.first { !it.active } }
+            assertEquals(0, f.executions.get())
+            assertEquals(Status.REJECTED, f.host.ledger.get(pending.callId)!!.state)
+            validateHistory(f.owner.state.value.messages)
+            collect.cancelAndJoin()
+        } finally { f.close() }
+    }
+
+    @Test fun missingSessionMissingModelAndUnavailableStorageFailWithoutFabricatingSession() = runBlocking {
+        val f = Fixture(configured = false); f.initialize()
+        try {
+            f.owner.open().join()
+            val original = f.owner.state.value.sessionId
+            unavailable { f.owner.entrySessions.open(EntryRequest("", "missing")) }
+            assertEquals(original, f.owner.state.value.sessionId)
+            unavailable { f.owner.entrySessions.open(EntryRequest("hello")) }
+            assertEquals(0, f.requests.get())
+            assertEquals(0, f.owner.entrySessions.handleCount)
+            assertEquals(0L, f.owner.state.value.acceptedMessages)
+            val failed = ChatSessionOwner(f.scope, { throw IllegalStateException("database inaccessible") }, { error("not reached") })
+            unavailable { failed.entrySessions.open(EntryRequest("hello")) }
+            assertNull(failed.state.value.sessionId)
+        } finally { f.close() }
+    }
+
+    @Test fun bindingExistingSessionAndCancellingCollectorReleaseOnlyHandle() = runBlocking {
+        val hold = CompletableDeferred<Unit>()
+        val f = Fixture(hold = hold); f.initialize()
+        try {
+            f.store.createHistory("saved").use { it.append(it.revision(), listOf(message(Role.USER, textPart("old")))) }
+            val entry = f.owner.entrySessions.open(EntryRequest("hello", "saved"))
+            withTimeout(10_000) { entry.events.first { it is SessionEvent.Text } }
+            assertEquals(0, f.owner.entrySessions.handleCount)
+            unavailable { entry.send("closed by collector") }
+            assertTrue(f.owner.state.value.active)
+            assertEquals("saved", f.owner.state.value.sessionId)
+            hold.complete(Unit)
+            withTimeout(10_000) { f.owner.state.first { !it.active } }
+            validateHistory(f.owner.state.value.messages)
+            assertEquals("old", (f.owner.state.value.messages.first().parts.single() as ContentPart.Text).text)
+        } finally { f.close() }
+    }
+
+    @Test fun foregroundFailureIsSanitizedAndDoesNotSubmitModel() = runBlocking {
+        val f = Fixture(presenceFails = true); f.initialize()
+        try {
+            val entry = f.owner.entrySessions.open(EntryRequest("hello"))
+            val event = withTimeout(10_000) { entry.events.first { it is SessionEvent.Failed } } as SessionEvent.Failed
+            assertFalse(event.message.contains("internal"))
+            assertEquals(0, f.requests.get()); assertEquals(0, f.executions.get())
+        } finally { f.close() }
+    }
+
+    @Test fun revokedDuringOpenCannotStartRunAndLateSendRemainsRejected() = runBlocking {
+        val f = Fixture(); f.initialize()
+        try {
+            var admitted = true
+            val entry = f.owner.entrySessions.open(EntryRequest("")) { admitted }
+            admitted = false
+            unavailable { entry.send("revoked") }
+            unavailable { f.owner.entrySessions.open(EntryRequest("revoked")) { false } }
+            assertEquals(0, f.requests.get())
+            entry.close()
+        } finally { f.close() }
+    }
+
+    @Test fun simultaneousSendsHaveExactlyOneAdmissionAndUiSwitchPreservesBinding() = runBlocking {
+        val hold = CompletableDeferred<Unit>()
+        val f = Fixture(hold = hold); f.initialize()
+        try {
+            val entry = f.owner.entrySessions.open(EntryRequest(""))
+            val bound = f.owner.state.value.sessionId
+            f.owner.newSession().join()
+            assertNotEquals(bound, f.owner.state.value.sessionId)
+            val results = coroutineScope {
+                (1..2).map { async(Dispatchers.Default) { runCatching { entry.send("message $it") }.isSuccess } }.awaitAll()
+            }
+            assertEquals(1, results.count { it })
+            assertEquals(bound, f.owner.state.value.sessionId)
+            assertEquals(1L, f.owner.state.value.acceptedMessages)
+            entry.close()
+        } finally { f.close() }
+    }
+
+    @Test fun entryQueuesAreBoundedAndOverflowIsExplicit() = runBlocking {
+        val f = Fixture(); f.initialize()
+        try {
+            val entry = f.owner.entrySessions.open(EntryRequest(""))
+            val id = f.owner.state.value.sessionId!!
+            repeat(300) { f.owner.entrySessions.modelEvent(id, Events.text(0, "delta")) }
+            unavailable { entry.send("delivery is incomplete") }
+            val event = withTimeout(10_000) { entry.events.first { it is SessionEvent.Failed } }
+            assertTrue((event as SessionEvent.Failed).message.contains("slow"))
+            assertEquals(0, f.owner.entrySessions.handleCount)
+        } finally { f.close() }
+    }
+}
