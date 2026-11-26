@@ -1,6 +1,7 @@
 package io.github.bytejuno.thetacore.chat
 
 import androidx.sqlite.driver.bundled.BundledSQLiteDriver
+import androidx.compose.runtime.saveable.SaverScope
 import io.github.bytejuno.thetacore.R
 import io.github.bytejuno.thetacore.agent.ledger.*
 import io.github.bytejuno.thetacore.plugin.AndroidAgentStore
@@ -16,6 +17,47 @@ class ChatScreenStateTest {
     private val stores = mutableListOf<AndroidAgentStore>()
 
     @After fun closeStores() { stores.forEach { it.close() } }
+
+    private val saverScope = SaverScope { true }
+
+    @Test fun pageCheckpointStaysSmallAndRestoresEveryFullLengthSessionDraft() {
+        val files = ComposerDraftFiles(temp.newFolder())
+        val saver = ChatComposerDrafts.saver(files)
+        val book = ChatComposerDrafts(files)
+        val versions = (0 until 40).map { index ->
+            book["session-$index"].apply { edit(index.toString().padEnd(32_000, '\u754c')) }.textVersion
+        }
+        val checkpoint = with(saver) { requireNotNull(saverScope.save(book)) }
+        assertEquals(1, checkpoint)
+        val restored = requireNotNull(saver.restore(checkpoint))
+        versions.forEachIndexed { index, version ->
+            assertEquals(index.toString().padEnd(32_000, '\u754c'), restored["session-$index"].input)
+            assertEquals(version, restored["session-$index"].textVersion)
+        }
+    }
+
+    @Test fun restoredAttachmentRetainsSendBytesAndReceiptIdentity() {
+        val files = ComposerDraftFiles(temp.newFolder())
+        val saver = ChatComposerDrafts.saver(files)
+        val book = ChatComposerDrafts(files)
+        val bytes = ByteArray(128 * 1024) { it.toByte() }
+        val pending = PendingUserImage(mimeType = "image/png", bytes = bytes)
+        val original = book["original"]
+        original.images = listOf(pending)
+        book["second"].edit("keep")
+        val checkpoint = with(saver) { requireNotNull(saverScope.save(book)) }
+        val restored = requireNotNull(saver.restore(checkpoint))
+        val draft = restored["original"]
+        val attachment = draft.images.single()
+        assertArrayEquals(bytes, attachment.bytes)
+        assertEquals(pending.mimeType, attachment.mimeType)
+        assertEquals(pending.localId, attachment.localId)
+        assertEquals(original.textVersion, draft.textVersion)
+        draft.acknowledge(ChatDraftReceipt("original", original.textVersion, setOf(pending.localId)))
+        val next = with(saver) { requireNotNull(saver.restore(saverScope.save(restored)!!)) }
+        assertTrue(next["original"].images.isEmpty())
+        assertEquals("keep", next["second"].input)
+    }
 
     private val imageDefinition = FrozenDefinition(
         toolKey = IMAGE_TOOL_KEY,

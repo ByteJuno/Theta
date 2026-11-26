@@ -24,6 +24,24 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ChatEntrySessionsTest {
+    @Test fun closingBeforeDeliveryStartsFinishesCollectorOutsideHostLock() = runBlocking {
+        val pending = java.util.ArrayDeque<Runnable>()
+        val dispatcher = object : CoroutineDispatcher() {
+            override fun dispatch(context: CoroutineContext, block: Runnable) { pending.addLast(block) }
+        }
+        val lock = Any()
+        val queue = EntryEventQueue(this, {}, dispatcher)
+        var completedUnderLock: Boolean? = null
+        val collector = launch(Dispatchers.Unconfined) {
+            try { queue.events.collect { fail("Closed entry delivered an event") } }
+            finally { completedUnderLock = Thread.holdsLock(lock) }
+        }
+        synchronized(lock) { queue.close() }
+        while (pending.isNotEmpty()) pending.removeFirst().run()
+        assertTrue("Collector still suspended after dispatcher drained", collector.isCompleted)
+        assertEquals(false, completedUnderLock)
+    }
+
     private class Fixture(val risk: ToolRisk = ToolRisk.READ, val configured: Boolean = true,
         val hold: CompletableDeferred<Unit>? = null, val presenceFails: Boolean = false,
         val disconnectFirst: Boolean = false, val interleaved: Boolean = false) {
@@ -220,7 +238,7 @@ class ChatEntrySessionsTest {
         try {
             f.owner.open().join()
             val original = requireNotNull(f.owner.state.value.sessionId)
-            val drafts = ChatComposerDrafts()
+            val drafts = ChatComposerDrafts(ComposerDraftFiles(f.root.resolve("drafts")))
             val image = PendingUserImage(mimeType = "image/png", bytes = byteArrayOf(1))
             drafts[original].edit("still editing")
             drafts[original].images = listOf(image)

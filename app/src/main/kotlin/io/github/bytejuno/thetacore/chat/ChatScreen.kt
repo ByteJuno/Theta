@@ -55,7 +55,7 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
     val owner = remember(host) { host.chat }
     val launchTask = rememberChatTaskLauncher(host)
     val state by owner.state.collectAsState()
-    val drafts = rememberSaveable(saver = ChatComposerDrafts.Saver) { ChatComposerDrafts() }
+    val drafts = rememberChatComposerDrafts()
     val composer = drafts[state.sessionId]
     var pickerSession by rememberSaveable { mutableStateOf<String?>(null) }
     var settings by rememberSaveable { mutableStateOf(false) }
