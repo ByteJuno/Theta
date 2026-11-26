@@ -1,0 +1,5 @@
+实现提交 `90ab6b4514b05aca1a8c18ca375b965eecf1246d`
+
+严格配置缓存 preflight 通过。验证 566 对中英文资源、lintDebug、storage-fixture 编译、agent-core:test（最终 UP-TO-DATE）及应用 JVM 单测。应用 718 项，717 通过、1 跳过，含 3 项设置跳转回归。
+
+未生成主应用 APK。视觉未验证，包括中英文小屏、大字体和明暗主题。厂商设置页面、返回后的状态刷新和 ColorOS 锁屏长任务未在设备上验证。远端 CI、独立审核与模拟器回归待发布后执行。
