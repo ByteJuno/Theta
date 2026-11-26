@@ -122,7 +122,7 @@ class LedgerToolExecutor(
             val d = byName[call.name]
             record(ledger.recordInvocation(InvocationInput(BindingValue.copyOf(call.binding), identity.taskChainId,
                 identity.sessionId, identity.runId, step, order, call.argsJson, d, identity.unattended,
-                maxOf(d?.declaredRisk ?: Risk.READ, if (d?.source == Source.MCP) Risk.WRITE else Risk.READ),
+                d?.initialRisk ?: Risk.READ,
                 cancelled, call.name, reason,
                 toolAdmissionRejected = !cancelled && d != null && call.name !in admittedToolNames)))
         }

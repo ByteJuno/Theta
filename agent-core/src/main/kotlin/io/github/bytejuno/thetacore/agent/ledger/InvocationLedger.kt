@@ -40,6 +40,19 @@ class InvocationLedger(
     private var epoch: String? = null
     private var halted = false
     fun get(callId: String): InvocationRecord? = gate.withGate { recordsById[callId]?.detached() }
+    /** Detached metadata only; management never deletes or rewrites the audit ledger. */
+    fun approvalTools(): List<FrozenDefinition> = gate.withGate {
+        all().mapNotNull { it.input.definition }.distinctBy { it.toolKey to it.digest }
+    }
+    fun permanentGrants(): List<PermanentToolGrant> = gate.withGate {
+        all().flatMap { record ->
+            val definition = record.input.definition ?: return@flatMap emptyList()
+            record.receipts.filter { it.decision == Decision.ALLOW_ALWAYS &&
+                it.request.unknownCalls.isEmpty() && policy.grantActive(it) }.map {
+                PermanentToolGrant(definition, it.request.risk, it.request.id)
+            }
+        }
+    }
     /** Checked at authorization consumption as well as writes. Cached results remain readable. */
     fun executionAdmissionFailure(): Mutation? = gate.withGate {
         if (halted) return@withGate Mutation.Blocked("Storage acknowledgement uncertain; reopen and cold-recover")
@@ -276,7 +289,7 @@ class InvocationLedger(
         definitionCheck(r)?.let { return@withGate it }
         if (policy.isDenied(r.input)) return@withGate update(r, terminal(r, Status.REJECTED, null, "Policy denied before claim"))
         val unknown = unknown(r)
-        val accepted = r.receipts.any { it.decision != Decision.DENY && !it.request.internal &&
+        val accepted = r.receipts.any { it.decision != Decision.DENY && policy.grantActive(it) && !it.request.internal &&
             (it.decision == Decision.ALLOW_ONCE || policy.permitsLongTerm(r.effectiveRisk)) &&
             it.request.risk >= r.effectiveRisk && it.request.unknownCalls == unknown }
         if (!accepted && policy.evaluate(r, r.effectiveRisk, unknown, all()) != ApprovalPolicy.Verdict.ALLOW) {
@@ -360,6 +373,7 @@ class InvocationLedger(
         definitionCheck(r)?.let { return@withGate it }
         chainBarrier(r, internal = true)?.let { return@withGate it }
         if (policy.isDenied(r.input)) return@withGate Mutation.Blocked("Deny rule takes priority")
+        if (!policy.grantActive(receipt)) return@withGate Mutation.Blocked("Permanent grant revoked")
         if (receipt.decision != Decision.ALLOW_ONCE && !policy.permitsLongTerm(receipt.request.risk))
             return@withGate Mutation.Blocked("ROOT long-term grants disabled")
         if (unknown(r, receipt.request.risk) != receipt.request.unknownCalls) {

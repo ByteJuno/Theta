@@ -46,6 +46,7 @@ class HistorySchemaTest {
             7, 4, "digest", "settings", "goal", 8, 9, "CONTINUATION", "summary", "reason", true,
             listOf(record), listOf(definition), "SUMMARY_RESERVED", "budget")
         same(approval); same(record); same(checkpoint)
+        same(definition.copy(userRisk = Risk.ROOT))
         same(checkpoint.copy(ledger = listOf(record.copy(input = record.input.copy(nonExecutionReason = NonExecutionReason.MODEL_PAUSED)))))
         same(RetryReceipt("receipt", "session", "caller", "note",
             ExecutionBarrier("session", "chain", "run", "reason", 8, 9, "barrier"), checkpoint))

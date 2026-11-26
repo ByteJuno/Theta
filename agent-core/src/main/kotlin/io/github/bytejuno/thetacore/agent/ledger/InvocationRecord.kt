@@ -36,10 +36,17 @@ import java.util.UUID
     val parallelSafe: Boolean, val exclusiveResource: String?, val idempotent: Boolean,
     val outputSchema: String?,
     val timeoutMillis: Long? = null,
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val userRisk: Risk? = null,
 ) {
     init { require(toolKey.contains('/') && owner.isNotBlank() && version.isNotBlank() && generation >= 0) }
     /** Aliases belong to a run, not the registration. All other fields must still match. */
-    fun sameRegistrationAs(other: FrozenDefinition): Boolean = copy(modelName = other.modelName) == other
+    fun sameRegistrationAs(other: FrozenDefinition): Boolean =
+        copy(modelName = other.modelName, userRisk = null) == other.copy(userRisk = null)
+
+    val initialRisk: Risk get() = maxOf(declaredRisk, userRisk ?: Risk.READ,
+        if (source == Source.MCP) Risk.WRITE else Risk.READ)
 
     /** Assigned by the host registry. SDK metadata and run-local model aliases cannot select a domain. */
     val builtinToolKey: String? get() = toolKey.takeIf {
@@ -94,7 +101,7 @@ internal fun sha256(value: String) = MessageDigest.getInstance("SHA-256")
         require(listOf(taskChainId, sessionId, runId, stepId).all { it.isNotBlank() } && callOrder >= 0)
         if (definition != null) {
             require(modelName == definition.modelName)
-            require(initialRisk >= definition.declaredRisk)
+            require(initialRisk >= definition.initialRisk)
             require(definition.source != Source.MCP || initialRisk >= Risk.WRITE)
         } else {
             require(modelName.isNotBlank())

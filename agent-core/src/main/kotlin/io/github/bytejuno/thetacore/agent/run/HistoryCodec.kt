@@ -233,7 +233,8 @@ internal object HistoryCodec {
                 "description" to v.description, "inputSchema" to v.inputSchema, "declaredRisk" to v.declaredRisk,
                 "source" to v.source, "owner" to v.owner, "version" to v.version, "generation" to v.generation,
                 "parallelSafe" to v.parallelSafe, "exclusiveResource" to v.exclusiveResource, "idempotent" to v.idempotent,
-                "outputSchema" to v.outputSchema, "timeoutMillis" to v.timeoutMillis)
+                "outputSchema" to v.outputSchema, "timeoutMillis" to v.timeoutMillis,
+                *if (v.userRisk == null) emptyArray() else arrayOf("userRisk" to v.userRisk))
             is ApprovalRequest -> fields("id" to v.id, "callId" to v.callId, "digest" to v.digest,
                 "version" to v.version, "generation" to v.generation, "risk" to v.risk,
                 "unknownCalls" to v.unknownCalls, "internal" to v.internal, "summary" to v.summary)

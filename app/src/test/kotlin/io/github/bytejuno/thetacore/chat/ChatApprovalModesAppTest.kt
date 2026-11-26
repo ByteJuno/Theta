@@ -50,7 +50,7 @@ class ChatApprovalModesAppTest {
             val propFile = File(root, "${ChatApprovalSettingsStore.DIRECTORY}/settings.properties")
             propFile.writeText("mode=UNRECOGNIZED_MODE\nallowRootLongTerm=true\n")
             val corrupted = ChatApprovalSettingsStore(root)
-            assertEquals(ChatApprovalSettings(ApprovalMode.STRICT, false), corrupted.ensureLoaded())
+            assertEquals(ChatApprovalSettings(ApprovalMode.STRICT, false, rulesUnavailable = true), corrupted.ensureLoaded())
         } finally {
             root.deleteRecursively()
         }
