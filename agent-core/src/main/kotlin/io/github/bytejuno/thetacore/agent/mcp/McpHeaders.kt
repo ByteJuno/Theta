@@ -22,13 +22,21 @@ fun mcpHeaderParameters(schema: JsonObject): List<McpHeaderParameter>? = try {
                     require(type in setOf("string", "integer", "boolean"))
                     result += McpHeaderParameter(path, name, type!!)
                 }
-                value.forEach { (key, child) ->
-                    if (key == "properties" && child is JsonObject) child.forEach { (property, definition) ->
+                // Only schema-bearing keywords contain annotations. const/enum/default/examples
+                // and unknown extension values are literal data, even when keys look like schemas.
+                value.forEach { (key, child) -> when (key) {
+                    "properties" -> child.jsonObject.forEach { (property, definition) ->
                         walk(definition, path + property, reachable)
-                    } else if (key != "x-mcp-header") walk(child, path, false)
-                }
+                    }
+                    "patternProperties", "dependentSchemas", "\$defs", "definitions" ->
+                        child.jsonObject.values.forEach { walk(it, path, false) }
+                    "allOf", "anyOf", "oneOf", "prefixItems" ->
+                        child.jsonArray.forEach { walk(it, path, false) }
+                    "additionalProperties", "items", "contains", "not", "if", "then", "else",
+                    "unevaluatedProperties", "unevaluatedItems", "propertyNames", "additionalItems",
+                    "contentSchema" -> walk(child, path, false)
+                } }
             }
-            is JsonArray -> value.forEach { walk(it, path, false) }
             else -> Unit
         }
     }

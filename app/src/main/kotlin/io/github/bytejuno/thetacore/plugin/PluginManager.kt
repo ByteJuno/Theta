@@ -146,7 +146,11 @@ internal class PluginManager(context: Context) {
         }
     }
 
-    suspend fun restore(skipPlugins: Boolean = false) = operation { restoreInternal(skipPlugins) }
+    suspend fun restore(skipPlugins: Boolean = false) = operation {
+        restoreInternal(skipPlugins)
+        // Application may attach MCP before or after restore. Both paths use the same latched policy.
+        (app as? io.github.bytejuno.thetacore.ThetaApplication)?.mcp?.reload()
+    }
 
     private suspend fun restoreInternal(skipPlugins: Boolean = false) {
         if (restored) return

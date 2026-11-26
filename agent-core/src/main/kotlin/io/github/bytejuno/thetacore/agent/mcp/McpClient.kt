@@ -126,6 +126,7 @@ class McpClient(private val endpoint: McpEndpoint, private val sessionInvalid: (
         input: suspend (String, JsonObject) -> JsonObject? = { _, _ -> null },
         progress: (String, Float?) -> Unit): JsonObject {
         var id = UUID.randomUUID().toString()
+        var inputRequested = false
         try {
             var continuation: JsonObject? = null
             repeat(8) {
@@ -137,13 +138,20 @@ class McpClient(private val endpoint: McpEndpoint, private val sessionInvalid: (
                 }, id, callId, progress, headers)
                 when (result["resultType"]?.jsonPrimitive?.content ?: "complete") {
                     "complete" -> return result
-                    "input_required" -> continuation = inputContinuation(result, input)
+                    "input_required" -> {
+                        inputRequested = true
+                        continuation = inputContinuation(result, input)
+                    }
                     else -> throw McpException()
                 }
                 // Only an explicit input response continues a call; never retry a failed request.
                 id = UUID.randomUUID().toString()
             }
             throw McpException()
+        } catch (missing: McpUnknownToolException) {
+            // A continuation rejection says nothing about effects of earlier input rounds.
+            if (inputRequested) throw McpException(code = -32602)
+            throw missing
         } catch (cancelled: CancellationException) {
             withContext(NonCancellable) {
                 withTimeoutOrNull(1_000) {

@@ -4,6 +4,7 @@ import io.github.bytejuno.thetacore.R
 import io.github.bytejuno.thetacore.plugin.McpPreset
 
 internal fun McpConnectionView.stateText(): Int = when (state) {
+    "recovery_blocked" -> R.string.mcp_recovery_blocked
     "ready" -> R.string.mcp_ready
     "refreshing" -> R.string.mcp_refreshing
     "failed" -> R.string.mcp_refresh_failed

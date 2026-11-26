@@ -327,4 +327,30 @@ class McpClientTest {
             assertEquals(if (invalid) 1 else 2, calls.get())
         }
     }
+    @Test fun headerAnnotationsIgnoreLiteralDataButRejectUnreachableSchemaNodes() {
+        val validator = io.github.bytejuno.thetacore.agent.execution.Schema202012Validator()
+        val literal = """{"x-mcp-header":"literal-value","properties":{"x":{"x-mcp-header":"also-data"}}}"""
+        for (keyword in listOf("const", "enum")) {
+            val value = if (keyword == "enum") "[$literal]" else literal
+            val schema = Json.parseToJsonElement("""{"type":"object","properties":{
+                "payload":{"type":"object","$keyword":$value},
+                "scope":{"type":"string","x-mcp-header":"Scope"}}}""").jsonObject
+            assertEquals(listOf(McpHeaderParameter(listOf("scope"), "Scope", "string")), mcpHeaderParameters(schema))
+            assertTrue(validator.supported(schema.toString()))
+            assertTrue(validator.valid(schema.toString(), """{"payload":$literal,"scope":"selected"}"""))
+            assertFalse(validator.valid(schema.toString(), """{"payload":{}}"""))
+        }
+        val annotation = """{"type":"string","x-mcp-header":"InvalidLocation"}"""
+        for (keyword in listOf("additionalProperties", "items", "contains", "not", "if", "then", "else",
+            "unevaluatedProperties", "unevaluatedItems", "propertyNames", "contentSchema")) {
+            assertNull(keyword, mcpHeaderParameters(Json.parseToJsonElement("""{"$keyword":$annotation}""").jsonObject))
+        }
+        for (keyword in listOf("allOf", "anyOf", "oneOf", "prefixItems")) {
+            assertNull(keyword, mcpHeaderParameters(Json.parseToJsonElement("""{"$keyword":[$annotation]}""").jsonObject))
+        }
+        for (keyword in listOf("dependentSchemas", "patternProperties", "\$defs", "definitions")) {
+            assertNull(keyword, mcpHeaderParameters(Json.parseToJsonElement("""{"$keyword":{"x":$annotation}}""").jsonObject))
+        }
+    }
+
 }

@@ -34,7 +34,7 @@ class ThetaApplication : Application() {
     internal val mcp by lazy {
         io.github.bytejuno.thetacore.mcp.McpManager(io.github.bytejuno.thetacore.mcp.McpConnectionStore(
             noBackupFilesDir, io.github.bytejuno.thetacore.storage.androidSecretCipher(
-                "theta.mcp.credentials.v1", "theta-mcp-credentials-v1", allowKeyRecovery = true)), hostToolsOwner)
+                "theta.mcp.credentials.v1", "theta-mcp-credentials-v1", allowKeyRecovery = true)), hostToolsOwner) { crashRecovery.dataAdmissionAllowed }
     }
     /** Process-wide shared HTTP transport so chat runs reuse one OkHttp connection pool. */
     internal val modelTransport by lazy {

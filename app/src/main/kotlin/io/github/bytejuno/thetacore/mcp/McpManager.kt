@@ -13,7 +13,10 @@ internal data class McpConnectionView(val id: String, val name: String, val url:
     val enabled: Boolean, val hasToken: Boolean, val header: String, val state: String = "disabled", val tools: Int = 0)
 
 /** One process owner. IO never holds DefinitionGate; epochs prevent stale refresh publication. */
-internal class McpManager(private val store: McpConnectionStore, private val scope: CoroutineScope) {
+internal class McpManager(private val store: McpConnectionStore, private val scope: CoroutineScope,
+    private val dataAdmissionAllowed: () -> Boolean = { true }) {
+    private val blocked = MutableStateFlow(!dataAdmissionAllowed())
+    val recoveryBlocked: StateFlow<Boolean> = blocked.asStateFlow()
     private val mutex = Mutex()
     private val states = MutableStateFlow<List<McpConnectionView>>(emptyList())
     val connections: StateFlow<List<McpConnectionView>> = states.asStateFlow()
@@ -41,6 +44,7 @@ internal class McpManager(private val store: McpConnectionStore, private val sco
     }
     suspend fun reload() = withContext(Dispatchers.IO) {
         mutex.withLock {
+            if (!admissionAllowedLocked()) return@withLock
             try {
                 val records = credentials { store.read() }
                 errors.value = false
@@ -58,6 +62,7 @@ internal class McpManager(private val store: McpConnectionStore, private val sco
     }
     suspend fun save(id: String?, name: String, url: String, enabled: Boolean, token: String?, header: String) =
         withContext(Dispatchers.IO) { mutex.withLock {
+            if (!admissionAllowedLocked() && enabled) throw McpSettingsException()
             val old = credentials { store.read() }.firstOrNull { it.id == id }
             if (token == null && old?.hasCredentials() == true && (old.url != url || old.header != header))
                 throw McpSettingsException()
@@ -78,6 +83,7 @@ internal class McpManager(private val store: McpConnectionStore, private val sco
             errors.value = false; recovery.value = false
         } }
     suspend fun enable(id: String, enabled: Boolean) = withContext(Dispatchers.IO) { mutex.withLock {
+        if (!admissionAllowedLocked() && enabled) throw McpSettingsException()
         // Disabling is local and immediate even when credentials cannot be read or persisted.
         stopLocked(id)
         update(id, "disabled", 0)
@@ -92,6 +98,7 @@ internal class McpManager(private val store: McpConnectionStore, private val sco
         states.value = states.value.filterNot { it.id == id }
     } }
     suspend fun refresh(id: String) = mutex.withLock {
+        if (!admissionAllowedLocked()) return@withLock
         bindings[id]?.let { b ->
             // Explicit refresh starts a new session. Old calls keep their own client; no replay.
             b.listener?.cancel(); b.listener = null
@@ -100,7 +107,16 @@ internal class McpManager(private val store: McpConnectionStore, private val sco
         }
     }
 
+    private fun admissionAllowedLocked(): Boolean {
+        blocked.value = !dataAdmissionAllowed()
+        if (blocked.value) {
+            bindings.keys.toList().forEach(::stopLocked)
+            states.value = states.value.map { it.copy(state = "recovery_blocked", tools = 0) }
+        }
+        return !blocked.value
+    }
     private fun startLocked(connection: McpConnection) {
+        if (!admissionAllowedLocked() || catalog == null) return
         val b = Binding(connection)
         b.client = client(b)
         bindings[connection.id] = b
@@ -156,6 +172,7 @@ internal class McpManager(private val store: McpConnectionStore, private val sco
     private inline fun <T> credentials(action: () -> T): T = try { action() }
         catch (e: McpSettingsException) { credentialFailure(e); throw e }
     private fun requestRefreshLocked(b: Binding) {
+        if (!admissionAllowedLocked()) return
         val target = catalog ?: return
         val epoch = target.gate.withGate {
             target.beginMcpRefresh(b.connection.id)
@@ -181,7 +198,7 @@ internal class McpManager(private val store: McpConnectionStore, private val sco
                 }
                 mutex.withLock {
                     currentCoroutineContext().ensureActive()
-                    if (bindings[b.connection.id] !== b || b.client !== refreshClient) return@withLock
+                    if (!admissionAllowedLocked() || bindings[b.connection.id] !== b || b.client !== refreshClient) return@withLock
                     val installed = target.gate.withGate {
                         if (b.invalidations.get() != epoch) return@withGate false
                         target.replaceMcp(b.connection.id, b.version, directory.tools.map { McpTool(refreshClient, it) })

@@ -509,4 +509,5 @@
     <string name="tool_input_invalid">请按要求填写必填项。</string>
     <string name="tool_input_send">提交信息</string>
     <string name="tool_input_decline">拒绝</string>
+    <string name="mcp_recovery_blocked">启动恢复已暂停 MCP 连接。请在插件页面恢复扩展，然后重启应用。</string>
 </resources>

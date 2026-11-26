@@ -509,4 +509,5 @@
     <string name="tool_input_invalid">Complete the required fields using the requested values.</string>
     <string name="tool_input_send">Submit input</string>
     <string name="tool_input_decline">Decline</string>
+    <string name="mcp_recovery_blocked">MCP connections are paused by startup recovery. Resume extensions from the Plugins page, then restart the app.</string>
 </resources>

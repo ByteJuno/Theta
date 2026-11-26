@@ -49,9 +49,9 @@ class McpIntegrationTest {
             catalog.registerHost("host/blob_read", "1", io.github.bytejuno.thetacore.plugin.tools.HostBlobReadTool(ledger))
             return catalog.freeze(run).values.first { it.source == Source.MCP }
         }
-        suspend fun prepare(definition: FrozenDefinition, index: Int = 0, args: String = "{}"): InvocationRecord {
+        suspend fun prepare(definition: FrozenDefinition, index: Int = 0, args: String = "{}", unattended: Boolean = false): InvocationRecord {
             val input = InvocationInput(BindingValue("test", "request", null, index, null, UUID.randomUUID().toString()),
-                "chain", "session", "run", "step", index, args, definition, false, Risk.WRITE)
+                "chain", "session", "run", "step", index, args, definition, unattended, Risk.WRITE)
             return (service.prepare(input) as Mutation.Applied).record
         }
         suspend fun approve(r: InvocationRecord): InvocationRecord =
@@ -229,6 +229,103 @@ class McpIntegrationTest {
                 assertFalse(done.result!!.text.contains("secret")); assertEquals(1, server.calls)
                 done.validate()
             } }
+        }
+    }
+
+    @Test fun unknownToolAfterInputRetainsEffectsAndRejectsUnattendedRetry() = runBlocking {
+        for (answer in listOf(true, false)) {
+            var writes = 0
+            var requests = 0
+            Server {
+                requests++
+                buildJsonObject {
+                    if (requests == 1) { writes++; put("result", requiredInput()) }
+                    else putJsonObject("error") { put("code", -32602); put("message", "Unknown tool remote") }
+                }
+            }.use { server -> Fixture().use { f ->
+                val d = f.register(McpClient(McpEndpoint(server.url)))
+                val r = f.prepare(d)
+                f.service.decide(r.callId, r.pending!!.id, Decision.ALLOW_ALWAYS)
+                f.service.dispatch(r.callId)
+                await { f.service.activeInputs(listOf(r.callId)).isNotEmpty() }
+                val input = f.service.activeInputs(listOf(r.callId)).getValue(r.callId)
+                assertTrue(f.service.respondInput("session", r.callId, input.id,
+                    if (answer) buildJsonObject { put("name", "chosen") } else null))
+                f.service.awaitObservedExit(r.callId)
+                val done = f.ledger.get(r.callId)!!
+                assertEquals(Status.FAILED, done.state); assertEquals(Effect.UNKNOWN, done.result!!.effect)
+                assertEquals(InstanceState.EXIT_CONFIRMED, done.instance!!.state)
+                assertEquals(1, writes); assertEquals(2, requests)
+                val retry = f.prepare(d, 1, unattended = true)
+                assertEquals(Status.REJECTED, retry.state)
+                assertTrue(f.ledger.rejectedUnknownUnattended(retry.callId))
+                assertNull(retry.instance)
+                assertTrue(f.service.dispatch(retry.callId) !is Mutation.Applied)
+                assertEquals(2, requests); assertEquals(1, writes)
+                assertEquals(done, f.ledger.get(r.callId)); done.validate()
+            } }
+        }
+    }
+
+    @Test fun coldRecoveryGatesMcpBeforeAndAfterManualAdmissionAndSettingsCannotBypass() = runBlocking {
+        for (mode in listOf("normal", "manual", "automatic")) for (attachFirst in listOf(true, false)) {
+            Server { request -> directoryResponse(request) ?: buildJsonObject { putJsonObject("result") {} } }.use { server ->
+                val dir = Files.createTempDirectory("theta-mcp-cold-admission").toFile()
+                try { Fixture().use { f ->
+                    var tick = 1_000L
+                    val clock = object : PluginRecoveryClock {
+                        override fun wallMillis() = tick
+                        override fun elapsedMillis() = tick
+                    }
+                    val storage = FilePluginRecoveryStorage(dir.resolve("recovery"))
+                    var serial = 0
+                    fun boot() = PluginCrashRecovery(storage, clock, pid = ++serial, token = "cold-$serial")
+                    if (mode == "automatic") repeat(3) {
+                        val prior = boot(); prior.restorePolicy(); tick += 100; prior.recordUncaughtCrash()
+                    }
+                    val recovery = boot()
+                    assertEquals(mode == "automatic", recovery.policy.skipData)
+                    val key = KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
+                    val store = McpConnectionStore(dir, AesGcmSecretCipher("mcp") { key })
+                    store.save(McpConnection("connection", "Local", server.url, true))
+                    val original = dir.resolve("mcp-connections.bin").readBytes()
+                    val manager = McpManager(store, f.owner) { recovery.dataAdmissionAllowed }
+                    if (attachFirst) {
+                        manager.attach(f.catalog)
+                        assertTrue(manager.recoveryBlocked.value)
+                        assertEquals(0, server.calls); assertTrue(f.catalog.mcpKeys("connection").isEmpty())
+                        manager.reload(); manager.refresh("connection")
+                        try { manager.enable("connection", true); fail("Admission not decided") }
+                        catch (_: McpSettingsException) { }
+                        assertArrayEquals(original, dir.resolve("mcp-connections.bin").readBytes())
+                    }
+                    val policy = recovery.restorePolicy(skipPlugins = mode == "manual")
+                    if (attachFirst) manager.reload() else {
+                        // Plugin restore may finish before the eager host catalog is available.
+                        manager.reload(); assertEquals(0, server.calls)
+                        manager.attach(f.catalog)
+                    }
+                    if (mode == "normal") {
+                        assertFalse(policy.skipData)
+                        await { manager.connections.value.singleOrNull()?.state == "ready" }
+                        assertFalse(manager.recoveryBlocked.value)
+                        assertEquals(1, f.catalog.mcpKeys("connection").size)
+                        assertTrue(server.calls >= 2)
+                    } else {
+                        assertTrue(policy.skipData); assertTrue(manager.recoveryBlocked.value)
+                        manager.reload(); manager.refresh("connection")
+                        try { manager.enable("connection", true); fail("Safe mode must reject enable") }
+                        catch (_: McpSettingsException) { }
+                        try { manager.save("connection", "Edited", server.url, true, null, "Authorization"); fail("Safe mode must reject enabled save") }
+                        catch (_: McpSettingsException) { }
+                        assertTrue(recovery.requestResumeNextColdStart())
+                        manager.reload(); manager.refresh("connection")
+                        assertFalse(recovery.dataAdmissionAllowed)
+                        assertEquals(0, server.calls); assertTrue(f.catalog.mcpKeys("connection").isEmpty())
+                        assertArrayEquals(original, dir.resolve("mcp-connections.bin").readBytes())
+                    }
+                } } finally { dir.deleteRecursively() }
+            }
         }
     }
 

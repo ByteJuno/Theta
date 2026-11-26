@@ -20,6 +20,7 @@ internal fun McpScreen(host: ThetaApplication, close: () -> Unit) {
     val scope = rememberCoroutineScope()
     val connections by host.mcp.connections.collectAsState()
     val loadFailed by host.mcp.loadFailed.collectAsState()
+    val recoveryBlocked by host.mcp.recoveryBlocked.collectAsState()
     val replacementAllowed by host.mcp.replacementAllowed.collectAsState()
     var presets by remember { mutableStateOf<List<McpPreset>>(emptyList()) }
     var busy by remember { mutableStateOf(false) }
@@ -46,6 +47,7 @@ internal fun McpScreen(host: ThetaApplication, close: () -> Unit) {
         text = {
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(strings.get(R.string.mcp_notice))
+                if (recoveryBlocked) Text(strings.get(R.string.mcp_recovery_blocked))
                 if (loading || busy) LinearProgressIndicator(Modifier.fillMaxWidth())
                 if (error || loadFailed) {
                     Text(strings.get(R.string.mcp_error), color = MaterialTheme.colorScheme.error)
@@ -64,13 +66,13 @@ internal fun McpScreen(host: ThetaApplication, close: () -> Unit) {
                         Text(c.url, style = MaterialTheme.typography.bodySmall)
                         Text(strings.get(c.stateText(), c.tools))
                         FlowRow {
-                            TextButton(enabled = !busy, onClick = { action { host.mcp.enable(c.id, !c.enabled) } }) {
+                            TextButton(enabled = !busy && (!recoveryBlocked || c.enabled), onClick = { action { host.mcp.enable(c.id, !c.enabled) } }) {
                                 Text(strings.get(if (c.enabled) R.string.mcp_disable else R.string.mcp_enable))
                             }
-                            TextButton(enabled = !busy, onClick = { selected = c; preset = null; editing = true }) {
+                            TextButton(enabled = !busy && !recoveryBlocked, onClick = { selected = c; preset = null; editing = true }) {
                                 Text(strings.get(R.string.mcp_edit))
                             }
-                            TextButton(enabled = !busy && c.enabled, onClick = { action { host.mcp.refresh(c.id) } }) {
+                            TextButton(enabled = !busy && !recoveryBlocked && c.enabled, onClick = { action { host.mcp.refresh(c.id) } }) {
                                 Text(strings.get(R.string.mcp_refresh))
                             }
                             TextButton(enabled = !busy, onClick = { action { host.mcp.delete(c.id) } }) {
@@ -80,12 +82,12 @@ internal fun McpScreen(host: ThetaApplication, close: () -> Unit) {
                     }
                     HorizontalDivider()
                 }
-                OutlinedButton(enabled = !busy && !loading && !loadFailed, onClick = {
+                OutlinedButton(enabled = !busy && !loading && !loadFailed && !recoveryBlocked, onClick = {
                     selected = null; preset = null; editing = true
                 }) { Text(strings.get(R.string.mcp_add)) }
                 if (presets.isNotEmpty()) Text(strings.get(R.string.mcp_presets), style = MaterialTheme.typography.titleSmall)
                 presets.forEach { p ->
-                    TextButton(enabled = !busy && !loadFailed, onClick = { selected = null; preset = p; editing = true }) {
+                    TextButton(enabled = !busy && !loadFailed && !recoveryBlocked, onClick = { selected = null; preset = p; editing = true }) {
                         Text(strings.get(R.string.mcp_import, p.name, URI(p.url).host))
                     }
                 }
