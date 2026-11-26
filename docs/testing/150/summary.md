@@ -1,17 +1,18 @@
 # Issue 150 validation
 
-Implementation SHA: `0f6efb8af81920446b67d9dda21e66294371a405`
-Branch: `auto/150-schema-profiles`
-RETURN: https://github.com/ByteJuno/Theta/pull/160#issuecomment-7183634748
-Observed remote head: `77c02a045ffaec1eac1feb49a559ce9b72f553c0`; integrated main: `d05a9101d6a43df9bc2253f67e265bec9b4b3bf6`.
+Implementation source: `74dd3327079a40367f42a49f1eeb4bf5e47c9856`.
+Branch: `auto/150-schema-profiles`; PR: #160.
+Integrated main: `f2a468d42220520279f583e0fcc33640353d10b4`.
+RETURN: https://github.com/ByteJuno/Theta/pull/160#issuecomment-7186226526.
 
-The provider catalog exclusion now becomes a durable execution rejection before any tool claim. Original Schema and FrozenDefinition digest remain intact. Mixed tool results, real SQLite reopening, pending-step continuation, history encoding, forced selection before transport/credentials, and existing truncation cancellation semantics are covered by seven regression tests.
+Resolved the Schema validator conflict while retaining bounded local refs, original-schema argument validation, frozen definition identity, MCP header admission, and the immutable excluded-tool execution boundary. Header validation runs before model projection so unsafe original locations cannot be hidden by reference expansion or downgrade. Two new formal integration tests cover valid local-ref/header coexistence and invalid header exclusions in all three profiles. No new UI behavior relative to main.
 
-- `python scripts/preflight.py` passed with `--configuration-cache --configuration-cache-problems=fail` and existing Android path/sdk options. Final full execution: core 611 tests (610 passed, one platform skip), App 687 (686 passed, one platform skip), no errors/failures; 156.267 seconds. Subsequent precommit run after upstream documentation integration passed in 8.353 seconds, with unchanged test/compile/lint tasks up to date and configuration cache reused.
-- GPU entry `/opt/homelab-report/theta-gpu-test :agent-core:test --tests '*SchemaAdmissionTest' --tests '*SchemaProfilesTest' --configuration-cache --configuration-cache-problems=fail --console=plain --max-workers=4`: 21 passed, zero failed, 45.107 seconds including transport. Source matches this implementation except the subsequently integrated upstream docs/UI_DESIGN.md; all production/test/build inputs are verified identical.
-- lintDebug, storage-fixture source verification and compileDebugKotlin passed; 497 English/Chinese keys verified.
-- All 463 committed files verified against local/GPU manifests using Git blobs with standard CRLF/LF normalization. Upstream UI_DESIGN.md retained identical Git content, including its Markdown hard break. No raw evidence, Probe files or testing summary were committed by the writer.
+Actual checks on the committed implementation:
+- Required preflight passed in 303.15s with strict configuration cache (reused). Core: 628 total, 627 passed, one Windows platform skip; App: 711 total, 710 passed, one Windows platform skip; zero failures/errors.
+- `:app:lintDebug`, `:app:verifyUiResources` (537 English/Chinese keys), `:samples:storage-fixture:verifyStorageFixtureSources`, and `:samples:storage-fixture:compileDebugKotlin` passed.
+- Existing GPU test entry passed 38 JVM tests in 57.84s: SchemaProfilesTest, SchemaAdmissionTest and McpClientTest. Deterministic test transport is not a live-provider acceptance result.
+- All 479 committed blobs match the preflight worktree and the GPU archive under standard Git newline normalization. Remote branch and latest main were fetched and checked before final validation/commit; both are incorporated.
+- No test failure this round. Initial terminal decoding/output truncation and a merge command rejected for missing default committer identity were corrected; original logs are retained outside Git. Commit used the authorized per-command ByteJuno identity.
 
-Failure evidence retained: first preflight failed on a missing fixture brace; second failed one new assertion expecting uppercase rather than the existing lowercase wire envelope (fixed with exact parsed status/effect assertions). First GPU package exited 127 due to Windows CRLF launcher; Linux validation uses unchanged Git shell blobs. Next GPU run reproduced the wire-case assertion error; final runs passed. Initial archive-based binding was discarded because export conversion changes some blobs; direct git-show verification of every file passed. Logs/XML remain in `E:\Desktop\AI研究\theta-auto-loop\event-runs\bddce37f-f386-45d9-99c4-d811852acc27`.
-
-APK: not generated; SHA256: not applicable. Phone/device accessed: no. Emulator/visual/API33/R8/physical power-loss/live third-party endpoint acceptance: not performed. Deterministic transport establishes run/ledger behavior, not external-provider compatibility. Historical invocations are not rewritten. CI, independent review and prescribed final emulator regression are pending publication and remain reviewer-owned. No push, PR update/create or GitHub merge was performed by this writer.
+APK: not generated; SHA256: not available. No APK generated or APK SHA; no phone/emulator, visual, API33 runtime, R8, physical power-loss or live third-party-provider acceptance. GPU entry ran JVM tests in its scratch checkout, not device tests. New-head CI, independent review and prescribed emulator regression remain reviewer-owned and pending.
+Visual verification: not performed. This RETURN adds no UI changes; merged MCP screens retain their own evidence, and this run makes no new visual acceptance claim. Historical platform/device evidence remains bound to its original commit. Raw logs and manifests are stored outside Git in `event-runs/0b2072d2-e9c6-4a5b-ae2a-c3fd8b63b138`.
