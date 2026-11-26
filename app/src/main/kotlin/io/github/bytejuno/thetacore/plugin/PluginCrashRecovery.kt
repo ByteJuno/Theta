@@ -162,6 +162,10 @@ internal class PluginCrashRecovery(
         policy
     }
 
+    /** Network/data consumers wait for the first launch's manual/automatic admission decision. */
+    val dataAdmissionAllowed: Boolean
+        get() = synchronized(journalLock) { policyClaimed && !policy.skipData }
+
     /** Non-latching preview for host UI; actual admission must call restorePolicy. */
     val policy: PluginRestorePolicy
         get() {

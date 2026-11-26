@@ -17,10 +17,13 @@ class Schema202012Validator : ArgumentsValidator {
         "additionalProperties", "items", "prefixItems", "minItems", "maxItems", "uniqueItems", "contains",
         "minContains", "maxContains", "enum", "const", "allOf", "anyOf", "oneOf", "not", "if", "then", "else",
         "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf", "minLength", "maxLength",
-        "minProperties", "maxProperties", "dependentRequired", "dependentSchemas", "unevaluatedProperties", "unevaluatedItems")
+        "minProperties", "maxProperties", "dependentRequired", "dependentSchemas", "unevaluatedProperties", "unevaluatedItems",
+        "x-mcp-header")
     fun supported(schema: String): Boolean = runCatching {
         require(schema.length <= 32_768)
-        checkSchema(Json.parseToJsonElement(schema), 0)
+        val original = Json.parseToJsonElement(schema)
+        checkSchema(original, 0)
+        if (original is JsonObject) require(io.github.bytejuno.thetacore.agent.mcp.mcpHeaderParameters(original) != null)
         factory.getSchema(schema)
         true
     }.getOrDefault(false)

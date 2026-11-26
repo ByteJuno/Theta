@@ -1,0 +1,26 @@
+# Issue 136 validation
+
+Implementation commit: `c7d1f718670f4f2fb3d85edf4dee77b6d766bc62`.
+Reviewed parent: `dfc9d5fad0689dd1cc700d34cfb3073f5f4f4b6c`.
+Integrated main: `d21ee824b8bd258112df8659dfaa87593c8fffef`.
+RETURN: https://github.com/ByteJuno/Theta/pull/149#issuecomment-7183664864
+
+Resolved the three merge conflicts in ThetaApplication.kt and the English/Chinese strings.xml files. Kept the recovery-gated MCP manager and persona settings together, retaining both complete sets of existing strings. Inspected automatically merged chat/session/provider/plugin execution paths; mainline prompt/persona and skill support coexists with MCP input and recovery. No independent feature scope was added, no protected file was changed, and this issue's prior summary was not edited by the writer. Main's existing issue 134 summary was inherited byte-for-byte as part of the merge.
+
+Full `python scripts/preflight.py` passed in 334.08s with strict `--configuration-cache --configuration-cache-problems=fail` (cache stored). Agent-core: 604 tests, 603 passed, 1 platform skip, zero failures/errors. App: 710 tests, 709 passed, 1 platform skip, zero failures/errors. lintDebug, storage-fixture source/compile checks and 537 bilingual resource keys passed. MCP client/integration/preset, input-form, chat prompt integration, persona settings and plugin prompt data suites passed as part of this run. All test XML is from this invocation. Tested tracked files stayed unchanged through commit and staged sources match their tested bytes with Git CRLF-to-LF normalization only.
+
+The first --no-commit merge stopped for missing Git identity before changing the tree; its log was preserved and the merge was retried using the approved per-command ByteJuno identity. The three expected content conflicts were resolved without discarding either feature. No test failure occurred. Raw logs, XML, worktree hashes and source binding remain outside Git in event-runs/33079e56-9f12-42d1-8b33-146c252f4153.
+
+APK: not generated; SHA-256 unavailable. Visual verification: not performed. No phone/emulator or GPU entry operated this round. Earlier GPU and CI results remain bound to their original heads. Pending reviewer exact-build scenarios include MCP input/decline and recovery notice/disabled controls alongside persona settings, both languages, small screen/large font/themes. Actual device cold-launch ordering, API33 runtime, R8, physical power loss and third-party interoperability remain unverified. Independent review, new-head CI and prescribed final emulator regression are still required.
+
+## Reviewer round 4
+
+Reviewed head: `dcaa37fd8fbccd09021bd3572a057acd2d904d8f`, against main `d21ee824b8bd258112df8659dfaa87593c8fffef`. The prior return count remains three. The implementation/test sources match `c7d1f718670f4f2fb3d85edf4dee77b6d766bc62`; the head only updates this summary, so its existing preflight evidence is applicable before the following repair.
+
+The untracked `McpHeaderNumberProbe` reproduced a valid JSON Schema integer (`1.0`) failing before HTTP submission: `schemaValid=true`, `state=FAILED`, `effect=UNKNOWN`, `requests=0`. The control (`1`) succeeded with one request. The authorized GPU entry reported `GRADLE_EXIT=1`, one test, one failure. An earlier setup invocation ran zero tests after the unavailable `python` command prevented probe creation; that failed invocation is not validation evidence. Setup was corrected using `python3`. All failed-run output remains in the review transcript.
+
+The repair uses exact decimal-to-integer conversion for MCP integer header mirrors, accepting decimal/exponent representations without changing JSON arguments. Fractional, nonnumeric and out-of-safe-range values remain rejected. Permanent tests cover exact safe bounds, extreme exponents, preservation of wire/ledger arguments, and real host dispatch.
+
+Authorized GPU validation on the repaired production/test bytes: `/opt/homelab-report/theta-gpu-test :agent-core:test --tests '*McpClientTest*' :app:testDebugUnitTest --tests '*McpHeaderNumberProbe*' --tests '*McpIntegrationTest*'` returned `GRADLE_EXIT=0`, **34 tests, zero failures**. The unchanged probe reported `SUCCEEDED/APPLIED` and exactly one request for each of `1`, `1.0`, and `1e0`. No assertions or timeouts were weakened. This summary append changes no tested code. The probe remains untracked; raw logs/XML are not committed.
+
+No APK or rendering was produced by this review. Visual acceptance remains unverified; the prescribed final emulator regression stays with the outer review script.
