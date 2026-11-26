@@ -77,7 +77,15 @@ class ApprovalPolicy(
     private val denied: (InvocationInput) -> Boolean = { false },
     private val allowRootLongTerm: () -> Boolean = { false },
     private val mode: () -> ApprovalMode = { ApprovalMode.STRICT },
+    private val grantRevoked: (ApprovalReceipt) -> Boolean = { false },
+    private val riskOverride: (String) -> Risk? = { null },
 ) {
+    /** Captured once with the run catalog; never changes registration identity or its digest. */
+    fun freezeRisk(definition: FrozenDefinition): FrozenDefinition = definition.copy(
+        userRisk = riskOverride(definition.toolKey)?.let { maxOf(it, definition.declaredRisk) },
+    )
+    internal fun grantActive(receipt: ApprovalReceipt): Boolean =
+        receipt.decision != Decision.ALLOW_ALWAYS || !grantRevoked(receipt)
     internal enum class Verdict { ALLOW, ASK, DENY }
     internal fun permitsLongTerm(risk: Risk) = risk != Risk.ROOT || allowRootLongTerm()
     internal fun isDenied(input: InvocationInput) = denied(input)
@@ -91,7 +99,7 @@ class ApprovalPolicy(
                 (definition.source != Source.MCP || other.input.definition?.version == definition.version) &&
                 other.receipts.any { receipt ->
                     receipt.request.risk >= risk && receipt.request.unknownCalls.isEmpty() &&
-                        (receipt.decision == Decision.ALLOW_ALWAYS ||
+                        ((receipt.decision == Decision.ALLOW_ALWAYS && grantActive(receipt)) ||
                             (!i.unattended && receipt.decision == Decision.ALLOW_SESSION && other.input.sessionId == i.sessionId))
                 }
         }

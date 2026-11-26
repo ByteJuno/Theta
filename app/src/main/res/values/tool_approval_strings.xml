@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="tool_rules_title">Manage grants and tool rules</string>
+    <string name="tool_rules_explanation">Revoking a grant preserves its audit history. Approval mode still applies. Deny rules take priority for new execution; they do not stop tools already running. Risk changes apply to the next run.</string>
+    <string name="tool_rules_failed">Could not read or save tool rules. Retry after storage is available. Unreadable saved rules block tool execution until restored.</string>
+    <string name="tool_rules_saved">Saved</string>
+    <string name="tool_rules_refresh">Refresh</string>
+    <string name="tool_rules_grants">Active permanent grants</string>
+    <string name="tool_rules_no_grants">No active permanent grants</string>
+    <string name="tool_rules_grant_detail">Granted risk: %1$s · Definition: %2$s</string>
+    <string name="tool_rules_revoke">Revoke</string>
+    <string name="tool_rules_revoke_all">Revoke all permanent grants</string>
+    <string name="tool_rules_revoke_confirm">Revoke all permanent grants, including grants for unavailable tools? History remains unchanged. You can explicitly grant access again later.</string>
+    <string name="tool_rules_tools">Registered and previously used tools</string>
+    <string name="tool_rules_no_tools">No tools available</string>
+    <string name="tool_rules_declared">Declared risk: %1$s</string>
+    <string name="tool_rules_deny">Deny calls</string>
+    <string name="tool_rules_minimum_risk">Minimum risk for future runs</string>
+    <string name="tool_rules_default">Default (declared risk)</string>
+    <string name="tool_rules_risk_read">Read</string>
+    <string name="tool_rules_risk_write">Write</string>
+    <string name="tool_rules_risk_device">Device control</string>
+    <string name="tool_rules_risk_root">Root</string>
+</resources>

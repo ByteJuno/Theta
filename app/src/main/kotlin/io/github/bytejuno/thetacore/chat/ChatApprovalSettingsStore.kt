@@ -25,6 +25,10 @@ import kotlinx.coroutines.flow.asStateFlow
 internal data class ChatApprovalSettings(
     val mode: ApprovalMode = ApprovalMode.BALANCED,
     val allowRootLongTerm: Boolean = false,
+    val revokedReceipts: Set<String> = emptySet(),
+    val deniedTools: Set<String> = emptySet(),
+    val riskOverrides: Map<String, Risk> = emptyMap(),
+    val rulesUnavailable: Boolean = false,
 )
 
 internal fun canGrantMultiCallApproval(approval: ApprovalRequest, allowRootLongTerm: Boolean): Boolean =
@@ -63,13 +67,30 @@ internal class ChatApprovalSettingsStore(noBackupDirectory: File) {
         updateLocked(base.copy(allowRootLongTerm = allowed))
     }
 
+    fun revoke(receiptIds: Set<String>): ChatApprovalSettings = synchronized(lock) {
+        val base = ensureLoaded()
+        updateLocked(base.copy(revokedReceipts = base.revokedReceipts + receiptIds))
+    }
+
+    fun setToolRule(toolKey: String, denied: Boolean, risk: Risk?): ChatApprovalSettings = synchronized(lock) {
+        require(toolKey.contains('/') && toolKey.length <= 4096)
+        val base = ensureLoaded()
+        updateLocked(base.copy(
+            deniedTools = if (denied) base.deniedTools + toolKey else base.deniedTools - toolKey,
+            riskOverrides = if (risk == null) base.riskOverrides - toolKey else base.riskOverrides + (toolKey to risk),
+        ))
+    }
+
     fun policy(denied: (InvocationInput) -> Boolean = { false }): ApprovalPolicy = ApprovalPolicy(
-        denied = denied,
+        denied = { current().rulesUnavailable || it.definition?.toolKey in current().deniedTools || denied(it) },
         allowRootLongTerm = { current().allowRootLongTerm },
         mode = { current().mode },
+        grantRevoked = { current().rulesUnavailable || it.request.id in current().revokedReceipts },
+        riskOverride = { current().riskOverrides[it] },
     )
 
     private fun updateLocked(next: ChatApprovalSettings): ChatApprovalSettings {
+        check(!next.rulesUnavailable) { "Approval rules unavailable; restore settings before saving" }
         persist(next)
         mutableState.value = next
         initialized = true
@@ -93,17 +114,17 @@ internal class ChatApprovalSettingsStore(noBackupDirectory: File) {
                 ApprovalMode.STRICT.name -> ApprovalMode.STRICT
                 ApprovalMode.BALANCED.name -> ApprovalMode.BALANCED
                 ApprovalMode.FULL_AUTO.name -> ApprovalMode.FULL_AUTO
-                else -> return ChatApprovalSettings(mode = ApprovalMode.STRICT, allowRootLongTerm = false)
+                else -> error("Invalid approval mode")
             }
             val allowRoot = when (props.getProperty(KEY_ALLOW_ROOT_LONG_TERM)?.trim()) {
                 "true" -> true
                 "false", null -> false
-                else -> false
+                else -> error("Invalid Root approval setting")
             }
-            ChatApprovalSettings(mode = mode, allowRootLongTerm = allowRoot)
+            ApprovalToolRulesCodec.decode(props, ChatApprovalSettings(mode = mode, allowRootLongTerm = allowRoot))
         } catch (_: Exception) {
             // Corrupt file fails closed conservatively rather than escalating privileges.
-            ChatApprovalSettings(mode = ApprovalMode.STRICT, allowRootLongTerm = false)
+            ChatApprovalSettings(mode = ApprovalMode.STRICT, allowRootLongTerm = false, rulesUnavailable = true)
         }
     }
 
@@ -118,8 +139,10 @@ internal class ChatApprovalSettingsStore(noBackupDirectory: File) {
         Files.createDirectories(directory)
         check(Files.notExists(file, NOFOLLOW_LINKS) || Files.isRegularFile(file, NOFOLLOW_LINKS))
         val text = buildString {
+            append("toolRulesVersion=1\n")
             append(KEY_MODE).append('=').append(settings.mode.name).append('\n')
             append(KEY_ALLOW_ROOT_LONG_TERM).append('=').append(settings.allowRootLongTerm).append('\n')
+            append(ApprovalToolRulesCodec.encode(settings))
         }
         val bytes = text.toByteArray(Charsets.UTF_8)
         check(bytes.size <= MAX_BYTES)
@@ -141,7 +164,7 @@ internal class ChatApprovalSettingsStore(noBackupDirectory: File) {
         private const val FILE_NAME = "settings.properties"
         private const val KEY_MODE = "mode"
         private const val KEY_ALLOW_ROOT_LONG_TERM = "allowRootLongTerm"
-        private const val MAX_BYTES = 16 * 1024L
+        private const val MAX_BYTES = 1024 * 1024L
         private val locks = Array(16) { Any() }
 
         fun android(context: Context): ChatApprovalSettingsStore =

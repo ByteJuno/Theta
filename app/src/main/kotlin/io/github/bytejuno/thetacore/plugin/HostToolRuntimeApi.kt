@@ -33,7 +33,7 @@ internal class HostToolRuntimeApi(private val service: HostToolExecutionService)
                     BindingValue("host-api", field("requestId"), null, order, null, field("callId")),
                     field("taskChainId"), field("sessionId"), run, field("stepId"), order,
                     field("argsJson"), definition, request.getValue("unattended").jsonPrimitive.boolean,
-                    definition?.declaredRisk ?: Risk.READ, modelName = name,
+                    definition?.initialRisk ?: Risk.READ, modelName = name,
                 )
                 mutation(service.prepare(input))
             }
