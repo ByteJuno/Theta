@@ -9,8 +9,12 @@ import io.github.bytejuno.thetacore.plugin.*
 import io.github.bytejuno.thetacore.sdk.*
 import java.nio.file.Files
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
+import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.serialization.json.Json
@@ -21,7 +25,8 @@ import org.junit.Test
 
 class ChatEntrySessionsTest {
     private class Fixture(val risk: ToolRisk = ToolRisk.READ, val configured: Boolean = true,
-        val hold: CompletableDeferred<Unit>? = null, val presenceFails: Boolean = false) {
+        val hold: CompletableDeferred<Unit>? = null, val presenceFails: Boolean = false,
+        val disconnectFirst: Boolean = false) {
         val root = Files.createTempDirectory("entry-session").toFile()
         val store = AndroidAgentStore.open(root, BundledSQLiteDriver())
         val budget = PluginExecutionBudget()
@@ -44,6 +49,7 @@ class ChatEntrySessionsTest {
                 val turn = requests.incrementAndGet()
                 emit(Events.started("entry-$turn", "model"))
                 emit(Events.text(0, if (turn == 1) "before tool" else "answer"))
+                if (disconnectFirst && turn == 1) throw java.io.IOException("connection lost")
                 hold?.await()
                 emit(Events.end(0))
                 if (turn == 1) {
@@ -119,7 +125,67 @@ class ChatEntrySessionsTest {
             withTimeout(10_000) { runtime.actualExited.await() }
             collect.cancelAndJoin()
             assertEquals(0, f.owner.entrySessions.handleCount)
+            val bound = f.owner.state.value.sessionId!!
+            val replacements = List(32) { f.owner.entrySessions.open(EntryRequest("", bound)) }
+            replacements.forEach { it.close() }
         } finally { runtime.close(); pluginScope.cancel(); f.close() }
+    }
+
+    @Test fun cancellationOnReturnReclaimsEveryHandleAndLeavesAdmittedRunAlone() = runBlocking {
+        val hold = CompletableDeferred<Unit>()
+        val f = Fixture(hold = hold); f.initialize()
+        val resumes = Channel<Runnable>(Channel.UNLIMITED)
+        val caller = object : CoroutineDispatcher() {
+            override fun dispatch(context: CoroutineContext, block: Runnable) {
+                check(resumes.trySend(block).isSuccess)
+            }
+        }
+        try {
+            f.store.createHistory("saved").close()
+            repeat(33) { index ->
+                val allowOpen = CountDownLatch(1)
+                val text = if (index == 32) "go" else ""
+                val opening = launch(caller, start = CoroutineStart.UNDISPATCHED) {
+                    f.owner.entrySessions.open(EntryRequest(text, "saved")) {
+                        allowOpen.await(10, TimeUnit.SECONDS)
+                    }
+                    fail("Cancelled caller received a handle")
+                }
+                allowOpen.countDown()
+                val resume = withTimeout(10_000) { resumes.receive() }
+                opening.cancel()
+                resume.run()
+                opening.join()
+                assertEquals(0, f.owner.entrySessions.handleCount)
+            }
+            assertTrue(f.owner.state.value.active)
+            hold.complete(Unit)
+            withTimeout(10_000) { f.owner.state.first { !it.active } }
+            assertEquals(RunState.COMPLETED, f.owner.state.value.result?.state)
+            assertEquals(1L, f.owner.state.value.acceptedMessages)
+            validateHistory(f.owner.state.value.messages)
+        } finally { f.close() }
+    }
+
+    @Test fun disconnectedAttemptStreamsSeparatelyFromSuccessfulRetry() = runBlocking {
+        val f = Fixture(disconnectFirst = true); f.initialize()
+        try {
+            val entry = f.owner.entrySessions.open(EntryRequest("hello"))
+            val seen = mutableListOf<SessionEvent>()
+            withTimeout(10_000) { entry.events.first { seen += it; it === SessionEvent.Finished } }
+            assertEquals(5, seen.size)
+            assertEquals(SessionEvent.Text("before tool"), seen[0])
+            assertTrue((seen[1] as SessionEvent.AttemptEnded).discardText)
+            assertEquals(SessionEvent.Text("answer"), seen[2])
+            assertFalse((seen[3] as SessionEvent.AttemptEnded).discardText)
+            assertSame(SessionEvent.Finished, seen[4])
+            assertEquals(2, f.requests.get())
+            val state = f.owner.state.value
+            assertEquals("NETWORK", state.journal.single().reason)
+            assertEquals("before tool", (state.journal.single().partial.parts.single() as ContentPart.Text).text)
+            val reply = state.messages.single { it.role == Role.ASSISTANT }
+            assertEquals("answer", (reply.parts.single() as ContentPart.Text).text)
+        } finally { f.close() }
     }
 
     @Test fun approvalAndConcurrentSendsNeverBypassUserDecision() = runBlocking {

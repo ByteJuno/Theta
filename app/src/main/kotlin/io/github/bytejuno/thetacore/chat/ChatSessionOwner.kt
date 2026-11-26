@@ -655,7 +655,7 @@ internal class ChatSessionOwner(
                 }, requestBudget)
             }
             val result = AgentRunLoop(id, target, request, disk, executor(definitions),
-                journal = StoredRunJournal(disk),
+                journal = entrySessions.observeAttempts(disk.sessionId, StoredRunJournal(disk)),
                 budget = requestBudget,
                 contextPolicy = ContextPolicy(context.goal, context.priorMessageCount, summary, resumeId, readmitId),
                 beforeModelSubmit = { gate.withLock {

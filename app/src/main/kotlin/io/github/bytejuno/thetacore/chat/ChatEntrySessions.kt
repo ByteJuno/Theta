@@ -2,7 +2,10 @@ package io.github.bytejuno.thetacore.chat
 
 import io.github.bytejuno.thetacore.R
 import io.github.bytejuno.thetacore.agent.ledger.InvocationRecord
+import io.github.bytejuno.thetacore.agent.protocol.HistoryDisposition
 import io.github.bytejuno.thetacore.agent.protocol.ModelEvent
+import io.github.bytejuno.thetacore.agent.run.ModelAttempt
+import io.github.bytejuno.thetacore.agent.run.RunJournal
 import io.github.bytejuno.thetacore.agent.run.SessionPreview
 import io.github.bytejuno.thetacore.agent.run.ToolExecutionBridge
 import io.github.bytejuno.thetacore.plugin.HostToolExecutionService
@@ -34,27 +37,31 @@ internal class ChatEntrySessions(
     private val handles = mutableSetOf<Handle>()
     internal val handleCount: Int get() = synchronized(lock) { handles.size }
 
-    suspend fun open(request: EntryRequest, admitted: () -> Boolean = { true }): EntrySession = withContext(Dispatchers.IO) {
+    suspend fun open(request: EntryRequest, admitted: () -> Boolean = { true }): EntrySession {
+        // The caller may be cancelled while withContext dispatches the result back.
+        var undelivered: Handle? = null
         try {
-            gate.withLock {
-                check(admitted())
-                require(request.text.length <= 32_000)
-                val store = requireNotNull(host().sessionStore)
-                checkIdle()
-                val id = request.sessionId?.takeUnless { it.isEmpty() }
-                // Opening an unknown ID must fail before changing the currently selected history.
-                if (id != null) store.openHistory(id).close()
-                synchronized(lock) { check(handles.size < 32) }
-                select(id, store.sessionPreviews())
-                val handle = Handle(requireNotNull(state().sessionId), admitted)
-                synchronized(lock) { handles += handle }
-                try {
+            return withContext(Dispatchers.IO) {
+                gate.withLock {
+                    check(admitted())
+                    require(request.text.length <= 32_000)
+                    val store = requireNotNull(host().sessionStore)
+                    checkIdle()
+                    val id = request.sessionId?.takeUnless { it.isEmpty() }
+                    // Validate a different history before releasing the owner's current binding.
+                    if (id != null && id != state().sessionId) store.openHistory(id).close()
+                    synchronized(lock) { check(handles.size < 32) }
+                    select(id, store.sessionPreviews())
+                    val handle = Handle(requireNotNull(state().sessionId), admitted)
+                    undelivered = handle
+                    synchronized(lock) { handles += handle }
                     if (request.text.isNotEmpty()) sendLocked(handle, request.text)
                     handle
-                } catch (error: Throwable) { handle.close(); throw error }
-            }
+                }
+            }.also { undelivered = null }
         } catch (error: CancellationException) { throw error }
         catch (_: Exception) { throw EntryUnavailableException() }
+        finally { undelivered?.close() }
     }
 
     private fun checkIdle() {
@@ -78,6 +85,15 @@ internal class ChatEntrySessions(
 
     fun modelEvent(sessionId: String, event: ModelEvent) {
         if (event is ModelEvent.TextDelta) emit(sessionId, SessionEvent.Text(event.text))
+    }
+
+    fun observeAttempts(sessionId: String, journal: RunJournal): RunJournal = object : RunJournal by journal {
+        override fun finished(attempt: ModelAttempt) {
+            journal.finished(attempt)
+            emit(sessionId, object : SessionEvent.AttemptEnded {
+                override val discardText = attempt.cancelled || attempt.disposition == HistoryDisposition.DISCARD
+            })
+        }
     }
 
     fun observeTools(delegate: ToolExecutionBridge, host: HostToolExecutionService,

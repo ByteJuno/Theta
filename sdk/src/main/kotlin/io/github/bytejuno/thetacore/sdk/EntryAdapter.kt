@@ -31,6 +31,9 @@ sealed interface SessionEvent {
     data class Text(val delta: String) : SessionEvent
     data object Finished : SessionEvent
     data class Failed(val message: String) : SessionEvent
+    /** Ends one model attempt. When discardText is true, its streamed Text deltas
+     * belong to a discarded attempt. The run may still continue with another attempt. */
+    interface AttemptEnded : SessionEvent { val discardText: Boolean }
     interface ToolActivity : SessionEvent { val toolName: String; val state: String }
     interface NeedsApproval : SessionEvent { val summary: String }
 }
