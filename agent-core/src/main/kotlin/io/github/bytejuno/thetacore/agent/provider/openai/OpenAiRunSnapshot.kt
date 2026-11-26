@@ -81,8 +81,11 @@ fun validApiKey(token: String): Boolean = token.length in 1..16384 && token.all 
 class OpenAiRunSnapshot(val settings: OpenAiProviderSettings, private val credentials: Credentials) {
     constructor(settings: OpenAiProviderSettings, credentials: ApiKeyCredentials) : this(settings, credentials as Credentials)
 
-    fun target(transport: ModelTransport = OkHttpModelTransport()): ModelTarget =
-        ModelTarget(settings.providerId, OpenAiChatProvider(settings.adapterConfig(), transport), credentials)
+    fun target(
+        transport: ModelTransport = OkHttpModelTransport(),
+        mediaReader: MediaContentReader? = null,
+    ): ModelTarget =
+        ModelTarget(settings.providerId, OpenAiChatProvider(settings.adapterConfig(), transport, mediaReader), credentials)
 
     fun request(configure: ChatRequestBuilder.() -> Unit = {}): ChatRequest = chatRequest(settings.model) {
         settings.systemPrompt?.let { system = it }

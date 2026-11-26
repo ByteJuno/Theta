@@ -46,7 +46,11 @@ class ThetaApplication : Application() {
             providerSettings::snapshotForNewRun, diagnostic = { error ->
             Log.e("ThetaChat", "Chat operation failed: ${error.javaClass.simpleName}")
         }, targetForRun = io.github.bytejuno.thetacore.chat.sharedTargetFactory(modelTransport),
-            presence = chatTaskPresence)
+            presence = chatTaskPresence,
+            targetWithMediaForRun = io.github.bytejuno.thetacore.chat.sharedTargetWithMediaFactory(modelTransport),
+            userImageValidator = { bytes ->
+                io.github.bytejuno.thetacore.chat.validateAndDecodeAndroidUserImage(bytes)
+            })
     }
     private val hostToolsOwner = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private lateinit var hostToolsStartup: Deferred<HostToolExecutionService>

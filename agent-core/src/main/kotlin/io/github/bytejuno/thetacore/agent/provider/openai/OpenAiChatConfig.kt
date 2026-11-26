@@ -66,6 +66,8 @@ class OpenAiChatConfig(
         /** Explicit opt-in for compatible endpoints accepting content-block cache_control.
          * Standard OpenAI Chat has automatic caching and MUST leave this false. */
         val explicitCacheControl: Boolean = false,
+        /** Whether this model profile accepts user image attachments (PROTOCOL 2.4). */
+        val supportsImageInput: Boolean = true,
     ) {
         init {
             require(maxTokensField in setOf("max_tokens", "max_completion_tokens"))
