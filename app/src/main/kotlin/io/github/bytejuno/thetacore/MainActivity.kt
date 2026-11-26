@@ -529,7 +529,6 @@ private fun PluginList(
         Text(stringResource(R.string.api_level, THETA_API_LEVEL))
         AppLanguageSetting()
         HostEnvironmentSummaryBar(hostEnvironment, onRefreshEnvironment, onOpenAccessibility)
-        BackgroundDiagnostics()
         if (recovery) Text(strings.get(R.string.recovery_requested))
         Button(onClick = onPick, enabled = !staging) { Text(strings.get(R.string.import_code)) }
         Button(onClick = onPickData, enabled = !staging && !dataRecoveryBlocked) { Text(strings.get(R.string.import_data)) }
@@ -537,6 +536,7 @@ private fun PluginList(
         if (staging) TextButton(onClick = onCancelReading) { Text(strings.get(R.string.cancel_reading)) }
         TextButton(onClick = onRetryCleanup) { Text(strings.get(R.string.retry_import_cleanup)) }
         error?.let { Text(strings.get(it), color = MaterialTheme.colorScheme.error) }
+        BackgroundDiagnostics()
         if (manager.failures.isNotEmpty()) {
             LaunchedEffect(manager.failures.toList()) { manager.failures.forEach(::logUiDiagnostic) }
             Text(strings.get(R.string.plugin_diagnostics_failed, manager.failures.size), color = MaterialTheme.colorScheme.error)
