@@ -63,7 +63,33 @@ def scroll(down):
         str(width // 2), str(top if down else bottom), "200")
 
 
-def wait_for(description, matches, fail=None, sweep=False):
+def tap_target(node, nodes):
+    def bounds(element):
+        values = re.findall(r"-?\d+", element.get("bounds", ""))
+        if len(values) != 4:
+            return None
+        left, top, right, bottom = map(int, values)
+        return (left, top, right, bottom) if left < right and top < bottom else None
+
+    visible = bounds(node)
+    if visible is None:
+        return None
+    parents = {child: parent for parent in nodes for child in parent}
+    ancestor = parents.get(node)
+    while ancestor is not None:
+        clip = bounds(ancestor)
+        if clip is None:
+            return None
+        visible = (max(visible[0], clip[0]), max(visible[1], clip[1]),
+                   min(visible[2], clip[2]), min(visible[3], clip[3]))
+        ancestor = parents.get(ancestor)
+    left, top, right, bottom = visible
+    if left < 0 or top < 0 or left >= right or top >= bottom:
+        return None
+    return ET.Element("node", bounds=f"[{left},{top}][{right},{bottom}]")
+
+
+def wait_for(description, matches, fail=None, sweep=False, for_tap=False):
     """等界面上出现匹配的文字。`fail` 匹配到时立刻失败，不用等到超时。
 
     `sweep` 只用于宿主列表上的卡片：没找到就先往下、再往上来回滑。弹窗按钮
@@ -76,6 +102,8 @@ def wait_for(description, matches, fail=None, sweep=False):
         nodes = screen()
         texts = [n.get("text") for n in nodes if n.get("text")]
         node = find(nodes, matches)
+        if node is not None and for_tap:
+            node = tap_target(node, nodes)
         if node is not None:
             return node
         if fail is not None and find(nodes, fail) is not None:
@@ -104,7 +132,7 @@ def tap(node):
 
 
 def tap_text(text, sweep=False):
-    tap(wait_for(f"find {text!r}", lambda t: t == text, sweep=sweep))
+    tap(wait_for(f"find {text!r}", lambda t: t == text, sweep=sweep, for_tap=True))
 
 
 def tap_card(text):
