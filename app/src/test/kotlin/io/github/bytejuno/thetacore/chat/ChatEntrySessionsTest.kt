@@ -238,7 +238,7 @@ class ChatEntrySessionsTest {
         try {
             f.owner.open().join()
             val original = requireNotNull(f.owner.state.value.sessionId)
-            val drafts = ChatComposerDrafts(ComposerDraftFiles(f.root.resolve("drafts")))
+            val drafts = ChatComposerDrafts { f.store.composerDrafts }
             val image = PendingUserImage(mimeType = "image/png", bytes = byteArrayOf(1))
             drafts[original].edit("still editing")
             drafts[original].images = listOf(image)

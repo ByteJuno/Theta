@@ -13,7 +13,7 @@ internal fun SqliteRunHistory.checkChatAdmission(host: HostToolExecutionService)
         check(previous != null)
 }
 
-internal fun SqliteRunHistory.appendUserInput(text: String, media: List<ContentPart>): RunIdentity {
+internal fun SqliteRunHistory.appendUserInput(text: String, media: List<ContentPart>, draft: ChatDraftReceipt? = null): RunIdentity {
     val parts = buildList {
         if (text.isNotBlank()) add(textPart(text))
         addAll(media)
@@ -22,6 +22,6 @@ internal fun SqliteRunHistory.appendUserInput(text: String, media: List<ContentP
     if (chatContext() == null) saveChatContext(ChatTaskContext(chain, text.trim().ifEmpty { IMAGE_ONLY_GOAL_FALLBACK },
         Math.toIntExact(page(null, 1).totalMessages), chatSummaryWindow(), chatContextWindow()))
     val identity = RunIdentity(chain, sessionId, UUID.randomUUID().toString())
-    appendChatInput(revision(), message(Role.USER, *parts.toTypedArray()), identity)
+    appendChatInput(revision(), message(Role.USER, *parts.toTypedArray()), identity, draft?.consumption())
     return identity
 }

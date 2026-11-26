@@ -20,8 +20,14 @@ class ChatScreenStateTest {
 
     private val saverScope = SaverScope { true }
 
+    private fun draftsFor(ids: List<String>): () -> SessionComposerStore {
+        val store = AndroidAgentStore.open(temp.newFolder(), BundledSQLiteDriver()).also { stores += it }
+        ids.forEach { store.createHistory(it).close() }
+        return { store.composerDrafts }
+    }
+
     @Test fun pageCheckpointStaysSmallAndRestoresEveryFullLengthSessionDraft() {
-        val files = ComposerDraftFiles(temp.newFolder())
+        val files = draftsFor((0 until 40).map { "session-$it" })
         val saver = ChatComposerDrafts.saver(files)
         val book = ChatComposerDrafts(files)
         val versions = (0 until 40).map { index ->
@@ -37,7 +43,7 @@ class ChatScreenStateTest {
     }
 
     @Test fun restoredAttachmentRetainsSendBytesAndReceiptIdentity() {
-        val files = ComposerDraftFiles(temp.newFolder())
+        val files = draftsFor(listOf("original", "second"))
         val saver = ChatComposerDrafts.saver(files)
         val book = ChatComposerDrafts(files)
         val bytes = ByteArray(128 * 1024) { it.toByte() }
@@ -57,6 +63,33 @@ class ChatScreenStateTest {
         val next = with(saver) { requireNotNull(saver.restore(saverScope.save(restored)!!)) }
         assertTrue(next["original"].images.isEmpty())
         assertEquals("keep", next["second"].input)
+    }
+
+    @Test fun olderAdmissionConsumesOnlySubmittedPartsAfterAnEditAndImageRemoval() {
+        val store = AndroidAgentStore.open(temp.newFolder(), BundledSQLiteDriver()).also { stores += it }
+        val id = "edited"
+        store.createHistory(id).use { history ->
+            val book = ChatComposerDrafts { store.composerDrafts }
+            val draft = book[id]
+            fun image(key: String) = PendingUserImage(key, "image/png", key.toByteArray())
+            val removed = image("remove")
+            val sent = image("sent")
+            val kept = image("z-kept")
+            val added = image("a-added")
+            draft.edit("submitted")
+            draft.images = listOf(removed, sent, kept)
+            book.checkpoint()
+            val receipt = ChatDraftReceipt(id, draft.textVersion, setOf(sent.localId))
+            draft.edit("new edit")
+            draft.images = listOf(sent, kept, added)
+            book.checkpoint()
+            history.appendUserInput("submitted", emptyList(), receipt)
+            val recovered = ChatComposerDrafts { store.composerDrafts }[id]
+            assertEquals("new edit", recovered.input)
+            assertEquals(draft.textVersion, recovered.textVersion)
+            assertEquals(listOf(kept.localId, added.localId), recovered.images.map { it.localId })
+            assertArrayEquals(added.bytes, recovered.images.last().bytes)
+        }
     }
 
     private val imageDefinition = FrozenDefinition(

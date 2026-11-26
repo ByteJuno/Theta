@@ -4,10 +4,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.ui.platform.LocalContext
+import io.github.bytejuno.thetacore.agent.ledger.ComposerImage
+import io.github.bytejuno.thetacore.agent.ledger.ComposerSnapshot
+import io.github.bytejuno.thetacore.agent.ledger.SessionComposerStore
 import java.util.UUID
 
 internal class ChatComposerDraft(text: String = "", version: String = UUID.randomUUID().toString()) {
@@ -29,11 +30,18 @@ internal class ChatComposerDraft(text: String = "", version: String = UUID.rando
     }
 }
 
-internal class ChatComposerDrafts(private val files: ComposerDraftFiles) {
+internal fun ChatComposerDraft.snapshot() = ComposerSnapshot(textVersion, input,
+    images.map { ComposerImage(it.localId, it.mimeType, it.bytes) })
+
+internal class ChatComposerDrafts(private val store: () -> SessionComposerStore?) {
     private val sessions = mutableMapOf<String?, ChatComposerDraft>()
     private val saved = mutableMapOf<String?, Pair<String, List<String>>>()
     operator fun get(id: String?) = sessions.getOrPut(id) {
-        (files.read(id) ?: ChatComposerDraft()).also { saved[id] = it.identity() }
+        val row = id?.let { requireNotNull(store()).read(it) }
+        ChatComposerDraft(row?.text.orEmpty(), row?.version ?: UUID.randomUUID().toString()).apply {
+            images = row?.images.orEmpty().map { PendingUserImage(it.id, it.mime, it.bytes) }
+            saved[id] = identity()
+        }
     }
 
     // Empty text after acknowledgment can have the same receipt version as the submitted text.
@@ -43,8 +51,8 @@ internal class ChatComposerDrafts(private val files: ComposerDraftFiles) {
     fun checkpoint(): Int {
         for ((id, draft) in sessions) {
             val identity = draft.identity()
-            if (identity != saved[id]) {
-                files.write(id, draft)
+            if (id != null && identity != saved[id]) {
+                requireNotNull(store()).save(id, draft.snapshot(), saved[id]?.second.orEmpty())
                 saved[id] = identity
             }
         }
@@ -52,9 +60,9 @@ internal class ChatComposerDrafts(private val files: ComposerDraftFiles) {
     }
 
     companion object {
-        fun saver(files: ComposerDraftFiles) = Saver<ChatComposerDrafts, Any>(
+        fun saver(store: () -> SessionComposerStore?) = Saver<ChatComposerDrafts, Any>(
             save = { it.checkpoint() },
-            restore = { value -> ChatComposerDrafts(files).apply {
+            restore = { value -> ChatComposerDrafts(store).apply {
                 // Earlier versions saved flattened (session, text, version) triples.
                 if (value is List<*>) value.filterIsInstance<String>().chunked(3).forEach {
                     if (it.size == 3) sessions[it[0]] = ChatComposerDraft(it[1], it[2])
@@ -65,8 +73,8 @@ internal class ChatComposerDrafts(private val files: ComposerDraftFiles) {
 }
 
 @Composable
-internal fun rememberChatComposerDrafts(): ChatComposerDrafts {
-    val root = LocalContext.current.noBackupFilesDir
-    val files = remember(root) { ComposerDraftFiles.inPrivateStorage(root) }
-    return rememberSaveable(saver = ChatComposerDrafts.saver(files)) { ChatComposerDrafts(files) }
+internal fun rememberChatComposerDrafts(owner: ChatSessionOwner): ChatComposerDrafts {
+    return rememberSaveable(saver = ChatComposerDrafts.saver { owner.composerStore }) {
+        ChatComposerDrafts { owner.composerStore }
+    }
 }

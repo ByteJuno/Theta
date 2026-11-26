@@ -601,7 +601,8 @@ open class SqliteRunHistory internal constructor(
     @Synchronized override fun append(expectedRevision: Long, messages: List<Message>) =
         appendBatch(expectedRevision, messages, null, false)
 
-    @Synchronized fun appendChatInput(expectedRevision: Long, input: Message, identity: RunIdentity) {
+    @Synchronized fun appendChatInput(expectedRevision: Long, input: Message, identity: RunIdentity,
+        draft: ComposerConsumption? = null) {
         ready()
         require(input.role == Role.USER && identity.sessionId == sessionId && identity.runId.isNotBlank())
         require(identity.taskChainId == chatTaskChainId() && chatContext() != null && !hasPendingIntent())
@@ -617,7 +618,7 @@ open class SqliteRunHistory internal constructor(
         val reason = "Input accepted; awaiting foreground admission"
         val acceptedResult = if (admission != null) RunResult(RunState.PAUSED, reason, admission.steps, admission.retries)
             else chatResult()?.copy(state = RunState.PAUSED, reason = reason)
-        appendBatch(expectedRevision, listOf(input), null, false, admission, acceptedResult)
+        appendBatch(expectedRevision, listOf(input), null, false, admission, acceptedResult, draft)
     }
 
     /** The loop selects this path only after the final model event has been validated. */
@@ -630,7 +631,7 @@ open class SqliteRunHistory internal constructor(
     }
 
     private fun appendBatch(expectedRevision: Long, messages: List<Message>, completion: RunAccounting?, rotateChain: Boolean,
-        admission: RunAccounting? = null, acceptedResult: RunResult? = null) {
+        admission: RunAccounting? = null, acceptedResult: RunResult? = null, draft: ComposerConsumption? = null) {
         ready(); check(expectedRevision == head.revision) { "History changed during run" }
         val next = freezeMessages(messages)
         require(next.isNotEmpty()); validateHistory(next) // only the new, complete transaction
@@ -663,6 +664,7 @@ open class SqliteRunHistory internal constructor(
             writeValue(batchPath(value.revision), value)
             for (id in calls) writeValue(callPath(id), CallLocation(id, value.revision, hash))
             writeValue("head", newHead)
+            if (draft != null) SessionComposerStore(database).consumeInTransaction(sessionId, draft)
             if (firstText != null) writeValue(SESSION_PREVIEW_KEY, "1$firstText")
             if (admission != null) {
                 writeValue(accountingPath(admission.taskChainId), admission)

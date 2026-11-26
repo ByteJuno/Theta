@@ -86,6 +86,7 @@ internal class ChatSessionOwner(
 ) {
     private val mutable = MutableStateFlow(ChatState())
     val state = mutable.asStateFlow()
+    internal val composerStore get() = tools?.sessionStore?.composerDrafts
     private val gate = Mutex()
     internal val entrySessions = ChatEntrySessions(gate, scope, { mutable.value }, ::bindEntry)
     private var history: SqliteRunHistory? = null
@@ -360,7 +361,7 @@ internal class ChatSessionOwner(
             store.privateImages.putUserImage(disk.sessionId, blobId, valid.bytes)
             mediaPart(ProtocolMediaKind.IMAGE, blobRef(blobId, valid.mimeType, valid.bytes.size.toLong()))
         }
-        startAccepted(snapshot, disk.appendUserInput(text, mediaParts), draft)
+        startAccepted(snapshot, disk.appendUserInput(text, mediaParts, draft), draft)
     }
 
     private fun startAccepted(snapshot: OpenAiRunSnapshot, identity: RunIdentity, draft: ChatDraftReceipt?) {

@@ -21,6 +21,57 @@ import java.nio.file.Files
 import java.util.concurrent.atomic.AtomicInteger
 
 class ChatSessionOwnerTest {
+    @Test fun admissionConsumesSavedDraftAcrossColdStartWithoutAnotherCheckpoint() = runBlocking {
+        val root = Files.createTempDirectory("chat-draft-admission").toFile()
+        val f = fixture(root, AtomicInteger(), provider(tool = false))
+        val id: String
+        try {
+            f.owner.open().join()
+            id = requireNotNull(f.owner.state.value.sessionId)
+            val drafts = ChatComposerDrafts { f.store.composerDrafts }
+            val draft = drafts[id]
+            draft.edit("send once")
+            drafts.checkpoint()
+            val receipt = ChatDraftReceipt(id, draft.textVersion, emptySet())
+            f.owner.send(draft.input, draft = receipt).join()
+            await { !f.owner.state.value.active }
+            draft.acknowledge(requireNotNull(f.owner.state.value.acceptedDraft))
+            assertEquals("", draft.input)
+        } finally { f.close() }
+        val cold = fixture(root, AtomicInteger(), provider(tool = false))
+        try {
+            cold.owner.open().join()
+            assertEquals(id, cold.owner.state.value.sessionId)
+            assertEquals(listOf("send once"), cold.owner.state.value.messages.filter { it.role == Role.USER }
+                .flatMap { it.parts.filterIsInstance<ContentPart.Text>() }.map { it.text })
+            assertEquals("", ChatComposerDrafts { cold.store.composerDrafts }[id].input)
+        } finally { cold.close(); root.deleteRecursively() }
+    }
+
+    @Test fun sessionDeletionRemovesDraftAndRejectsLatePageSave() = runBlocking {
+        val root = Files.createTempDirectory("chat-draft-delete").toFile()
+        val f = fixture(root, AtomicInteger(), provider(tool = false))
+        try {
+            f.owner.open().join()
+            val id = requireNotNull(f.owner.state.value.sessionId)
+            val book = ChatComposerDrafts { f.store.composerDrafts }
+            val draft = book[id]
+            draft.edit("unsubmitted")
+            draft.images = listOf(PendingUserImage(mimeType = "image/png", bytes = byteArrayOf(1, 2)))
+            book.checkpoint()
+            assertEquals(1, f.store.composerDrafts.read(id).images.size)
+            f.owner.deleteCurrentSession().join()
+            assertFalse(id in f.store.sessionIds())
+            draft.edit("late edit")
+            draft.images = draft.images + PendingUserImage(mimeType = "image/png", bytes = byteArrayOf(3))
+            book.checkpoint()
+            val stored = f.store.composerDrafts.read(id)
+            assertNull(stored.version)
+            assertEquals("", stored.text)
+            assertTrue(stored.images.isEmpty())
+        } finally { f.close(); root.deleteRecursively() }
+    }
+
     @Test fun stoppingSavedStepCommitsBeforeTimedOutWorkerExit() = runBlocking {
         stopSavedStepBeforeExit(cancel = false)
     }
