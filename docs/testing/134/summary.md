@@ -1,33 +1,30 @@
-# Issue #134: enabled data skills and personas
+# Issue 134 validation
 
-- Tested implementation: `62c54d65d4d44cef52a2c6d11587b033b828401e`.
-- Integrated main: `6d11d8191ced3d77188710e9e58bd3574137a85f`; prior PR148 head: `1e0083f80c0ee8e7ed48eff4f42c6ab2e2b4a0bc`.
-- APK: not generated; SHA-256: not applicable. No writer device/emulator access.
+Implementation source commit: `f4a9d697e6e3e87f8dcb5539720394cae476ae91`
+Reviewed predecessor: `b6d2a37aa7765003eb26d2544c830041ce05ac41`
+Main baseline: `6d11d8191ced3d77188710e9e58bd3574137a85f`
+RETURN cursor: `IC_kwDOVkrS_s8AAAABq_3Slw`
 
-## Behavior
+## Implemented
 
-Enabled data archives supply validated personas and a deterministic skill metadata prefix capped at 8,000 characters. The first-party READ tool `host/skill_read` loads full same-skill Markdown/text documents on demand, rechecks lifecycle/digest/path boundaries and uses the existing BlobStore for long results. Skill documents remain data, with no script execution. Persona selection persists for new runs, retains the custom system prompt, and clears an unavailable selection with bilingual feedback.
+Run-bound skill directory and retained archive version/SHA-256 reads, current lifecycle revocation, explicit missing/digest mismatch refusal, and next-run updates. Unicode validation rejects unpaired UTF-16 while accepting valid supplementary characters. SafeConstructor-based bounded SnakeYAML parsing replaces the handwritten subset. DataStore Core/Okio replaces handwritten persistence, reads existing JSON under noBackupFilesDir, and recovers corrupt preference contents with a persistent bilingual notice and explicit selection acknowledgement. Original stable skill prefix, READ/BlobStore handling, persona fallback and image/chat integration remain.
 
-This RETURN repair integrates main's image-input work without dropping either feature. Application/ChatSessionOwner wiring retains prompt snapshots, the media-aware model target and the image validator. A real loopback HTTP test installs a data ZIP and checks that skill metadata, persona, custom prompt and image payload coexist; disabling the bundle removes its prompt contribution and reports fallback while image input remains intact. Image rejection and session deletion checks remain.
+## Actual checks
 
-## Validation bound to the implementation
+- Full preflight passed in 208.30s: agent-core 590 tests / 589 passed / 1 platform skip; app 682 tests / 681 passed / 1 platform skip; zero failures/errors.
+- PluginPromptDataTest 9/9, PersonaSettingsTest 3/3, ChatPromptIntegrationTest 2/2 and UserImageChatTest 3/3 passed. Update-during-run returns v1 content with v1 metadata; the next run uses v2. Corrupt preferences do not block chat.
+- lintDebug, storage-fixture source verification/compile, and 496 English/Chinese resource keys passed.
+- Final preflight + Debug APK assembly after license assets: 67.50s, strict --configuration-cache --configuration-cache-problems=fail, cache reused. Production and test sources unchanged from full suite; Gradle reports unit tasks UP-TO-DATE.
+- Debug APK SHA-256: `06b2b72775c33941fc150503987dbab016d86078cb9d5337fca0cc0aefc98833`; size 55713165 bytes. Local artifact: event-runs/9c3d2704-8c82-4005-8815-3843fbc4371d/app-debug.apk. Not installed.
+- Source hash manifest verified before commit and committed blobs verified against Git-normalized tested files. APK includes Apache-2.0 and prompt component attribution assets.
+- SnakeYAML 2.4 and AndroidX DataStore Core/Okio 1.1.7 licenses verified as Apache-2.0 from official published POM/source artifacts; component rationale and links are in the PR body. No protected file modified.
 
-`python scripts/preflight.py` completed successfully with `--configuration-cache --configuration-cache-problems=fail` and release environment variables cleared. The index tree was recorded before testing and matches the implementation commit; all tracked worktree SHA-256 values remained unchanged after testing.
+## Failure evidence retained
 
-- agent-core: 590 tests, 589 passed, 1 platform skip, 0 failures/errors. These completed during the first preflight in this round. Only missing app-test imports changed afterward; final Gradle correctly reused the unchanged core task as UP-TO-DATE.
-- app: 675 tests, 674 passed, 1 platform skip, 0 failures/errors, fresh final-run XML.
-- Decisive suites within app: UserImageChatTest 3/3; ChatPromptIntegrationTest 1/1; PluginPromptDataTest 6/6.
-- lintDebug, 495 English/Chinese resource keys, storage fixture source verification and compilation: passed.
-- Final preflight: 174.70 seconds, configuration cache reused. First attempt: 190.31 seconds; failed app test compilation due to missing imports for existing readSkill/promptData extension functions. Imports corrected, original failure preserved outside Git, no assertion or timeout relaxed.
-- Platform skips: SummaryWorkspaceTest link/parent traversal and PluginUpdatesTest executable-bit snapshot. Skips are not passes.
-- Protected files unchanged; issue134 summary unchanged by writer. The merge carries main's existing issue133 summary byte-for-byte without creating new evidence for that issue.
+The first targeted run had six failures rooted in the default DataStore FileStorage's Windows File.renameTo replacement. Production switched to the library's official OkioStorage backend after source inspection. The next run passed 16/17; one new test kept an InputStream open, blocking later replacement on Windows. Closed the stream via use, kept assertions/timeouts unchanged; final full suite passed. Reviewer original verdict and earlier failure history remain outside Git. Reviewer PromptReviewProbe.kt was not imported or committed.
 
-Evidence lives under `event-runs/12045acb-7fca-45aa-ba45-c9c6cf04a152/validation` and `validation-final` (command, logs, XML, tested tree/worktree hashes). The pre-merge identity error and original conflict output are also retained in the run record/logs. No raw evidence is committed.
+## Limits and continuation
 
-## Remaining verification
+Visual unverified: new recovery notice and persona picker, English/Chinese, long names, small-screen/large-font, light/dark, selection and empty/error states. No phone or emulator operation, API33 device runtime, Release/R8, physical power loss or live model endpoint acceptance. Cold-recovered skill calls without a process-local run binding fail closed; pruned old archives cannot silently use newer bytes. Current package disable/quarantine/uninstall revokes reads even for retained versions.
 
-The writer only created the local implementation commit and publication handoff. New published-head CI, independent review and prescribed final dedicated-emulator regression remain the existing reviewer/controller's responsibility. Prior-head CI success is not transferred to this implementation. No APK, live model endpoint, API33 runtime, Release/R8 or personal-device acceptance was performed.
-
-Visual unverified: no dedicated writer rendering surface available. Pending reviewer scenarios are English/Chinese persona selection and unavailable notice, long names/ids, loading/empty/error/retry/disabled/selected states, small-screen and large-font readability, and light/dark appearance. Compilation and resource checks do not establish visual acceptance.
-
-Original reference: https://github.com/openai/codex/blob/main/codex-rs/ext/skills/src/render.rs (bounded deterministic skill metadata; no source copied).
+Existing publisher must publish this implementation and the unique summary; independent reviewer owns new-head review, CI and prescribed dedicated-emulator regression. Earlier-head CI is not claimed for this commit. Raw logs/XML, dependency sources and APK remain in event-runs/9c3d2704-8c82-4005-8815-3843fbc4371d/ and validation-issue11/issue134-9c3d-* outside Git.
