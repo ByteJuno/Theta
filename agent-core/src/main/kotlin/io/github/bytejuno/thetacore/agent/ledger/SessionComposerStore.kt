@@ -18,7 +18,7 @@ internal fun createComposerSchema(db: SQLiteConnection) {
 
 class ComposerImage(val id: String, val mime: String, val bytes: ByteArray)
 class ComposerSnapshot(val version: String?, val text: String, val images: List<ComposerImage>)
-class ComposerConsumption(val version: String, val imageIds: Set<String>)
+class ComposerConsumption(val versions: Set<String>, val imageIds: Set<String>)
 
 class SessionComposerStore(private val database: AgentDatabase) {
     private val db get() = database.connection
@@ -123,7 +123,7 @@ class SessionComposerStore(private val database: AgentDatabase) {
 
     internal fun consumeInTransaction(session: String, receipt: ComposerConsumption) {
         check(db.inTransaction())
-        put(session, "text", receipt.version, 0, null)
+        for (version in receipt.versions) put(session, "text", version, 0, null)
         for (id in receipt.imageIds) put(session, "image", id, 0, null)
     }
 

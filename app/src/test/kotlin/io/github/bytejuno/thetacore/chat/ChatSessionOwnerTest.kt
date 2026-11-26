@@ -21,6 +21,48 @@ import java.nio.file.Files
 import java.util.concurrent.atomic.AtomicInteger
 
 class ChatSessionOwnerTest {
+    @Test fun coldStartAfterSendingReplacementDoesNotRestoreOldText() = runBlocking {
+        checkColdDraftAfterSend { book, id ->
+            book[id].edit("old text")
+            book.checkpoint()
+            book[id].edit("final text")
+        }
+    }
+
+    @Test fun coldStartAfterSendingTextDoesNotRestoreRemovedImage() = runBlocking {
+        checkColdDraftAfterSend { book, id ->
+            book[id].images = listOf(PendingUserImage("removed", "image/png", byteArrayOf(1, 2, 3)))
+            book.checkpoint()
+            book[id].images = emptyList()
+            book[id].edit("final text")
+        }
+    }
+
+    private suspend fun checkColdDraftAfterSend(prepare: (ChatComposerDrafts, String) -> Unit) {
+        val root = Files.createTempDirectory("chat-draft-replace").toFile()
+        val first = fixture(root, AtomicInteger(), provider(tool = false))
+        val id: String
+        try {
+            first.owner.open().join()
+            id = requireNotNull(first.owner.state.value.sessionId)
+            val drafts = ChatComposerDrafts { first.store.composerDrafts }
+            prepare(drafts, id)
+            val draft = drafts[id]
+            first.owner.send(draft.input, draft.images, drafts.receipt(id)).join()
+            await { !first.owner.state.value.active }
+        } finally { first.close() }
+        val cold = fixture(root, AtomicInteger(), provider(tool = false))
+        try {
+            cold.owner.open().join()
+            assertEquals(id, cold.owner.state.value.sessionId)
+            val parts = cold.owner.state.value.messages.single { it.role == Role.USER }.parts
+            assertEquals("final text", (parts.single() as ContentPart.Text).text)
+            val recovered = ChatComposerDrafts { cold.store.composerDrafts }[id]
+            assertTrue(recovered.input.isEmpty())
+            assertTrue(recovered.images.isEmpty())
+        } finally { cold.close(); root.deleteRecursively() }
+    }
+
     @Test fun admissionConsumesSavedDraftAcrossColdStartWithoutAnotherCheckpoint() = runBlocking {
         val root = Files.createTempDirectory("chat-draft-admission").toFile()
         val f = fixture(root, AtomicInteger(), provider(tool = false))

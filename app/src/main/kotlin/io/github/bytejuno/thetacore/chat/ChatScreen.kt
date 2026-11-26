@@ -333,7 +333,7 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
                 val text = composer.input
                 val images = composer.images
                 composer.error = null
-                val receipt = ChatDraftReceipt(requireNotNull(state.sessionId), composer.textVersion, images.map { it.localId }.toSet())
+                val receipt = drafts.receipt(requireNotNull(state.sessionId))
                 launchTask { owner.send(text, images, receipt) }
             },
             enabled = state.sessionId != null && (composer.input.isNotBlank() || composer.images.isNotEmpty()) && !state.loading && !state.active && !state.pending,

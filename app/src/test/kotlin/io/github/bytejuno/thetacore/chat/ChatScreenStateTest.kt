@@ -92,6 +92,33 @@ class ChatScreenStateTest {
         }
     }
 
+    @Test fun sendReceiptPreservesChangesCheckpointedAfterClick() {
+        val store = AndroidAgentStore.open(temp.newFolder(), BundledSQLiteDriver()).also { stores += it }
+        val id = "later-edit"
+        store.createHistory(id).use { history ->
+            val book = ChatComposerDrafts { store.composerDrafts }
+            val draft = book[id]
+            draft.edit("old")
+            draft.images = listOf(PendingUserImage("removed", "image/png", byteArrayOf(1)))
+            book.checkpoint()
+            draft.edit("submitted")
+            draft.images = emptyList()
+            val receipt = book.receipt(id)
+            draft.edit("keep")
+            val added = PendingUserImage("added", "image/png", byteArrayOf(2))
+            draft.images = listOf(added)
+            book.checkpoint()
+            history.appendUserInput("submitted", emptyList(), receipt)
+            draft.acknowledge(receipt)
+            val restored = ChatComposerDrafts { store.composerDrafts }[id]
+            assertEquals("keep", draft.input)
+            assertEquals("keep", restored.input)
+            assertEquals(draft.textVersion, restored.textVersion)
+            assertEquals(added.localId, restored.images.single().localId)
+            assertArrayEquals(added.bytes, restored.images.single().bytes)
+        }
+    }
+
     private val imageDefinition = FrozenDefinition(
         toolKey = IMAGE_TOOL_KEY,
         modelName = "generate_image",

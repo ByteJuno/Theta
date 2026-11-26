@@ -35,7 +35,8 @@ internal fun ChatComposerDraft.snapshot() = ComposerSnapshot(textVersion, input,
 
 internal class ChatComposerDrafts(private val store: () -> SessionComposerStore?) {
     private val sessions = mutableMapOf<String?, ChatComposerDraft>()
-    private val saved = mutableMapOf<String?, Pair<String, List<String>>>()
+    private data class SavedParts(val version: String, val emptyText: Boolean, val imageIds: List<String>)
+    private val saved = mutableMapOf<String?, SavedParts>()
     operator fun get(id: String?) = sessions.getOrPut(id) {
         val row = id?.let { requireNotNull(store()).read(it) }
         ChatComposerDraft(row?.text.orEmpty(), row?.version ?: UUID.randomUUID().toString()).apply {
@@ -46,13 +47,20 @@ internal class ChatComposerDrafts(private val store: () -> SessionComposerStore?
 
     // Empty text after acknowledgment can have the same receipt version as the submitted text.
     private fun ChatComposerDraft.identity() =
-        (if (input.isEmpty()) "" else textVersion) to images.map { it.localId }
+        SavedParts(textVersion, input.isEmpty(), images.map { it.localId })
+
+    fun receipt(id: String): ChatDraftReceipt {
+        val draft = this[id]
+        val baseline = saved[id]
+        return ChatDraftReceipt(id, draft.textVersion, draft.images.map { it.localId }.toSet(),
+            baseline?.version, baseline?.imageIds.orEmpty())
+    }
 
     fun checkpoint(): Int {
         for ((id, draft) in sessions) {
             val identity = draft.identity()
             if (id != null && identity != saved[id]) {
-                requireNotNull(store()).save(id, draft.snapshot(), saved[id]?.second.orEmpty())
+                requireNotNull(store()).save(id, draft.snapshot(), saved[id]?.imageIds.orEmpty())
                 saved[id] = identity
             }
         }
