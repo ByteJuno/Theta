@@ -97,6 +97,7 @@ class InvocationLedger(
         // Unknown calls are terminal in their first durable write: they can never be claimed,
         // including after a crash before the rest of the step was registered.
         persist(null, when {
+            input.toolAdmissionRejected -> terminal(record, Status.REJECTED, null, "Tool unavailable for this model request: ${input.modelName}")
             input.cancelledBeforeExecution -> terminal(record, Status.CANCELLED, null, cancelledText)
             input.definition == null -> terminal(record, Status.REJECTED, null, "Unknown tool: ${input.modelName}")
             else -> record

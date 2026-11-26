@@ -28,13 +28,15 @@ class OpenAiChatProvider(
     private val config: OpenAiChatConfig,
     private val transport: ModelTransport = OkHttpModelTransport(),
     private val mediaReader: MediaContentReader? = null,
+    /** Request-scoped diagnostics for the host UI/log owner; must not throw or retain credentials. */
+    private val onSchemaDiagnostics: (ToolSchemaPreparation) -> Unit = {},
 ) : ModelProvider {
     private val codec = OpenAiChatCodec(config, mediaReader)
     override fun contextConfigurationKey(): String = buildJsonObject {
         put("version", 1); put("provider", config.providerId); put("endpoint", config.endpoint.toString())
         put("maxTokens", config.compat.maxTokensField); put("reasoning", config.compat.reasoningField)
         put("replay", config.compat.replayReasoning); put("usage", config.compat.streamUsage)
-        put("schema", config.compat.schemaProfile.name); put("cache", config.compat.explicitCacheControl)
+        put("schema", config.schemaProfile.name); put("cache", config.compat.explicitCacheControl)
         if (!config.compat.supportsImageInput) put("imageInput", false)
     }.toString()
     override fun canReplay(data: ReplayData, targetModel: String): Boolean = codec.canReplay(data, targetModel)
@@ -45,10 +47,12 @@ class OpenAiChatProvider(
         kind == MediaKind.IMAGE && config.compat.supportsImageInput
     override fun executionMode(request: ChatRequest): ModelExecutionMode =
         if (request.extraBody.isEmpty()) ModelExecutionMode.GENERATION_ONLY else ModelExecutionMode.MAY_EXECUTE_SERVER_TOOLS
+    override fun toolNamesForExecution(request: ChatRequest): Set<String> =
+        ToolSchemaProfiles().prepare(request.tools, config.schemaProfile).tools.map { it.name }.toSet()
 
     /** No timeout/retry policy here: the host wraps this cold flow with validated(). */
     override fun chat(request: ChatRequest, auth: Credentials): Flow<ModelEvent> = flow {
-        val body = try { codec.encode(request) } catch (error: IllegalArgumentException) {
+        val body = try { codec.encode(request, onSchemaDiagnostics) } catch (error: IllegalArgumentException) {
             emit(Events.failed(modelError(ModelErrorCode.INVALID_REQUEST, "Invalid OpenAI Chat request or incompatible history")))
             return@flow
         }

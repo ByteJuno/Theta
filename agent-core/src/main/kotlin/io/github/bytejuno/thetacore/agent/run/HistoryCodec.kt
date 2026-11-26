@@ -221,7 +221,11 @@ internal object HistoryCodec {
                     "sessionId" to v.sessionId, "runId" to v.runId, "stepId" to v.stepId, "callOrder" to v.callOrder,
                     "argsJson" to v.argsJson, "definition" to v.definition, "unattended" to v.unattended,
                     "initialRisk" to v.initialRisk, "cancelledBeforeExecution" to v.cancelledBeforeExecution, "modelName" to v.modelName)
-                if (v.nonExecutionReason == null) fields(*input) else fields(*input, "nonExecutionReason" to v.nonExecutionReason)
+                val optional = buildList<Pair<String, Any?>> {
+                    v.nonExecutionReason?.let { add("nonExecutionReason" to it) }
+                    if (v.toolAdmissionRejected) add("toolAdmissionRejected" to true)
+                }
+                fields(*input, *optional.toTypedArray())
             }
             is BindingValue -> fields("provider" to v.provider, "requestId" to v.requestId, "responseId" to v.responseId,
                 "index" to v.index, "wireId" to v.wireId, "callId" to v.callId)

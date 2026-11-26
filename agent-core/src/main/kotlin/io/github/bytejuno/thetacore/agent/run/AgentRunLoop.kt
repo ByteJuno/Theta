@@ -488,6 +488,7 @@ class AgentRunLoop(
             if (!compatible(target, request)) return pauseContext(view, "Replay incompatible; checkpoint required")
             if (!mediaSupported(target, request)) return result(RunState.FAILED, "Image input disabled for active model")
             val mode = target.provider.executionMode(request) // freeze BEFORE submission, including extraBody
+            val admittedToolNames = target.provider.toolNamesForExecution(request).toSet()
             val reducer = ModelEventReducer(target.id, request.requestId)
             beforeModelSubmit()
             currentCoroutineContext().ensureActive()
@@ -629,7 +630,8 @@ class AgentRunLoop(
                         finish.reason == FinishReason.PAUSED -> NonExecutionReason.MODEL_PAUSED
                         else -> null
                     }
-                    tools.register(identity, step, calls, cancelled = !execute, reason = reason)
+                    tools.register(identity, step, calls, cancelled = !execute, reason = reason,
+                        admittedToolNames = admittedToolNames)
                     if (execute) tools.execute(calls)
                     currentCoroutineContext().ensureActive()
                 } catch (e: Exception) {
