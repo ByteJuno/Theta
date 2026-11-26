@@ -18,6 +18,7 @@ internal fun recoveryActions(state: ChatState): Set<ChatRecoveryAction> {
     if (token.identity.sessionId != state.sessionId || token.identity.taskChainId != token.context.taskChainId) return emptySet()
     if (token.reconciliation != null) return setOf(ChatRecoveryAction.RETRY)
     if (token.checkpoint?.canContinue == true) {
+        if (state.checkpointSettingsChanged) return emptySet()
         val next = token.checkpoint.nextIdentity ?: return emptySet()
         return if (!next.unattended && next.sessionId == token.identity.sessionId && next.taskChainId == token.identity.taskChainId)
             setOf(ChatRecoveryAction.CONTINUE_SUMMARY) else emptySet()

@@ -77,8 +77,9 @@ internal fun parseDataSkill(pluginId: String, path: String, bytes: ByteArray): D
     val lines = dataUtf8(bytes).removePrefix("\uFEFF").replace("\r\n", "\n").lines()
     val fields = mutableMapOf<String, String>()
     var body = 0
-    if (lines.firstOrNull()?.trim() == "---") {
-        val end = (1 until lines.size).firstOrNull { lines[it].trim() in setOf("---", "...") }
+    if (lines.firstOrNull()?.trimEnd() == "---") {
+        // Document markers must start at column zero. Indented markers are scalar data.
+        val end = (1 until lines.size).firstOrNull { lines[it].trimEnd() in setOf("---", "...") }
         dataRequire(end != null, "Unterminated skill frontmatter")
         if (end != null) {
             body = end + 1

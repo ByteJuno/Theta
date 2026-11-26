@@ -31,6 +31,19 @@ class PluginPromptDataTest {
     }
     private val persona = """{"id":"guide","name":"Guide","systemPrompt":"Be a careful guide.\nExplain your answer."}"""
 
+    @Test fun frontmatterKeepsIndentedDocumentMarkersInLiteralAndFoldedScalars() {
+        for (style in listOf("|-", ">-")) for (end in listOf("---", "...")) {
+            val text = "---\nname: Read\ndescription: $style\n  Read first\n  ---\n  ...\n  then explain the result\n$end\nFallback"
+            val skill = parseDataSkill("test.prompts", "skills/read/SKILL.md", text.toByteArray())
+            assertEquals("Read first --- ... then explain the result", skill.description)
+            assertEquals("Read", skill.name)
+        }
+        assertThrows(Exception::class.java) {
+            parseDataSkill("test.prompts", "skills/read/SKILL.md",
+                "---\ndescription: |-\n  words\n  ---\n  ...".toByteArray())
+        }
+    }
+
     @Test fun yamlSupportsCommentsMultilineScalarsAndYamlEscapes() {
         fun description(yaml: String) = parseDataSkill("test.prompts", "skills/read/SKILL.md",
             "---\n$yaml\n---\nFallback body".toByteArray()).description

@@ -349,7 +349,7 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
             modifier = Modifier.fillMaxWidth(),
         ) { Text(strings.get(R.string.chat_send)) }
     }
-    if (settings) ProviderScreen(host) { settings = false }
+    if (settings) ProviderScreen(host) { settings = false; owner.latest() }
     if (profilePicker) AlertDialog(
         onDismissRequest = { profilePicker = false },
         title = { Text(strings.get(R.string.chat_profile_switch_title)) },
