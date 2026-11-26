@@ -35,4 +35,12 @@ class ChatRecoveryTest {
         assertTrue(recoveryActions(state(token.copy(checkpoint = checkpoint.copy(canContinue = true,
             nextIdentity = identity.copy(unattended = true))))).isEmpty())
     }
+    @Test fun changedSettingsHideObsoleteSummaryButNeverHideUncertainExecutionReconciliation() {
+        val continuation = token.copy(checkpoint = checkpoint.copy(kind = "CONTINUATION", canContinue = true,
+            nextIdentity = identity.copy(runId = "next")))
+        assertTrue(recoveryActions(state(continuation).copy(checkpointSettingsChanged = true)).isEmpty())
+        assertEquals(setOf(ChatRecoveryAction.RETRY), recoveryActions(state(continuation.copy(
+            reconciliation = RetryReconciliation("receipt", "session", "uncertain")))
+            .copy(checkpointSettingsChanged = true)))
+    }
 }

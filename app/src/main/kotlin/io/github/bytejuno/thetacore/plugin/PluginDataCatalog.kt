@@ -185,17 +185,21 @@ internal class PluginDataCatalog(
     /** Validates an active data selection once and returns copies of entries matching [predicate] in path order. */
     fun readEntries(
         selection: SelectedPluginData,
+        allowRetainedVersion: Boolean = false,
         predicate: (String) -> Boolean,
     ): Map<String, ByteArray> {
         val current = states.read(selection.manifest.id)
             ?: throw PluginPackageException("Data page revoked", PluginFailureReason.DATA_PAGE_REVOKED)
         dataRequire(
-            current == selection.state && current.enabled && !current.pendingDelete,
+            (allowRetainedVersion || current == selection.state) && current.enabled && !current.pendingDelete &&
+                selection.state.enabled && !selection.state.pendingDelete,
             "Data page revoked",
             PluginFailureReason.DATA_PAGE_REVOKED,
         )
         val rawEntries = linkedMapOf<String, ByteArray>()
-        val validatedManifest = validateSelection(selection.manifest.id, current) { name, bytes ->
+        // A run may read its retained archive, never the replacement's bytes. Lifecycle is current;
+        // version, digest and manifest are from the run snapshot. Missing/pruned archives fail closed.
+        val validatedManifest = validateSelection(selection.manifest.id, selection.state) { name, bytes ->
             if (predicate(name)) {
                 rawEntries[name] = bytes.copyOf()
             }

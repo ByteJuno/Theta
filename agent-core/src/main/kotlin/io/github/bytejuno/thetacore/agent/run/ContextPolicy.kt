@@ -115,6 +115,9 @@ data class CheckpointInfo(val id: String, val previousRunId: String, val nextIde
     val goal: String = "", val catalog: List<FrozenDefinition> = emptyList(), val pauseClass: String = "REVIEW",
     val kind: String = "PAUSED")
 
+/** A host can offer new user input without treating the obsolete summary as valid. */
+class CheckpointSettingsChangedException : IllegalArgumentException("Stale checkpoint or changed run settings")
+
 internal fun ContextCheckpoint.info() = CheckpointInfo(id, runId,
     nextRunId?.let { identity() }, steps, retries, reason, kind == "CONTINUATION" && !serverUnresolved,
     goal, catalog.toList(), pauseClass, kind)

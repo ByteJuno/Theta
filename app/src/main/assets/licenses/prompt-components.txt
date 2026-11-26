@@ -1,0 +1,19 @@
+Prompt data components
+
+SnakeYAML 2.4 (org.yaml:snakeyaml)
+Copyright (c) 2008, SnakeYAML
+https://bitbucket.org/snakeyaml/snakeyaml
+Licensed under the Apache License, Version 2.0 (Apache-2.0.txt).
+
+AndroidX DataStore Core and Okio Storage 1.1.7
+Copyright 2020-2024 The Android Open Source Project
+https://developer.android.com/jetpack/androidx/releases/datastore
+https://cs.android.com/androidx/platform/frameworks/support
+Licensed under the Apache License, Version 2.0 (Apache-2.0.txt).
+
+Okio (storage backend; version resolved by the shared dependency graph)
+Copyright 2013 Square, Inc.
+https://github.com/square/okio
+Licensed under the Apache License, Version 2.0 (Apache-2.0.txt).
+
+Libraries are used without source modifications.

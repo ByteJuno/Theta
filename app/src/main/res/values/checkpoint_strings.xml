@@ -2,6 +2,7 @@
     <string name="checkpoint_title">Paused task recovery</string>
     <string name="checkpoint_readmit">Retry with a larger window</string>
     <string name="checkpoint_continue_summary">Continue from saved summary</string>
+    <string name="checkpoint_settings_changed">Skills, persona or model settings have changed. The saved summary cannot be reused. Review the original conversation, then send a message below to continue the task with the current settings and original history. Tool safety checks and cumulative task limits still apply; a new summary may be needed.</string>
     <string name="checkpoint_summary_warning">Summaries may lose details. Check the original conversation and tool results before continuing. Existing approvals and cumulative task limits still apply.</string>
     <string name="checkpoint_readmit_warning">Use only a context window verified for this model. This path does not generate a summary or change the model. It preserves the original messages, approvals and cumulative limits; the request can still be rejected or paused.</string>
     <string name="checkpoint_not_attended">Confirmation is unavailable for an unattended task or when its original identity cannot be verified. No request will be retried automatically.</string>

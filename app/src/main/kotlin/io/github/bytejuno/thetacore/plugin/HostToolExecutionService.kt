@@ -24,7 +24,9 @@ internal class HostToolExecutionService(
     private val afterRuntimeApprovalStart: suspend () -> Unit = {},
     private val invocationClock: InvocationClock = budget,
     val sessionStore: AndroidAgentStore? = null,
+    private val runSkills: RunSkillReader? = null,
 ) {
+    fun bindSkills(runId: String, data: PluginPromptData) { runSkills?.bind(runId, data) }
     private val gate get() = catalog.gate
     private val control = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val active = mutableMapOf<String, PluginInvocation>()
@@ -48,7 +50,7 @@ internal class HostToolExecutionService(
      * still need the frozen reader until the last observer records actual exit. */
     fun finishChatRun(runId: String) = gate.withGate {
         if (active.keys.any { ledger.get(it)?.input?.runId == runId }) retiringRuns.add(runId)
-        else { retiringRuns.remove(runId); catalog.release(runId) }
+        else { retiringRuns.remove(runId); catalog.release(runId); runSkills?.release(runId) }
         Unit
     }
     private val observations = mutableMapOf<String, Deferred<Unit>>()

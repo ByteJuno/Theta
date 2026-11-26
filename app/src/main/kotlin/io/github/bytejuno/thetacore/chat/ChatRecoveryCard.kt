@@ -39,6 +39,8 @@ internal fun ChatRecoveryCard(state: ChatState,
             if (token == null || token.identity.unattended) {
                 Text(strings.get(R.string.checkpoint_not_attended))
             } else {
+                if (state.checkpointSettingsChanged)
+                    Text(strings.get(R.string.checkpoint_settings_changed))
                 if (ChatRecoveryAction.RETRY in actions) Text(strings.get(R.string.chat_retry_warning))
                 if (ChatRecoveryAction.SUMMARIZE in actions || ChatRecoveryAction.CONTINUE_SUMMARY in actions)
                     Text(strings.get(R.string.checkpoint_summary_warning))
