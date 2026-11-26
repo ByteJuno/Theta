@@ -1,6 +1,7 @@
 package io.github.bytejuno.thetacore.plugin
 
 import io.github.bytejuno.thetacore.agent.ledger.*
+import io.github.bytejuno.thetacore.agent.ledger.BlobRef
 import io.github.bytejuno.thetacore.agent.protocol.*
 import io.github.bytejuno.thetacore.sdk.*
 import kotlinx.coroutines.*

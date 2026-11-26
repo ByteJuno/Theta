@@ -139,6 +139,7 @@ internal object ProviderSettingsCodec {
             put("replayReasoning", c.replayReasoning)
             put("streamUsage", c.streamUsage)
             put("explicitCacheControl", c.explicitCacheControl)
+            put("supportsImageInput", c.supportsImageInput)
             put("schema", c.schemaProfile.name)
         }
     }
@@ -211,6 +212,7 @@ internal object ProviderSettingsCodec {
             replayReasoning = c.getValue("replayReasoning").jsonPrimitive.boolean,
             streamUsage = c.getValue("streamUsage").jsonPrimitive.boolean,
             explicitCacheControl = c["explicitCacheControl"]?.jsonPrimitive?.boolean ?: false,
+            supportsImageInput = c["supportsImageInput"]?.jsonPrimitive?.boolean ?: true,
             schemaProfile = SchemaProfile.valueOf(c.getValue("schema").jsonPrimitive.content),
         )
         return OpenAiProviderSettings(

@@ -1,7 +1,11 @@
 package io.github.bytejuno.thetacore.chat
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -13,6 +17,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.text.style.TextOverflow
@@ -54,10 +59,13 @@ internal fun reconcileDraftOnAccepted(
 @Composable
 internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
     val strings = uiStrings()
+    val context = LocalContext.current
     val owner = remember(host) { host.chat }
     val launchTask = rememberChatTaskLauncher(host)
     val state by owner.state.collectAsState()
     var input by rememberSaveable(state.sessionId) { mutableStateOf("") }
+    var pendingImages by remember(state.sessionId) { mutableStateOf<List<PendingUserImage>>(emptyList()) }
+    var attachmentError by remember(state.sessionId) { mutableStateOf<Int?>(null) }
     var clearedAtAccepted by rememberSaveable { mutableLongStateOf(state.acceptedMessages) }
     var settings by rememberSaveable { mutableStateOf(false) }
     var stream by remember { mutableStateOf("") }
@@ -87,11 +95,69 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
     LaunchedEffect(host.approvalSettings) {
         withContext(Dispatchers.IO) { runCatching { host.approvalSettings.ensureLoaded() } }
     }
+    val photoPickerLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickMultipleVisualMedia(MAX_USER_IMAGES_PER_MESSAGE),
+    ) { uris ->
+        if (uris.isEmpty()) return@rememberLauncherForActivityResult
+        attachmentError = null
+        val remaining = MAX_USER_IMAGES_PER_MESSAGE - pendingImages.size
+        if (remaining <= 0) {
+            attachmentError = R.string.chat_image_limit
+            return@rememberLauncherForActivityResult
+        }
+        val selected = uris.take(remaining)
+        if (uris.size > remaining) attachmentError = R.string.chat_image_limit
+        uiScope.launch {
+            val loaded = withContext(Dispatchers.IO) {
+                val added = mutableListOf<PendingUserImage>()
+                var invalid = false
+                for (uri in selected) {
+                    try {
+                        val bytes = context.contentResolver.openInputStream(uri)?.use { readBoundedImageStream(it) }
+                            ?: throw IllegalArgumentException()
+                        val valid = validateAndDecodeAndroidUserImage(bytes)
+                        added += PendingUserImage(mimeType = valid.mimeType, bytes = valid.bytes)
+                    } catch (_: Exception) {
+                        invalid = true
+                    }
+                }
+                added to invalid
+            }
+            if (loaded.first.isNotEmpty()) {
+                pendingImages = (pendingImages + loaded.first).take(MAX_USER_IMAGES_PER_MESSAGE)
+            }
+            if (loaded.second) attachmentError = R.string.chat_image_invalid
+        }
+    }
+    val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicturePreview()) { bitmap ->
+        if (bitmap == null) return@rememberLauncherForActivityResult
+        attachmentError = null
+        if (pendingImages.size >= MAX_USER_IMAGES_PER_MESSAGE) {
+            attachmentError = R.string.chat_image_limit
+            return@rememberLauncherForActivityResult
+        }
+        uiScope.launch {
+            val captured = withContext(Dispatchers.IO) {
+                runCatching { encodeCameraBitmapToPng(bitmap) }.getOrNull()
+            }
+            if (captured != null) {
+                pendingImages = (pendingImages + PendingUserImage(mimeType = captured.mimeType, bytes = captured.bytes))
+                    .take(MAX_USER_IMAGES_PER_MESSAGE)
+            } else {
+                attachmentError = R.string.chat_image_invalid
+            }
+        }
+    }
     LaunchedEffect(owner) { owner.open() }
     LaunchedEffect(state.acceptedMessages) {
+        val acceptedAdvanced = state.acceptedMessages > clearedAtAccepted
         val (nextInput, nextCleared) = reconcileDraftOnAccepted(input, state.acceptedMessages, clearedAtAccepted)
         input = nextInput
         clearedAtAccepted = nextCleared
+        if (acceptedAdvanced) {
+            pendingImages = emptyList()
+            attachmentError = null
+        }
     }
     Column(Modifier.fillMaxSize().imePadding().padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(
@@ -170,6 +236,7 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
                         style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
                     message.parts.forEach { part -> when (part) {
                         is ContentPart.Text -> SelectionContainer { Text(part.text) }
+                        is ContentPart.Media -> UserChatImage(part.blob, state.sessionId, owner)
                         is ContentPart.Reasoning -> part.summary?.let { SelectionContainer { Text(it, style = MaterialTheme.typography.bodySmall) } }
                         is ContentPart.ToolCall -> ToolCard(
                             call = part,
@@ -224,11 +291,61 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
             TextButton(onClick = { launchTask { owner.continueSavedStep() } }) { Text(strings.get(R.string.chat_finish_saved)) }
         }
         if (state.active || state.pending) TextButton(onClick = { owner.stop() }) { Text(strings.get(R.string.chat_stop)) }
+        attachmentError?.let { err ->
+            val errText = if (err == R.string.chat_image_limit) strings.get(err, MAX_USER_IMAGES_PER_MESSAGE) else strings.get(err)
+            Text(errText, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+        }
+        if (pendingImages.isNotEmpty()) {
+            Text(
+                strings.get(R.string.chat_image_pending_count, pendingImages.size, MAX_USER_IMAGES_PER_MESSAGE),
+                style = MaterialTheme.typography.labelMedium,
+            )
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                items(pendingImages, key = { it.localId }) { item ->
+                    PendingImagePreview(
+                        item = item,
+                        enabled = !state.loading && !state.active && !state.pending,
+                        onRemove = {
+                            pendingImages = pendingImages.filterNot { it.localId == item.localId }
+                            attachmentError = null
+                        },
+                    )
+                }
+            }
+        }
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(
+                enabled = !state.loading && !state.active && !state.pending && pendingImages.size < MAX_USER_IMAGES_PER_MESSAGE,
+                onClick = {
+                    attachmentError = null
+                    photoPickerLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                },
+            ) {
+                Text(strings.get(R.string.chat_image_add_photo))
+            }
+            OutlinedButton(
+                enabled = !state.loading && !state.active && !state.pending && pendingImages.size < MAX_USER_IMAGES_PER_MESSAGE,
+                onClick = {
+                    attachmentError = null
+                    cameraLauncher.launch(null)
+                },
+            ) {
+                Text(strings.get(R.string.chat_image_take_photo))
+            }
+        }
         OutlinedTextField(value = input, onValueChange = { if (it.length <= 32_000) input = it },
             label = { Text(strings.get(R.string.chat_message)) }, modifier = Modifier.fillMaxWidth(),
             minLines = 1, maxLines = 5, enabled = !state.loading && !state.active && !state.pending)
-        Button(onClick = { val text = input; launchTask { owner.send(text) } }, enabled = input.isNotBlank() && !state.loading && !state.active && !state.pending,
-            modifier = Modifier.fillMaxWidth()) { Text(strings.get(R.string.chat_send)) }
+        Button(
+            onClick = {
+                val text = input
+                val images = pendingImages
+                attachmentError = null
+                launchTask { owner.send(text, images) }
+            },
+            enabled = (input.isNotBlank() || pendingImages.isNotEmpty()) && !state.loading && !state.active && !state.pending,
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text(strings.get(R.string.chat_send)) }
     }
     if (settings) ProviderScreen(host) { settings = false }
     if (profilePicker) AlertDialog(

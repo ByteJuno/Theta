@@ -49,6 +49,7 @@ internal fun validateHistorySequence(messages: List<Message>, checkDuplicates: B
             require(m.role != Role.TOOL && m.parts.none { it is ContentPart.ToolResult })
             val calls = m.parts.filterIsInstance<ContentPart.ToolCall>()
             require(calls.isEmpty() || m.role == Role.ASSISTANT)
+            require(m.parts.none { it is ContentPart.Media } || m.role == Role.USER) { "Media parts are only valid on USER messages" }
             pending = calls.map { it.binding.callId }
             require(!checkDuplicates || pending.all { seen.add(it) }) { "Duplicate call identity" }
         }
@@ -61,6 +62,7 @@ internal fun freezeMessages(messages: List<Message>): List<Message> = frozen(mes
         val replay = p.replay?.let { replayData(it.protocol, it.model, it.payload) }
         when (p) {
             is ContentPart.Text -> textPart(p.text, replay)
+            is ContentPart.Media -> mediaPart(p.kind, blobRef(p.blob.id, p.blob.mimeType, p.blob.sizeBytes), replay)
             is ContentPart.Reasoning -> reasoningPart(p.summary, replay)
             is ContentPart.ToolCall -> with(p.binding) {
                 toolCallPart(callBinding(provider, requestId, responseId, index, wireId, callId), p.name, p.argsJson, replay)

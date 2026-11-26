@@ -141,6 +141,7 @@ internal data class ProviderSettingsForm(
     val streamUsage: Boolean = true,
     val reasoningField: String = "",
     val replayReasoning: Boolean = false,
+    val supportsImageInput: Boolean = true,
     val schemaProfile: SchemaProfile = SchemaProfile.FULL,
     val profileId: String? = null,
     val profileName: String = "",
@@ -176,6 +177,7 @@ internal data class ProviderSettingsForm(
             streamUsage = streamUsage,
             schemaProfile = schemaProfile,
             explicitCacheControl = explicitCacheControl,
+            supportsImageInput = supportsImageInput,
         )
         return OpenAiProviderSettings(
             providerId = providerId,
@@ -197,6 +199,7 @@ internal data class ProviderSettingsForm(
             streamUsage = settings.compat.streamUsage,
             reasoningField = settings.compat.reasoningField.orEmpty(),
             replayReasoning = settings.compat.replayReasoning,
+            supportsImageInput = settings.compat.supportsImageInput,
             schemaProfile = settings.compat.schemaProfile,
             systemPrompt = settings.systemPrompt.orEmpty(),
         )

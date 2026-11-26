@@ -11,6 +11,7 @@ import androidx.compose.ui.unit.dp
 import io.github.bytejuno.thetacore.R
 import io.github.bytejuno.thetacore.uiStrings
 import io.github.bytejuno.thetacore.agent.ledger.InvocationRecord
+import io.github.bytejuno.thetacore.agent.protocol.BlobRef
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -39,6 +40,61 @@ internal fun ChatImage(record: InvocationRecord, owner: ChatSessionOwner) {
         Image(image.asImageBitmap(), contentDescription = strings.get(R.string.chat_image_description),
             modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp).aspectRatio(image.width.toFloat() / image.height),
             contentScale = ContentScale.Fit)
+    }
+}
+
+@Composable
+internal fun UserChatImage(blob: BlobRef, sessionId: String?, owner: ChatSessionOwner) {
+    val strings = uiStrings()
+    var bitmap by remember(sessionId, blob.id) { mutableStateOf<android.graphics.Bitmap?>(null) }
+    var loading by remember(sessionId, blob.id) { mutableStateOf(true) }
+    var failed by remember(sessionId, blob.id) { mutableStateOf(false) }
+    LaunchedEffect(sessionId, blob.id) {
+        loading = true
+        failed = false
+        try {
+            val decoded = if (sessionId == null) null else withContext(Dispatchers.IO) {
+                owner.userImage(sessionId, blob.id)?.let(::decodeImage)
+            }
+            bitmap = decoded
+            failed = decoded == null
+        } catch (error: CancellationException) { throw error }
+        catch (_: Exception) { failed = true }
+        finally { loading = false }
+    }
+    if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
+    if (failed) Text(strings.get(R.string.chat_image_unavailable), color = MaterialTheme.colorScheme.error)
+    bitmap?.let { image ->
+        Image(
+            image.asImageBitmap(),
+            contentDescription = strings.get(R.string.chat_image_user_description),
+            modifier = Modifier.fillMaxWidth().heightIn(max = 320.dp).aspectRatio(image.width.toFloat() / image.height),
+            contentScale = ContentScale.Fit,
+        )
+    }
+}
+
+@Composable
+internal fun PendingImagePreview(item: PendingUserImage, enabled: Boolean, onRemove: () -> Unit) {
+    val strings = uiStrings()
+    var bitmap by remember(item.localId) { mutableStateOf<android.graphics.Bitmap?>(null) }
+    LaunchedEffect(item.localId) {
+        bitmap = withContext(Dispatchers.IO) { runCatching { decodeImage(item.bytes) }.getOrNull() }
+    }
+    OutlinedCard(Modifier.width(96.dp)) {
+        Column(Modifier.padding(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            bitmap?.let { image ->
+                Image(
+                    image.asImageBitmap(),
+                    contentDescription = strings.get(R.string.chat_image_user_description),
+                    modifier = Modifier.fillMaxWidth().height(72.dp),
+                    contentScale = ContentScale.Crop,
+                )
+            }
+            TextButton(onClick = onRemove, enabled = enabled, modifier = Modifier.fillMaxWidth()) {
+                Text(strings.get(R.string.chat_image_remove))
+            }
+        }
     }
 }
 
