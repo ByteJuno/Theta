@@ -14,6 +14,8 @@ interface ModelProvider {
     fun canReplay(data: ReplayData, targetModel: String): Boolean = false
     fun canReplayMessage(message: Message, targetModel: String): Boolean =
         message.parts.all { part -> part.replay?.let { canReplay(it, targetModel) } != false }
+    /** True when this provider/model permits sending user media of [kind]. Default true per PROTOCOL 2.2. */
+    fun supportsMediaInput(kind: MediaKind, model: String): Boolean = true
     fun chat(request: ChatRequest, auth: Credentials): Flow<ModelEvent>
 }
 
@@ -22,6 +24,7 @@ interface ModelProvider {
 fun interface Credentials { suspend fun accessToken(): String }
 enum class ModelExecutionMode { GENERATION_ONLY, MAY_EXECUTE_SERVER_TOOLS }
 enum class Role { USER, ASSISTANT, TOOL }
+enum class MediaKind { IMAGE, AUDIO, DOCUMENT, VIDEO }
 enum class FinishReason { STOP, TOOL_CALLS, LENGTH, CONTEXT_EXCEEDED, PAUSED, REFUSAL, CONTENT_FILTER, OTHER }
 enum class ModelErrorCode {
     AUTH, RATE_LIMIT, QUOTA, OVERLOADED, SERVER, NETWORK, TIMEOUT, CONTEXT_TOO_LONG,
@@ -74,18 +77,47 @@ private data class BindingValue(override val provider: String, override val requ
     override val responseId: String?, override val index: Int, override val wireId: String?,
     override val callId: String) : CallBinding
 
+interface BlobRef {
+    val id: String
+    val mimeType: String
+    val sizeBytes: Long
+}
+private val BLOB_ID_REGEX = Regex("[A-Za-z0-9._-]{1,128}")
+fun blobRef(id: String, mimeType: String, sizeBytes: Long): BlobRef {
+    require(BLOB_ID_REGEX.matches(id)) { "Invalid media blob identifier" }
+    require(mimeType.isNotBlank() && mimeType.length <= 128 && mimeType.none { it < ' ' || it.isISOControl() }) {
+        "Invalid media MIME type"
+    }
+    require(sizeBytes > 0L) { "Media size must be positive" }
+    return MediaBlobValue(id, mimeType, sizeBytes)
+}
+private data class MediaBlobValue(
+    override val id: String,
+    override val mimeType: String,
+    override val sizeBytes: Long,
+) : BlobRef
+
+/** Read-only session-scoped media reader used on demand when encoding outbound multimodal requests. */
+fun interface MediaContentReader {
+    fun read(blob: BlobRef): ByteArray?
+}
+
 sealed interface ContentPart {
     val replay: ReplayData?
     interface Text : ContentPart { val text: String }
+    interface Media : ContentPart { val kind: MediaKind; val blob: BlobRef }
     interface Reasoning : ContentPart { val summary: String? }
     interface ToolCall : ContentPart { val binding: CallBinding; val name: String; val argsJson: String }
     interface ToolResult : ContentPart { val callId: String; val text: String; val isError: Boolean }
 }
 fun textPart(text: String, replay: ReplayData? = null): ContentPart.Text = TextValue(text, replay)
+fun mediaPart(kind: MediaKind, blob: BlobRef, replay: ReplayData? = null): ContentPart.Media =
+    MediaValue(kind, blobRef(blob.id, blob.mimeType, blob.sizeBytes), replay)
 fun reasoningPart(summary: String?, replay: ReplayData?): ContentPart.Reasoning = ReasoningValue(summary, replay)
 fun toolCallPart(binding: CallBinding, name: String, argsJson: String, replay: ReplayData? = null): ContentPart.ToolCall = CallValue(binding, name, argsJson, replay)
 fun toolResultPart(callId: String, text: String, isError: Boolean = false): ContentPart.ToolResult = ResultValue(callId, text, isError)
 private data class TextValue(override val text: String, override val replay: ReplayData?) : ContentPart.Text
+private data class MediaValue(override val kind: MediaKind, override val blob: BlobRef, override val replay: ReplayData?) : ContentPart.Media
 private data class ReasoningValue(override val summary: String?, override val replay: ReplayData?) : ContentPart.Reasoning
 private data class CallValue(override val binding: CallBinding, override val name: String,
     override val argsJson: String, override val replay: ReplayData? = null) : ContentPart.ToolCall

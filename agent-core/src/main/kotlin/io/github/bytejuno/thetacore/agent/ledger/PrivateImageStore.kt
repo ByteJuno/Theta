@@ -81,8 +81,49 @@ class PrivateImageStore(
         check(offset == bytes.size && digest(bytes) == metadata.second) { "Private image is corrupt" }
         bytes
     }
+
+    /** Atomically stores a session-scoped user-uploaded image using the same chunked table so session deletion cleans it up. */
+    fun putUserImage(sessionId: String, imageId: String, bytes: ByteArray): Unit = database.access {
+        require(USER_IMAGE_ID_REGEX.matches(imageId)) { "Invalid user image identifier" }
+        val storageKey = "$USER_IMAGE_PREFIX$imageId"
+        checkIdentity(sessionId, storageKey)
+        require(bytes.size in 1..ImageLimits.BYTES) { "User image size out of bounds" }
+        val hash = digest(bytes)
+        database.transaction {
+            connection.prepare("SELECT 1 FROM private_image_attempts WHERE session_id=? AND call_id=?").use {
+                it.bindText(1, sessionId); it.bindText(2, storageKey)
+                check(!it.step()) { "User image already exists" }
+            }
+            connection.prepare("INSERT INTO private_image_attempts(session_id,call_id,size,hash) VALUES(?,?,?,?)").use {
+                it.bindText(1, sessionId); it.bindText(2, storageKey)
+                it.bindLong(3, bytes.size.toLong()); it.bindText(4, hash)
+                it.step()
+            }
+            connection.prepare("INSERT INTO private_image_chunks(session_id,call_id,ordinal,bytes) VALUES(?,?,?,?)").use { statement ->
+                var offset = 0
+                while (offset < bytes.size) {
+                    val end = minOf(bytes.size, offset + CHUNK_BYTES)
+                    statement.bindText(1, sessionId); statement.bindText(2, storageKey)
+                    statement.bindLong(3, (offset / CHUNK_BYTES).toLong())
+                    statement.bindBlob(4, bytes.copyOfRange(offset, end)); statement.step(); statement.reset()
+                    fault(SqliteWriteStage.AFTER_CONTENT_CHUNK)
+                    offset = end
+                }
+            }
+            fault(SqliteWriteStage.BEFORE_COMMIT)
+        }
+        fault(SqliteWriteStage.AFTER_COMMIT)
+    }
+
+    fun readUserImage(sessionId: String, imageId: String): ByteArray? {
+        if (!USER_IMAGE_ID_REGEX.matches(imageId)) return null
+        return read(sessionId, "$USER_IMAGE_PREFIX$imageId")
+    }
+
     companion object {
         private const val CHUNK_BYTES = 64 * 1024
+        private const val USER_IMAGE_PREFIX = "user-image:"
+        private val USER_IMAGE_ID_REGEX = Regex("[A-Za-z0-9._-]{1,128}")
         private fun digest(bytes: ByteArray) = MessageDigest.getInstance("SHA-256")
             .digest(bytes).joinToString("") { "%02x".format(it) }
     }

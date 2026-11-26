@@ -1,7 +1,10 @@
 package io.github.bytejuno.thetacore.agent.run
 
 import io.github.bytejuno.thetacore.agent.protocol.*
+import io.github.bytejuno.thetacore.agent.protocol.MediaKind as ProtocolMediaKind
 import io.github.bytejuno.thetacore.agent.ledger.*
+import io.github.bytejuno.thetacore.agent.ledger.BlobRef as LedgerBlobRef
+import io.github.bytejuno.thetacore.agent.provider.openai.ImageLimits
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -83,9 +86,17 @@ internal data class StoredReplay(val protocol: String, val model: String, val pa
 internal data class StoredBinding(val provider: String, val requestId: String, val responseId: String?,
     val index: Int, val wireId: String?, val callId: String)
 @Serializable
+internal data class StoredMediaBlob(val id: String, val mimeType: String, val sizeBytes: Long)
+@Serializable
 internal data class StoredPart(val kind: String, val text: String? = null, val name: String? = null,
     val args: String? = null, val binding: StoredBinding? = null, val callId: String? = null,
-    val error: Boolean? = null, val replay: StoredReplay? = null)
+    val error: Boolean? = null, val replay: StoredReplay? = null,
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val mediaKind: ProtocolMediaKind? = null,
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val mediaBlob: StoredMediaBlob? = null)
 @Serializable
 internal data class StoredMessage(val role: Role, val parts: List<StoredPart>)
 @Serializable
@@ -171,8 +182,16 @@ internal object HistoryCodec {
                 "stepId" to v.stepId, "assistant" to v.assistant, "resultReader" to v.resultReader)
             is CallLocation -> fields("callId" to v.callId, "revision" to v.revision, "batchHash" to v.batchHash)
             is StoredMessage -> fields("role" to v.role, "parts" to v.parts)
-            is StoredPart -> fields("kind" to v.kind, "text" to v.text, "name" to v.name, "args" to v.args,
-                "binding" to v.binding, "callId" to v.callId, "error" to v.error, "replay" to v.replay)
+            is StoredPart -> {
+                val base = mutableListOf<Pair<String, Any?>>(
+                    "kind" to v.kind, "text" to v.text, "name" to v.name, "args" to v.args,
+                    "binding" to v.binding, "callId" to v.callId, "error" to v.error, "replay" to v.replay,
+                )
+                if (v.mediaKind != null) base += "mediaKind" to v.mediaKind
+                if (v.mediaBlob != null) base += "mediaBlob" to v.mediaBlob
+                fields(*base.toTypedArray())
+            }
+            is StoredMediaBlob -> fields("id" to v.id, "mimeType" to v.mimeType, "sizeBytes" to v.sizeBytes)
             is StoredBinding -> fields("provider" to v.provider, "requestId" to v.requestId, "responseId" to v.responseId,
                 "index" to v.index, "wireId" to v.wireId, "callId" to v.callId)
             is StoredReplay -> fields("protocol" to v.protocol, "model" to v.model, "payload" to v.payload)
@@ -224,7 +243,7 @@ internal object HistoryCodec {
             is ExitEvidence -> fields("attemptId" to v.attemptId, "text" to v.text, "outcome" to v.outcome)
             is Isolation -> fields("reason" to v.reason, "resource" to v.resource, "resolution" to v.resolution)
             is StoredToolOutput -> fields("raw" to v.raw, "media" to v.media, "warning" to v.warning)
-            is BlobRef -> fields("id" to v.id, "mimeType" to v.mimeType, "sizeBytes" to v.sizeBytes,
+            is LedgerBlobRef -> fields("id" to v.id, "mimeType" to v.mimeType, "sizeBytes" to v.sizeBytes,
                 "contentHash" to v.contentHash, "chunksHash" to v.chunksHash)
             else -> error("Unsupported history value")
         } }
@@ -234,6 +253,12 @@ internal object HistoryCodec {
         val replay = p.replay?.let { StoredReplay(it.protocol, it.model, it.payload) }
         when (p) {
             is ContentPart.Text -> StoredPart("text", text = p.text, replay = replay)
+            is ContentPart.Media -> StoredPart(
+                "media",
+                replay = replay,
+                mediaKind = p.kind,
+                mediaBlob = StoredMediaBlob(p.blob.id, p.blob.mimeType, p.blob.sizeBytes),
+            )
             is ContentPart.Reasoning -> StoredPart("reasoning", text = p.summary, replay = replay)
             is ContentPart.ToolCall -> StoredPart("call", name = p.name, args = p.argsJson, replay = replay,
                 binding = with(p.binding) { StoredBinding(provider, requestId, responseId, index, wireId, callId) })
@@ -271,6 +296,13 @@ internal object HistoryCodec {
         val replay = p.replay?.let { replayData(it.protocol, it.model, it.payload) }
         val part = when (p.kind) {
             "text" -> textPart(requireNotNull(p.text), replay)
+            "media" -> {
+                val mediaKind = requireNotNull(p.mediaKind)
+                val blob = requireNotNull(p.mediaBlob)
+                require(mediaKind == ProtocolMediaKind.IMAGE) { "Unsupported history media kind: $mediaKind" }
+                require(blob.sizeBytes in 1L..ImageLimits.BYTES.toLong()) { "Invalid history media size" }
+                mediaPart(mediaKind, blobRef(blob.id, blob.mimeType, blob.sizeBytes), replay)
+            }
             "reasoning" -> reasoningPart(p.text, replay)
             "call" -> with(requireNotNull(p.binding)) {
                 toolCallPart(callBinding(provider, requestId, responseId, index, wireId, callId),

@@ -451,6 +451,16 @@
     <string name="chat_provider_no_auth_notice">请求不携带 Authorization 头。关闭后可填写 API 密钥。</string>
     <string name="chat_system_prompt">自定义系统提示词（可选）</string>
     <string name="chat_system_prompt_notice">最多 %1$d 个字符。作为稳定系统消息前缀注入新运行，不混入时间等易变内容。</string>
+    <string name="chat_compat_image_input">支持图片输入</string>
+    <string name="chat_compat_image_input_notice">默认开启。若当前模型不支持视觉输入，关闭后会在发送前直接本地拦截附图消息。</string>
+    <string name="chat_image_input_disabled">当前模型配置已关闭图片输入。请移除待发图片，或在模型配置高级选项中开启“支持图片输入”。</string>
+    <string name="chat_image_add_photo">相册选图</string>
+    <string name="chat_image_take_photo">拍照</string>
+    <string name="chat_image_remove">移除</string>
+    <string name="chat_image_invalid">所选图片格式不受支持、已损坏或超出安全限制（仅支持 JPEG/PNG/WEBP，单张不超过 8 MiB，不超过 4096 像素 / 400 万像素）。</string>
+    <string name="chat_image_limit">单条消息最多附加 %1$d 张图片。</string>
+    <string name="chat_image_user_description">用户发送的图片</string>
+    <string name="chat_image_pending_count">已选图片（%1$d/%2$d）</string>
     <string name="chat_provider_templates_title">已启用数据插件的服务商模板</string>
     <string name="chat_provider_template_source">来源数据包：%1$s</string>
     <string name="chat_provider_template_host">目标主机：%1$s</string>

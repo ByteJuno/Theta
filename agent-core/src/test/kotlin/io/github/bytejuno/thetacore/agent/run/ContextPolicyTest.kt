@@ -67,6 +67,7 @@ class ContextPolicyTest {
         r.tools.sumOf { it.name.length + it.description.length + it.inputSchema.toString().length } +
         r.messages.sumOf { m -> m.parts.sumOf { p -> when (p) {
             is ContentPart.Text -> p.text.length.toLong()
+            is ContentPart.Media -> 4096L + (p.blob.sizeBytes / 128L)
             is ContentPart.Reasoning -> (p.summary?.length ?: 0).toLong() + (p.replay?.payload?.length ?: 0)
             is ContentPart.ToolCall -> p.argsJson.length.toLong() + p.name.length
             is ContentPart.ToolResult -> p.text.length.toLong()

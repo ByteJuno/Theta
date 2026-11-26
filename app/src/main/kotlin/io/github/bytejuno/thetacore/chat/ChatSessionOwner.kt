@@ -3,6 +3,7 @@ package io.github.bytejuno.thetacore.chat
 import io.github.bytejuno.thetacore.R
 import io.github.bytejuno.thetacore.agent.ledger.*
 import io.github.bytejuno.thetacore.agent.protocol.*
+import io.github.bytejuno.thetacore.agent.protocol.MediaKind as ProtocolMediaKind
 import io.github.bytejuno.thetacore.agent.provider.openai.OpenAiRunSnapshot
 import io.github.bytejuno.thetacore.agent.provider.openai.OpenAiChatCodec
 import io.github.bytejuno.thetacore.agent.run.*
@@ -55,6 +56,9 @@ internal data class ChatState(
 internal fun sharedTargetFactory(transport: ModelTransport): (OpenAiRunSnapshot) -> ModelTarget =
     { snapshot -> snapshot.target(transport) }
 
+internal fun sharedTargetWithMediaFactory(transport: ModelTransport): (OpenAiRunSnapshot, MediaContentReader) -> ModelTarget =
+    { snapshot, media -> snapshot.target(transport, media) }
+
 private fun defaultTargetForRun(): (OpenAiRunSnapshot) -> ModelTarget {
     val shared = lazy { OkHttpModelTransport() }
     return { snapshot -> snapshot.target(shared.value) }
@@ -71,6 +75,8 @@ internal class ChatSessionOwner(
     private val imageAttachments: ImageAttachments? = null,
     private val presence: ChatTaskPresence = ChatTaskPresence.None,
     private val promptSnapshot: suspend () -> ChatPromptSnapshot = { ChatPromptSnapshot() },
+    private val targetWithMediaForRun: ((OpenAiRunSnapshot, MediaContentReader) -> ModelTarget)? = null,
+    private val userImageValidator: (ByteArray) -> ValidatedUserImage = ::validateAndDecodeAndroidUserImage,
 ) {
     private val mutable = MutableStateFlow(ChatState())
     val state = mutable.asStateFlow()
@@ -137,6 +143,12 @@ internal class ChatSessionOwner(
             check(record?.input?.sessionId == sessionId && record.input.definition?.toolKey == IMAGE_TOOL_KEY)
             imageAttachments?.read(sessionId, callId)
                 ?: requireNotNull(tools!!.sessionStore).privateImages.read(sessionId, callId)
+        }
+    }
+    suspend fun userImage(sessionId: String, blobId: String): ByteArray? = withContext(Dispatchers.IO) {
+        gate.withLock {
+            check(sessionId == mutable.value.sessionId)
+            requireNotNull(tools!!.sessionStore).privateImages.readUserImage(sessionId, blobId)
         }
     }
     fun deleteCurrentSession() = launchOperation {
@@ -274,8 +286,9 @@ internal class ChatSessionOwner(
         require(!pending.identity.unattended)
         start(null, pending)
     }
-    fun send(text: String) = launchOperation {
-        check(active == null && text.isNotBlank() && text.length <= 32_000)
+    fun send(text: String, images: List<PendingUserImage> = emptyList()) = launchOperation {
+        check(active == null && (text.isNotBlank() || images.isNotEmpty()) && text.length <= 32_000)
+        require(images.size <= MAX_USER_IMAGES_PER_MESSAGE) { "Too many attached images" }
         val disk = requireNotNull(history)
         check(disk.pendingStep(tools!!.ledger) == null)
         val previousIdentity = disk.chatRecoveryIdentity()
@@ -283,13 +296,33 @@ internal class ChatSessionOwner(
         if (disk.retryReconciliation() != null || disk.checkpointInfo()?.kind in setOf("PAUSED", "CONTINUATION"))
             check(previousIdentity != null)
         val snapshot = configuration() // validate/decrypt before acknowledging a new message
+        if (images.isNotEmpty() && !snapshot.settings.compat.supportsImageInput) {
+            mutable.update { it.copy(loading = false, error = R.string.chat_image_input_disabled) }
+            return@launchOperation
+        }
+        val validatedImages = if (images.isEmpty()) emptyList() else try {
+            images.map { userImageValidator(it.bytes) }
+        } catch (_: Exception) {
+            mutable.update { it.copy(loading = false, error = R.string.chat_image_invalid) }
+            return@launchOperation
+        }
+        val store = requireNotNull(tools!!.sessionStore)
+        val mediaParts = validatedImages.map { valid ->
+            val blobId = UUID.randomUUID().toString()
+            store.privateImages.putUserImage(disk.sessionId, blobId, valid.bytes)
+            mediaPart(ProtocolMediaKind.IMAGE, blobRef(blobId, valid.mimeType, valid.bytes.size.toLong()))
+        }
+        val userParts = buildList<ContentPart> {
+            if (text.isNotBlank()) add(textPart(text))
+            addAll(mediaParts)
+        }
         val chain = disk.chatTaskChainId() // Capture checkpoint identity before the history revision advances.
-        if (disk.chatContext() == null) disk.saveChatContext(ChatTaskContext(chain, text,
+        if (disk.chatContext() == null) disk.saveChatContext(ChatTaskContext(chain, text.trim().ifEmpty { IMAGE_ONLY_GOAL_FALLBACK },
             Math.toIntExact(disk.page(null, 1).totalMessages), disk.chatSummaryWindow(), disk.chatContextWindow()))
         val identity = RunIdentity(chain, disk.sessionId, UUID.randomUUID().toString())
-        disk.appendChatInput(disk.revision(), message(Role.USER, textPart(text)), identity)
-        val entry = requireNotNull(tools!!.sessionStore).sessionPreview(disk.sessionId)
-        mutable.update { it.copy(acceptedMessages = it.acceptedMessages + 1,
+        disk.appendChatInput(disk.revision(), message(Role.USER, *userParts.toTypedArray()), identity)
+        val entry = store.sessionPreview(disk.sessionId)
+        mutable.update { it.copy(acceptedMessages = it.acceptedMessages + 1, error = null,
             sessions = it.sessions.map { saved -> if (saved.sessionId == entry.sessionId) entry else saved }) }
         start(snapshot, null, identity)
     }
@@ -583,11 +616,14 @@ internal class ChatSessionOwner(
             val request = if (window != null && configured.maxOutputTokens == null) object : ChatRequest by configured {
                 override val maxOutputTokens: Int = minOf(2048, (window / 4).toInt())
             } else configured
-            val target = targetForRun(config)
-            val codec = OpenAiChatCodec(config.settings.adapterConfig())
+            val mediaReader = MediaContentReader { blob ->
+                tools?.sessionStore?.privateImages?.readUserImage(disk.sessionId, blob.id)
+            }
+            val target = targetWithMediaForRun?.invoke(config, mediaReader) ?: targetForRun(config)
+            val codec = OpenAiChatCodec(config.settings.adapterConfig(), mediaReader)
             val requestBudget = ContextBudget({ candidate ->
                 try {
-                    256L + codec.encode(candidate).toByteArray(Charsets.UTF_8).size
+                    256L + codec.estimateRequestBytes(candidate)
                 } catch (_: IllegalArgumentException) {
                     null
                 }

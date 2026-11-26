@@ -26,6 +26,7 @@ internal fun diagnosticReason(reason: String): UiText {
         "Empty model response" -> R.string.chat_diagnostic_empty
         "Truncated response" -> R.string.chat_pause_truncated
         "Replay incompatible" -> R.string.chat_diagnostic_replay
+        "Image input disabled for active model" -> R.string.chat_image_input_disabled
         "Server execution state unknown", "Server execution requires reconciliation",
         "Admitted response uncertain; host reconciliation required",
         "Summary response uncertain; host reconciliation required" -> R.string.chat_pause_reconcile
