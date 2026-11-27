@@ -23,6 +23,9 @@
     <string name="providers_remove_model">移除模型</string>
     <string name="providers_delete">删除服务商及其模型</string>
     <string name="providers_schema">工具 Schema 兼容级别</string>
+    <string name="providers_schema_full">完整支持</string>
+    <string name="providers_schema_no_combinators">不使用顶层组合规则</string>
+    <string name="providers_schema_basic">基础支持</string>
     <string name="providers_chat_binding">默认对话模型</string>
     <string name="providers_image_binding">默认生图模型</string>
     <string name="providers_image_none">不配置生图模型</string>

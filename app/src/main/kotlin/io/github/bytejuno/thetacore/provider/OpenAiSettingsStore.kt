@@ -139,13 +139,7 @@ class OpenAiSettingsStore internal constructor(
     fun saveProvider(connection: ProviderConnection, models: List<EnabledModel>, apiKey: String,
         replaceUnreadable: Boolean = false, activateChat: Boolean = false): ProviderCatalog = synchronized(lock) {
         // Recovery consent applies only while the original record is still unreadable.
-        val existing = try { readOptionalConnections() }
-        catch (failure: ProviderSettingsException) {
-            if (!replaceUnreadable) throw failure
-            null
-        }
-        if (replaceUnreadable && existing != null)
-            throw ProviderSettingsException(ProviderSettingsException.Failure.RECOVERED)
+        val existing = readOptionalConnections(replaceUnreadable)
         val saved = existing?.providers?.firstOrNull { it.connection.providerId == connection.providerId }
         val key = when {
             connection.noAuth -> { require(apiKey.isEmpty()); "" }
@@ -168,7 +162,7 @@ class OpenAiSettingsStore internal constructor(
             bindings.activeChatModelRef.takeIf { valid(it, false) } ?: firstChat,
             bindings.activeImageModelRef.takeIf { valid(it, true) })
         val next = ConnectionsRecord(providers, bindings)
-        writeConnections(next, existing == null || apiKey.isNotEmpty())
+        writeConnections(next, replaceUnreadable || existing == null || apiKey.isNotEmpty())
         next.summary()
     }
 
@@ -181,6 +175,10 @@ class OpenAiSettingsStore internal constructor(
 
     fun selectChatModel(ref: ModelRef): ProviderCatalog = synchronized(lock) {
         val c = readConnections(); bindModels(c.bindings.copy(activeChatModelRef = ref))
+    }
+
+    fun selectImageModel(ref: ModelRef?): ProviderCatalog = synchronized(lock) {
+        val c = readConnections(); bindModels(c.bindings.copy(activeImageModelRef = ref))
     }
 
     fun renameProfile(profileId: String, displayName: String): ProviderProfileSummary = synchronized(lock) {
@@ -298,30 +296,43 @@ class OpenAiSettingsStore internal constructor(
         }
     }
 
-    private fun readOptionalConnections(): ConnectionsRecord? = try { readConnections() }
+    private fun readOptionalConnections(replaceUnreadable: Boolean = false): ConnectionsRecord? = try { readConnections(replaceUnreadable) }
         catch (failure: ProviderSettingsException) {
             if (failure.failure == ProviderSettingsException.Failure.NOT_CONFIGURED) null else throw failure
         }
 
-    private fun readConnections(): ConnectionsRecord {
-        if (absent() && legacyImages != null) {
-            val image = legacyImages.readRecord(ProviderSettingsCodec::decodeRecord)
-            return migrateImages(ConnectionsRecord(emptyList(), ModelBindings()), image)
-        }
-        var legacy = false
-        val initial = readRecord { bytes ->
-            if (ProviderConnectionsCodec.isV3(bytes)) ProviderConnectionsCodec.decode(bytes)
-            else { legacy = true; ProviderConnectionsCodec.migrate(ProviderSettingsCodec.decodeCatalog(bytes)) }
-        }
-        if (!legacy || legacyImages == null) return initial
-        val image = try { legacyImages.readRecord(ProviderSettingsCodec::decodeRecord) }
+    private fun readConnections(replaceUnreadable: Boolean = false): ConnectionsRecord {
+        var unreadable = false
+        // Recovery is per encrypted record. A failed legacy image read must never discard
+        // readable chat profiles, and a failed chat read must never discard image credentials.
+        fun <T> readPart(read: () -> T): T? = try { read() }
         catch (failure: ProviderSettingsException) {
-            if (failure.failure != ProviderSettingsException.Failure.NOT_CONFIGURED) throw failure
-            null
+            if (failure.failure == ProviderSettingsException.Failure.NOT_CONFIGURED) null
+            else {
+                if (!replaceUnreadable) throw failure
+                unreadable = true
+                null
+            }
         }
-        val migrated = if (image == null) initial else migrateImages(initial, image)
+        var legacy = true
+        val initial = readPart { readRecord { bytes ->
+            if (ProviderConnectionsCodec.isV3(bytes)) {
+                val decoded = ProviderConnectionsCodec.decode(bytes)
+                legacy = false
+                decoded
+            } else ProviderConnectionsCodec.migrate(ProviderSettingsCodec.decodeCatalog(bytes))
+        } }
+        val image = if (legacy && legacyImages != null)
+            readPart { legacyImages.readRecord(ProviderSettingsCodec::decodeRecord) } else null
+        if (replaceUnreadable && !unreadable && (initial != null || image != null)) {
+            throw ProviderSettingsException(ProviderSettingsException.Failure.RECOVERED)
+        }
+        val chat = initial ?: ConnectionsRecord(emptyList(), ModelBindings())
+        if (initial == null && image == null && !unreadable) {
+            throw ProviderSettingsException(ProviderSettingsException.Failure.NOT_CONFIGURED)
+        }
         // Keep legacy ciphertext and aliases untouched until an explicit save writes v3.
-        return migrated
+        return if (image == null) chat else migrateImages(chat, image)
     }
 
     private fun migrateImages(c: ConnectionsRecord, image: ProviderSettingsCodec.Record): ConnectionsRecord {
@@ -406,7 +417,10 @@ class OpenAiSettingsStore internal constructor(
 
     companion object {
         internal const val DIRECTORY = "provider-credentials-v1"
-        internal const val MAX_BYTES = 256 * 1024
+        internal const val LEGACY_MAX_BYTES = 256 * 1024
+        // v3 combines two formerly independent records and repeats connection/settings
+        // metadata. Reserve bounded migration headroom without changing legacy limits.
+        internal const val MAX_BYTES = 2 * 1024 * 1024
         private val locks = Array(64) { Any() }
         /** Android excludes this directory from Auto Backup and device transfer. Never use
          * filesDir, plugin dataDir, external storage or cacheDir for this record. */

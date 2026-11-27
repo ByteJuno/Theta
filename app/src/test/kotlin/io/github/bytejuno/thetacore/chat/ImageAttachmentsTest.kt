@@ -33,7 +33,8 @@ class ImageAttachmentsTest {
         val count = AtomicInteger()
         var owner = open(root)
         var store = ImageAttachments(owner.privateImages)
-        var tool = HostImageGenerationTool(::snapshot, store, { _, _ -> count.incrementAndGet(); bytes }, { it })
+        var tool = HostImageGenerationTool(store, { _, _ -> count.incrementAndGet(); bytes }, { it })
+        tool.configurations.bind("run", snapshot().withImageSnapshot(snapshot()))
         val result = tool.call(args, env())
         assertEquals(IMAGE_COMPLETE, result.text)
         assertTrue(result.content.isEmpty())
@@ -42,7 +43,7 @@ class ImageAttachmentsTest {
         assertNull(store.read("foreign", "call"))
         owner.close(); owner = open(root)
         store = ImageAttachments(owner.privateImages)
-        tool = HostImageGenerationTool(::snapshot, store, { _, _ -> count.incrementAndGet(); bytes }, { it })
+        tool = HostImageGenerationTool(store, { _, _ -> count.incrementAndGet(); bytes }, { it })
         assertEquals(IMAGE_ATTEMPTED, tool.call(args, env()).text)
         assertEquals(1, count.get())
         assertArrayEquals(bytes, store.read("session", "call"))
@@ -57,10 +58,11 @@ class ImageAttachmentsTest {
             val entered = CompletableDeferred<Unit>()
             val count = AtomicInteger()
             val owner = open(root)
-            val tool = HostImageGenerationTool(::snapshot, ImageAttachments(owner.privateImages), { _, _ ->
+            val tool = HostImageGenerationTool(ImageAttachments(owner.privateImages), { _, _ ->
                 count.incrementAndGet(); entered.complete(Unit)
                 if (cancel) awaitCancellation() else error("secret signed-url image-body")
             }, { it })
+            tool.configurations.bind("run", snapshot().withImageSnapshot(snapshot()))
             val job = async { tool.call(args, env()) }
             entered.await()
             if (cancel) job.cancelAndJoin() else {
@@ -70,14 +72,14 @@ class ImageAttachmentsTest {
                 assertFalse(result.toString().contains("secret"))
             }
             owner.close()
-            val reopened = HostImageGenerationTool(::snapshot, ImageAttachments(open(root).privateImages), { _, _ -> count.incrementAndGet(); bytes }, { it })
+            val reopened = HostImageGenerationTool(ImageAttachments(open(root).privateImages), { _, _ -> count.incrementAndGet(); bytes }, { it })
             assertEquals(IMAGE_ATTEMPTED, reopened.call(args, env()).text)
             assertEquals(1, count.get())
         }
     }
     @Test fun missingConfigurationDoesNotChargeOrConsumeAttempt() = runBlocking {
         val store = ImageAttachments(open(temp.newFolder()).privateImages)
-        val tool = HostImageGenerationTool({ throw ProviderSettingsException(ProviderSettingsException.Failure.NOT_CONFIGURED) }, store,
+        val tool = HostImageGenerationTool(store,
             { _, _ -> throw AssertionError("Must not request") }, { it })
         assertEquals(IMAGE_CONFIGURE, tool.call(args, env()).text)
         assertTrue(store.claim("session", "call"))

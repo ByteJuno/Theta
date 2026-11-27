@@ -146,7 +146,7 @@ internal object ProviderSettingsCodec {
 
     private fun checkEncodedSize(json: JsonObject): ByteArray =
         json.toString().toByteArray(Charsets.UTF_8).also {
-            if (it.size > OpenAiSettingsStore.MAX_BYTES - 32) {
+            if (it.size > OpenAiSettingsStore.LEGACY_MAX_BYTES - 32) {
                 it.fill(0)
                 throw IllegalArgumentException("Provider settings exceed size limit")
             }
@@ -157,7 +157,7 @@ internal object ProviderSettingsCodec {
     fun decodeRecord(bytes: ByteArray): Record = decodeCatalog(bytes).active.toRecord()
 
     fun decodeCatalog(bytes: ByteArray): CatalogRecord {
-        require(bytes.size <= OpenAiSettingsStore.MAX_BYTES)
+        require(bytes.size <= OpenAiSettingsStore.LEGACY_MAX_BYTES)
         val root = Json.parseToJsonElement(bytes.toString(Charsets.UTF_8)).jsonObject
         return when (root.getValue("version").jsonPrimitive.int) {
             1 -> {

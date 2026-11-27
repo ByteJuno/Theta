@@ -12,7 +12,6 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.serialization.json.*
 
 internal class HostImageGenerationTool(
-    private val configuration: () -> OpenAiRunSnapshot,
     private val attachments: ImageAttachments,
     private val generate: suspend (OpenAiRunSnapshot, String) -> ByteArray = OpenAiImageClient()::generate,
     private val normalize: (ByteArray) -> ByteArray = ::normalizeImage,
@@ -29,7 +28,9 @@ internal class HostImageGenerationTool(
         try {
             val prompt = args.getValue("prompt").jsonPrimitive.content
             require(prompt.isNotBlank() && prompt.length <= 8000)
-            val snapshot = configurations.image(env.runId, configuration)
+            if (attachments.hasAttempt(env.sessionId, env.callId))
+                return ToolResult(IMAGE_ATTEMPTED, isError = true, effect = ToolEffect.UNKNOWN)
+            val snapshot = configurations.image(env.runId)
             if (!attachments.claim(env.sessionId, env.callId))
                 return ToolResult(IMAGE_ATTEMPTED, isError = true, effect = ToolEffect.UNKNOWN)
             currentCoroutineContext().ensureActive()

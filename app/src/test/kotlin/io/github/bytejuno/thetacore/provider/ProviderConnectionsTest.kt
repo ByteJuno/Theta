@@ -21,6 +21,104 @@ class ProviderConnectionsTest {
     private fun connection(id: String = "gateway") = ProviderConnection(id, id, "https://example.invalid/v1")
     private suspend fun token(snapshot: OpenAiRunSnapshot) = snapshot.target().credentials.accessToken()
 
+    @Test fun recoveryReplacesOnlyUnreadableLegacyRecordAndKeepsOtherCredentials() = runBlocking {
+        for (brokenChat in listOf(false, true)) {
+            val root = temp.newFolder(); val chatCipher = cipher(); val imageCipher = cipher()
+            val directory = File(root, OpenAiSettingsStore.DIRECTORY).apply { mkdirs() }
+            val profiles = listOf("a", "b").map { id -> ProviderSettingsCodec.ProfileRecord(id, id,
+                OpenAiProviderSettings("chat", "https://example.invalid/v1", "model-$id", systemPrompt = "System $id"), "key-$id") }
+            File(directory, "active.bin").writeBytes(chatCipher.encrypt(
+                ProviderSettingsCodec.encodeCatalog(ProviderSettingsCodec.CatalogRecord("b", profiles))))
+            val images = OpenAiSettingsStore(root, imageCipher, "images.bin")
+            images.replace(OpenAiProviderSettings("images", "https://images.invalid/v1", "paint"), "image-key")
+            File(directory, if (brokenChat) "active.bin" else "images.bin").writeBytes(byteArrayOf(0))
+            val imageBefore = File(directory, "images.bin").readBytes()
+            val store = OpenAiSettingsStore(root, chatCipher, legacyImages = images)
+            assertThrows(ProviderSettingsException::class.java) { store.readProviderCatalog() }
+            store.saveProvider(connection("replacement"), listOf(EnabledModel("new")), "new-key", replaceUnreadable = true)
+            val cold = OpenAiSettingsStore(root, chatCipher, legacyImages = images)
+            if (brokenChat) {
+                assertEquals("paint", cold.snapshotForImage().settings.model)
+                assertEquals("image-key", token(cold.snapshotForImage()))
+                assertEquals("new-key", token(cold.snapshotForNewRun()))
+            } else {
+                assertEquals(setOf("a", "b", "replacement"), cold.readProviderCatalog().providers.map { it.connection.providerId }.toSet())
+                assertEquals("b", cold.readProviderCatalog().bindings.activeChatModelRef?.providerId)
+                for (id in listOf("a", "b")) {
+                    cold.selectChatModel(ModelRef(id, "model-$id"))
+                    assertEquals("System $id", cold.snapshotForNewRun().settings.systemPrompt)
+                    assertEquals("key-$id", token(cold.snapshotForNewRun()))
+                }
+            }
+            assertArrayEquals(imageBefore, File(directory, "images.bin").readBytes())
+        }
+    }
+
+    @Test fun legacyImageReadRecoveryAbortsReplacementWithoutChangingEitherRecord() = runBlocking {
+        val root = temp.newFolder(); val c = cipher(); val ic = cipher(); var unavailable = false
+        val images = OpenAiSettingsStore(root, object : SecretCipher {
+            override fun encrypt(plaintext: ByteArray) = ic.encrypt(plaintext)
+            override fun decrypt(ciphertext: ByteArray): ByteArray { check(!unavailable); return ic.decrypt(ciphertext) }
+        }, "images.bin")
+        OpenAiSettingsStore(root, c).replace(OpenAiProviderSettings("chat", "https://example.invalid/v1", "chat"), "chat-key")
+        images.replace(OpenAiProviderSettings("images", "https://images.invalid/v1", "paint"), "image-key")
+        val directory = File(root, OpenAiSettingsStore.DIRECTORY)
+        val before = directory.listFiles()!!.associate { it.name to it.readBytes() }
+        val store = OpenAiSettingsStore(root, c, legacyImages = images)
+        unavailable = true
+        assertThrows(ProviderSettingsException::class.java) { store.readProviderCatalog() }
+        unavailable = false
+        val error = assertThrows(ProviderSettingsException::class.java) {
+            store.saveProvider(connection("replacement"), listOf(EnabledModel("new")), "new-key", replaceUnreadable = true)
+        }
+        assertEquals(ProviderSettingsException.Failure.RECOVERED, error.failure)
+        before.forEach { (name, bytes) -> assertArrayEquals(bytes, File(directory, name).readBytes()) }
+        assertEquals("chat-key", token(store.snapshotForNewRun()))
+        assertEquals("image-key", token(store.snapshotForImage()))
+    }
+
+    @Test fun nearLegacyCapacityCanMigrateSwitchAndReopenWithoutDroppingPromptsOrKeys() = runBlocking {
+        val root = temp.newFolder(); val c = cipher()
+        val profiles = (1..8).map { n -> ProviderSettingsCodec.ProfileRecord("p$n", "Provider $n",
+            OpenAiProviderSettings("chat", "https://example.invalid/v1", "model-$n",
+                systemPrompt = "$n".repeat(MAX_SYSTEM_PROMPT_CHARS)), "key-$n") }
+        val legacy = ProviderSettingsCodec.encodeCatalog(ProviderSettingsCodec.CatalogRecord("p1", profiles))
+        assertTrue(legacy.size in 250_000..(256 * 1024 - 32))
+        val directory = File(root, OpenAiSettingsStore.DIRECTORY).apply { mkdirs() }
+        File(directory, "active.bin").writeBytes(c.encrypt(legacy))
+        val store = OpenAiSettingsStore(root, c)
+        store.selectChatModel(ModelRef("p2", "model-2"))
+        val cold = OpenAiSettingsStore(root, c)
+        assertEquals("model-2", cold.snapshotForNewRun().settings.model)
+        assertEquals(8, cold.readProviderCatalog().providers.size)
+        for (n in 1..8) {
+            cold.selectChatModel(ModelRef("p$n", "model-$n"))
+            assertEquals("$n".repeat(MAX_SYSTEM_PROMPT_CHARS), cold.snapshotForNewRun().settings.systemPrompt)
+            assertEquals("key-$n", token(cold.snapshotForNewRun()))
+        }
+    }
+
+    @Test fun coldRunWithoutOriginalImageSnapshotNeverUsesCurrentBinding() {
+        val runs = RunModelSnapshots()
+        val failure = assertThrows(ProviderSettingsException::class.java) {
+            runs.image("old-run")
+        }
+        assertEquals(ProviderSettingsException.Failure.NOT_CONFIGURED, failure.failure)
+    }
+
+    @Test fun imageSelectionPreservesLatestChatBindingAcrossStoreInstances() {
+        val root = temp.newFolder(); val c = cipher(); val store = OpenAiSettingsStore(root, c)
+        val stale = store.saveProvider(connection(), listOf(EnabledModel("a"), EnabledModel("b"),
+            EnabledModel("paint", chat = false, image = true)), "key")
+        val other = OpenAiSettingsStore(root, c)
+        other.selectChatModel(ModelRef("gateway", "b"))
+        assertEquals("a", stale.bindings.activeChatModelRef?.modelId)
+        store.selectImageModel(ModelRef("gateway", "paint"))
+        assertEquals(ModelBindings(ModelRef("gateway", "b"), ModelRef("gateway", "paint")), other.readProviderCatalog().bindings)
+        store.selectImageModel(null)
+        assertEquals(ModelBindings(ModelRef("gateway", "b"), null), other.readProviderCatalog().bindings)
+    }
+
     @Test fun legacyWhitespaceModelMigratesWithoutChangingModelOrKey() = runBlocking {
         val root = temp.newFolder(); val cipher = cipher()
         val store = OpenAiSettingsStore(root, cipher)
@@ -96,9 +194,10 @@ class ProviderConnectionsTest {
         assertEquals("fast", frozen.settings.model)
         val runs = RunModelSnapshots()
         runs.bind("run", frozen)
-        assertSame(frozen.imageSnapshot, runs.image("run", store::snapshotForImage))
+        assertSame(frozen.imageSnapshot, runs.image("run"))
         runs.release("run")
-        assertEquals("new-key", token(runs.image("run", store::snapshotForImage)))
+        assertThrows(ProviderSettingsException::class.java) { runs.image("run") }
+        Unit
     }
 
     @Test fun recoverySaveRereadsUnderLockAndNeverDeletesReadableProviders() {

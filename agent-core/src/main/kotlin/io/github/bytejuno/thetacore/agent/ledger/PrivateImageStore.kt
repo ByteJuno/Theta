@@ -14,6 +14,12 @@ class PrivateImageStore(
         HistoryCodec.requireUtf8(sessionId); HistoryCodec.requireUtf8(callId)
         check(!database.isSessionDeleted(sessionId)) { "Session has been deleted" }
     }
+    fun hasAttempt(sessionId: String, callId: String): Boolean = database.access {
+        checkIdentity(sessionId, callId)
+        connection.prepare("SELECT 1 FROM private_image_attempts WHERE session_id=? AND call_id=?").use {
+            it.bindText(1, sessionId); it.bindText(2, callId); it.step()
+        }
+    }
     fun claim(sessionId: String, callId: String): Boolean = database.access {
         checkIdentity(sessionId, callId)
         val exists = connection.prepare("SELECT 1 FROM private_image_attempts WHERE session_id=? AND call_id=?").use {

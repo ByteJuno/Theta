@@ -95,7 +95,7 @@ internal fun ProviderConnectionsScreen(host: ThetaApplication, onClose: () -> Un
                         catalog = withContext(Dispatchers.IO) { store.selectChatModel(requireNotNull(ref)) }
                     } }
                     ProviderBindingChoices(catalog, editable, true) { ref -> operate {
-                        catalog = withContext(Dispatchers.IO) { store.bindModels(catalog.bindings.copy(activeImageModelRef = ref)) }
+                        catalog = withContext(Dispatchers.IO) { store.selectImageModel(ref) }
                     } }
                     Text(strings.get(R.string.providers_saved), style = MaterialTheme.typography.titleMedium)
                     if (catalog.providers.isEmpty()) Text(strings.get(R.string.providers_empty))
@@ -245,8 +245,14 @@ private fun ProviderCompat(value: OpenAiChatConfig.Compat, enabled: Boolean, cha
             enabled = enabled, label = { Text(strings.get(R.string.chat_compat_reasoning)) }, modifier = Modifier.fillMaxWidth())
         ProviderCheck(strings.get(R.string.chat_compat_replay), value.replayReasoning, enabled && value.reasoningField != null) { change(next(replayReasoning = it)) }
         Text(strings.get(R.string.providers_schema))
-        SchemaProfile.entries.forEach { schema -> FilterChip(value.schemaProfile == schema, { change(next(schema = schema)) }, enabled = enabled, label = { Text(schema.name) }) }
+        SchemaProfile.entries.forEach { schema -> FilterChip(value.schemaProfile == schema, { change(next(schema = schema)) }, enabled = enabled, label = { Text(strings.get(schema.label)) }) }
     }
+}
+
+internal val SchemaProfile.label: Int get() = when (this) {
+    SchemaProfile.FULL -> R.string.providers_schema_full
+    SchemaProfile.NO_TOP_LEVEL_COMBINATORS -> R.string.providers_schema_no_combinators
+    SchemaProfile.BASIC -> R.string.providers_schema_basic
 }
 
 @Composable

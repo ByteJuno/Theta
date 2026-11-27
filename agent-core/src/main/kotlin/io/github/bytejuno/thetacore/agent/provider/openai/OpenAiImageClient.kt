@@ -94,7 +94,10 @@ class OpenAiImageClient internal constructor(private val generation: OkHttpClien
                 override fun writeTo(sink: okio.BufferedSink) = payload.writeTo(sink)
             }
             val request = Request.Builder().url(endpoint).header("Accept", "application/json")
-                .header("Authorization", "Bearer ${snapshot.target().credentials.accessToken()}")
+                .apply {
+                    val token = snapshot.target().credentials.accessToken()
+                    if (token.isNotEmpty()) header("Authorization", "Bearer $token")
+                }
                 .post(oneShot).build()
             val response = fetch(generation, request, ImageLimits.RESPONSE_BYTES)
             val items = Json.parseToJsonElement(response.toString(Charsets.UTF_8)).jsonObject.getValue("data").jsonArray

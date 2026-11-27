@@ -23,6 +23,9 @@
     <string name="providers_remove_model">Remove model</string>
     <string name="providers_delete">Delete provider and its models</string>
     <string name="providers_schema">Tool schema compatibility</string>
+    <string name="providers_schema_full">Full support</string>
+    <string name="providers_schema_no_combinators">No top-level combinators</string>
+    <string name="providers_schema_basic">Basic support</string>
     <string name="providers_chat_binding">Default chat model</string>
     <string name="providers_image_binding">Default image model</string>
     <string name="providers_image_none">Image generation not configured</string>
