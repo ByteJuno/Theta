@@ -172,7 +172,14 @@ class OpenAiSettingsStore internal constructor(
             bindings.activeChatModelRef.takeIf { valid(it, false) } ?: firstChat,
             bindings.activeImageModelRef.takeIf { valid(it, true) })
         val next = ConnectionsRecord(providers, bindings)
-        writeConnections(next, replaceUnreadable || existing == null || apiKey.isNotEmpty())
+        // Empty catalogs and image-only legacy imports have no credentials encrypted
+        // with this store's key to retain. Explicit no-auth setup may recover that key;
+        // imported image credentials have already been read with their independent key.
+        val initializesRecord = existing?.providers.isNullOrEmpty() ||
+            (!hasConnectionsRecord() && sanitize(ProviderSettingsException.Failure.READ_FAILED) {
+                Files.notExists(file, NOFOLLOW_LINKS)
+            })
+        writeConnections(next, replaceUnreadable || initializesRecord || apiKey.isNotEmpty())
         next.summary()
     }
 

@@ -3,8 +3,12 @@ package io.github.bytejuno.thetacore.provider
 import io.github.bytejuno.thetacore.agent.provider.openai.OpenAiProviderSettings
 import io.github.bytejuno.thetacore.storage.AesGcmSecretCipher
 import io.github.bytejuno.thetacore.storage.SecretCipher
+import io.github.bytejuno.thetacore.storage.KeyStoreSecretCipher
+import io.github.bytejuno.thetacore.storage.SecretKeySource
+import io.github.bytejuno.thetacore.storage.UnusableSecretKeyException
 import java.io.File
 import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
 import org.junit.Rule
@@ -150,5 +154,66 @@ class ProviderMigrationRecoveryTest {
         assertNull(f.open().snapshotForNewRun().imageSnapshot)
         assertEquals("new-key", f.open().snapshotForNewRun().target().credentials.accessToken())
         assertEquals(imageReads, f.imageReads)
+    }
+
+    @Test fun noAuthRefillAfterUnavailableKeyClearRebuildsOnlyOnExplicitSave() = runBlocking {
+        assertNoAuthInitialization(legacyImageOnly = false)
+    }
+
+    @Test fun noAuthFirstChatRecoversUnusedKeyAndKeepsReadableLegacyImages() = runBlocking {
+        assertNoAuthInitialization(legacyImageOnly = true)
+    }
+
+    private suspend fun assertNoAuthInitialization(legacyImageOnly: Boolean) {
+        var unusable = false
+        var rebuilds = 0
+        var key: SecretKey = KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
+        val source = object : SecretKeySource {
+            override fun load(create: Boolean): SecretKey {
+                if (unusable) throw UnusableSecretKeyException("synthetic invalidation")
+                return key
+            }
+            override fun delete() {
+                rebuilds++
+                unusable = false
+                key = KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
+            }
+        }
+        val cipher = KeyStoreSecretCipher(AesGcmSecretCipher("clear-refill", source::load), source, allowKeyRecovery = true)
+        val root = temp.newFolder()
+        val store = OpenAiSettingsStore(root, cipher)
+        val imageKey = KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
+        val images = OpenAiSettingsStore(root, AesGcmSecretCipher("initial-image") { imageKey }, "images.bin")
+        images.replace(OpenAiProviderSettings("image", "https://image.invalid/v1", "paint"), "image-key")
+        val imageFile = File(root, "${OpenAiSettingsStore.DIRECTORY}/images.bin")
+        val imageBefore = imageFile.readBytes()
+        if (legacyImageOnly) {
+            store.replace(OpenAiProviderSettings("old", "https://old.invalid/v1", "old-model"), "old-key")
+        } else {
+            store.saveProvider(ProviderConnection("old", "Old", "https://old.invalid/v1"),
+                listOf(EnabledModel("old-model")), "old-key")
+        }
+        unusable = true
+        store.clear()
+        val cold = OpenAiSettingsStore(root, cipher, legacyImages = images)
+        assertEquals(if (legacyImageOnly) listOf("legacy-images") else emptyList<String>(),
+            cold.readProviderCatalog().providers.map { it.connection.providerId })
+        assertEquals(0, rebuilds)
+        cold.saveProvider(ProviderConnection("local", "Local", "http://127.0.0.1/v1", noAuth = true),
+            listOf(EnabledModel("local-model")), "")
+        assertEquals(1, rebuilds)
+        val reopened = OpenAiSettingsStore(root, cipher, legacyImages = images)
+        assertEquals(if (legacyImageOnly) listOf("legacy-images", "local") else listOf("local"),
+            reopened.readProviderCatalog().providers.map { it.connection.providerId })
+        assertEquals("local-model", reopened.snapshotForNewRun().settings.model)
+        assertEquals("", reopened.snapshotForNewRun().target().credentials.accessToken())
+        if (legacyImageOnly) {
+            val image = requireNotNull(reopened.snapshotForNewRun().imageSnapshot)
+            assertEquals("paint", image.settings.model)
+            assertEquals("image-key", image.target().credentials.accessToken())
+        } else {
+            assertNull(reopened.snapshotForNewRun().imageSnapshot)
+        }
+        assertArrayEquals(imageBefore, imageFile.readBytes())
     }
 }
