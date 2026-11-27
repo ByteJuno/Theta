@@ -8,8 +8,13 @@ internal class ChatDraftReceipt(
     private val savedVersion: String? = null,
     private val savedImages: List<String> = emptyList(),
 ) {
-    fun consumption() = io.github.bytejuno.thetacore.agent.ledger.ComposerConsumption(
-        setOfNotNull(savedVersion, textVersion), imageIds + savedImages)
+    fun consumption(hasText: Boolean = true) = io.github.bytejuno.thetacore.agent.ledger.ComposerConsumption(
+        versions = setOfNotNull(savedVersion, textVersion),
+        imageIds = imageIds + savedImages,
+        submittedVersions = setOfNotNull(textVersion.takeIf { hasText }),
+        submittedImageIds = imageIds,
+    )
     fun clearsText(currentVersion: String) = currentVersion == textVersion
+    fun clearsImage(localId: String) = localId in imageIds
     fun remaining(images: List<PendingUserImage>) = images.filterNot { it.localId in imageIds }
 }

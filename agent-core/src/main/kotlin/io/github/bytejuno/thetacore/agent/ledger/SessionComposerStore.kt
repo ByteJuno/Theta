@@ -18,7 +18,12 @@ internal fun createComposerSchema(db: SQLiteConnection) {
 
 class ComposerImage(val id: String, val mime: String, val bytes: ByteArray)
 class ComposerSnapshot(val version: String?, val text: String, val images: List<ComposerImage>)
-class ComposerConsumption(val versions: Set<String>, val imageIds: Set<String>)
+class ComposerConsumption(
+    val versions: Set<String>,
+    val imageIds: Set<String>,
+    val submittedVersions: Set<String> = versions,
+    val submittedImageIds: Set<String> = imageIds,
+)
 
 class SessionComposerStore(private val database: AgentDatabase) {
     private val db get() = database.connection
@@ -77,10 +82,10 @@ class SessionComposerStore(private val database: AgentDatabase) {
                 it.step()
             }
             put(session, "text", version, 0, draft.text)
-        } else if (!textChanged && draft.text.isEmpty()) {
+        } else if (!textChanged && draft.text.isEmpty() && !consumed(session, "text", version)) {
             // An image-only draft still needs a stable initial receipt identity.
             db.prepare("""INSERT INTO composer_parts SELECT ?, 'text', ?, 0, ''
-                WHERE NOT EXISTS (SELECT 1 FROM composer_parts WHERE session_id=? AND kind='text')""").use {
+                WHERE NOT EXISTS (SELECT 1 FROM composer_parts WHERE session_id=? AND kind='text' AND value IS NOT NULL)""").use {
                 it.bindText(1, session)
                 it.bindText(2, version)
                 it.bindText(3, session)
@@ -132,6 +137,17 @@ class SessionComposerStore(private val database: AgentDatabase) {
                 }
             }
         }
+    }
+
+    fun consumed(session: String, version: String?, imageIds: Collection<String>): ComposerConsumption = database.access {
+        val versions = if (version != null && consumed(session, "text", version)) setOf(version) else emptySet()
+        val images = imageIds.filter { consumed(session, "image", it) }.toSet()
+        ComposerConsumption(versions, images)
+    }
+
+    fun isSubmittedConsumed(session: String, receipt: ComposerConsumption): Boolean = database.access {
+        receipt.submittedVersions.any { consumed(session, "text", it) } ||
+            receipt.submittedImageIds.any { consumed(session, "image", it) }
     }
 
     private fun consumed(session: String, kind: String, id: String): Boolean =

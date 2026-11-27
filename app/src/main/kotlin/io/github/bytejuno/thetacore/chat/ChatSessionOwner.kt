@@ -29,6 +29,7 @@ internal const val CHAT_PROVIDER_ID = "chat"
 internal data class ChatState(
     val acceptedMessages: Long = 0,
     val acceptedDraft: ChatDraftReceipt? = null,
+    val draftSync: Long = 0,
     val loading: Boolean = true,
     val sessions: List<SessionPreview> = emptyList(),
     val moreSessionsAvailable: Boolean = false,
@@ -344,6 +345,20 @@ internal class ChatSessionOwner(
         val disk = requireNotNull(history)
         check(draft == null || draft.sessionId == disk.sessionId)
         disk.checkChatAdmission(requireNotNull(tools))
+        val store = requireNotNull(tools!!.sessionStore)
+        if (draft != null) {
+            val submitted = draft.consumption(text.isNotBlank())
+            val guard = ComposerConsumption(
+                submitted.versions,
+                submitted.imageIds,
+                submitted.submittedVersions,
+                submitted.submittedImageIds + images.map { it.localId },
+            )
+            if (store.composerDrafts.isSubmittedConsumed(disk.sessionId, guard)) {
+                mutable.update { it.copy(loading = false, draftSync = it.draftSync + 1) }
+                return
+            }
+        }
         val snapshot = configuration() // validate/decrypt before acknowledging a new message
         if (images.isNotEmpty() && !snapshot.settings.compat.supportsImageInput) {
             mutable.update { it.copy(loading = false, error = R.string.chat_image_input_disabled) }
@@ -355,7 +370,6 @@ internal class ChatSessionOwner(
             mutable.update { it.copy(loading = false, error = R.string.chat_image_invalid) }
             return
         }
-        val store = requireNotNull(tools!!.sessionStore)
         val mediaParts = validatedImages.map { valid ->
             val blobId = UUID.randomUUID().toString()
             store.privateImages.putUserImage(disk.sessionId, blobId, valid.bytes)

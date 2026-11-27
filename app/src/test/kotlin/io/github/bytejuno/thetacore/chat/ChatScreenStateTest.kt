@@ -24,6 +24,101 @@ class ChatScreenStateTest {
     private val session = "shared"
     private fun image(id: String) = PendingUserImage(id, "image/png", id.toByteArray())
 
+    @Test fun crossPageReconcileClearsConsumedPartsKeepsUnsentImageAndProtectsNewerDraft() {
+        val root = temp.newFolder()
+        val otherSession = "other"
+        AndroidAgentStore.open(root, BundledSQLiteDriver()).use { store ->
+            store.createHistory(session).use { history ->
+                store.createHistory(otherSession).close()
+                val pageA = ChatComposerDrafts { store.composerDrafts }
+                val sentImage = image("sent-1")
+                pageA[session].edit("first")
+                pageA[session].images = listOf(sentImage)
+                pageA.checkpoint()
+
+                val pageB = ChatComposerDrafts { store.composerDrafts }
+                val draftB = pageB[session]
+                val firstReceipt = pageB.receipt(session)
+                history.appendUserInput(draftB.input, emptyList(), firstReceipt)
+                draftB.acknowledge(firstReceipt)
+
+                draftB.edit("second")
+                val secondReceipt = pageB.receipt(session)
+                history.appendUserInput(draftB.input, emptyList(), secondReceipt)
+                draftB.acknowledge(secondReceipt)
+
+                // Another page then saves a new unsent draft, and latest receipt even moves to another session.
+                draftB.edit("newer page-b draft")
+                pageB.checkpoint()
+                val unrelatedReceipt = ChatDraftReceipt(otherSession, "other-version", emptySet())
+
+                // Page A still holds consumed "first" and sentImage, plus an unsent new image.
+                val keepImage = image("keep-a")
+                pageA[session].images = listOf(sentImage, keepImage)
+                pageA.reconcile(session, unrelatedReceipt)
+
+                assertEquals("", pageA[session].input)
+                assertEquals(listOf("keep-a"), pageA[session].images.map { it.localId })
+                assertArrayEquals("keep-a".toByteArray(), pageA[session].images.single().bytes)
+
+                // Checkpointing Page A after reconcile keeps Page B's newer text and persists keep-a.
+                pageA.checkpoint()
+
+                // Re-submitting an already-consumed receipt directly at history boundary fails without poisoning.
+                try {
+                    history.appendUserInput("first", emptyList(), firstReceipt)
+                    fail("Expected already-consumed draft to be rejected")
+                } catch (_: IllegalArgumentException) {
+                    // expected
+                }
+
+                // Fresh image-only send using Page A's remaining unsent attachment succeeds cleanly.
+                val freshImageOnlyReceipt = pageA.receipt(session)
+                val keepMedia = listOf(io.github.bytejuno.thetacore.agent.protocol.mediaPart(
+                    io.github.bytejuno.thetacore.agent.protocol.MediaKind.IMAGE,
+                    io.github.bytejuno.thetacore.agent.protocol.blobRef("blob-keep-a", "image/png", 6L),
+                ))
+                history.appendUserInput("", keepMedia, freshImageOnlyReceipt)
+                try {
+                    history.appendUserInput("", keepMedia, freshImageOnlyReceipt)
+                    fail("Expected already-consumed image-only draft to be rejected")
+                } catch (_: IllegalArgumentException) {
+                    // expected
+                }
+            }
+        }
+        AndroidAgentStore.open(root, BundledSQLiteDriver()).use { store ->
+            val saved = store.composerDrafts.read(session)
+            assertEquals("newer page-b draft", saved.text)
+            assertTrue(saved.images.isEmpty())
+            store.openHistory(session).use { history ->
+                assertEquals(3L, history.page(null, 10).totalMessages)
+            }
+        }
+    }
+
+    @Test fun freshEditSupersedingConsumedBaselineCanStillBeSubmitted() {
+        val store = AndroidAgentStore.open(temp.newFolder(), BundledSQLiteDriver()).also { stores += it }
+        store.createHistory(session).use { history ->
+            val pageA = ChatComposerDrafts { store.composerDrafts }
+            pageA[session].edit("old")
+            pageA[session].images = listOf(image("old-img"))
+            pageA.checkpoint()
+
+            val pageB = ChatComposerDrafts { store.composerDrafts }
+            val receiptB = pageB.receipt(session)
+            history.appendUserInput("old", emptyList(), receiptB)
+
+            // Page A replaces the old draft with brand-new unsent text and attachment without reconciling first.
+            val freshImg = image("fresh-img")
+            pageA[session].edit("brand new")
+            pageA[session].images = listOf(freshImg)
+            val receiptA = pageA.receipt(session)
+            history.appendUserInput("brand new", emptyList(), receiptA)
+            assertEquals(2L, history.page(null, 10).totalMessages)
+        }
+    }
+
     @Test fun activityCanRestoreLatestDraftWhenSavedOnPluginPage() {
         val files = draftsFor(listOf(session))
         val saver = ChatComposerDrafts.saver(files)

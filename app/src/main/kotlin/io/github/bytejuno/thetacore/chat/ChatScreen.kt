@@ -49,7 +49,7 @@ internal fun toolState(record: InvocationRecord?): Int = when {
 internal fun showApproval(record: InvocationRecord): Boolean = record.pending != null && !record.input.unattended
 
 @Composable
-internal fun ChatScreen(host: ThetaApplication, drafts: ChatComposerDrafts, onPlugins: () -> Unit) {
+internal fun ChatScreen(host: ThetaApplication, drafts: ChatComposerDrafts, resumed: Boolean = true, onPlugins: () -> Unit) {
     val strings = uiStrings()
     val context = LocalContext.current
     val owner = remember(host) { host.chat }
@@ -141,9 +141,17 @@ internal fun ChatScreen(host: ThetaApplication, drafts: ChatComposerDrafts, onPl
         }
     }
     LaunchedEffect(owner) { owner.open() }
-    LaunchedEffect(state.acceptedDraft) {
-        val receipt = state.acceptedDraft ?: return@LaunchedEffect
-        drafts[receipt.sessionId].acknowledge(receipt)
+    LaunchedEffect(drafts, state.sessionId, state.acceptedMessages, state.acceptedDraft, state.draftSync, resumed) {
+        val currentId = state.sessionId
+        val receipt = state.acceptedDraft
+        val targets = buildSet {
+            if (currentId != null) add(currentId)
+            if (receipt != null) add(receipt.sessionId)
+        }
+        if (targets.isEmpty()) return@LaunchedEffect
+        val snapshots = drafts.identities(targets)
+        val consumed = withContext(Dispatchers.IO) { drafts.readConsumed(snapshots) }
+        drafts.applyConsumed(consumed, receipt)
     }
     Column(Modifier.fillMaxSize().imePadding().padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(

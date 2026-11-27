@@ -635,6 +635,9 @@ open class SqliteRunHistory internal constructor(
         ready(); check(expectedRevision == head.revision) { "History changed during run" }
         val next = freezeMessages(messages)
         require(next.isNotEmpty()); validateHistory(next) // only the new, complete transaction
+        if (draft != null) require(!SessionComposerStore(database).isSubmittedConsumed(sessionId, draft)) {
+            "Composer draft already consumed"
+        }
         val pending = if (hasValue(pendingPath())) read<StoredPending>(pendingPath()) else null
         if (pending != null) {
             require(pending.revision == head.revision && pending.sessionId == sessionId && next.size == 2 &&

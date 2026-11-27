@@ -277,7 +277,7 @@ private fun ThetaCoreApp(
                     BackHandler { leavePage() }
                     activePage.Content()
                 } else if (!showPlugins) {
-                    io.github.bytejuno.thetacore.chat.ChatScreen(application, drafts) { showPlugins = true }
+                    io.github.bytejuno.thetacore.chat.ChatScreen(application, drafts, resumed) { showPlugins = true }
                 } else {
                     BackHandler { showPlugins = false }
                     TextButton(onClick = { showPlugins = false }) { Text(strings.get(R.string.chat_back)) }
