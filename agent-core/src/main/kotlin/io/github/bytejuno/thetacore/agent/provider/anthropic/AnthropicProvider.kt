@@ -33,7 +33,12 @@ class AnthropicProvider(
     override fun canReplayMessage(message: Message, targetModel: String) =
         super.canReplayMessage(message, targetModel) && message.parts.all {
             (it !is ContentPart.Reasoning || it.replay != null) &&
-                (it.replay == null || it is ContentPart.Reasoning && message.role == Role.ASSISTANT)
+                (it.replay == null || it is ContentPart.Reasoning && message.role == Role.ASSISTANT) &&
+                // Rejected malformed arguments stay in history/ledger. Anthropic cannot
+                // encode them as tool_use.input, so ask the kernel for a checkpoint.
+                (it !is ContentPart.ToolCall || runCatching {
+                    Json.parseToJsonElement(it.argsJson) is JsonObject
+                }.getOrDefault(false))
         }
     override fun supportsMediaInput(kind: MediaKind, model: String) = kind == MediaKind.IMAGE
     override fun executionMode(request: ChatRequest) = if (request.extraBody.isEmpty())
@@ -48,7 +53,10 @@ class AnthropicProvider(
 }
 
 internal fun anthropicError(error: JsonObject?, status: Int?, retryAfter: Long?): ModelError {
-    val code = when ((error?.get("type") as? JsonPrimitive)?.contentOrNull) {
+    val type = error?.string("type")
+    val inputTooLong = type == "invalid_request_error" &&
+        error?.string("message")?.trim()?.startsWith("prompt is too long", ignoreCase = true) == true
+    val code = if (inputTooLong) ModelErrorCode.CONTEXT_TOO_LONG else when (type) {
         "authentication_error", "permission_error" -> ModelErrorCode.AUTH
         "rate_limit_error" -> ModelErrorCode.RATE_LIMIT
         "overloaded_error" -> ModelErrorCode.OVERLOADED

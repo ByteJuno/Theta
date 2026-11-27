@@ -106,8 +106,40 @@ class AnthropicTest {
         val req = chatRequest("m") { messages = listOf(call, result) }
         val encodedMessages = json(codec.encode(req))["messages"]!!.jsonArray
         assertEquals("toolu_original", encodedMessages[1].jsonObject["content"]!!.jsonArray[0].jsonObject["tool_use_id"]!!.jsonPrimitive.content)
-        assertFailsWith<IllegalArgumentException> { codec.encode(chatRequest("m") { messages = listOf(call, result, message(Role.USER, textPart("inserted"))) }) }
+        val nextRun = json(codec.encode(chatRequest("m") {
+            messages = listOf(call, result, message(Role.USER, textPart("new goal")), message(Role.USER, textPart("details")))
+        }))["messages"]!!.jsonArray
+        assertEquals(3, nextRun.size)
+        assertEquals(encodedMessages[1], nextRun[1])
+        assertEquals(listOf("new goal", "details"), nextRun[2].jsonObject["content"]!!.jsonArray.map {
+            it.jsonObject["text"]!!.jsonPrimitive.content
+        })
+        assertFailsWith<IllegalArgumentException> { codec.encode(chatRequest("m") {
+            messages = listOf(call, message(Role.USER, textPart("unsettled insertion")), result)
+        }) }
         assertFailsWith<IllegalArgumentException> { codec.encode(chatRequest("m") { messages = listOf(call) }) }
+    }
+
+    @Test fun `explicit input overflow enters context recovery without exposing HTTP or stream error content`() = runTest {
+        for (status in listOf(400, 200)) for ((type, detail, expected) in listOf(
+            Triple("invalid_request_error", "prompt is too long: 201000 tokens > 200000 maximum; synthetic-key", ModelErrorCode.CONTEXT_TOO_LONG),
+            Triple("invalid_request_error", "invalid tool input synthetic-key", ModelErrorCode.INVALID_REQUEST),
+            Triple("request_too_large", "request exceeds byte limit synthetic-key", ModelErrorCode.INVALID_REQUEST),
+            Triple("authentication_error", "prompt is too long synthetic-key", ModelErrorCode.AUTH),
+        )) {
+            val body = buildJsonObject { put("type", "error"); putJsonObject("error") {
+                put("type", type); put("message", detail)
+            } }.toString()
+            val provider = AnthropicProvider(config, ModelTransport { _, _, _ -> flow {
+                emit(TransportEvent.Headers(status, if (status == 200) "text/event-stream" else "application/json", null))
+                emit(TransportEvent.Bytes((if (status == 200) "event: error\ndata: $body\n\n" else body).toByteArray()))
+            } })
+            val error = assertIs<ModelEvent.Failed>(provider.chat(request(), auth).toList().last()).error
+            assertEquals(expected, error.code)
+            assertEquals(if (status == 400) 400 else null, error.httpStatus)
+            assertEquals("Model request failed", error.message)
+            assertFalse(error.message.contains("synthetic-key"))
+        }
     }
 
     @Test fun `replay rejects foreign provider endpoint model protocol malformed or missing signature`() {

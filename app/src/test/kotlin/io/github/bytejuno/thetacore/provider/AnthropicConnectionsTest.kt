@@ -46,6 +46,27 @@ class AnthropicConnectionsTest {
         assertEquals("new-key", cold.snapshotForNewRun().target().credentials.accessToken())
     }
 
+    @Test fun invalidPresetParametersFailDuringParsingBeforeModelSelection() {
+        for (metadata in listOf(
+            """"reasoningLevels":["very high"],"defaultReasoningLevel":"very high"""",
+            """"defaultReasoningLevel":"very high"""",
+            """"reasoningLevels":["high","bad level"]""",
+        )) {
+            val raw = """{"id":"preset","name":"Preset","protocol":"anthropic","baseUrl":"https://example.invalid/v1","models":[{"id":"m",$metadata}]}"""
+            val error = assertThrows(PluginPackageException::class.java) {
+                parseProviderTemplate("pack", "Pack", "1", "providers/preset.json", raw.toByteArray())
+            }
+            assertEquals("Invalid provider model parameters", error.message)
+        }
+        for (effort in listOf("low", "medium", "high", "max")) {
+            val raw = """{"id":"preset","name":"Preset","protocol":"anthropic","baseUrl":"https://example.invalid/v1","models":[{"id":"m","maxOutputTokens":8192,"reasoningLevels":["$effort"],"defaultReasoningLevel":"$effort"}]}"""
+            val template = parseProviderTemplate("pack", "Pack", "1", "providers/preset.json", raw.toByteArray())
+            val selected = anthropicTemplateModel(template, "m")
+            assertEquals(effort, selected.parameters.reasoningLevel)
+            assertEquals(8192, selected.parameters.maxOutputTokens)
+        }
+    }
+
     @Test fun nativeConfigurationRejectsMissingAuthImageGenerationAndCrossHostKeyReuse() = runBlocking {
         val store = OpenAiSettingsStore(temp.newFolder(), cipher())
         val c = ProviderConnection("native", "Claude", "https://example.invalid/v1", "anthropic")

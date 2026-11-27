@@ -2,6 +2,7 @@ package io.github.bytejuno.thetacore.plugin
 
 import io.github.bytejuno.thetacore.agent.provider.openai.OpenAiChatConfig
 import io.github.bytejuno.thetacore.agent.provider.openai.OpenAiProviderSettings
+import io.github.bytejuno.thetacore.agent.provider.openai.OpenAiParameters
 import io.github.bytejuno.thetacore.agent.provider.openai.SchemaProfile
 import io.github.bytejuno.thetacore.provider.validProfileDisplayName
 import kotlinx.serialization.json.JsonArray
@@ -27,7 +28,9 @@ internal data class ProviderTemplateModel(
     val maxOutputTokens: Int? = null,
     val reasoningLevels: List<String> = emptyList(),
     val defaultReasoningLevel: String? = null,
-)
+) {
+    fun parameters() = OpenAiParameters(maxOutputTokens = maxOutputTokens, reasoningLevel = defaultReasoningLevel)
+}
 
 internal data class ProviderTemplate(
     val pluginId: String,
@@ -181,7 +184,14 @@ private fun parseTemplateModels(json: JsonObject): List<ProviderTemplateModel> {
             maxOutputTokens = maxOutputTokens,
             reasoningLevels = reasoningLevels,
             defaultReasoningLevel = defaultReasoningLevel,
-        )
+        ).also { model ->
+            try {
+                model.parameters()
+                model.reasoningLevels.forEach { OpenAiParameters(reasoningLevel = it) }
+            } catch (_: IllegalArgumentException) {
+                throw PluginPackageException("Invalid provider model parameters")
+            }
+        }
     }
 }
 

@@ -479,13 +479,16 @@ class AgentRunLoop(
                 if (cacheDisabled) message(m.role, *m.parts.toTypedArray()) else m
             }
             val request = copyRequest(config, messages, requestId = UUID.randomUUID().toString())
+            // A wire estimator may reject incompatible history too (for example native
+            // tool input that the ledger rejected). Preserve it via the checkpoint path
+            // before asking the provider to serialize it for budget estimation.
+            if (!compatible(target, request)) return pauseContext(view, "Replay incompatible; checkpoint required")
             val estimate = budget.tokens(request)
             val capacity = budget.limit(request.model)
             if (estimate != null && capacity != null && estimate > capacity) {
                 if (!irreducible(view) && compactPrior(view)) continue
                 return pauseContext(view, "Request budget exceeded; checkpoint required")
             }
-            if (!compatible(target, request)) return pauseContext(view, "Replay incompatible; checkpoint required")
             if (!mediaSupported(target, request)) return result(RunState.FAILED, "Image input disabled for active model")
             val mode = target.provider.executionMode(request) // freeze BEFORE submission, including extraBody
             val admittedToolNames = target.provider.toolNamesForExecution(request).toSet()

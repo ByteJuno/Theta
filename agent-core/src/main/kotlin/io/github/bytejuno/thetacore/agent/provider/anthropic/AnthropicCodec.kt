@@ -117,8 +117,10 @@ class AnthropicCodec(private val config: AnthropicConfig, private val mediaReade
             }
             val role = if (m.role == Role.ASSISTANT) "assistant" else "user"
             val last = turns.lastOrNull()
-            if (last?.role == role) {
-                require(last.toolResults == (m.role == Role.TOOL)) { "Tool results must not merge with user text" }
+            // The kernel admits new user input only between runs. A completed/cancelled
+            // tool step may therefore precede a new user turn in the retained history.
+            // Keep that boundary on the wire; only merge messages of the same kind.
+            if (last?.role == role && last.toolResults == (m.role == Role.TOOL)) {
                 last.blocks.addAll(blocks)
             } else turns += Turn(role, m.role == Role.TOOL, blocks)
         }
