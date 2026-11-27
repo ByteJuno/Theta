@@ -1,3 +1,27 @@
+# Issue 154 validation — RETURN repair
+
+Implementation SHA: `09fcc31e3ce4ced712a5db3a6eb424547e8fda6c`
+Tested tree: `6f110d715f20db20c7b39145bbfa7b60d13fac58`
+Branch: `auto/154-openai-responses`
+Fetched main: `e5015815cfb97bb89b90cf1b0ef6cba503b554a4`
+Return: https://github.com/ByteJuno/Theta/pull/169#issuecomment-7219300227
+
+Raw reasoning content and summaries now have independent indexed accumulators, text-done and final-item checks. Missing/changed parts, malformed raw content, post-done deltas and final output mutations fail closed. The full final JSON object, including both channels, encrypted content and additional fields, is preserved for replay. The host's single reasoning display stays on its first nonempty channel; every incoming reasoning event still proves liveness. The real two-request tool-loop regression asserts the complete replay input and final persisted answer.
+
+Official Java SDK was evaluated at `273ed57253318b382c9e3e90a5b6ce4cdb700ed4`. It supports Responses, Java 8+, shared OkHttp and custom HttpClient. At that revision ResponseAccumulator's raw/summary reasoning visitors are empty. Adoption would still require Theta transport lifecycle, ModelEvent/call binding, final consistency and replay integration; this bounded repair retains existing ModelTransport and uses the official typed events as a reference. Verifiable source links are in the PR body; local evaluation is `sdk-evaluation.md`.
+
+Final validation: GPU JVM entry 18/18 passed, GRADLE_EXIT=0, 57.0s, exact staged tree matched on the remote scratch checkout. Final `python scripts/preflight.py` passed in 130.7s with strict `--configuration-cache --configuration-cache-problems=fail`. agent-core 651 tests: 650 passed, 1 platform skip; its successful result from final-r3 was reused unchanged by final-r4. app 797 tests: 796 passed, 1 platform skip, rerun in final-r4. UI resource checks, lint and storage fixture verification/compile passed. Seven new formal tests plus strengthened tool-loop assertions cover raw fragmented Unicode, terminal-only raw content, independent multipart/channel reconciliation, both channel arrival orders, malformed/contradictory finals, complete replay and nonvisible-channel liveness. Original assertions, timeouts and 64 KiB limits remain.
+
+Skipped: SummaryWorkspaceTest link/parent traversal and PluginUpdatesTest snapshotKeepsExecutableBit (Windows platform constraints).
+
+Preserved failures: original implementation GPU baseline had 4 failures / 15 tests; first candidate missed a protocol import; next candidate's new assertion omitted the existing empty initial reasoning delta and was corrected to assert that event too. final-r3 additionally had one unchanged PluginOutputSurfacesTest assertion failure: backup21 show event absent after 8s. Full class independently passed 11/11 without code/assertion/timeout changes, and final-r4 full preflight passed. This intermittent failure is disclosed, not claimed fixed. Evidence is in `E:\Desktop\AI研究\theta-auto-loop\event-runs\8f183c0d-fab3-4d0a-a3d9-2bac6d90415b` and `validation-issue11/issue154-8f183-plugin-failure`.
+
+Limitations: 未生成 APK，未调用真实供应商 API，未操作手机或模拟器，视觉未验证。本轮仅修改 agent-core；原 PR 的协议选择、导入及切换界面仍待当前构建渲染验收。GPU 是既有 GPU 主机上的 JVM 定向测试，不是 GPU 渲染或模拟器验收。SSE 使用合成 fixture/fake transport；API33、R8、硬件 Keystore、实体断电未验证。新提交 CI、独立审核和正式模拟器回归由审核端负责。完整推理回放仍受既有 64 KiB 单事件上限约束，未扩大限制。一次未改动的 PluginOutputSurfacesTest 备用展示 8 秒等待失败，根因未确认；同树该类 11/11 与随后完整预检通过，未宣称修复该偶发问题。
+
+Only verified implementation files were committed. No test summary was committed by the writer, no push/PR write/merge was performed. Existing publisher owns publication; independent reviewer owns CI, formal emulator regression and merge.
+
+## Historical initial implementation evidence (not rebound to this SHA)
+
 # Issue 154 validation
 
 Implementation SHA: `cba1a82ae6ba079cefd0176b1b8d648361680fb4`
