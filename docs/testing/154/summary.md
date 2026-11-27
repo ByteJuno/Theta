@@ -1,3 +1,50 @@
+# Issue 154 validation — final main alignment
+
+Implementation SHA: `ed13314c908f28044c137507d4415cc70af0b853`
+Tested tree: `b9d8076660360f68ff27d4a08d8c0bebec6f2de8`
+Branch: `auto/154-openai-responses`
+Fetched main: `341e7c195324dad4f049b29fbfc6a23545857716`
+Observed remote PR head: `ca4b4ee2b434c227e23947f5323a11ef58050866`
+RETURN: https://github.com/ByteJuno/Theta/pull/169#issuecomment-7220074638
+
+The preceding RETURN implementation `7a523c8f190149b526615b5ae37b497933885930` was preserved. It accumulates ordinary response parts by content_index, reconciles text/refusal/content done events, rejects contradictory function argument completion before execution, and maps known Responses schema errors safely to responseSchema recovery. This resumption merges current main, including the independent reviewer's compact chat and stable composer fixes from PR170. Merge was clean with no manual source changes. PR169's remote head was already an ancestor; reviewer commits were not overwritten. Fetch and comment/head checks before commit found no additional movement or OWNER event.
+
+`python scripts/preflight.py` passed in 168.1s with strict `--configuration-cache --configuration-cache-problems=fail`. App: 800 tests, 799 passed, 1 existing Windows skip, executed against the merged source. Core: 657 tests, 656 passed, 1 existing Windows skip; Gradle reported :agent-core:test UP-TO-DATE. Reuse is backed by exact hashes of 154 unchanged agent-core/sdk/build input files from prior implementation `7a523c8f190149b526615b5ae37b497933885930`; it is not a claim that the full core suite reran. Source-run results and the comparison are retained in core-result-reuse.json. Existing skips are PluginUpdatesTest.snapshotKeepsExecutableBit and SummaryWorkspaceTest's link/parent traversal test.
+
+GPU-host JVM tests reran on the exact full merged tree: 24/24 passed, GRADLE_EXIT=0, 46.9s, STAGED_TREE matched `b9d8076660360f68ff27d4a08d8c0bebec6f2de8`. These cover OpenAiResponsesTest and ResponsesReplayCheckpointTest, including six permanent RETURN regressions. UI resources verified 604 paired English/Chinese keys; lint and storage fixture source/compile checks passed. The worktree hash manifest stayed unchanged throughout validation, and the committed tree equals the validated and GPU-staged tree.
+
+PR170 completion was separately registered after checking GitHub mergedAt, mergeCommit `341e7c195324dad4f049b29fbfc6a23545857716`, its parents and the OWNER MERGED receipt. The PR170 validation record remains bound to its original implementation; this registration does not rebind prior visual or device evidence. Other PR cursors and evidence waits were preserved independently.
+
+Evidence directory: `E:\Desktop\AI研究\theta-auto-loop\event-runs\0d6e0677-f223-4bfd-8d32-b95b2ac54c49`. Files include preflight-final, gpu-final.log/json, core-result-reuse.json, verified-review-and-refs.json and final-refs.json. Initial GitHub TLS/EOF/timeout failures and a merge attempt rejected for missing local committer identity are preserved; both resolved without source loss. No test failure occurred in this round. Prior regression baseline and intermittent PluginOutputSurfacesTest failures remain in the historical evidence below and are not claimed fixed here.
+
+Limitations: 未生成 APK，未调用真实供应商 API，未操作手机或模拟器，视觉未验证。GPU 指既有 GPU 主机上的 JVM 定向测试，使用合成 SSE/fake transport，不代表 GPU 渲染或真实接口验收。原 PR 的协议选择、导入和切换界面，以及合入 main 的紧凑聊天布局，仍需当前构建的实际渲染与关键交互验收。API33、R8、硬件 Keystore、实体断电未测；发布后的 CI、独立审核及正式模拟器回归由审核端负责。 Existing size bounds, timeouts and assertions were not relaxed.
+
+The writer created only the validated main merge commit, performed no push, PR write or merge on GitHub, and did not edit/commit a new issue154 test summary. Already tracked summaries came solely from existing ancestry/main and remain unchanged. The existing publisher owns the new summary, publication and PR update; the independent reviewer owns final CI/regression/merge.
+
+## Historical RETURN evidence — original SHA bindings retained
+
+# Issue 154 validation — indexed content and argument completion
+
+Implementation SHA: `7a523c8f190149b526615b5ae37b497933885930`
+Tested tree: `7cea22d89a2e5b3db32b101bae94b49d103d5911`
+Branch: `auto/154-openai-responses`
+Fetched main: `e5015815cfb97bb89b90cf1b0ef6cba503b554a4`
+RETURN: https://github.com/ByteJuno/Theta/pull/169#issuecomment-7220074638
+
+Ordinary message content is now accumulated independently by content_index and drained in index order. Text/refusal done and content-part done values are reconciled with deltas, each other and final item content; missing indices, changed types, contradictory done values and post-done deltas fail closed. Buffered higher-index data emits liveness events. Function-call argument completion must match its prefix and final item exactly; contradictory streams produce PROTOCOL and never execute a tool.
+
+Responses known schema error fields (text, text.format and explicit schema metadata paths) map to the existing response_format recovery key only when responseSchema is configured. Both original and mapped values pass credential sanitization, unknown paths remain filtered and Chat behavior is unchanged. HTTP errors, SSE error and response.failed use the same recovery route.
+
+Six formal regressions added. GPU baseline on unchanged production code: 24 tests, 6 failures, tree 160063e86a886dfbbcddafc74da6cd264e61eda3. Same regression assertions on candidate: 24/24 passed in 61.0s; remote STAGED_TREE matched exactly. Includes interleaved and out-of-order parts, done-only content, refusal and invalid indices/types, argument completion/prefix checks, zero execution and zero ledger records for contradictory tool streams, HTTP/SSE schema recovery, credential alias redaction and Chat isolation. Original assertions and limits remain unchanged.
+
+Final python scripts/preflight.py passed in 164.3s with strict --configuration-cache --configuration-cache-problems=fail. Core: 657 tests, 656 passed, 1 platform skip. App: 797 tests, 796 passed, 1 platform skip. Resources, lint and storage fixture verification/compile passed. Configuration cache reused. Worktree hashes unchanged during validation; implementation tree equals GPU tree. Skips are existing Windows SummaryWorkspaceTest link/parent traversal and PluginUpdatesTest snapshotKeepsExecutableBit.
+
+Evidence: `E:\Desktop\AI研究\theta-auto-loop\event-runs\73870e9a-bae6-4682-9e35-3e79eec5db8a` (gpu-red.log/json, gpu-green.log/json, preflight-final, final-refs.json, review-verdict.json). No Probe, raw log or summary committed by writer. No push, PR write or merge by writer.
+
+Limitations: 本轮仅修改 agent-core；未生成 APK，未调用真实供应商 API，未操作手机或模拟器，视觉未验证。GPU 指既有 GPU 主机的 JVM 定向测试，使用合成 SSE/fake transport，不代表渲染或真实接口验收。原 PR 协议选择与导入界面仍待当前构建渲染验收；API33、R8、硬件 Keystore、实体断电未测。独立审核端负责发布后的 CI 与正式模拟器回归。未修改超时、事件大小限制或原有断言。
+
+## Historical evidence (applies only to the SHAs stated below)
+
 # Issue 154 validation — RETURN repair
 
 Implementation SHA: `09fcc31e3ce4ced712a5db3a6eb424547e8fda6c`
