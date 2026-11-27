@@ -90,7 +90,7 @@ internal object ProviderSettingsCodec {
             return encodeCatalog(
                 CatalogRecord(
                     activeProfileId = DEFAULT_PROFILE_ID,
-                    profiles = listOf(ProfileRecord(DEFAULT_PROFILE_ID, legacyDisplayName(settings.model), settings, token, noAuth = false)),
+                    profiles = listOf(ProfileRecord(DEFAULT_PROFILE_ID, legacyDisplayName(settings), settings, token, noAuth = false)),
                 ),
             )
         }
@@ -164,7 +164,7 @@ internal object ProviderSettingsCodec {
                 val settings = decodeSettings(root, systemPrompt = null)
                 val key = root.getValue("key").jsonPrimitive.content
                 require(validApiKey(key))
-                val defaultName = legacyDisplayName(settings.model)
+                val defaultName = legacyDisplayName(settings)
                 CatalogRecord(
                     activeProfileId = DEFAULT_PROFILE_ID,
                     profiles = listOf(ProfileRecord(DEFAULT_PROFILE_ID, defaultName, settings, key, noAuth = false)),
@@ -226,4 +226,7 @@ internal object ProviderSettingsCodec {
     }
 }
 
-internal fun legacyDisplayName(model: String): String = model.map { if (it.isISOControl()) ' ' else it }.joinToString("").trim().take(MAX_PROFILE_NAME_CHARS).ifBlank { "Model" }
+/** Derive editable names from saved identifiers without introducing untranslated UI labels. */
+internal fun legacyDisplayName(settings: OpenAiProviderSettings): String = settings.model
+    .map { if (it.isISOControl()) ' ' else it }.joinToString("").trim().take(MAX_PROFILE_NAME_CHARS)
+    .ifBlank { settings.providerId }

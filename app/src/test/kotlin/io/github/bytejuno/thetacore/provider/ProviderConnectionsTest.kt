@@ -160,6 +160,9 @@ class ProviderConnectionsTest {
             assertEquals("System b", store.snapshotForNewRun().settings.systemPrompt)
             assertEquals("key-b", token(store.snapshotForNewRun()))
             assertEquals(if (shared) "a" else "legacy-images", catalog.bindings.activeImageModelRef?.providerId)
+            assertEquals(if (shared) "a" else "paint", catalog.providers.single {
+                it.connection.providerId == catalog.bindings.activeImageModelRef?.providerId
+            }.connection.displayName)
             store.bindModels(catalog.bindings)
             val cold = OpenAiSettingsStore(root, c)
             assertEquals("paint", cold.snapshotForImage().settings.model)
@@ -169,6 +172,20 @@ class ProviderConnectionsTest {
             assertEquals("key-a", token(cold.snapshotForNewRun()))
             assertArrayEquals(oldImage, File(directory, "images.bin").readBytes())
         }
+    }
+
+    @Test fun controlOnlyLegacyModelUsesProviderIdForEditableNameWithoutChangingModel() = runBlocking {
+        val root = temp.newFolder(); val c = cipher()
+        val legacy = OpenAiProviderSettings("legacy-chat", "https://example.invalid/v1", "\u0000")
+        val store = OpenAiSettingsStore(root, c)
+        store.replace(legacy, "original-key")
+        val catalog = store.readProviderCatalog()
+        assertEquals("legacy-chat", catalog.providers.single().connection.displayName)
+        store.bindModels(catalog.bindings)
+        val cold = OpenAiSettingsStore(root, c)
+        assertEquals("legacy-chat", cold.readProviderCatalog().providers.single().connection.displayName)
+        assertEquals("\u0000", cold.snapshotForNewRun().settings.model)
+        assertEquals("original-key", token(cold.snapshotForNewRun()))
     }
 
     @Test fun multipleModelsInheritOrOverrideCompatAndBothSlotsFreezeBeforeNextEdit() = runBlocking {

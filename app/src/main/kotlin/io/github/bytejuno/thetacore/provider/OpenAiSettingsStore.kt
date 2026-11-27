@@ -138,7 +138,7 @@ class OpenAiSettingsStore internal constructor(
         noAuth: Boolean = false, activate: Boolean = true, replaceUnreadable: Boolean = false,
     ): ProviderProfileSummary = synchronized(lock) {
         val id = profileId?.trim()?.takeIf { it.isNotEmpty() } ?: UUID.randomUUID().toString()
-        val connection = ProviderConnection(id, displayName.trim().ifEmpty { legacyDisplayName(settings.model) },
+        val connection = ProviderConnection(id, displayName.trim().ifEmpty { legacyDisplayName(settings) },
             settings.baseUrl, noAuth = noAuth, compat = settings.compat)
         val model = EnabledModel(settings.model, systemPrompt = settings.systemPrompt,
             parameters = settings.parameters, runtimeProviderId = settings.providerId)
@@ -368,7 +368,7 @@ class OpenAiSettingsStore internal constructor(
             parameters = image.settings.parameters, systemPrompt = image.settings.systemPrompt, runtimeProviderId = image.settings.providerId)
         val id = same?.connection?.providerId ?: generateSequence("legacy-images") { "$it-1" }
             .first { candidate -> c.providers.none { it.connection.providerId == candidate } }
-        val updated = if (same == null) ConnectionRecord(ProviderConnection(id, "Images", image.settings.baseUrl,
+        val updated = if (same == null) ConnectionRecord(ProviderConnection(id, legacyDisplayName(image.settings), image.settings.baseUrl,
             noAuth = image.noAuth, compat = image.settings.compat), listOf(model), image.key)
         else {
             val old = same.models.firstOrNull { it.modelId == model.modelId }
