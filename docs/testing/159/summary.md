@@ -21,3 +21,15 @@ Evidence is retained outside Git at E:\Desktop\AI研究\theta-auto-loop\event-ru
 APK: not generated; APK SHA-256: unavailable. No phone or emulator accessed. 本轮未生成 APK，未操作手机或模拟器。验证为 JVM 文件存储与合成 AES 密钥证据；Android Keystore 失效、设备冷启动、真实生图请求、API 33、R8 和实体断电未验证。视觉未验证（本轮无 UI 改动）；原 PR 界面的实际渲染仍由审核端覆盖。当前实现的 CI、独立审核和正式模拟器回归待发布后执行。
 
 Fetch before final checks confirmed remote PR branch and origin/main are ancestors. GitHub head/comments were rechecked before commit and were unchanged. This writer only committed implementation/tests; the existing publisher owns summary commit/push/PR publication and the independent reviewer owns acceptance/merge.
+
+## Independent review, round 3
+
+Two prior RETURNs remain part of the review history. The writer's implementation tree above matches e3497c5; PR head 755852f adds only this summary, so its full preflight evidence was reused.
+
+Reviewer fix: cd661fd43226effdd27f08c21359607fa242f22e (tracked tree 9e5e8ab597e65692a33d75860f4d37d868a90e58). Explicit no-auth setup now permits rebuilding an unusable encryption key when the catalog is empty or only independently encrypted legacy images remain. Reads and clear still do not rebuild keys. Two added regression cases check cold reopen, retained readable image credentials, unchanged legacy image ciphertext, and no revival after explicit clear. Existing assertions and timeouts were retained.
+
+GPU failure evidence: ProviderClearRefillProbe failed on PR head with WRITE_FAILED, rebuilds=0, providers=0. ImageOnlyNoAuthMigrationProbe failed with only the first empty-catalog fix applied: WRITE_FAILED, rebuilds=0, providers=1. The probe sources and output copies remain untracked locally as *Probe.kt and *Probe.failure.log; no raw test evidence is committed.
+
+Final scoped GPU command: `/opt/homelab-report/theta-gpu-test :app:testDebugUnitTest --tests '*ProviderClearRefillProbe*' --tests '*ImageOnlyNoAuthMigrationProbe*' --tests '*ProviderMigrationRecoveryTest*' --tests '*ProviderConnectionsTest*' --tests '*CredentialKeyRecoveryTest*'`. Result: 34 tests, zero failures (32 tracked regression tests and two untracked probes). Both probes reported failure=null and rebuilds=1; provider counts were respectively 1 and 2. Output copy: untracked ProviderRecoveryProbe.success.log.
+
+No dependency or protected-file changes. No APK or device execution. Android Keystore hardware behavior and real image-service compatibility are not established by these JVM tests. Visual rendering remains unverified for the provider/model editor and picker in Chinese/English on small screens and with large text; final emulator checks remain with the outer script.
