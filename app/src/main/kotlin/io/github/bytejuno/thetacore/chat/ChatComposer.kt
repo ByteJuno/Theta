@@ -46,13 +46,16 @@ internal fun ChatComposer(
             }
         }
     }
-    val input: @Composable (Modifier) -> Unit = { modifier ->
-        OutlinedTextField(value = draft.input, onValueChange = draft::edit,
-            label = { Text(strings.get(R.string.chat_message)) }, modifier = modifier,
-            minLines = 1, maxLines = if (compact) 1 else 5, enabled = available.edit)
+    if (!compact) {
+        if (available.stop) TextButton(onClick = onStop) { Text(strings.get(R.string.chat_stop)) }
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = onGallery, enabled = available.attach) { Text(strings.get(R.string.chat_image_add_photo)) }
+            OutlinedButton(onClick = onCamera, enabled = available.attach) { Text(strings.get(R.string.chat_image_take_photo)) }
+        }
     }
-    if (compact) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+    // Keep the input at one composition location when IME insets switch the layout.
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+        if (compact) {
             Box {
                 IconButton(onClick = { attachments = true }, enabled = available.attach) {
                     Icon(painterResource(R.drawable.ic_chat_attach), strings.get(R.string.chat_add_attachment))
@@ -64,19 +67,18 @@ internal fun ChatComposer(
                         onClick = { attachments = false; onCamera() })
                 }
             }
-            input(Modifier.weight(1f))
+        }
+        OutlinedTextField(value = draft.input, onValueChange = draft::edit,
+            label = { Text(strings.get(R.string.chat_message)) }, modifier = Modifier.weight(1f),
+            minLines = 1, maxLines = if (compact) 1 else 5, enabled = available.edit)
+        if (compact) {
             FilledIconButton(onClick = if (available.stop) onStop else onSend, enabled = available.stop || available.send) {
                 Icon(painterResource(if (available.stop) R.drawable.ic_chat_stop else R.drawable.ic_chat_send),
                     strings.get(if (available.stop) R.string.chat_stop else R.string.chat_send))
             }
         }
-    } else {
-        if (available.stop) TextButton(onClick = onStop) { Text(strings.get(R.string.chat_stop)) }
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = onGallery, enabled = available.attach) { Text(strings.get(R.string.chat_image_add_photo)) }
-            OutlinedButton(onClick = onCamera, enabled = available.attach) { Text(strings.get(R.string.chat_image_take_photo)) }
-        }
-        input(Modifier.fillMaxWidth())
+    }
+    if (!compact) {
         Button(onClick = onSend, enabled = available.send, modifier = Modifier.fillMaxWidth()) { Text(strings.get(R.string.chat_send)) }
     }
 }
