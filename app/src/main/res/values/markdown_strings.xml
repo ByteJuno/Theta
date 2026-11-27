@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="markdown_code">Code</string>
+    <string name="markdown_copy_code">Copy code</string>
+    <string name="markdown_copied">Copied</string>
+    <string name="markdown_copy_failed">Could not copy code. Select the text to copy it.</string>
+    <string name="markdown_link_failed">Could not open this link. Check that a browser is available.</string>
+    <string name="markdown_large_message">Large message shown as plain text. All text is available to copy.</string>
+</resources>

@@ -23,6 +23,7 @@ import io.github.bytejuno.thetacore.R
 import io.github.bytejuno.thetacore.agent.ledger.*
 import io.github.bytejuno.thetacore.agent.protocol.*
 import io.github.bytejuno.thetacore.agent.run.RunState
+import io.github.bytejuno.thetacore.chat.markdown.MarkdownText
 import io.github.bytejuno.thetacore.plugin.PluginToolProgress
 import io.github.bytejuno.thetacore.plugin.ToolInputRequest
 import io.github.bytejuno.thetacore.agent.mcp.MCP_PROGRESS_RUNNING
@@ -163,7 +164,7 @@ internal fun ChatScreen(host: ThetaApplication, drafts: ChatComposerDrafts, resu
                     if (message.role != Role.TOOL) Text(strings.get(if (message.role == Role.USER) R.string.chat_you else R.string.chat_assistant),
                         style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
                     message.parts.forEach { part -> when (part) {
-                        is ContentPart.Text -> SelectionContainer { Text(part.text) }
+                        is ContentPart.Text -> MarkdownText(part.text)
                         is ContentPart.Media -> UserChatImage(part.blob, state.sessionId, owner)
                         is ContentPart.Reasoning -> part.summary?.let { SelectionContainer { Text(it, style = MaterialTheme.typography.bodySmall) } }
                         is ContentPart.ToolCall -> ToolCard(
@@ -191,7 +192,7 @@ internal fun ChatScreen(host: ThetaApplication, drafts: ChatComposerDrafts, resu
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text(strings.get(replyReason(reply.reason)), style = MaterialTheme.typography.labelLarge)
                     reply.partial.parts.forEach { part -> when (part) {
-                        is ContentPart.Text -> SelectionContainer { Text(part.text) }
+                        is ContentPart.Text -> MarkdownText(part.text)
                         is ContentPart.Reasoning -> part.summary?.let { SelectionContainer { Text(it) } }
                         else -> Unit
                     } }
@@ -205,7 +206,7 @@ internal fun ChatScreen(host: ThetaApplication, drafts: ChatComposerDrafts, resu
             }
             if (stream.isNotEmpty()) item {
                 Text(strings.get(R.string.chat_assistant), style = MaterialTheme.typography.labelLarge)
-                SelectionContainer { Text(stream) }
+                MarkdownText(stream)
             }
             if (state.notice != null || chatDiagnostic(state) != null) item {
                 Column {
