@@ -1,35 +1,33 @@
 # Issue 159 validation
 
-Implementation commit: e3497c5d6222ef5e5b2cba76567aad710ec6c841
-Tested tree: 18e4bf6662d6c7c58716e15969f545f12e8d6fc8
-Base main: 2cd1b6d78f8fe44aa2937f0d666129718df71073
-Reviewed remote head before this repair: c9c2c414c2f080fb8fc9962feadcd28b61988578
-RETURN: https://github.com/ByteJuno/Theta/pull/168#issuecomment-7213492679
+Implementation commit: 3797d0969a3843563500508109fd6ca2cd22ba9c
+Tested tree: c4331e9cb4c0398a824644d709f5249e070592c6
+Base main: b26215bd10ce37ede1d714c5e3e84a5cd3c25b5b
+Reviewed remote head: 7a1b25c9103723ced8f9498765534aa6a5844e74
+RETURN: https://github.com/ByteJuno/Theta/pull/168#issuecomment-7216760139
 
-## Change and evidence
+## Current result
 
-New v3 writes use an authoritative atomic record separate from the legacy input, preserving the migration/recovery distinction even when v3 cannot decrypt. Recovery cannot revive old image credentials or bindings. First legacy migration remains independently recoverable. Last-provider deletion and explicit clear preserve the no-import boundary. No protected files or host UI wiring changed.
+Integrated reviewer fix cd661fd43226effdd27f08c21359607fa242f22e before merging current main. Resolved ChatScreen conflicts by retaining session-bound text/image drafts, picker targeting, accepted-draft receipts and the model-binding persistence gate. Combined both ChatSessionOwnerTest fixtures, keeping injectable image validation, frozen image snapshots and all 69 test methods (61 in the PR parent, 68 in main, one PR-only test). No assertions were removed and no timeouts expanded. Existing authoritative v3 recovery, host-bound credentials, independent image bindings and no-auth key-recovery fixes remain intact.
 
-Full preflight passed in 167.53 seconds with --configuration-cache --configuration-cache-problems=fail. app 750 tests: 749 passed, 1 existing Windows skip. agent-core 633: 632 passed, 1 existing Windows skip; FROM-CACHE. UI resource parity, lintDebug and storage-fixture source/compile checks passed. All 54 provider tests passed, including 8 new tests and the prior 12 ProviderConnectionsTest regressions. Prior cold SQLite image-approval and unauthenticated HTTP-header regressions remain in the full suite.
+Full preflight passed in 220.38 seconds, using --configuration-cache --configuration-cache-problems=fail. App: 793 tests, 0 failures/errors, 1 existing platform skip. Agent-core: 633 tests, 0 failures/errors, 1 existing platform skip. Both test tasks executed; configuration cache reused. UI resource verification, lintDebug, storage-fixture source/compile checks passed. SDK test task was UP-TO-DATE / NO-SOURCE. Manifest comparison confirmed the tested source did not change.
 
-Initial red run on the old production code: 6 tests, 5 failed, proving legacy image resurrection after deletion, unbinding, replacement, last-provider deletion and explicit clear. First candidate run: all 8 new tests and 12 prior connection regressions passed; 3 other fixtures still targeted active.bin after migration. Those fixtures now target the authoritative record without dropping assertions or changing timeouts; the final full preflight passed.
+The same tree passed 115 scoped JVM tests on TEST_HOST=gpu with zero failures in 99.06 seconds. Scope: ChatEntrySessionsTest, ChatSessionOwnerTest, PluginEntryRuntimeTest, ProviderMigrationRecoveryTest and ProviderConnectionsTest; command also included the existing profile/recovery-name filters. This is JVM/SQLite evidence, not a rendered UI or device acceptance result.
 
-Evidence is retained outside Git at E:\Desktop\AI研究\theta-auto-loop\event-runs\529b7f53-d565-42e3-ad15-b5ae3dd70950. Reviewer failure: reviewer-failed-test.log and reviewer-verdict.json.log. Local initial failure: theta-auto-loop/validation-issue11/issue159-529b7-red. Intermediate fixture failure: theta-auto-loop/validation-issue11/issue159-529b7-green. Final evidence: preflight.log, preflight-result.json, TEST-io.github.bytejuno.thetacore.provider.ProviderMigrationRecoveryTest.xml and final-ref-check.json. Previous round evidence remains at event-runs/7ba19f43-a644-4320-8299-6a59108ccea7 and its referenced validation runs.
+Final fetch before validation confirmed PR head and main unchanged. GitHub comments and PR head were rechecked before commit; no later RETURN or OWNER appeared. The merge commit contains both verified remote parents. No protected files or new testing summary were authored in this round; the main-parent testing documentation is inherited. The writer did not push, update/create a PR or perform the reviewer merge.
+
+## Preserved evidence
+
+Current evidence directory: E:\Desktop\AI研究\theta-auto-loop\event-runs\d5124f1b-c7c6-47c9-9f56-3ebc48590cb4
+- preflight-final/command.json, gradle.log, result.json, tested-worktree-sha256.json and XML results.
+- affected-final.json, affected-final.log and source archive: the exact staged tree used remotely.
+- final-refs.json, commit.log and GitHub/reviewer snapshots.
+- pr168.stderr.log: initial TLS handshake timeout; the next read succeeded.
+- merge-main.log: original two-file conflicts, followed by verified resolutions.
+
+Previous migration evidence remains at event-runs/529b7f53-d565-42e3-ad15-b5ae3dd70950 and event-runs/7ba19f43-a644-4320-8299-6a59108ccea7. It includes five failing cases from six initial old-code tests, fixture-path failures, reviewer failures and eight added migration/recovery regressions. Reviewer round 3 added two no-auth key-recovery regressions in cd661fd and preserved ProviderClearRefillProbe/ImageOnlyNoAuthMigrationProbe failures and subsequent success outside Git. Those earlier results are historical, not transferred as validation of this commit. Current full-suite and scoped results above validate this round's tree.
 
 ## Limits
 
-APK: not generated; APK SHA-256: unavailable. No phone or emulator accessed. 本轮未生成 APK，未操作手机或模拟器。验证为 JVM 文件存储与合成 AES 密钥证据；Android Keystore 失效、设备冷启动、真实生图请求、API 33、R8 和实体断电未验证。视觉未验证（本轮无 UI 改动）；原 PR 界面的实际渲染仍由审核端覆盖。当前实现的 CI、独立审核和正式模拟器回归待发布后执行。
-
-Fetch before final checks confirmed remote PR branch and origin/main are ancestors. GitHub head/comments were rechecked before commit and were unchanged. This writer only committed implementation/tests; the existing publisher owns summary commit/push/PR publication and the independent reviewer owns acceptance/merge.
-
-## Independent review, round 3
-
-Two prior RETURNs remain part of the review history. The writer's implementation tree above matches e3497c5; PR head 755852f adds only this summary, so its full preflight evidence was reused.
-
-Reviewer fix: cd661fd43226effdd27f08c21359607fa242f22e (tracked tree 9e5e8ab597e65692a33d75860f4d37d868a90e58). Explicit no-auth setup now permits rebuilding an unusable encryption key when the catalog is empty or only independently encrypted legacy images remain. Reads and clear still do not rebuild keys. Two added regression cases check cold reopen, retained readable image credentials, unchanged legacy image ciphertext, and no revival after explicit clear. Existing assertions and timeouts were retained.
-
-GPU failure evidence: ProviderClearRefillProbe failed on PR head with WRITE_FAILED, rebuilds=0, providers=0. ImageOnlyNoAuthMigrationProbe failed with only the first empty-catalog fix applied: WRITE_FAILED, rebuilds=0, providers=1. The probe sources and output copies remain untracked locally as *Probe.kt and *Probe.failure.log; no raw test evidence is committed.
-
-Final scoped GPU command: `/opt/homelab-report/theta-gpu-test :app:testDebugUnitTest --tests '*ProviderClearRefillProbe*' --tests '*ImageOnlyNoAuthMigrationProbe*' --tests '*ProviderMigrationRecoveryTest*' --tests '*ProviderConnectionsTest*' --tests '*CredentialKeyRecoveryTest*'`. Result: 34 tests, zero failures (32 tracked regression tests and two untracked probes). Both probes reported failure=null and rebuilds=1; provider counts were respectively 1 and 2. Output copy: untracked ProviderRecoveryProbe.success.log.
-
-No dependency or protected-file changes. No APK or device execution. Android Keystore hardware behavior and real image-service compatibility are not established by these JVM tests. Visual rendering remains unverified for the provider/model editor and picker in Chinese/English on small screens and with large text; final emulator checks remain with the outer script.
+APK: not generated. APK SHA-256: unavailable.
+未生成 APK，未操作手机或模拟器。视觉未验证：聊天草稿及图片输入、模型切换期间禁用状态、服务商/模型选择器在中英文、小屏、大字体和明暗主题下的实际渲染仍待审核端验证。JVM/SQLite 与合成密钥测试不证明 Android Keystore 硬件行为、设备冷启动、真实生图服务、API 33、R8 或实体断电行为。新提交的 CI、独立审核与正式模拟器回归由发布后的审核端执行。
