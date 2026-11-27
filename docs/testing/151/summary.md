@@ -67,3 +67,20 @@ On the candidate, the development test endpoint selected the f512 runner and all
 在 `0e3cec0` 上，JVM 探针模拟聊天页退出组合：保存文字 before，改为 after 并加一张图片，随后注销聊天页的保存回调。重新读取时仍为 before，附件为零；1 项用例失败。
 
 修复提交 `5fc5b1cb0a779b9e43ab6779fb4a86cb88dcc641` 将草稿保存在 Activity 的共同上层。插件页显示期间，系统仍能保存最新编辑。gpu-bai 定向运行 ChatScreenStateTest，12/12 通过，包括文字及图片字节恢复。未生成 APK，未实测页面点击或渲染；最终提交的 CI 和模拟器回归由外层执行。
+
+## PR 164 第九轮：跨页面连续发送回执与已消费草稿防重发
+
+实现提交 `000f3943237b7877c45844d13e4c78f7c7fa1d72`，验证树 `b04db67968ffac0ed492eaff8521ec5b9c2a4bb4`（基于 `8b2622821cc5142d5e387f4ad5f92b24af73b0a5`）。
+
+- 基线复现：在 `8b26228` 上加入双页面连续两次发送回归（树 `72af06b4fb6dab707e0221158ef1afe2da530c36`），`theta-gpu-test`（`gpu-bai`）2/2 失败：`twoPagesConsecutiveSendsClearReturnedDraftAndBlockDuplicateHistory` 与 `returningPageAfterConsecutiveSendsPreservesUnsentEditsAndAllowsFreshSend` 均报 `AssertionError: expected:<2> but was:<3>`，旧页面重发已消费草稿写入第三条历史，且仅收到第二次回执时无法清掉第一次已发送的文字与附件。
+- 修复方案：
+  1. `SessionComposerStore` 新增 `consumed` / `isSubmittedConsumed` 主键点查，并在 `ComposerConsumption` 中区分本次提交标识（`submittedVersions` / `submittedImageIds`）与旧基线消费集合；同时在空文本附件草稿写入路径补充 `!consumed` 守卫防止主键冲突。
+  2. `ChatComposerDrafts` 与 `ChatScreen` 在页面重显、会话切换、新发送接纳或 Activity 恢复时按 SQLite 已消费记录和最新回执共同核对，仅清除已发送的文字版本（并轮换新鲜版本、同步已保存基线）和附件标识，完整保留该页未发送的新编辑及新附件；跨会话覆盖 `acceptedDraft` 时同样按当前会话核对。
+  3. 发送入口双层防重发：`ChatSessionOwner.sendInternal` 在写入用户图片和历史前拦截已消费的提交并触发 `draftSync` 同步界面；`SqliteRunHistory.appendBatch` 在事务开始前拒绝已消费草稿提交而不污染数据库。
+- 验证结果：
+  - `theta-gpu-test`（`gpu-bai`，验证树 `b04db67968ffac0ed492eaff8521ec5b9c2a4bb4`，严格配置缓存）：
+    - 定向套件（`ChatEntrySessionsTest`、`ChatScreenStateTest`、`ChatSessionOwnerTest`、`PluginEntryRuntimeTest`、`UserImageChatTest`）：106/106 通过，0 失败。
+    - 全量 `:agent-core:test` + `AndroidAgentOwnershipTest`：636/636 通过，0 失败。
+  - 本地 Windows 严格配置缓存检查：静态检查（29 路径、无受保护文件改动、无 `probe` 命名）、`:samples:storage-fixture:verifyStorageFixtureSources`、`:samples:storage-fixture:compileDebugKotlin`、`:app:verifyUiResources`（567 对双语键）、`:app:lintDebug` 与 `:agent-core:test`（632 通过、1 跳过）全部通过；`:app:testDebugUnitTest` 753 通过、1 跳过、1 失败为本机 Windows 开发者模式符号链接路径导致的 `AndroidAgentOwnershipTest.trustedContextAliasResolvesButInjectedAliasAndDuplicateWriterAreRejected`（已在 Linux `gpu-bai` 4/4 验证通过）。
+
+本轮验证覆盖 JVM 与 SQLite 数据库重开。未构建 APK，真实设备冷启动、页面交互渲染、实际图片选择与发送、API 33 及 R8 运行行为未验证。新提交的 CI、独立审核和正式回归待发布后执行。
