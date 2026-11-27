@@ -30,7 +30,6 @@ import io.github.bytejuno.thetacore.agent.run.RunState
 import io.github.bytejuno.thetacore.plugin.PluginToolProgress
 import io.github.bytejuno.thetacore.plugin.ToolInputRequest
 import io.github.bytejuno.thetacore.agent.mcp.MCP_PROGRESS_RUNNING
-import io.github.bytejuno.thetacore.provider.ProviderProfilesCatalog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -85,14 +84,8 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
     var profilePicker by remember { mutableStateOf(false) }
     var approvalDialog by rememberSaveable { mutableStateOf(false) }
     val uiScope = rememberCoroutineScope()
-    val providerRevision by host.providerSettings.revision.collectAsState()
-    var profileCatalog by remember { mutableStateOf(ProviderProfilesCatalog(null, emptyList())) }
-    LaunchedEffect(host.providerSettings, providerRevision) {
-        profileCatalog = withContext(Dispatchers.IO) {
-            runCatching { host.providerSettings.readProfiles() }
-                .getOrDefault(ProviderProfilesCatalog(null, emptyList()))
-        }
-    }
+    val modelSelection = io.github.bytejuno.thetacore.provider.rememberChatModelSelection(host.providerSettings)
+    val modelState by modelSelection.state.collectAsState()
     val approvalSettings by host.approvalSettings.state.collectAsState()
     LaunchedEffect(host.approvalSettings) {
         withContext(Dispatchers.IO) { runCatching { host.approvalSettings.ensureLoaded() } }
@@ -168,15 +161,15 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(strings.get(R.string.chat_title), style = MaterialTheme.typography.headlineMedium)
-            val activeProfile = profileCatalog.activeProfile
+            val activeProfile = modelState.catalog.model(modelState.catalog.bindings.activeChatModelRef)
             OutlinedButton(
                 onClick = {
-                    if (profileCatalog.profiles.isEmpty()) settings = true else profilePicker = true
+                    if (modelState.catalog.providers.isEmpty()) settings = true else profilePicker = true
                 },
                 enabled = !state.active && !state.loading,
             ) {
                 Text(
-                    text = activeProfile?.headerLabel() ?: strings.get(R.string.chat_profile_unconfigured),
+                    text = activeProfile?.label ?: strings.get(R.string.chat_profile_unconfigured),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -309,7 +302,7 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
                 items(pendingImages, key = { it.localId }) { item ->
                     PendingImagePreview(
                         item = item,
-                        enabled = !state.loading && !state.active && !state.pending,
+                        enabled = !state.loading && !state.active && !state.pending && !modelState.saving,
                         onRemove = {
                             pendingImages = pendingImages.filterNot { it.localId == item.localId }
                             attachmentError = null
@@ -320,7 +313,7 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
         }
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(
-                enabled = !state.loading && !state.active && !state.pending && pendingImages.size < MAX_USER_IMAGES_PER_MESSAGE,
+                enabled = !state.loading && !state.active && !state.pending && !modelState.saving && pendingImages.size < MAX_USER_IMAGES_PER_MESSAGE,
                 onClick = {
                     attachmentError = null
                     photoPickerLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
@@ -329,7 +322,7 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
                 Text(strings.get(R.string.chat_image_add_photo))
             }
             OutlinedButton(
-                enabled = !state.loading && !state.active && !state.pending && pendingImages.size < MAX_USER_IMAGES_PER_MESSAGE,
+                enabled = !state.loading && !state.active && !state.pending && !modelState.saving && pendingImages.size < MAX_USER_IMAGES_PER_MESSAGE,
                 onClick = {
                     attachmentError = null
                     cameraLauncher.launch(null)
@@ -340,63 +333,21 @@ internal fun ChatScreen(host: ThetaApplication, onPlugins: () -> Unit) {
         }
         OutlinedTextField(value = input, onValueChange = { if (it.length <= 32_000) input = it },
             label = { Text(strings.get(R.string.chat_message)) }, modifier = Modifier.fillMaxWidth(),
-            minLines = 1, maxLines = 5, enabled = !state.loading && !state.active && !state.pending)
+            minLines = 1, maxLines = 5, enabled = !state.loading && !state.active && !state.pending && !modelState.saving)
         Button(
             onClick = {
                 val text = input
                 val images = pendingImages
                 attachmentError = null
-                launchTask { owner.send(text, images) }
+                if (!modelState.saving) launchTask { owner.send(text, images) }
             },
-            enabled = (input.isNotBlank() || pendingImages.isNotEmpty()) && !state.loading && !state.active && !state.pending,
+            enabled = (input.isNotBlank() || pendingImages.isNotEmpty()) && !state.loading && !state.active && !state.pending && !modelState.saving,
             modifier = Modifier.fillMaxWidth(),
         ) { Text(strings.get(R.string.chat_send)) }
     }
     if (settings) ProviderScreen(host) { settings = false; owner.latest() }
-    if (profilePicker) AlertDialog(
-        onDismissRequest = { profilePicker = false },
-        title = { Text(strings.get(R.string.chat_profile_switch_title)) },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(strings.get(R.string.chat_profile_switch_notice), style = MaterialTheme.typography.bodySmall)
-                LazyColumn(Modifier.heightIn(max = 360.dp)) {
-                    itemsIndexed(profileCatalog.profiles, key = { _, entry -> entry.id }) { _, entry ->
-                        val current = entry.id == profileCatalog.activeProfileId
-                        TextButton(
-                            enabled = !state.active && !state.loading,
-                            onClick = {
-                                profilePicker = false
-                                uiScope.launch {
-                                    withContext(Dispatchers.IO) {
-                                        runCatching { host.providerSettings.selectActiveProfile(entry.id) }
-                                    }
-                                }
-                            },
-                            modifier = Modifier.fillMaxWidth().semantics { selected = current },
-                        ) {
-                            Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.Start) {
-                                Text(entry.headerLabel(), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                if (current) {
-                                    Text(
-                                        strings.get(R.string.chat_profile_active_badge),
-                                        style = MaterialTheme.typography.labelSmall,
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = { profilePicker = false; settings = true }) {
-                Text(strings.get(R.string.chat_profile_manage))
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = { profilePicker = false }) { Text(strings.get(R.string.chat_close)) }
-        },
-    )
+    if (profilePicker) io.github.bytejuno.thetacore.provider.ChatModelPicker(modelSelection, !state.active && !state.pending && !state.loading,
+        { profilePicker = false }, { profilePicker = false; settings = true })
     if (approvalDialog) ChatApprovalDialog(host) { approvalDialog = false }
     if (deleting) AlertDialog(onDismissRequest = { deleting = false },
         title = { Text(strings.get(R.string.chat_delete_session)) },

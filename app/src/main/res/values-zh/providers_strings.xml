@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="providers_title">服务商与模型</string>
+    <string name="providers_recovered">原有配置已恢复可读。请重新加载后保存，已有配置未被覆盖。</string>
+    <string name="providers_replace_warning">此操作将覆盖全部无法读取的服务商配置及已保存凭据。请确认能够重新填写后再继续。</string>
+    <string name="providers_replace_confirm">重新填写并替换</string>
+    <string name="providers_bindings">当前模型绑定</string>
+    <string name="providers_saved">已配置服务商</string>
+    <string name="providers_empty">尚未配置服务商，请在下方添加。</string>
+    <string name="providers_add">添加服务商</string>
+    <string name="providers_custom">自定义服务商</string>
+    <string name="providers_connection">连接设置</string>
+    <string name="providers_name">服务商名称</string>
+    <string name="providers_protocol">协议：OpenAI Chat</string>
+    <string name="providers_key_reuse">留空可保留此端点已保存的密钥。</string>
+    <string name="providers_defaults">服务商默认兼容选项</string>
+    <string name="providers_models">已启用模型</string>
+    <string name="providers_add_model">添加模型 ID</string>
+    <string name="providers_chat_use">用于对话</string>
+    <string name="providers_image_use">用于生图</string>
+    <string name="providers_alias">显示别名（可选）</string>
+    <string name="providers_override">覆盖服务商兼容设置</string>
+    <string name="providers_remove_model">移除模型</string>
+    <string name="providers_delete">删除服务商及其模型</string>
+    <string name="providers_schema">工具 Schema 兼容级别</string>
+    <string name="providers_chat_binding">默认对话模型</string>
+    <string name="providers_image_binding">默认生图模型</string>
+    <string name="providers_image_none">不配置生图模型</string>
+    <string name="providers_switch_failed">切换模型失败，仍使用原模型。请再次选择模型重试。</string>
+    <string name="providers_switching">正在保存模型选择…</string>
+    <string name="providers_count">%1$s · %2$d 个模型</string>
+</resources>

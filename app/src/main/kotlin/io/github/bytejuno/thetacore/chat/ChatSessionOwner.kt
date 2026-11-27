@@ -623,6 +623,7 @@ internal class ChatSessionOwner(
         } else {
             val config = requireNotNull(snapshot)
             val id = requireNotNull(identity)
+            tools!!.bindModels(id.runId, config)
             val context = requireNotNull(disk.chatContext())
             val window = context.contextWindowTokens
             val definitions = (tools!!.catalog.frozen(id.runId) ?: tools!!.catalog.freeze(id.runId)).values.toList()

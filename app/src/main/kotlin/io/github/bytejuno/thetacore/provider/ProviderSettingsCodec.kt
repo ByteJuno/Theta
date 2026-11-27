@@ -90,7 +90,7 @@ internal object ProviderSettingsCodec {
             return encodeCatalog(
                 CatalogRecord(
                     activeProfileId = DEFAULT_PROFILE_ID,
-                    profiles = listOf(ProfileRecord(DEFAULT_PROFILE_ID, settings.model, settings, token, noAuth = false)),
+                    profiles = listOf(ProfileRecord(DEFAULT_PROFILE_ID, legacyDisplayName(settings.model), settings, token, noAuth = false)),
                 ),
             )
         }
@@ -119,7 +119,7 @@ internal object ProviderSettingsCodec {
         }
     })
 
-    private fun JsonObjectBuilder.encodeSettingsFields(settings: OpenAiProviderSettings) {
+    internal fun JsonObjectBuilder.encodeSettingsFields(settings: OpenAiProviderSettings) {
         put("provider", settings.providerId)
         put("base", settings.baseUrl)
         put("model", settings.model)
@@ -164,7 +164,7 @@ internal object ProviderSettingsCodec {
                 val settings = decodeSettings(root, systemPrompt = null)
                 val key = root.getValue("key").jsonPrimitive.content
                 require(validApiKey(key))
-                val defaultName = settings.model.take(MAX_PROFILE_NAME_CHARS)
+                val defaultName = legacyDisplayName(settings.model)
                 CatalogRecord(
                     activeProfileId = DEFAULT_PROFILE_ID,
                     profiles = listOf(ProfileRecord(DEFAULT_PROFILE_ID, defaultName, settings, key, noAuth = false)),
@@ -195,7 +195,7 @@ internal object ProviderSettingsCodec {
         }
     }
 
-    private fun decodeSettings(obj: JsonObject, systemPrompt: String?): OpenAiProviderSettings {
+    internal fun decodeSettings(obj: JsonObject, systemPrompt: String?): OpenAiProviderSettings {
         val p = obj.getValue("parameters").jsonObject
         val c = obj.getValue("compat").jsonObject
         val parameters = OpenAiParameters(
@@ -225,3 +225,5 @@ internal object ProviderSettingsCodec {
         )
     }
 }
+
+internal fun legacyDisplayName(model: String): String = model.map { if (it.isISOControl()) ' ' else it }.joinToString("").trim().take(MAX_PROFILE_NAME_CHARS).ifBlank { "Model" }

@@ -14,7 +14,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-internal fun ProviderProfileSummary.headerLabel(): String = "$displayName · ${settings.model}"
+internal fun ProviderProfileSummary.headerLabel(): String = settings.model
 
 /** State shared by the profile UI and its load/recovery actions; contains no saved key. */
 internal class ProviderSettingsEditor {

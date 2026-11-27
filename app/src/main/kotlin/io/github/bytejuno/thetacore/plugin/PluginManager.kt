@@ -102,7 +102,7 @@ internal class PluginManager(context: Context) {
         hostToolBridge.initialize(io.github.bytejuno.thetacore.plugin.tools.AndroidScreenBackend(app),
             AndroidInvocationClock(app, executionBudget),
             imageTool = { store -> io.github.bytejuno.thetacore.plugin.tools.HostImageGenerationTool(
-                io.github.bytejuno.thetacore.provider.OpenAiSettingsStore.images(app)::snapshotForNewRun,
+                io.github.bytejuno.thetacore.provider.OpenAiSettingsStore.android(app)::snapshotForImage,
                 io.github.bytejuno.thetacore.chat.ImageAttachments((store as AndroidAgentStore).privateImages)) },
             policy = policy, skillReader = ::readSkill) {
             AndroidAgentStore.open(app)
