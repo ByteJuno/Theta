@@ -11,6 +11,7 @@ import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
+import java.nio.file.Path
 import java.nio.file.StandardCopyOption.ATOMIC_MOVE
 import java.nio.file.StandardCopyOption.REPLACE_EXISTING
 import java.nio.file.StandardOpenOption.*
@@ -52,6 +53,9 @@ class OpenAiSettingsStore internal constructor(
     private val directory = root.resolve(DIRECTORY)
     init { require(recordName in setOf("active.bin", "images.bin")) }
     private val file = directory.resolve(recordName)
+    // Publishing this file atomically also commits the migration boundary. Its presence
+    // is authoritative even when credentials cannot be decrypted; legacy records stay inert.
+    private val connectionsFile = directory.resolve("$recordName.v3")
     private val lock = locks[(directory.toString().hashCode() and Int.MAX_VALUE) % locks.size]
     private val mutableRevision = MutableStateFlow(0L)
     val revision: StateFlow<Long> = mutableRevision.asStateFlow()
@@ -64,16 +68,20 @@ class OpenAiSettingsStore internal constructor(
 
     private fun writeSingle(settings: OpenAiProviderSettings, apiKey: String, replaceKey: Boolean) {
         require(validApiKey(apiKey)) { "Invalid API key" }
+        val migrated = hasConnectionsRecord()
         val plaintext = ProviderSettingsCodec.encode(settings, apiKey)
-        encryptAndPersist(plaintext, replaceKey)
+        if (migrated) {
+            try { writeConnections(ProviderConnectionsCodec.migrate(ProviderSettingsCodec.decodeCatalog(plaintext)), replaceKey) }
+            finally { plaintext.fill(0) }
+        } else encryptAndPersist(plaintext, replaceKey)
     }
 
-    private fun encryptAndPersist(plaintext: ByteArray, replaceKey: Boolean) {
+    private fun encryptAndPersist(plaintext: ByteArray, replaceKey: Boolean, target: Path = file) {
         try {
             val encrypted = sanitize(ProviderSettingsException.Failure.WRITE_FAILED) {
                 if (replaceKey) cipher.encryptForReplacement(plaintext) else cipher.encrypt(plaintext)
             }
-            sanitize(ProviderSettingsException.Failure.WRITE_FAILED) { persist(encrypted) }
+            sanitize(ProviderSettingsException.Failure.WRITE_FAILED) { persist(encrypted, target) }
             mutableRevision.value++
         } finally {
             plaintext.fill(0)
@@ -101,12 +109,14 @@ class OpenAiSettingsStore internal constructor(
     }
 
     fun readProfiles(): ProviderProfilesCatalog = synchronized(lock) {
-        if (absent()) return ProviderProfilesCatalog(null, emptyList())
-        legacyProjection(readConnections()).toSummaryCatalog()
+        val catalog = readOptionalConnections()
+        if (catalog == null || catalog.providers.none { p -> p.models.any { it.chat } })
+            ProviderProfilesCatalog(null, emptyList())
+        else legacyProjection(catalog).toSummaryCatalog()
     }
 
-    private fun absent(): Boolean = sanitize(ProviderSettingsException.Failure.READ_FAILED) {
-        checkDirectories(); Files.notExists(file, NOFOLLOW_LINKS)
+    private fun hasConnectionsRecord(): Boolean = sanitize(ProviderSettingsException.Failure.READ_FAILED) {
+        checkDirectories(); !Files.notExists(connectionsFile, NOFOLLOW_LINKS)
     }
 
     /** Legacy entry points remain compatible; v3 editing uses saveProvider and bindModels. */
@@ -200,7 +210,7 @@ class OpenAiSettingsStore internal constructor(
     fun deleteProvider(providerId: String): ProviderCatalog = synchronized(lock) {
         val c = readConnections(); require(c.providers.any { it.connection.providerId == providerId })
         val remaining = c.providers.filterNot { it.connection.providerId == providerId }
-        if (remaining.isEmpty()) { if (legacyImages == null) clearLocked() else writeConnections(ConnectionsRecord(emptyList(), ModelBindings()), false); return ProviderCatalog() }
+        if (remaining.isEmpty()) { writeConnections(ConnectionsRecord(emptyList(), ModelBindings()), false); return ProviderCatalog() }
         val chat = c.bindings.activeChatModelRef?.takeUnless { it.providerId == providerId }
             ?: remaining.firstNotNullOfOrNull { p -> p.models.firstOrNull { it.chat }?.let { ModelRef(p.connection.providerId, it.modelId) } }
         val image = c.bindings.activeImageModelRef?.takeUnless { it.providerId == providerId }
@@ -212,7 +222,7 @@ class OpenAiSettingsStore internal constructor(
     }
 
     private fun writeConnections(record: ConnectionsRecord, replaceKey: Boolean) =
-        encryptAndPersist(ProviderConnectionsCodec.encode(record), replaceKey)
+        encryptAndPersist(ProviderConnectionsCodec.encode(record), replaceKey, connectionsFile)
 
     private fun legacyProjection(record: ConnectionsRecord): ProviderSettingsCodec.CatalogRecord {
         val profiles = record.providers.mapNotNull { p -> p.models.firstOrNull { it.chat }?.let { m ->
@@ -267,14 +277,14 @@ class OpenAiSettingsStore internal constructor(
     }
 
     /** Caller holds lock; all decrypted/encoded byte arrays are cleared even on failure. */
-    private fun <T> readRecord(decode: (ByteArray) -> T): T {
+    private fun <T> readRecord(target: Path = file, decode: (ByteArray) -> T): T {
         val encrypted = sanitize(ProviderSettingsException.Failure.READ_FAILED) {
             checkDirectories()
-            if (Files.notExists(file, NOFOLLOW_LINKS)) {
+            if (Files.notExists(target, NOFOLLOW_LINKS)) {
                 throw ProviderSettingsException(ProviderSettingsException.Failure.NOT_CONFIGURED)
             }
-            check(Files.isRegularFile(file, NOFOLLOW_LINKS))
-            Files.newInputStream(file, READ, NOFOLLOW_LINKS).use { input ->
+            check(Files.isRegularFile(target, NOFOLLOW_LINKS))
+            Files.newInputStream(target, READ, NOFOLLOW_LINKS).use { input ->
                 val out = ByteArrayOutputStream()
                 val buffer = ByteArray(8192)
                 while (true) {
@@ -314,16 +324,26 @@ class OpenAiSettingsStore internal constructor(
                 null
             }
         }
-        var legacy = true
-        val initial = readPart { readRecord { bytes ->
+        val migrated = hasConnectionsRecord()
+        // An explicit clear writes a durable empty tombstone without requiring a usable key.
+        // A nonempty but corrupt v3 record must enter recovery, never fall back to images.bin.
+        if (migrated && sanitize(ProviderSettingsException.Failure.READ_FAILED) {
+            check(Files.isRegularFile(connectionsFile, NOFOLLOW_LINKS))
+            Files.size(connectionsFile) == 0L
+        }) {
+            if (replaceUnreadable) throw ProviderSettingsException(ProviderSettingsException.Failure.RECOVERED)
+            return ConnectionsRecord(emptyList(), ModelBindings())
+        }
+        var legacy = !migrated
+        val initial = readPart { readRecord(if (migrated) connectionsFile else file) { bytes ->
+            if (migrated) return@readRecord ProviderConnectionsCodec.decode(bytes)
             if (ProviderConnectionsCodec.isV3(bytes)) {
-                val decoded = ProviderConnectionsCodec.decode(bytes)
                 legacy = false
-                decoded
+                ProviderConnectionsCodec.decode(bytes)
             } else ProviderConnectionsCodec.migrate(ProviderSettingsCodec.decodeCatalog(bytes))
         } }
         val image = if (legacy && legacyImages != null)
-            readPart { legacyImages.readRecord(ProviderSettingsCodec::decodeRecord) } else null
+            readPart { legacyImages.readRecord(decode = ProviderSettingsCodec::decodeRecord) } else null
         if (replaceUnreadable && !unreadable && (initial != null || image != null)) {
             throw ProviderSettingsException(ProviderSettingsException.Failure.RECOVERED)
         }
@@ -354,12 +374,13 @@ class OpenAiSettingsStore internal constructor(
             c.bindings.copy(activeImageModelRef = ModelRef(id, model.modelId)))
     }
 
-    /** Removes only the active record; Keystore aliases are not rotated/deleted during normal IO. */
+    /** Clears this store without re-enabling legacy import; Keystore aliases are left intact. */
     fun clear() = synchronized(lock) { clearLocked() }
 
     private fun clearLocked() {
         sanitize(ProviderSettingsException.Failure.WRITE_FAILED) {
             checkDirectories()
+            if (hasConnectionsRecord() || legacyImages != null) persist(byteArrayOf(), connectionsFile)
             Files.deleteIfExists(file)
             removeAbandonedTemps()
         }
@@ -390,11 +411,11 @@ class OpenAiSettingsStore internal constructor(
         }
     }
 
-    private fun persist(bytes: ByteArray) {
+    private fun persist(bytes: ByteArray, target: Path = file) {
         check(bytes.size <= MAX_BYTES)
         checkDirectories()
         Files.createDirectories(directory)
-        check(Files.notExists(file, NOFOLLOW_LINKS) || Files.isRegularFile(file, NOFOLLOW_LINKS))
+        check(Files.notExists(target, NOFOLLOW_LINKS) || Files.isRegularFile(target, NOFOLLOW_LINKS))
         removeAbandonedTemps()
         val temp = directory.resolve("$recordName-${UUID.randomUUID()}.tmp")
         try {
@@ -403,7 +424,7 @@ class OpenAiSettingsStore internal constructor(
                 while (buffer.hasRemaining()) channel.write(buffer)
                 channel.force(true)
             }
-            Files.move(temp, file, ATOMIC_MOVE, REPLACE_EXISTING)
+            Files.move(temp, target, ATOMIC_MOVE, REPLACE_EXISTING)
         } finally {
             Files.deleteIfExists(temp)
         }

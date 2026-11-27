@@ -208,7 +208,7 @@ class ProviderConnectionsTest {
         }
         val store = OpenAiSettingsStore(root, flaky)
         store.saveProvider(connection("one"), listOf(EnabledModel("first")), "old-key")
-        val file = File(root, "${OpenAiSettingsStore.DIRECTORY}/active.bin"); val before = file.readBytes()
+        val file = File(root, "${OpenAiSettingsStore.DIRECTORY}/active.bin.v3"); val before = file.readBytes()
         unreadable = true
         assertThrows(ProviderSettingsException::class.java) { store.readProviderCatalog() }
         unreadable = false

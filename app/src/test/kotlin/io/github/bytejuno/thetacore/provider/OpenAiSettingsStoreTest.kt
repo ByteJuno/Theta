@@ -300,7 +300,11 @@ class OpenAiSettingsStoreTest {
     private fun settings(n: Int = 1) = OpenAiProviderSettings("provider$n", "https://example.invalid/v$n", "model$n",
         OpenAiParameters(n, 0.5, 0.8, "high", false, listOf("stop$n")),
         OpenAiChatConfig.Compat("max_tokens", "reasoning_content", true, false, SchemaProfile.BASIC))
-    private fun record(root: File) = File(root, "${OpenAiSettingsStore.DIRECTORY}/active.bin")
+    // Fault injection and ciphertext assertions must follow the migrated authoritative record.
+    private fun record(root: File): File {
+        val current = File(root, "${OpenAiSettingsStore.DIRECTORY}/active.bin.v3")
+        return if (current.exists()) current else File(root, "${OpenAiSettingsStore.DIRECTORY}/active.bin")
+    }
     private fun token(snapshot: OpenAiRunSnapshot) = runBlocking {
         snapshot.target(ModelTransport { _, _, _ -> throw AssertionError("Token lookup must not use transport") })
             .credentials.accessToken()
