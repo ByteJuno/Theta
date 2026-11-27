@@ -32,7 +32,10 @@ class OpenAiResponsesCodec(
         item.string("type") == "reasoning" && !item.string("id").isNullOrBlank() &&
             item["summary"] is JsonArray && item.getValue("summary").jsonArray.all {
                 it is JsonObject && it.string("type") == "summary_text" && it.string("text") != null
-            } && (item["encrypted_content"] == null || item["encrypted_content"] == JsonNull ||
+            } && (item["content"] == null || item["content"] == JsonNull ||
+                item["content"] is JsonArray && item.getValue("content").jsonArray.all {
+                    it is JsonObject && it.string("type") == "reasoning_text" && it.string("text") != null
+                }) && (item["encrypted_content"] == null || item["encrypted_content"] == JsonNull ||
                 item.string("encrypted_content") != null) &&
             (item["status"] == null || item.string("status") in setOf("completed", "incomplete"))
 

@@ -15,7 +15,7 @@ class ResponsesReplayCheckpointTest {
     @get:Rule val temp = TemporaryFolder()
     @Test fun `native tool loop executes once and returns call id with original reasoning`() = runTest {
         val f = RunFixture(listOf(testDefinition("read")))
-        val reasoning = Json.parseToJsonElement("""{"id":"rs","type":"reasoning","summary":[],"encrypted_content":"opaque"}""").jsonObject
+        val reasoning = Json.parseToJsonElement("""{"id":"rs","type":"reasoning","content":[{"type":"reasoning_text","text":"raw plan"}],"summary":[{"type":"summary_text","text":"summary plan"}],"encrypted_content":"opaque","metadata":{"retain":true}}""").jsonObject
         val call = Json.parseToJsonElement("""{"id":"fc","type":"function_call","call_id":"wire","name":"read","arguments":"{}"}""").jsonObject
         val answer = Json.parseToJsonElement("""{"id":"msg","type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}""").jsonObject
         var submissions = 0
@@ -37,6 +37,14 @@ class ResponsesReplayCheckpointTest {
                 append(event("response.created") { putJsonObject("response") { put("id", "r$submissions"); put("model", "m") } })
                 output.forEachIndexed { i, item ->
                     append(event("response.output_item.added") { put("output_index", i); put("item", item) })
+                    if (item == reasoning) {
+                        append(event("response.reasoning_text.delta") {
+                            put("output_index", i); put("item_id", "rs"); put("content_index", 0); put("delta", "raw ")
+                        })
+                        append(event("response.reasoning_summary_text.delta") {
+                            put("output_index", i); put("item_id", "rs"); put("summary_index", 0); put("delta", "summary ")
+                        })
+                    }
                     append(event("response.output_item.done") { put("output_index", i); put("item", item) })
                 }
                 append(event("response.completed") { putJsonObject("response") {
@@ -49,6 +57,10 @@ class ResponsesReplayCheckpointTest {
         assertEquals(RunState.COMPLETED, result.state)
         assertEquals(2, submissions); assertEquals(1, f.submitted.size)
         assertNotEquals("wire", f.submitted.single().callId)
+        assertEquals("done", assertIs<ContentPart.Text>(f.history.snapshot().messages.last().parts.single()).text)
+        val savedReason = f.history.snapshot().messages.flatMap { it.parts }.filterIsInstance<ContentPart.Reasoning>().single()
+        assertEquals("raw plan", savedReason.summary)
+        assertEquals(reasoning, Json.parseToJsonElement(assertNotNull(savedReason.replay).payload).jsonObject.getValue("item"))
     }
 
     @Test fun `switching either protocol retains original replay and offers explicit summary continuation`() = runTest {

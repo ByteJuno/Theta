@@ -29,7 +29,8 @@ class OpenAiResponsesTest {
     private fun added(index: Int, item: JsonObject) = event("response.output_item.added") { put("output_index", index); put("item", item) }
     private fun ended(index: Int, item: JsonObject) = event("response.output_item.done") { put("output_index", index); put("item", item) }
     private fun delta(index: Int, id: String, type: String, value: String) = event("response.$type.delta") {
-        put("output_index", index); put("item_id", id); put("delta", value); put("content_index", 0)
+        put("output_index", index); put("item_id", id); put("delta", value)
+        put(if (type == "reasoning_summary_text") "summary_index" else "content_index", 0)
     }
     private fun text(value: String, refusal: Boolean = false) = buildJsonObject {
         put("id", "msg_1"); put("type", "message"); put("role", "assistant"); put("status", "completed")
@@ -43,6 +44,31 @@ class OpenAiResponsesTest {
     private fun reasoning(summary: String, encrypted: String = "opaque-final") = buildJsonObject {
         put("id", "rs_1"); put("type", "reasoning"); put("encrypted_content", encrypted)
         putJsonArray("summary") { addJsonObject { put("type", "summary_text"); put("text", summary) } }
+    }
+    private fun rawReasoning(content: List<String>, summaries: List<String> = emptyList()) = buildJsonObject {
+        put("id", "rs_1"); put("type", "reasoning"); put("status", "completed")
+        put("encrypted_content", "opaque-complete")
+        putJsonArray("content") { content.forEach { addJsonObject { put("type", "reasoning_text"); put("text", it) } } }
+        putJsonArray("summary") { summaries.forEach { addJsonObject { put("type", "summary_text"); put("text", it) } } }
+        putJsonObject("provider_metadata") { put("retain", "unknown-field") }
+    }
+    private fun reasoningEvent(type: String, value: String, part: Int = 0) = event("response.$type") {
+        put("output_index", 0); put("item_id", "rs_1")
+        put(if (type.startsWith("reasoning_summary")) "summary_index" else "content_index", part)
+        put(if (type.endsWith(".delta")) "delta" else "text", value)
+    }
+    private fun assertReasoningAnswer(result: List<ModelEvent>, reason: JsonObject, visible: String) {
+        assertEquals(FinishReason.STOP, assertIs<ModelEvent.Finished>(result.last()).reason)
+        assertEquals(1, result.count { it is ModelEvent.Finished })
+        val message = reduced(result).assistantMessage()
+        assertEquals("answer", assertIs<ContentPart.Text>(message.parts.last()).text)
+        val part = assertIs<ContentPart.Reasoning>(message.parts.first())
+        assertEquals(visible, part.summary)
+        val replay = assertNotNull(part.replay)
+        assertTrue(codec.canReplay(replay, "m"))
+        assertEquals(reason, obj(replay.payload).getValue("item"))
+        assertEquals(reason, obj(codec.encode(chatRequest("m") { messages = listOf(message) })).getValue("input").jsonArray.first())
+        assertTrue(result.all { eventSizeBytes(it) <= 64 * 1024 })
     }
     private fun wire(events: List<JsonObject>) = events.joinToString("") { "event: ${it.getValue("type").jsonPrimitive.content}\ndata: $it\n\n" }
     private fun transport(wire: String, segment: Int = 8192) = ModelTransport { _, _, _ -> flow {
@@ -87,6 +113,112 @@ class OpenAiResponsesTest {
         assertEquals(100L, r.usage!!.inputTokens); assertEquals(40L, r.usage!!.cacheReadTokens)
         assertEquals(30L, r.usage!!.outputTokens); assertEquals(20L, r.usage!!.reasoningTokens)
         assertEquals(FinishReason.STOP, (result.last() as ModelEvent.Finished).reason)
+    }
+
+    @Test fun `raw reasoning deltas and done text deliver answer and preserve entire replay`() = runTest {
+        val reason = rawReasoning(listOf("思考 🌍 complete")); val answer = text("answer")
+        val result = collect(listOf(created(), added(0, rawReasoning(emptyList())),
+            reasoningEvent("reasoning_text.delta", "思考 🌍"),
+            reasoningEvent("reasoning_text.done", "思考 🌍 complete"), ended(0, reason),
+            added(1, text("")), delta(1, "msg_1", "output_text", "answer"), ended(1, answer), terminal(listOf(reason, answer))), 1)
+        assertReasoningAnswer(result, reason, "思考 🌍 complete")
+        assertEquals(listOf("", "思考 🌍", " complete"), result.filterIsInstance<ModelEvent.ReasoningDelta>().map { it.text })
+    }
+
+    @Test fun `terminal only raw reasoning is delivered with complete replay`() = runTest {
+        val reason = rawReasoning(listOf("terminal reasoning")); val answer = text("answer")
+        assertReasoningAnswer(collect(listOf(created(), added(0, rawReasoning(emptyList())),
+            added(1, text("")), terminal(listOf(reason, answer)))), reason, "terminal reasoning")
+    }
+
+    @Test fun `raw reasoning and summary use independent indexed terminal checks`() = runTest {
+        val reason = rawReasoning(listOf("raw zero", "raw one"), listOf("summary zero", "summary one"))
+        val answer = text("answer")
+        val result = collect(listOf(created(), added(0, rawReasoning(emptyList())),
+            reasoningEvent("reasoning_text.delta", "raw ", 0),
+            reasoningEvent("reasoning_summary_text.delta", "summary ", 0),
+            reasoningEvent("reasoning_text.delta", "raw one", 1),
+            reasoningEvent("reasoning_summary_text.delta", "summary one", 1),
+            reasoningEvent("reasoning_text.done", "raw zero", 0),
+            reasoningEvent("reasoning_summary_text.done", "summary zero", 0),
+            ended(0, reason), added(1, text("")), ended(1, answer), terminal(listOf(reason, answer))))
+        assertReasoningAnswer(result, reason, "raw zeroraw one")
+    }
+
+    @Test fun `summary first remains visible while raw text and part completions are preserved`() = runTest {
+        val reason = rawReasoning(listOf("private reasoning"), listOf("visible summary")); val answer = text("answer")
+        fun part(type: String, summary: Boolean, value: String) = event("response.$type") {
+            put("output_index", 0); put("item_id", "rs_1")
+            put(if (summary) "summary_index" else "content_index", 0)
+            putJsonObject("part") { put("type", if (summary) "summary_text" else "reasoning_text"); put("text", value) }
+        }
+        val result = collect(listOf(created(), added(0, rawReasoning(emptyList())),
+            part("reasoning_summary_part.added", true, ""),
+            reasoningEvent("reasoning_summary_text.delta", "visible "),
+            part("content_part.added", false, ""),
+            reasoningEvent("reasoning_text.delta", "private "),
+            reasoningEvent("reasoning_text.done", "private reasoning"),
+            part("content_part.done", false, "private reasoning"),
+            reasoningEvent("reasoning_summary_text.done", "visible summary"),
+            part("reasoning_summary_part.done", true, "visible summary"),
+            ended(0, reason), added(1, text("")), ended(1, answer), terminal(listOf(reason, answer))))
+        assertReasoningAnswer(result, reason, "visible summary")
+    }
+
+    @Test fun `nonvisible reasoning channel still proves liveness to the kernel`() = runTest {
+        val reason = rawReasoning(listOf("rawrawrawraw"), listOf("summary")); val answer = text("answer")
+        val frames = listOf(created(), added(0, rawReasoning(emptyList())),
+            reasoningEvent("reasoning_summary_text.delta", "summary")) +
+            List(4) { reasoningEvent("reasoning_text.delta", "raw") } +
+            listOf(ended(0, reason), added(1, text("")), ended(1, answer), terminal(listOf(reason, answer)))
+        val transport = ModelTransport { _, _, _ -> flow {
+            emit(TransportEvent.Headers(200, "text/event-stream", null))
+            frames.forEach { frame ->
+                delay(60)
+                emit(TransportEvent.Bytes(wire(listOf(frame)).toByteArray()))
+            }
+        } }
+        val result = OpenAiResponsesProvider(config, transport).chat(req(), auth)
+            .validated("test", "req", EventTimeouts(firstMs = 100, idleMs = 100)).toList()
+        assertReasoningAnswer(result, reason, "summary")
+    }
+
+    @Test fun `terminal checks reject malformed raw content and changes after item completion`() = runTest {
+        val valid = rawReasoning(listOf("raw"), listOf("summary"))
+        for (bad in listOf(JsonPrimitive("not an array"),
+            JsonArray(listOf(obj("""{"type":"summary_text","text":"raw"}"""))),
+            JsonArray(listOf(obj("""{"type":"reasoning_text"}"""))))) {
+            val invalid = JsonObject(valid + ("content" to bad))
+            val result = collect(listOf(created(), added(0, rawReasoning(emptyList())), ended(0, invalid), terminal(listOf(invalid))))
+            assertEquals(ModelErrorCode.PROTOCOL, assertIs<ModelEvent.Failed>(result.last()).error.code)
+            val replay = replayData("openai-responses", "m", buildJsonObject {
+                put("v", 1); put("provider", "test"); put("endpoint", config.endpoint.toString()); put("item", invalid)
+            }.toString())
+            assertFalse(codec.canReplay(replay, "m"))
+        }
+        val result = collect(listOf(created(), added(0, rawReasoning(emptyList())), ended(0, valid),
+            terminal(listOf(rawReasoning(listOf("changed"), listOf("summary"))))))
+        assertEquals(ModelErrorCode.PROTOCOL, assertIs<ModelEvent.Failed>(result.last()).error.code)
+    }
+
+    @Test fun `reasoning contradictions cannot be hidden by the other channel or part`() = runTest {
+        val reason = rawReasoning(listOf("raw"), listOf("summary"))
+        val prefixes = listOf(
+            listOf(reasoningEvent("reasoning_text.delta", "summary")),
+            listOf(reasoningEvent("reasoning_summary_text.delta", "raw")),
+            listOf(reasoningEvent("reasoning_text.delta", "raw", 1)),
+            listOf(reasoningEvent("reasoning_summary_text.delta", "summary", 1)),
+            listOf(reasoningEvent("reasoning_text.delta", "raw"), reasoningEvent("reasoning_text.done", "other")),
+            listOf(reasoningEvent("reasoning_text.done", "ra")),
+            listOf(reasoningEvent("reasoning_summary_text.done", "summ")),
+            listOf(reasoningEvent("reasoning_text.done", "raw"), reasoningEvent("reasoning_text.delta", "extra")),
+        )
+        prefixes.forEach { prefix ->
+            val result = collect(listOf(created(), added(0, rawReasoning(emptyList()))) + prefix +
+                listOf(ended(0, reason), terminal(listOf(reason))))
+            assertEquals(ModelErrorCode.PROTOCOL, assertIs<ModelEvent.Failed>(result.last()).error.code)
+            assertTrue(result.none { it is ModelEvent.Finished })
+        }
     }
 
     @Test fun `parallel arguments and final reasoning item round trip through internal call bindings`() = runTest {

@@ -7,6 +7,7 @@ import kotlinx.serialization.json.*
 internal class OpenAiResponsesStream(private val request: ChatRequest, private val codec: OpenAiResponsesCodec) : OpenAiEventStream {
     private class Item(val index: Int, val id: String, val type: String, val initial: JsonObject) {
         val text = StringBuilder()
+        val reasoning = ResponsesReasoningText()
         var ended = false
         var final: JsonObject? = null
         var refusal = false
@@ -57,12 +58,25 @@ internal class OpenAiResponsesStream(private val request: ChatRequest, private v
                     else -> throw ProtocolException("Unsupported Responses output item")
                 }
             }
-            "response.output_text.delta", "response.refusal.delta", "response.reasoning_summary_text.delta",
+            "response.reasoning_text.delta", "response.reasoning_text.done",
+            "response.reasoning_summary_text.delta", "response.reasoning_summary_text.done",
+            "response.reasoning_summary_part.added", "response.reasoning_summary_part.done" -> {
+                val item = item(root)
+                protocol(item.type == "reasoning", "Reasoning event changed item type")
+                item.reasoning.event(type, root) { append(item, it, emit) }
+                emit(Events.keepAlive())
+            }
+            "response.content_part.added", "response.content_part.done" -> {
+                val item = item(root)
+                if (item.type == "reasoning") item.reasoning.event(type, root) { append(item, it, emit) }
+                else protocol(item.type == "message", "Content event changed item type")
+                emit(Events.keepAlive())
+            }
+            "response.output_text.delta", "response.refusal.delta",
             "response.function_call_arguments.delta" -> {
                 val item = item(root)
                 val expected = when (type) {
                     "response.function_call_arguments.delta" -> "function_call"
-                    "response.reasoning_summary_text.delta" -> "reasoning"
                     else -> "message"
                 }
                 protocol(item.type == expected, "Delta changed item type")
@@ -111,9 +125,7 @@ internal class OpenAiResponsesStream(private val request: ChatRequest, private v
                 done = true
             }
             // The authoritative final item is checked against every streamed delta at output_item.done.
-            "response.content_part.added", "response.content_part.done", "response.output_text.done",
-            "response.refusal.done", "response.reasoning_summary_part.added", "response.reasoning_summary_part.done",
-            "response.reasoning_summary_text.done", "response.function_call_arguments.done",
+            "response.output_text.done", "response.refusal.done", "response.function_call_arguments.done",
             "response.output_text.annotation.added" -> { item(root); emit(Events.keepAlive()) }
             else -> throw ProtocolException("Unsupported Responses stream event")
         }
@@ -152,10 +164,9 @@ internal class OpenAiResponsesStream(private val request: ChatRequest, private v
                 protocol(obj.string("call_id") == item.initial.string("call_id") && obj.string("name") == item.initial.string("name"), "Function identity changed")
                 obj.string("arguments") ?: throw ProtocolException("Missing final arguments")
             }
-            "reasoning" -> (obj["summary"] as? JsonArray ?: throw ProtocolException("Missing reasoning summary")).joinToString("") {
-                val p = it.jsonObject
-                protocol(p.string("type") == "summary_text", "Unsupported reasoning summary")
-                p.string("text") ?: throw ProtocolException("Missing summary text")
+            "reasoning" -> {
+                item.reasoning.finish(obj) { append(item, it, emit) }
+                item.text.toString()
             }
             else -> {
                 protocol(obj.string("role") == "assistant", "Message role changed")
