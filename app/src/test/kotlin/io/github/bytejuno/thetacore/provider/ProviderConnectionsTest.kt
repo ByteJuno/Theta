@@ -276,7 +276,7 @@ class ProviderConnectionsTest {
             store.saveProvider(c.copy(baseUrl = "https://changed.invalid/v1"), models, "")
         }
         assertEquals(ProviderSettingsException.Failure.ENDPOINT_CHANGED, failure.failure)
-        assertThrows(IllegalArgumentException::class.java) { c.copy(protocol = "openai-responses") }
+        assertEquals("openai-responses", c.copy(protocol = "openai-responses").protocol)
         assertThrows(IllegalArgumentException::class.java) { c.copy(protocol = "anthropic") }
         assertEquals("openai-chat", store.snapshotForNewRun().protocol)
     }

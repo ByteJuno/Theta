@@ -51,7 +51,7 @@ interface CollectedCall {
     val binding: CallBinding
     val name: String
     val argsJson: String
-    /** Syntactic completeness, not JSON Schema validation or permission to execute. */
+    /** Native completion and syntactically complete JSON, not Schema validation or permission to execute. */
     val complete: Boolean
     /** The call ended with no arguments. The host may read this as `{}` only if the Schema allows an empty object. */
     val emptyArguments: Boolean
@@ -67,6 +67,7 @@ class ModelEventReducer(private val provider: String, private val requestId: Str
     private class Part(val kind: Kind, val binding: CallBinding? = null, val name: String = "") {
         val content = StringBuilder()
         var ended = false
+        var complete = true
         var replay: ReplayData? = null
     }
     private val parts = linkedMapOf<Int, Part>()
@@ -110,11 +111,16 @@ class ModelEventReducer(private val provider: String, private val requestId: Str
             is ModelEvent.PartEnd -> {
                 val part = parts[event.index]
                 protocol(part != null && !part.ended, "PartEnd without open part")
+                protocol(event.complete || part!!.kind == Kind.TOOL, "Incomplete non-tool part")
                 part!!.ended = true
+                part.complete = event.complete
                 part.replay = event.replay?.let { replayData(it.protocol, it.model, it.payload) }
             }
             is ModelEvent.Finished -> {
                 protocol(started && parts.values.all { it.ended }, "Finished with unclosed parts")
+                protocol(parts.values.all { it.complete } || event.reason in setOf(FinishReason.LENGTH,
+                    FinishReason.CONTEXT_EXCEEDED, FinishReason.REFUSAL, FinishReason.CONTENT_FILTER),
+                    "Non-truncated response with unfinished tool call")
                 terminal = if (event.reason == FinishReason.STOP && calls().isNotEmpty() && calls().all { it.complete || it.emptyArguments })
                     Events.finished(FinishReason.TOOL_CALLS, event.rawReason) else event
             }
@@ -133,8 +139,8 @@ class ModelEventReducer(private val provider: String, private val requestId: Str
     fun endOfInput() { protocol(terminal != null, "EOF without terminal") }
     fun calls(): List<CollectedCall> = parts.values.filter { it.kind == Kind.TOOL }.map {
         val args = it.content.toString()
-        val complete = it.ended && runCatching { Json.parseToJsonElement(args) is JsonObject }.getOrDefault(false)
-        CollectedCallValue(it.binding!!, it.name, args, complete, it.ended && args.isEmpty())
+        val complete = it.ended && it.complete && runCatching { Json.parseToJsonElement(args) is JsonObject }.getOrDefault(false)
+        CollectedCallValue(it.binding!!, it.name, args, complete, it.ended && it.complete && args.isEmpty())
     }
     /** Only eligibility for downstream validation, never an execution approval. */
     fun toolCandidates(): List<CollectedCall> {

@@ -86,7 +86,7 @@ class OpenAiRunSnapshot(
 ) {
     constructor(settings: OpenAiProviderSettings, credentials: ApiKeyCredentials) : this(settings, credentials as Credentials)
 
-    init { require(protocol == "openai-chat") { "Protocol is not enabled" } }
+    init { require(protocol in setOf("openai-chat", "openai-responses")) { "Protocol is not enabled" } }
 
     fun withImageSnapshot(image: OpenAiRunSnapshot?) = OpenAiRunSnapshot(settings, credentials, protocol, image)
 
@@ -95,6 +95,16 @@ class OpenAiRunSnapshot(
         mediaReader: MediaContentReader? = null,
     ): ModelTarget = when (protocol) {
         "openai-chat" -> ModelTarget(settings.providerId, OpenAiChatProvider(settings.adapterConfig(), transport, mediaReader), credentials)
+        "openai-responses" -> ModelTarget(settings.providerId, OpenAiResponsesProvider(responsesConfig(), transport, mediaReader), credentials)
+        else -> error("Protocol is not enabled")
+    }
+
+    private fun responsesConfig() = OpenAiResponsesConfig(settings.providerId, settings.baseUrl, setOf(settings.model))
+
+    /** Use the same wire representation for admission and submission, including opaque replay. */
+    fun requestByteEstimator(mediaReader: MediaContentReader? = null): (ChatRequest) -> Long = when (protocol) {
+        "openai-chat" -> OpenAiChatCodec(settings.adapterConfig(), mediaReader)::estimateRequestBytes
+        "openai-responses" -> OpenAiResponsesCodec(responsesConfig(), mediaReader)::estimateRequestBytes
         else -> error("Protocol is not enabled")
     }
 

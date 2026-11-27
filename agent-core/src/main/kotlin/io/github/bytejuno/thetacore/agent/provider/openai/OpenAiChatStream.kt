@@ -4,7 +4,7 @@ import io.github.bytejuno.thetacore.agent.protocol.*
 import kotlinx.serialization.json.*
 
 internal class OpenAiChatStream(private val config: OpenAiChatConfig, private val request: ChatRequest,
-                                private val codec: OpenAiChatCodec) {
+                                private val codec: OpenAiChatCodec) : OpenAiEventStream {
     private class Tool(val part: Int, var wireId: String?, var name: String) { var started = false }
     private val tools = linkedMapOf<Int, Tool>()
     private var nextPart = 0
@@ -20,7 +20,7 @@ internal class OpenAiChatStream(private val config: OpenAiChatConfig, private va
     private var reason: String? = null
     private var done = false
 
-    suspend fun frame(event: String?, data: String?, heartbeat: Boolean, emit: suspend (ModelEvent) -> Unit) {
+    override suspend fun frame(event: String?, data: String?, heartbeat: Boolean, emit: suspend (ModelEvent) -> Unit) {
         val keepAlive = heartbeat || event == "ping" || event == "heartbeat"
         // A heartbeat after the terminal is connection noise, anything else may be a second answer.
         if (done) { protocol(keepAlive, "SSE frame after terminal"); return }
@@ -137,7 +137,7 @@ internal class OpenAiChatStream(private val config: OpenAiChatConfig, private va
         "content_filter" -> FinishReason.CONTENT_FILTER
         else -> FinishReason.OTHER
     }
-    fun endOfInput() { protocol(done, "EOF without DONE or stream error") }
+    override fun endOfInput() { protocol(done, "EOF without DONE or stream error") }
 }
 
 internal fun decodeError(error: JsonObject?, status: Int?, retryAfterMs: Long?): ModelError {
