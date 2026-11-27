@@ -12,6 +12,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.selects.select
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 
 /** One process-owned projection of the current foreground or attention notification. */
@@ -35,8 +38,9 @@ internal class PluginOutputSurfaces(
     private var displayed: Surface? = null
     private var displayedTask: TaskProgress? = null
     private data class Cleanup(val surface: Surface, val taskId: String)
-    private val pendingClears = mutableSetOf<Cleanup>()
-    private val draining = mutableMapOf<PluginExecutionBudget.Lease, Binding>()
+    private val outstanding = ConcurrentHashMap.newKeySet<Cleanup>()
+    private val pendingClears = ConcurrentHashMap.newKeySet<Cleanup>()
+    private val draining = ConcurrentHashMap<PluginExecutionBudget.Lease, Binding>()
     private val closingBindings = mutableSetOf<Binding>()
     private val waitingForCapacity = ConcurrentHashMap.newKeySet<String>()
 
@@ -58,19 +62,7 @@ internal class PluginOutputSurfaces(
 
     init {
         owner.launch {
-            for (change in changes) {
-                reconcile()
-                // Only this consumer can acquire a displayed task or enqueue another clear.
-                synchronized(gate) {
-                    closingBindings.removeAll { binding ->
-                        val done = displayed?.binding !== binding &&
-                            pendingClears.none { it.surface.binding === binding } &&
-                            draining.none { (lease, source) -> source === binding && !lease.actualExited.isCompleted }
-                        if (done) binding.drained.complete(Unit)
-                        done
-                    }
-                }
-            }
+            for (change in changes) reconcile()
         }
     }
 
@@ -86,10 +78,11 @@ internal class PluginOutputSurfaces(
         private var active = false
         private var closed = false
         private var registeredSurface = false
+        internal val callbacks = Mutex()
         internal val drained = CompletableDeferred<Unit>()
-        @Volatile internal var cleanupExpired = false
-            private set
-        internal var cleanupFailed = false
+        internal val expiry = CompletableDeferred<Unit>()
+        internal val cleanupExpired get() = expiry.isCompleted
+        @Volatile internal var cleanupFailed = false
         @Volatile internal var failed = false
             private set
 
@@ -114,14 +107,15 @@ internal class PluginOutputSurfaces(
                 if (active) candidates.add(item)
             }
             if (closed) {
-                if (registeredSurface) closingBindings.add(this) else drained.complete(Unit)
+                if (!registeredSurface) drained.complete(Unit)
+                else if (!drained.isCompleted && closingBindings.add(this)) owner.launch { drain(this@Binding) }
             }
             changes.trySend(Unit)
             Unit
         }
 
         fun expireCleanup() {
-            cleanupExpired = true
+            expiry.complete(Unit)
             changes.trySend(Unit)
         }
 
@@ -132,10 +126,42 @@ internal class PluginOutputSurfaces(
         }
     }
 
+    private suspend fun drain(binding: Binding) {
+        // Cross the same mutex as selection to include a show already admitted at revocation.
+        val tasks = binding.callbacks.withLock { outstanding.filter { it.surface.binding === binding } }
+        for (task in tasks) {
+            while (true) {
+                val released = budget.nextSlotRelease()
+                if (task.surface.clear(task.taskId) !== Callback.Busy) break
+                select<Unit> {
+                    released.onAwait { }
+                    binding.expiry.onAwait { }
+                }
+            }
+        }
+        draining.filterValues { it === binding }.keys.forEach { it.actualExited.await() }
+        synchronized(gate) {
+            binding.drained.complete(Unit)
+            closingBindings.remove(binding)
+        }
+        changes.trySend(Unit)
+    }
+
     private inner class Surface(val binding: Binding, val output: OutputSurface) {
         fun live() = !binding.failed && synchronized(gate) { this in candidates }
 
-        suspend fun <T : Any> call(
+        suspend fun <T : Any> read(action: () -> T): Callback<T> = binding.callbacks.withLock {
+            if (live()) call(action = action) else Callback.Unavailable
+        }
+
+        suspend fun show(task: TaskProgress): Callback<Unit> = binding.callbacks.withLock {
+            if (!live()) return@withLock Callback.Unavailable
+            val result = call(late = { output.clear(task.taskId) }) { output.show(task) }
+            if (result is Callback.Done || result is Callback.Failed) outstanding.add(Cleanup(this, task.taskId))
+            result
+        }
+
+        private suspend fun <T : Any> call(
             cleanup: Boolean = false,
             late: () -> Unit = {},
             action: () -> T,
@@ -149,7 +175,7 @@ internal class PluginOutputSurfaces(
                     outcome = try { Callback.Done(action()) } catch (t: Throwable) {
                         Callback.Failed(t)
                     }
-                    if (result.isCompleted) runCatching(late)
+                    if (result.isCompleted) runCatching(late).onFailure { binding.cleanupFailed = true }
                 }
             } ?: run {
                 if (budget.isClosed()) return Callback.Unavailable
@@ -172,15 +198,18 @@ internal class PluginOutputSurfaces(
             return value
         }
 
-        suspend fun clear(id: String) {
+        suspend fun clear(id: String): Callback<Unit> = binding.callbacks.withLock {
             val pending = Cleanup(this, id)
+            if (pending !in outstanding) return@withLock Callback.Done(Unit)
             val outcome = if (binding.cleanupExpired) Callback.Unavailable else call(cleanup = true) { output.clear(id) }
             if (outcome === Callback.Busy) {
                 pendingClears.add(pending)
             } else {
                 if (outcome !is Callback.Done) binding.cleanupFailed = true
                 pendingClears.remove(pending)
+                outstanding.remove(pending)
             }
+            outcome
         }
     }
 
@@ -193,7 +222,8 @@ internal class PluginOutputSurfaces(
 
     private fun awaitingCleanup(item: Surface): Boolean {
         val pluginId = item.binding.pluginId
-        return pendingClears.any { it.surface.binding.pluginId == pluginId } || draining.keys.any { it.pluginId == pluginId }
+        return synchronized(gate) { closingBindings.any { it.pluginId == pluginId } } ||
+            pendingClears.any { it.surface.binding.pluginId == pluginId } || draining.keys.any { it.pluginId == pluginId }
     }
 
     private suspend fun reconcile() {
@@ -205,18 +235,18 @@ internal class PluginOutputSurfaces(
         val snapshot = synchronized(gate) { candidates.toList() }
         val ranked = snapshot.mapNotNull { item ->
             if (awaitingCleanup(item)) return@mapNotNull null
-            val priority = item.call { item.output.priority }
+            val priority = item.read { item.output.priority }
             if (priority is Callback.Done) item to priority.value else null
         }.sortedByDescending { it.second }
         for ((item, _) in ranked) {
             if (desired !== task) return
-            val available = item.call { item.output.isAvailable(device) }
+            val available = item.read { item.output.isAvailable(device) }
             if (available !is Callback.Done || !available.value) continue
             if (item !== displayed) clearDisplayed()
             if (awaitingCleanup(item)) continue
             if (item === displayed && task == displayedTask) return
             if (desired !== task || !item.live()) return
-            when (item.call(late = { item.output.clear(task.taskId) }) { item.output.show(task) }) {
+            when (item.show(task)) {
                 is Callback.Done -> {
                     displayed = item
                     displayedTask = task

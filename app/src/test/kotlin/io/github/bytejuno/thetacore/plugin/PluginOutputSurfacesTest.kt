@@ -9,6 +9,7 @@ import io.github.bytejuno.thetacore.sdk.TaskProgress
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -28,12 +29,13 @@ class PluginOutputSurfacesTest {
 
     @After fun close() { owner.cancel(); budget.close() }
 
-    private fun add(id: String, rank: Int, available: Boolean = true, clear: () -> Unit = {}, show: () -> Unit = {}):
+    private fun add(id: String, rank: Int, available: Boolean = true, onRank: () -> Unit = {},
+        clear: () -> Unit = {}, show: () -> Unit = {}):
         PluginOutputSurfaces.Binding {
         val surface = object : OutputSurface {
             override val id = id
             override val displayName = id
-            override val priority = rank
+            override val priority get() = rank.also { onRank() }
             override fun isAvailable(device: DeviceInfo) = available && device.sdkInt == 33
             override fun show(task: TaskProgress) {
                 show()
@@ -105,6 +107,55 @@ class PluginOutputSurfacesTest {
         router.present(null)
         expect("low clear a")
         assertTrue(events.isEmpty())
+    }
+
+    @Test fun disableFinishesWhileUnrelatedRankingExceedsCloseDeadline() = runBlocking {
+        val high = add("high", 100)
+        val slow = AtomicBoolean(false)
+        val ranking = CountDownLatch(1)
+        repeat(22) { index ->
+            add("backup$index", index, onRank = {
+                if (slow.get()) {
+                    ranking.countDown()
+                    Thread.sleep(260)
+                }
+            })
+        }
+        router.present(ChatTaskProgress.Model.outputTask("a"))
+        expect("high show a MODEL null false")
+        slow.set(true)
+        val start = System.nanoTime()
+        router.present(ChatTaskProgress.Approval.outputTask("a"))
+        assertTrue(ranking.await(2, TimeUnit.SECONDS))
+        val close = disable(high)
+        assertTrue(close.awaitPluginClose(5_000, high)!!.getOrThrow().isEmpty())
+        expect("high clear a")
+        expect("disabled")
+        expect("resources closed")
+        assertEquals("backup21 show a APPROVAL null true", events.poll(8, TimeUnit.SECONDS))
+        assertTrue(System.nanoTime() - start >= TimeUnit.SECONDS.toNanos(5))
+        slow.set(false)
+    }
+
+    @Test fun lateShowCompensationFailureIsReturnedByDisable() = runBlocking {
+        val release = CountDownLatch(1)
+        val drawn = AtomicBoolean(false)
+        val high = add("high", 2, clear = { check(!drawn.get()) { "late clear failed" } }) {
+            release.await()
+            drawn.set(true)
+        }
+        add("low", 1)
+        router.present(ChatTaskProgress.Model.outputTask("a"))
+        val close = try {
+            expect("high clear a")
+            expect("low show a MODEL null false")
+            disable(high)
+        } finally { release.countDown() }
+        val errors = close.awaitPluginClose(5_000, high)!!.getOrThrow()
+        assertEquals("Output surface cleanup failed", errors.single().message)
+        expect("high show a MODEL null false")
+        expect("disabled")
+        expect("resources closed")
     }
 
     @Test fun expiredInFlightClearRetainsResourcesUntilActualExit() = runBlocking {
