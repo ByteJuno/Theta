@@ -54,11 +54,13 @@ internal class HostToolBridgeRoot(
                 catalog.registerHost("host/blob_read", "1", io.github.bytejuno.thetacore.plugin.tools.HostBlobReadTool(ledger))
                 val runSkills = skillReader?.let(::RunSkillReader)
                 runSkills?.let { catalog.registerHost("host/skill_read", "1", io.github.bytejuno.thetacore.plugin.tools.HostSkillReadTool(it::read)) }
-                imageTool?.let { catalog.registerHost("host/generate_image", "1", it(store)) }
+                val images = imageTool?.invoke(store)
+                images?.let { catalog.registerHost("host/generate_image", "1", it) }
                 HostToolExecutionService(
                     budget, owner, catalog, ledger, validator,
                     sessionStore = store as? AndroidAgentStore, invocationClock = invocationClock,
                     runSkills = runSkills,
+                    runModels = (images as? io.github.bytejuno.thetacore.plugin.tools.HostImageGenerationTool)?.configurations,
                 ).also { service = it }
             } catch (error: Throwable) {
                 owner.cancel()

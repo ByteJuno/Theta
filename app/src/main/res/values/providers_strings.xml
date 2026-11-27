@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="providers_title">Providers and models</string>
+    <string name="providers_recovered">Saved settings are readable again. Reload before saving; no existing configuration was replaced.</string>
+    <string name="providers_replace_warning">This will replace all unreadable provider configurations and saved credentials. Continue only if you can enter them again.</string>
+    <string name="providers_replace_confirm">Re-enter and replace</string>
+    <string name="providers_bindings">Current model bindings</string>
+    <string name="providers_saved">Configured providers</string>
+    <string name="providers_empty">No providers configured. Add a provider below.</string>
+    <string name="providers_add">Add provider</string>
+    <string name="providers_custom">Custom provider</string>
+    <string name="providers_connection">Connection settings</string>
+    <string name="providers_name">Provider name</string>
+    <string name="providers_protocol">Protocol: OpenAI Chat</string>
+    <string name="providers_key_reuse">Leave empty to keep the saved key for this endpoint.</string>
+    <string name="providers_defaults">Provider compatibility defaults</string>
+    <string name="providers_models">Enabled models</string>
+    <string name="providers_add_model">Add model ID</string>
+    <string name="providers_chat_use">Use for chat</string>
+    <string name="providers_image_use">Use for image generation</string>
+    <string name="providers_alias">Display alias (optional)</string>
+    <string name="providers_override">Override provider compatibility</string>
+    <string name="providers_remove_model">Remove model</string>
+    <string name="providers_delete">Delete provider and its models</string>
+    <string name="providers_schema">Tool schema compatibility</string>
+    <string name="providers_schema_full">Full support</string>
+    <string name="providers_schema_no_combinators">No top-level combinators</string>
+    <string name="providers_schema_basic">Basic support</string>
+    <string name="providers_chat_binding">Default chat model</string>
+    <string name="providers_image_binding">Default image model</string>
+    <string name="providers_image_none">Image generation not configured</string>
+    <string name="providers_switch_failed">Could not switch models. The previous model is still active. Select a model to retry.</string>
+    <string name="providers_switching">Saving model selection…</string>
+    <string name="providers_count">%1$s · %2$d models</string>
+</resources>

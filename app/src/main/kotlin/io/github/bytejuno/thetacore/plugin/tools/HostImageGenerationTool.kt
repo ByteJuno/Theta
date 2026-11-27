@@ -12,11 +12,11 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.serialization.json.*
 
 internal class HostImageGenerationTool(
-    private val configuration: () -> OpenAiRunSnapshot,
     private val attachments: ImageAttachments,
     private val generate: suspend (OpenAiRunSnapshot, String) -> ByteArray = OpenAiImageClient()::generate,
     private val normalize: (ByteArray) -> ByteArray = ::normalizeImage,
 ) : Tool {
+    internal val configurations = io.github.bytejuno.thetacore.provider.RunModelSnapshots()
     override val id = "generate_image"
     override val spec = ToolSpec(id,
         "Generate one image ONLY when the user asks to create or draw an image. Do not call for writing prompts, explaining image APIs, or discussing images. Supply the user's visual description as prompt. The image is displayed privately in this chat; never retrieve image bytes or URLs into the conversation. This may incur a charge and requires approval. Configuration errors need user action, not another call.",
@@ -28,7 +28,9 @@ internal class HostImageGenerationTool(
         try {
             val prompt = args.getValue("prompt").jsonPrimitive.content
             require(prompt.isNotBlank() && prompt.length <= 8000)
-            val snapshot = configuration()
+            if (attachments.hasAttempt(env.sessionId, env.callId))
+                return ToolResult(IMAGE_ATTEMPTED, isError = true, effect = ToolEffect.UNKNOWN)
+            val snapshot = configurations.image(env.runId)
             if (!attachments.claim(env.sessionId, env.callId))
                 return ToolResult(IMAGE_ATTEMPTED, isError = true, effect = ToolEffect.UNKNOWN)
             currentCoroutineContext().ensureActive()

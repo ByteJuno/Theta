@@ -70,8 +70,11 @@ class CredentialKeyRecoveryTest {
         }
     }
 
-    private fun record(root: File, name: String = "active.bin") =
-        File(root, "${OpenAiSettingsStore.DIRECTORY}/$name")
+    // Corrupt/check the authoritative record after settings-only updates migrate to v3.
+    private fun record(root: File, name: String = "active.bin"): File {
+        val current = File(root, "${OpenAiSettingsStore.DIRECTORY}/$name.v3")
+        return if (current.exists()) current else File(root, "${OpenAiSettingsStore.DIRECTORY}/$name")
+    }
     private fun failure(kind: ProviderSettingsException.Failure, action: () -> Unit) {
         val error = assertThrows(ProviderSettingsException::class.java, action)
         assertEquals(kind, error.failure)

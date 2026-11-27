@@ -11,6 +11,7 @@ import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.file.Files
 import java.nio.file.LinkOption.NOFOLLOW_LINKS
+import java.nio.file.Path
 import java.nio.file.StandardCopyOption.ATOMIC_MOVE
 import java.nio.file.StandardCopyOption.REPLACE_EXISTING
 import java.nio.file.StandardOpenOption.*
@@ -31,12 +32,13 @@ class ProviderSettingsException(val failure: Failure) : Exception(when (failure)
     Failure.INVALID_DATA -> "Provider settings are invalid; re-enter the configuration"
     Failure.WRITE_FAILED -> "Provider settings could not be saved"
     Failure.ENDPOINT_CHANGED -> "Enter a new API key for the changed endpoint"
+    Failure.RECOVERED -> "Saved settings are readable again; reload before editing"
 }) {
-    enum class Failure { NOT_CONFIGURED, READ_FAILED, DECRYPT_FAILED, INVALID_DATA, WRITE_FAILED, ENDPOINT_CHANGED }
+    enum class Failure { NOT_CONFIGURED, READ_FAILED, DECRYPT_FAILED, INVALID_DATA, WRITE_FAILED, ENDPOINT_CHANGED, RECOVERED }
 }
 
-/** Host-only encrypted OpenAI-compatible profile catalog (or single image record).
- * All profiles, active selection, system prompts, and keys live in one authenticated atomic record:
+/** Host-only encrypted provider/model catalog, with legacy profile and image import.
+ * Connections, both bindings, prompts and keys live in one authenticated atomic record:
  * concurrent updates cannot pair a new endpoint with an old key.
  * IO-worker API, not Main. No plaintext temporary files and no plugin-data/ledger integration.
  * Synchronization covers all instances in this process; no cross-process writers are supported.
@@ -45,12 +47,16 @@ class OpenAiSettingsStore internal constructor(
     noBackupDirectory: File,
     private val cipher: SecretCipher,
     private val recordName: String = "active.bin",
+    private val legacyImages: OpenAiSettingsStore? = null,
 ) {
     private val root = noBackupDirectory.absoluteFile.toPath().normalize()
     private val directory = root.resolve(DIRECTORY)
     init { require(recordName in setOf("active.bin", "images.bin")) }
     private val file = directory.resolve(recordName)
-    private val lock = locks[(file.toString().hashCode() and Int.MAX_VALUE) % locks.size]
+    // Publishing this file atomically also commits the migration boundary. Its presence
+    // is authoritative even when credentials cannot be decrypted; legacy records stay inert.
+    private val connectionsFile = directory.resolve("$recordName.v3")
+    private val lock = locks[(directory.toString().hashCode() and Int.MAX_VALUE) % locks.size]
     private val mutableRevision = MutableStateFlow(0L)
     val revision: StateFlow<Long> = mutableRevision.asStateFlow()
 
@@ -62,181 +68,175 @@ class OpenAiSettingsStore internal constructor(
 
     private fun writeSingle(settings: OpenAiProviderSettings, apiKey: String, replaceKey: Boolean) {
         require(validApiKey(apiKey)) { "Invalid API key" }
+        val migrated = hasConnectionsRecord()
         val plaintext = ProviderSettingsCodec.encode(settings, apiKey)
-        encryptAndPersist(plaintext, replaceKey)
+        if (migrated) {
+            try { writeConnections(ProviderConnectionsCodec.migrate(ProviderSettingsCodec.decodeCatalog(plaintext)), replaceKey) }
+            finally { plaintext.fill(0) }
+        } else encryptAndPersist(plaintext, replaceKey)
     }
 
-    private fun writeCatalog(catalog: ProviderSettingsCodec.CatalogRecord, replaceKey: Boolean) {
-        val plaintext = ProviderSettingsCodec.encodeCatalog(catalog)
-        encryptAndPersist(plaintext, replaceKey)
-    }
-
-    private fun encryptAndPersist(plaintext: ByteArray, replaceKey: Boolean) {
+    private fun encryptAndPersist(plaintext: ByteArray, replaceKey: Boolean, target: Path = file) {
         try {
             val encrypted = sanitize(ProviderSettingsException.Failure.WRITE_FAILED) {
                 if (replaceKey) cipher.encryptForReplacement(plaintext) else cipher.encrypt(plaintext)
             }
-            sanitize(ProviderSettingsException.Failure.WRITE_FAILED) { persist(encrypted) }
+            sanitize(ProviderSettingsException.Failure.WRITE_FAILED) { persist(encrypted, target) }
             mutableRevision.value++
         } finally {
             plaintext.fill(0)
         }
     }
 
-    /** Decrypt once at run admission. No lazy store-backed credentials may escape this boundary. */
+    /** Both slots are captured under the same storage lock before a new run is acknowledged. */
     fun snapshotForNewRun(): OpenAiRunSnapshot = synchronized(lock) {
-        readCatalog().active.toRecord().toSnapshot()
+        val catalog = readConnections()
+        val chat = catalog.snapshot(catalog.bindings.activeChatModelRef)
+        return chat.withImageSnapshot(catalog.bindings.activeImageModelRef?.let { catalog.snapshot(it, image = true) })
     }
 
-    /** Only non-secret fields leave the IO boundary for editing. A successful read implies configured state. */
-    fun readSettings(): OpenAiProviderSettings = synchronized(lock) { readCatalog().active.settings }
+    fun snapshotForImage(): OpenAiRunSnapshot = synchronized(lock) {
+        val catalog = readConnections()
+        catalog.snapshot(catalog.bindings.activeImageModelRef, image = true)
+    }
 
-    /** Returns non-secret profile summaries and active selection; empty when unconfigured. */
+    fun readSettings(): OpenAiProviderSettings = synchronized(lock) {
+        val c = readConnections(); c.snapshot(c.bindings.activeChatModelRef).settings
+    }
+
+    fun readProviderCatalog(): ProviderCatalog = synchronized(lock) {
+        readOptionalConnections()?.summary() ?: ProviderCatalog()
+    }
+
     fun readProfiles(): ProviderProfilesCatalog = synchronized(lock) {
-        val absent = sanitize(ProviderSettingsException.Failure.READ_FAILED) {
-            checkDirectories()
-            Files.notExists(file, NOFOLLOW_LINKS)
-        }
-        if (absent) return ProviderProfilesCatalog(activeProfileId = null, profiles = emptyList())
-        readCatalog().toSummaryCatalog()
+        val catalog = readOptionalConnections()
+        if (catalog == null || catalog.providers.none { p -> p.models.any { it.chat } })
+            ProviderProfilesCatalog(null, emptyList())
+        else legacyProjection(catalog).toSummaryCatalog()
     }
 
-    /** Check and reuse the active profile's key under the same process-wide lock as replacement. */
+    private fun hasConnectionsRecord(): Boolean = sanitize(ProviderSettingsException.Failure.READ_FAILED) {
+        checkDirectories(); !Files.notExists(connectionsFile, NOFOLLOW_LINKS)
+    }
+
+    /** Legacy entry points remain compatible; v3 editing uses saveProvider and bindModels. */
     fun updateSettings(settings: OpenAiProviderSettings) = synchronized(lock) {
-        val catalog = readCatalog()
-        val active = catalog.active
-        checkSavedEndpoint(settings.baseUrl, active.settings.baseUrl)
-        if (recordName == "images.bin" && catalog.profiles.size == 1 && !active.noAuth && settings.systemPrompt == null) {
-            writeSingle(settings, active.key, replaceKey = false)
-        } else {
-            val updated = ProviderSettingsCodec.ProfileRecord(
-                id = active.id,
-                displayName = active.displayName,
-                settings = settings,
-                key = active.key,
-                noAuth = active.noAuth,
-            )
-            val profiles = catalog.profiles.map { if (it.id == active.id) updated else it }
-            writeCatalog(ProviderSettingsCodec.CatalogRecord(catalog.activeProfileId, profiles), replaceKey = false)
-        }
+        val c = readConnections()
+        val (p, model) = c.resolve(requireNotNull(c.bindings.activeChatModelRef))
+        checkSavedEndpoint(settings.baseUrl, p.connection.baseUrl)
+        val updatedModel = model.copy(modelId = settings.model, parameters = settings.parameters,
+            compat = settings.compat, systemPrompt = settings.systemPrompt)
+        val updated = ConnectionRecord(p.connection, p.models.map { if (it === model) updatedModel else it }, p.key)
+        fun updatedRef(ref: ModelRef?) = if (ref == ModelRef(p.connection.providerId, model.modelId))
+            ModelRef(p.connection.providerId, settings.model) else ref
+        writeConnections(ConnectionsRecord(c.providers.map { if (it === p) updated else it }, ModelBindings(
+            updatedRef(c.bindings.activeChatModelRef), updatedRef(c.bindings.activeImageModelRef))), false)
     }
 
-    /** Create or edit a named chat profile with strict per-profile key isolation (#56/#57/#110). */
     fun saveProfile(
-        profileId: String?,
-        displayName: String,
-        settings: OpenAiProviderSettings,
-        apiKey: String,
-        noAuth: Boolean = false,
-        activate: Boolean = true,
-        replaceUnreadable: Boolean = false,
+        profileId: String?, displayName: String, settings: OpenAiProviderSettings, apiKey: String,
+        noAuth: Boolean = false, activate: Boolean = true, replaceUnreadable: Boolean = false,
     ): ProviderProfileSummary = synchronized(lock) {
         val id = profileId?.trim()?.takeIf { it.isNotEmpty() } ?: UUID.randomUUID().toString()
-        require(validProfileId(id)) { "Invalid profile identifier" }
-        val resolvedName = displayName.trim().ifEmpty { settings.model.take(MAX_PROFILE_NAME_CHARS) }
-        require(validProfileDisplayName(resolvedName)) { "Invalid profile display name" }
-        if (noAuth) {
-            require(apiKey.isEmpty()) { "Do not supply an API key when no-auth is enabled" }
-        }
+        val connection = ProviderConnection(id, displayName.trim().ifEmpty { legacyDisplayName(settings) },
+            settings.baseUrl, noAuth = noAuth, compat = settings.compat)
+        val model = EnabledModel(settings.model, systemPrompt = settings.systemPrompt,
+            parameters = settings.parameters, runtimeProviderId = settings.providerId)
+        saveProvider(connection, listOf(model), apiKey, replaceUnreadable, activate)
+        ProviderProfileSummary(id, connection.displayName, settings, noAuth)
+    }
 
-        if (replaceUnreadable) {
-            if (!noAuth) require(validApiKey(apiKey)) { "Invalid API key" }
-            val record = ProviderSettingsCodec.ProfileRecord(
-                id = id,
-                displayName = resolvedName,
-                settings = settings,
-                key = if (noAuth) "" else apiKey,
-                noAuth = noAuth,
-            )
-            writeCatalog(ProviderSettingsCodec.CatalogRecord(id, listOf(record)), replaceKey = true)
-            return record.summary()
-        }
-
-        val exists = sanitize(ProviderSettingsException.Failure.READ_FAILED) {
-            checkDirectories()
-            !Files.notExists(file, NOFOLLOW_LINKS)
-        }
-        val existing = if (exists) readCatalog() else null
-        val saved = existing?.profiles?.firstOrNull { it.id == id }
-
-        val (resolvedKey, allowKeyRebuild) = when {
-            noAuth -> "" to (existing == null)
-            apiKey.isNotEmpty() -> {
-                require(validApiKey(apiKey)) { "Invalid API key" }
-                apiKey to true
-            }
+    fun saveProvider(connection: ProviderConnection, models: List<EnabledModel>, apiKey: String,
+        replaceUnreadable: Boolean = false, activateChat: Boolean = false): ProviderCatalog = synchronized(lock) {
+        // Recovery consent applies only while the original record is still unreadable.
+        val existing = readOptionalConnections(replaceUnreadable)
+        val saved = existing?.providers?.firstOrNull { it.connection.providerId == connection.providerId }
+        val key = when {
+            connection.noAuth -> { require(apiKey.isEmpty()); "" }
+            apiKey.isNotEmpty() -> { require(validApiKey(apiKey)); apiKey }
             else -> {
                 val prior = saved ?: throw ProviderSettingsException(ProviderSettingsException.Failure.NOT_CONFIGURED)
-                if (prior.noAuth) throw IllegalArgumentException("API key required when disabling no-auth")
-                checkSavedEndpoint(settings.baseUrl, prior.settings.baseUrl)
-                prior.key to false
+                require(!prior.connection.noAuth) { "API key required" }
+                checkSavedEndpoint(connection.baseUrl, prior.connection.baseUrl)
+                prior.key
             }
         }
+        val updated = ConnectionRecord(connection, models.toList(), key)
+        val providers = existing?.providers.orEmpty().filterNot { it.connection.providerId == connection.providerId } + updated
+        var bindings = existing?.bindings ?: ModelBindings()
+        fun valid(ref: ModelRef?, image: Boolean): Boolean = providers.any { p -> p.connection.providerId == ref?.providerId &&
+            p.models.any { it.modelId == ref.modelId && if (image) it.image else it.chat } }
+        val firstChat = providers.firstNotNullOfOrNull { p -> p.models.firstOrNull { it.chat }?.let { ModelRef(p.connection.providerId, it.modelId) } }
+        val preferred = models.firstOrNull { it.chat }?.let { ModelRef(connection.providerId, it.modelId) }
+        bindings = ModelBindings(if (activateChat && preferred != null) preferred else
+            bindings.activeChatModelRef.takeIf { valid(it, false) } ?: firstChat,
+            bindings.activeImageModelRef.takeIf { valid(it, true) })
+        val next = ConnectionsRecord(providers, bindings)
+        // Empty catalogs and image-only legacy imports have no credentials encrypted
+        // with this store's key to retain. Explicit no-auth setup may recover that key;
+        // imported image credentials have already been read with their independent key.
+        val initializesRecord = existing?.providers.isNullOrEmpty() ||
+            (!hasConnectionsRecord() && sanitize(ProviderSettingsException.Failure.READ_FAILED) {
+                Files.notExists(file, NOFOLLOW_LINKS)
+            })
+        writeConnections(next, replaceUnreadable || initializesRecord || apiKey.isNotEmpty())
+        next.summary()
+    }
 
-        val updatedRecord = ProviderSettingsCodec.ProfileRecord(
-            id = id,
-            displayName = resolvedName,
-            settings = settings,
-            key = resolvedKey,
-            noAuth = noAuth,
-        )
-        val nextProfiles = when {
-            existing == null -> listOf(updatedRecord)
-            saved != null -> existing.profiles.map { if (it.id == id) updatedRecord else it }
-            else -> {
-                require(existing.profiles.size < MAX_PROFILES) { "Too many profiles" }
-                existing.profiles + updatedRecord
-            }
-        }
-        val nextActive = if (activate || existing == null) id else existing.activeProfileId
-        writeCatalog(ProviderSettingsCodec.CatalogRecord(nextActive, nextProfiles), replaceKey = allowKeyRebuild)
-        updatedRecord.summary()
+    fun bindModels(bindings: ModelBindings): ProviderCatalog = synchronized(lock) {
+        val c = readConnections()
+        val next = ConnectionsRecord(c.providers, bindings)
+        writeConnections(next, false)
+        next.summary()
+    }
+
+    fun selectChatModel(ref: ModelRef): ProviderCatalog = synchronized(lock) {
+        val c = readConnections(); bindModels(c.bindings.copy(activeChatModelRef = ref))
+    }
+
+    fun selectImageModel(ref: ModelRef?): ProviderCatalog = synchronized(lock) {
+        val c = readConnections(); bindModels(c.bindings.copy(activeImageModelRef = ref))
     }
 
     fun renameProfile(profileId: String, displayName: String): ProviderProfileSummary = synchronized(lock) {
-        val trimmedId = profileId.trim()
-        val trimmedName = displayName.trim()
-        require(validProfileDisplayName(trimmedName)) { "Invalid profile display name" }
-        val catalog = readCatalog()
-        val target = catalog.profiles.firstOrNull { it.id == trimmedId }
-            ?: throw ProviderSettingsException(ProviderSettingsException.Failure.NOT_CONFIGURED)
-        val updated = ProviderSettingsCodec.ProfileRecord(
-            id = target.id,
-            displayName = trimmedName,
-            settings = target.settings,
-            key = target.key,
-            noAuth = target.noAuth,
-        )
-        val profiles = catalog.profiles.map { if (it.id == trimmedId) updated else it }
-        writeCatalog(ProviderSettingsCodec.CatalogRecord(catalog.activeProfileId, profiles), replaceKey = false)
-        updated.summary()
+        val c = readConnections(); val p = c.providers.first { it.connection.providerId == profileId }
+        val updated = ConnectionRecord(p.connection.copy(displayName = displayName.trim()), p.models, p.key)
+        writeConnections(ConnectionsRecord(c.providers.map { if (it === p) updated else it }, c.bindings), false)
+        val m = p.models.first(); ProviderProfileSummary(profileId, displayName.trim(), p.settings(m), p.connection.noAuth)
     }
 
     fun selectActiveProfile(profileId: String): ProviderProfileSummary = synchronized(lock) {
-        val trimmedId = profileId.trim()
-        val catalog = readCatalog()
-        val target = catalog.profiles.firstOrNull { it.id == trimmedId }
+        val c = readConnections()
+        val p = c.providers.firstOrNull { it.connection.providerId == profileId.trim() }
             ?: throw ProviderSettingsException(ProviderSettingsException.Failure.NOT_CONFIGURED)
-        if (catalog.activeProfileId != trimmedId) {
-            writeCatalog(ProviderSettingsCodec.CatalogRecord(trimmedId, catalog.profiles), replaceKey = false)
-        }
-        target.summary()
+        val m = p.models.first { it.chat }
+        selectChatModel(ModelRef(p.connection.providerId, m.modelId))
+        ProviderProfileSummary(p.connection.providerId, p.connection.displayName, p.settings(m), p.connection.noAuth)
+    }
+
+    fun deleteProvider(providerId: String): ProviderCatalog = synchronized(lock) {
+        val c = readConnections(); require(c.providers.any { it.connection.providerId == providerId })
+        val remaining = c.providers.filterNot { it.connection.providerId == providerId }
+        if (remaining.isEmpty()) { writeConnections(ConnectionsRecord(emptyList(), ModelBindings()), false); return ProviderCatalog() }
+        val chat = c.bindings.activeChatModelRef?.takeUnless { it.providerId == providerId }
+            ?: remaining.firstNotNullOfOrNull { p -> p.models.firstOrNull { it.chat }?.let { ModelRef(p.connection.providerId, it.modelId) } }
+        val image = c.bindings.activeImageModelRef?.takeUnless { it.providerId == providerId }
+        val next = ConnectionsRecord(remaining, ModelBindings(chat, image)); writeConnections(next, false); next.summary()
     }
 
     fun deleteProfile(profileId: String): ProviderProfilesCatalog = synchronized(lock) {
-        val trimmedId = profileId.trim()
-        val catalog = readCatalog()
-        require(catalog.profiles.any { it.id == trimmedId }) { "Unknown profile" }
-        val remaining = catalog.profiles.filterNot { it.id == trimmedId }
-        if (remaining.isEmpty()) {
-            clearLocked()
-            ProviderProfilesCatalog(activeProfileId = null, profiles = emptyList())
-        } else {
-            val nextActive = if (catalog.activeProfileId == trimmedId) remaining.first().id else catalog.activeProfileId
-            val updated = ProviderSettingsCodec.CatalogRecord(nextActive, remaining)
-            writeCatalog(updated, replaceKey = false)
-            updated.toSummaryCatalog()
-        }
+        deleteProvider(profileId.trim()); readProfiles()
+    }
+
+    private fun writeConnections(record: ConnectionsRecord, replaceKey: Boolean) =
+        encryptAndPersist(ProviderConnectionsCodec.encode(record), replaceKey, connectionsFile)
+
+    private fun legacyProjection(record: ConnectionsRecord): ProviderSettingsCodec.CatalogRecord {
+        val profiles = record.providers.mapNotNull { p -> p.models.firstOrNull { it.chat }?.let { m ->
+            ProviderSettingsCodec.ProfileRecord(p.connection.providerId, p.connection.displayName, p.settings(m), p.key, p.connection.noAuth)
+        } }
+        if (profiles.isEmpty()) throw ProviderSettingsException(ProviderSettingsException.Failure.NOT_CONFIGURED)
+        return ProviderSettingsCodec.CatalogRecord(record.bindings.activeChatModelRef?.providerId ?: profiles.first().id, profiles)
     }
 
     suspend fun fetchModels(
@@ -263,15 +263,12 @@ class OpenAiSettingsStore internal constructor(
         val credentials: Credentials = when {
             noAuth -> NoAuthCredentials
             apiKey.isEmpty() -> synchronized(lock) {
-                val catalog = readCatalog()
-                val target = if (profileId == null) catalog.active else {
-                    catalog.profiles.firstOrNull { it.id == profileId }
-                        ?: throw ProviderSettingsException(ProviderSettingsException.Failure.NOT_CONFIGURED)
-                }
-                if (target.noAuth) {
-                    throw ProviderSettingsException(ProviderSettingsException.Failure.INVALID_DATA)
-                }
-                checkSavedEndpoint(endpoint, target.settings.baseUrl)
+                val catalog = readConnections()
+                val id = profileId ?: catalog.bindings.activeChatModelRef?.providerId
+                val target = catalog.providers.firstOrNull { it.connection.providerId == id }
+                    ?: throw ProviderSettingsException(ProviderSettingsException.Failure.NOT_CONFIGURED)
+                if (target.connection.noAuth) throw ProviderSettingsException(ProviderSettingsException.Failure.INVALID_DATA)
+                checkSavedEndpoint(endpoint, target.connection.baseUrl)
                 ApiKeyCredentials(target.key)
             }
             else -> ApiKeyCredentials(apiKey)
@@ -287,14 +284,14 @@ class OpenAiSettingsStore internal constructor(
     }
 
     /** Caller holds lock; all decrypted/encoded byte arrays are cleared even on failure. */
-    private fun readCatalog(): ProviderSettingsCodec.CatalogRecord {
+    private fun <T> readRecord(target: Path = file, decode: (ByteArray) -> T): T {
         val encrypted = sanitize(ProviderSettingsException.Failure.READ_FAILED) {
             checkDirectories()
-            if (Files.notExists(file, NOFOLLOW_LINKS)) {
+            if (Files.notExists(target, NOFOLLOW_LINKS)) {
                 throw ProviderSettingsException(ProviderSettingsException.Failure.NOT_CONFIGURED)
             }
-            check(Files.isRegularFile(file, NOFOLLOW_LINKS))
-            Files.newInputStream(file, READ, NOFOLLOW_LINKS).use { input ->
+            check(Files.isRegularFile(target, NOFOLLOW_LINKS))
+            Files.newInputStream(target, READ, NOFOLLOW_LINKS).use { input ->
                 val out = ByteArrayOutputStream()
                 val buffer = ByteArray(8192)
                 while (true) {
@@ -309,19 +306,88 @@ class OpenAiSettingsStore internal constructor(
         val plaintext = sanitize(ProviderSettingsException.Failure.DECRYPT_FAILED) { cipher.decrypt(encrypted) }
         try {
             return sanitize(ProviderSettingsException.Failure.INVALID_DATA) {
-                ProviderSettingsCodec.decodeCatalog(plaintext)
+                decode(plaintext)
             }
         } finally {
             plaintext.fill(0)
         }
     }
 
-    /** Removes only the active record; Keystore aliases are not rotated/deleted during normal IO. */
+    private fun readOptionalConnections(replaceUnreadable: Boolean = false): ConnectionsRecord? = try { readConnections(replaceUnreadable) }
+        catch (failure: ProviderSettingsException) {
+            if (failure.failure == ProviderSettingsException.Failure.NOT_CONFIGURED) null else throw failure
+        }
+
+    private fun readConnections(replaceUnreadable: Boolean = false): ConnectionsRecord {
+        var unreadable = false
+        // Recovery is per encrypted record. A failed legacy image read must never discard
+        // readable chat profiles, and a failed chat read must never discard image credentials.
+        fun <T> readPart(read: () -> T): T? = try { read() }
+        catch (failure: ProviderSettingsException) {
+            if (failure.failure == ProviderSettingsException.Failure.NOT_CONFIGURED) null
+            else {
+                if (!replaceUnreadable) throw failure
+                unreadable = true
+                null
+            }
+        }
+        val migrated = hasConnectionsRecord()
+        // An explicit clear writes a durable empty tombstone without requiring a usable key.
+        // A nonempty but corrupt v3 record must enter recovery, never fall back to images.bin.
+        if (migrated && sanitize(ProviderSettingsException.Failure.READ_FAILED) {
+            check(Files.isRegularFile(connectionsFile, NOFOLLOW_LINKS))
+            Files.size(connectionsFile) == 0L
+        }) {
+            if (replaceUnreadable) throw ProviderSettingsException(ProviderSettingsException.Failure.RECOVERED)
+            return ConnectionsRecord(emptyList(), ModelBindings())
+        }
+        var legacy = !migrated
+        val initial = readPart { readRecord(if (migrated) connectionsFile else file) { bytes ->
+            if (migrated) return@readRecord ProviderConnectionsCodec.decode(bytes)
+            if (ProviderConnectionsCodec.isV3(bytes)) {
+                legacy = false
+                ProviderConnectionsCodec.decode(bytes)
+            } else ProviderConnectionsCodec.migrate(ProviderSettingsCodec.decodeCatalog(bytes))
+        } }
+        val image = if (legacy && legacyImages != null)
+            readPart { legacyImages.readRecord(decode = ProviderSettingsCodec::decodeRecord) } else null
+        if (replaceUnreadable && !unreadable && (initial != null || image != null)) {
+            throw ProviderSettingsException(ProviderSettingsException.Failure.RECOVERED)
+        }
+        val chat = initial ?: ConnectionsRecord(emptyList(), ModelBindings())
+        if (initial == null && image == null && !unreadable) {
+            throw ProviderSettingsException(ProviderSettingsException.Failure.NOT_CONFIGURED)
+        }
+        // Keep legacy ciphertext and aliases untouched until an explicit save writes v3.
+        return if (image == null) chat else migrateImages(chat, image)
+    }
+
+    private fun migrateImages(c: ConnectionsRecord, image: ProviderSettingsCodec.Record): ConnectionsRecord {
+        val same = c.providers.firstOrNull { it.connection.baseUrl == image.settings.baseUrl && it.key == image.key && it.connection.noAuth == image.noAuth }
+        val model = EnabledModel(image.settings.model, chat = false, image = true, compat = image.settings.compat,
+            parameters = image.settings.parameters, systemPrompt = image.settings.systemPrompt, runtimeProviderId = image.settings.providerId)
+        val id = same?.connection?.providerId ?: generateSequence("legacy-images") { "$it-1" }
+            .first { candidate -> c.providers.none { it.connection.providerId == candidate } }
+        val updated = if (same == null) ConnectionRecord(ProviderConnection(id, legacyDisplayName(image.settings), image.settings.baseUrl,
+            noAuth = image.noAuth, compat = image.settings.compat), listOf(model), image.key)
+        else {
+            val old = same.models.firstOrNull { it.modelId == model.modelId }
+            // Different per-purpose parameters must not be silently lost during coalescing.
+            ConnectionRecord(same.connection, if (old == null) same.models + model else same.models.map {
+                if (it.modelId == model.modelId) it.copy(image = true, legacyImageSettings = image.settings) else it
+            }, same.key)
+        }
+        return ConnectionsRecord(c.providers.filterNot { it.connection.providerId == id } + updated,
+            c.bindings.copy(activeImageModelRef = ModelRef(id, model.modelId)))
+    }
+
+    /** Clears this store without re-enabling legacy import; Keystore aliases are left intact. */
     fun clear() = synchronized(lock) { clearLocked() }
 
     private fun clearLocked() {
         sanitize(ProviderSettingsException.Failure.WRITE_FAILED) {
             checkDirectories()
+            if (hasConnectionsRecord() || legacyImages != null) persist(byteArrayOf(), connectionsFile)
             Files.deleteIfExists(file)
             removeAbandonedTemps()
         }
@@ -352,11 +418,11 @@ class OpenAiSettingsStore internal constructor(
         }
     }
 
-    private fun persist(bytes: ByteArray) {
+    private fun persist(bytes: ByteArray, target: Path = file) {
         check(bytes.size <= MAX_BYTES)
         checkDirectories()
         Files.createDirectories(directory)
-        check(Files.notExists(file, NOFOLLOW_LINKS) || Files.isRegularFile(file, NOFOLLOW_LINKS))
+        check(Files.notExists(target, NOFOLLOW_LINKS) || Files.isRegularFile(target, NOFOLLOW_LINKS))
         removeAbandonedTemps()
         val temp = directory.resolve("$recordName-${UUID.randomUUID()}.tmp")
         try {
@@ -365,7 +431,7 @@ class OpenAiSettingsStore internal constructor(
                 while (buffer.hasRemaining()) channel.write(buffer)
                 channel.force(true)
             }
-            Files.move(temp, file, ATOMIC_MOVE, REPLACE_EXISTING)
+            Files.move(temp, target, ATOMIC_MOVE, REPLACE_EXISTING)
         } finally {
             Files.deleteIfExists(temp)
         }
@@ -379,13 +445,17 @@ class OpenAiSettingsStore internal constructor(
 
     companion object {
         internal const val DIRECTORY = "provider-credentials-v1"
-        internal const val MAX_BYTES = 256 * 1024
+        internal const val LEGACY_MAX_BYTES = 256 * 1024
+        // v3 combines two formerly independent records and repeats connection/settings
+        // metadata. Reserve bounded migration headroom without changing legacy limits.
+        internal const val MAX_BYTES = 2 * 1024 * 1024
         private val locks = Array(64) { Any() }
         /** Android excludes this directory from Auto Backup and device transfer. Never use
          * filesDir, plugin dataDir, external storage or cacheDir for this record. */
         fun android(context: Context): OpenAiSettingsStore = OpenAiSettingsStore(
             context.noBackupFilesDir,
             androidSecretCipher("theta.provider.credentials.v1", "theta-provider-credentials-v1", allowKeyRecovery = true),
+            legacyImages = images(context),
         )
         fun images(context: Context): OpenAiSettingsStore = OpenAiSettingsStore(
             context.noBackupFilesDir,

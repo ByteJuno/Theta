@@ -32,6 +32,7 @@ internal fun normalizeImage(bytes: ByteArray): ByteArray {
 }
 
 internal class ImageAttachments(private val storage: io.github.bytejuno.thetacore.agent.ledger.PrivateImageStore) {
+    fun hasAttempt(sessionId: String, callId: String) = storage.hasAttempt(sessionId, callId)
     fun claim(sessionId: String, callId: String) = storage.claim(sessionId, callId)
     fun save(sessionId: String, callId: String, bytes: ByteArray) = storage.save(sessionId, callId, bytes)
     fun read(sessionId: String, callId: String) = storage.read(sessionId, callId)

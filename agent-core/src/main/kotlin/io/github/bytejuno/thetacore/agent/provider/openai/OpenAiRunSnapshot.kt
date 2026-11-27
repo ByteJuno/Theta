@@ -78,14 +78,25 @@ fun validApiKey(token: String): Boolean = token.length in 1..16384 && token.all 
 /** One snapshot per NEW run. Pass target() and request() to AgentRunLoop, never re-read a store
  * inside a running loop. Updates/deletion affect future snapshots only. Adapters still request
  * Credentials on every attempt (2.12), rather than caching them in the provider. */
-class OpenAiRunSnapshot(val settings: OpenAiProviderSettings, private val credentials: Credentials) {
+class OpenAiRunSnapshot(
+    val settings: OpenAiProviderSettings,
+    private val credentials: Credentials,
+    val protocol: String = "openai-chat",
+    val imageSnapshot: OpenAiRunSnapshot? = null,
+) {
     constructor(settings: OpenAiProviderSettings, credentials: ApiKeyCredentials) : this(settings, credentials as Credentials)
+
+    init { require(protocol == "openai-chat") { "Protocol is not enabled" } }
+
+    fun withImageSnapshot(image: OpenAiRunSnapshot?) = OpenAiRunSnapshot(settings, credentials, protocol, image)
 
     fun target(
         transport: ModelTransport = OkHttpModelTransport(),
         mediaReader: MediaContentReader? = null,
-    ): ModelTarget =
-        ModelTarget(settings.providerId, OpenAiChatProvider(settings.adapterConfig(), transport, mediaReader), credentials)
+    ): ModelTarget = when (protocol) {
+        "openai-chat" -> ModelTarget(settings.providerId, OpenAiChatProvider(settings.adapterConfig(), transport, mediaReader), credentials)
+        else -> error("Protocol is not enabled")
+    }
 
     fun request(configure: ChatRequestBuilder.() -> Unit = {}): ChatRequest = chatRequest(settings.model) {
         settings.systemPrompt?.let { system = it }

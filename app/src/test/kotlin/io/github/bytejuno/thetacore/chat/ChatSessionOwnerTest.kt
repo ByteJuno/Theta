@@ -809,9 +809,7 @@ class ChatSessionOwnerTest {
             }
             override suspend fun finish(executionId: String, waiting: ChatTaskProgress?) = Unit
         }
-        fun imageTool(attachments: ImageAttachments) = io.github.bytejuno.thetacore.plugin.tools.HostImageGenerationTool({
-            OpenAiRunSnapshot(OpenAiProviderSettings("images", "https://example.invalid/v1", "images"), ApiKeyCredentials("image-key"))
-        }, attachments, { _, prompt ->
+        fun imageTool(attachments: ImageAttachments) = io.github.bytejuno.thetacore.plugin.tools.HostImageGenerationTool(attachments, { _, prompt ->
             assertEquals("画一只在窗边睡觉的猫", prompt)
             executions.incrementAndGet(); payload
         }, { it })
@@ -833,10 +831,13 @@ class ChatSessionOwnerTest {
         try {
             val first = fixture(root, executions, model, presence = presence)
             val attachments = ImageAttachments(first.store.privateImages)
-            first.host.catalog.registerHost(IMAGE_TOOL_KEY, "1", imageTool(attachments))
+            val images = imageTool(attachments)
+            first.host.catalog.registerHost(IMAGE_TOOL_KEY, "1", images)
             first.owner.open().join(); first.owner.send("画一只在窗边睡觉的猫").join()
             await { first.owner.state.value.records.values.any { it.pending != null } }
             val call = first.owner.state.value.records.values.single()
+            val imageSnapshot = OpenAiRunSnapshot(OpenAiProviderSettings("images", "https://example.invalid/v1", "images"), ApiKeyCredentials("image-key"))
+            images.configurations.bind(call.input.runId, imageSnapshot.withImageSnapshot(imageSnapshot))
             assertEquals(0, executions.get())
             presence.ready = { first.host.ledger.get(call.callId)?.state == Status.READY }
             val approval = first.owner.decide(call.callId, call.pending!!.id, Decision.ALLOW_ONCE)
@@ -898,6 +899,72 @@ class ChatSessionOwnerTest {
             throw AssertionError("Timed out waiting for $describe", error)
         }
     }
+    @Test fun coldImageApprovalCannotAdoptNewProviderButNewRunUsesNewBinding() = runBlocking {
+        val root = Files.createTempDirectory("chat-cold-image-binding").toFile()
+        val count = AtomicInteger()
+        fun snapshot(id: String): OpenAiRunSnapshot {
+            val image = OpenAiRunSnapshot(OpenAiProviderSettings(id, "https://$id.invalid/v1", "image-$id"), ApiKeyCredentials("key-$id"))
+            return OpenAiRunSnapshot(OpenAiProviderSettings("chat", "https://chat.invalid/v1", "chat"), ApiKeyCredentials("chat-key"))
+                .withImageSnapshot(image)
+        }
+        fun model() = object : ModelProvider {
+            var requests = 0
+            override fun executionMode(request: ChatRequest) = ModelExecutionMode.GENERATION_ONLY
+            override fun chat(request: ChatRequest, auth: Credentials): Flow<ModelEvent> = flow {
+                emit(Events.started("response-${requests++}", "chat"))
+                if (requests == 1) {
+                    emit(Events.toolStart(0, "image-wire", "host_generate_image"))
+                    emit(Events.toolDelta(0, """{"prompt":"cat"}""")); emit(Events.end(0))
+                    emit(Events.finished(FinishReason.TOOL_CALLS))
+                } else {
+                    emit(Events.text(0, "done")); emit(Events.end(0)); emit(Events.finished(FinishReason.STOP))
+                }
+            }
+        }
+        fun imageTool(store: InvocationStore): Tool = io.github.bytejuno.thetacore.plugin.tools.HostImageGenerationTool(
+            ImageAttachments((store as AndroidAgentStore).privateImages), { config, _ ->
+                assertEquals("image-b", config.settings.model)
+                assertEquals("https://b.invalid/v1", config.settings.baseUrl)
+                assertEquals("key-b", config.target().credentials.accessToken())
+                count.incrementAndGet(); byteArrayOf(1, 2, 3)
+            }, { it })
+        try {
+            val live = File(root, "live").also { it.mkdir() }
+            val saved = File(root, "saved").also { it.mkdir() }
+            val seed = fixture(live, count, model(), imageTool = ::imageTool, snapshot = { snapshot("a") })
+            seed.owner.open().join(); seed.owner.send("draw cat").join()
+            await { seed.owner.state.value.records.values.any { it.pending != null } }
+            val original = seed.owner.state.value.records.values.single()
+            BundledSQLiteDriver().open(File(live, AgentDatabase.FILE_NAME).path).use { db ->
+                db.prepare("VACUUM INTO ?").use {
+                    it.bindText(1, File(saved, AgentDatabase.FILE_NAME).path); it.step()
+                }
+            }
+            seed.close()
+            val cold = fixture(saved, count, model(), imageTool = ::imageTool, snapshot = { snapshot("b") })
+            try {
+                cold.owner.open().join()
+                val pending = cold.host.ledger.get(original.callId)!!.pending!!
+                cold.owner.decide(original.callId, pending.id, Decision.ALLOW_ONCE).join()
+                await { !cold.owner.state.value.active }
+                val result = cold.host.ledger.get(original.callId)!!.result!!
+                assertEquals(IMAGE_CONFIGURE, result.text)
+                assertEquals(Effect.NONE, result.effect)
+                assertEquals(0, count.get())
+                assertFalse(cold.store.privateImages.hasAttempt(original.input.sessionId, original.callId))
+                cold.owner.send("draw a new cat").join()
+                await { cold.owner.state.value.records.values.any { it.pending != null } }
+                val next = cold.owner.state.value.records.values.single { it.pending != null }
+                assertNotEquals(original.input.runId, next.input.runId)
+                cold.owner.decide(next.callId, next.pending!!.id, Decision.ALLOW_ONCE).join()
+                await { !cold.owner.state.value.active }
+                assertEquals(1, count.get())
+                assertEquals(IMAGE_COMPLETE, cold.host.ledger.get(next.callId)!!.result!!.text)
+                assertTrue(cold.failures.toString(), cold.failures.isEmpty())
+            } finally { cold.close() }
+        } finally { root.deleteRecursively() }
+    }
+
     private fun acceptTestImage(bytes: ByteArray) = ValidatedUserImage("image/png", 2, 2, bytes)
     private fun visionProvider() = object : ModelProvider {
         var requests = 0
@@ -910,21 +977,23 @@ class ChatSessionOwnerTest {
     }
     private suspend fun fixture(root: File, count: AtomicInteger, provider: ModelProvider, hostTool: Tool = tool(count),
         presence: ChatTaskPresence = ChatTaskPresence.None, budget: PluginExecutionBudget = PluginExecutionBudget(),
+        imageTool: ((InvocationStore) -> Tool)? = null,
+        snapshot: () -> OpenAiRunSnapshot = { OpenAiRunSnapshot(OpenAiProviderSettings("test", "https://example.invalid/v1", "model"), ApiKeyCredentials("test-key")) },
         userImageValidator: (ByteArray) -> ValidatedUserImage = ::validateAndDecodeAndroidUserImage,
         fault: (SqliteWriteStage) -> Unit = {}): Fixture {
         val store = AndroidAgentStore.open(root, BundledSQLiteDriver(), fault)
-        val host = HostToolBridgeRoot(budget, hostTool).initialize { store }
-        return Fixture(store, budget, host, provider, ImageAttachments(store.privateImages), presence, userImageValidator)
+        val host = HostToolBridgeRoot(budget, hostTool).initialize(imageTool = imageTool) { store }
+        return Fixture(store, budget, host, provider, ImageAttachments(store.privateImages), presence, snapshot, userImageValidator)
     }
     private inner class Fixture(val store: AndroidAgentStore, val budget: PluginExecutionBudget,
         val host: HostToolExecutionService, provider: ModelProvider, images: ImageAttachments,
         presence: ChatTaskPresence = ChatTaskPresence.None,
+        snapshot: () -> OpenAiRunSnapshot,
         userImageValidator: (ByteArray) -> ValidatedUserImage = ::validateAndDecodeAndroidUserImage) {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         val failures = mutableListOf<Throwable>()
-        val owner = ChatSessionOwner(scope, { host }, {
-            OpenAiRunSnapshot(OpenAiProviderSettings("test", "https://example.invalid/v1", "model"), ApiKeyCredentials("test-key"))
-        }, { synchronized(failures) { failures += it } }, { ModelTarget("test", provider, Credentials { "test-key" }) },
+        val owner = ChatSessionOwner(scope, { host }, snapshot,
+            { synchronized(failures) { failures += it } }, { ModelTarget("test", provider, Credentials { "test-key" }) },
             imageAttachments = images, presence = presence, userImageValidator = userImageValidator)
         suspend fun close() {
             owner.stop().join()

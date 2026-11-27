@@ -25,7 +25,9 @@ internal class HostToolExecutionService(
     private val invocationClock: InvocationClock = budget,
     val sessionStore: AndroidAgentStore? = null,
     private val runSkills: RunSkillReader? = null,
+    private val runModels: io.github.bytejuno.thetacore.provider.RunModelSnapshots? = null,
 ) {
+    fun bindModels(runId: String, snapshot: io.github.bytejuno.thetacore.agent.provider.openai.OpenAiRunSnapshot) { runModels?.bind(runId, snapshot) }
     fun bindSkills(runId: String, data: PluginPromptData) { runSkills?.bind(runId, data) }
     private val gate get() = catalog.gate
     private val control = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -78,7 +80,7 @@ internal class HostToolExecutionService(
      * still need the frozen reader until the last observer records actual exit. */
     fun finishChatRun(runId: String) = gate.withGate {
         if (active.keys.any { ledger.get(it)?.input?.runId == runId }) retiringRuns.add(runId)
-        else { retiringRuns.remove(runId); catalog.release(runId); runSkills?.release(runId) }
+        else { retiringRuns.remove(runId); catalog.release(runId); runSkills?.release(runId); runModels?.release(runId) }
         Unit
     }
     private val observations = mutableMapOf<String, Deferred<Unit>>()

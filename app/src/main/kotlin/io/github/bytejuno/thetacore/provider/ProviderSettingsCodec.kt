@@ -90,7 +90,7 @@ internal object ProviderSettingsCodec {
             return encodeCatalog(
                 CatalogRecord(
                     activeProfileId = DEFAULT_PROFILE_ID,
-                    profiles = listOf(ProfileRecord(DEFAULT_PROFILE_ID, settings.model, settings, token, noAuth = false)),
+                    profiles = listOf(ProfileRecord(DEFAULT_PROFILE_ID, legacyDisplayName(settings), settings, token, noAuth = false)),
                 ),
             )
         }
@@ -119,7 +119,7 @@ internal object ProviderSettingsCodec {
         }
     })
 
-    private fun JsonObjectBuilder.encodeSettingsFields(settings: OpenAiProviderSettings) {
+    internal fun JsonObjectBuilder.encodeSettingsFields(settings: OpenAiProviderSettings) {
         put("provider", settings.providerId)
         put("base", settings.baseUrl)
         put("model", settings.model)
@@ -146,7 +146,7 @@ internal object ProviderSettingsCodec {
 
     private fun checkEncodedSize(json: JsonObject): ByteArray =
         json.toString().toByteArray(Charsets.UTF_8).also {
-            if (it.size > OpenAiSettingsStore.MAX_BYTES - 32) {
+            if (it.size > OpenAiSettingsStore.LEGACY_MAX_BYTES - 32) {
                 it.fill(0)
                 throw IllegalArgumentException("Provider settings exceed size limit")
             }
@@ -157,14 +157,14 @@ internal object ProviderSettingsCodec {
     fun decodeRecord(bytes: ByteArray): Record = decodeCatalog(bytes).active.toRecord()
 
     fun decodeCatalog(bytes: ByteArray): CatalogRecord {
-        require(bytes.size <= OpenAiSettingsStore.MAX_BYTES)
+        require(bytes.size <= OpenAiSettingsStore.LEGACY_MAX_BYTES)
         val root = Json.parseToJsonElement(bytes.toString(Charsets.UTF_8)).jsonObject
         return when (root.getValue("version").jsonPrimitive.int) {
             1 -> {
                 val settings = decodeSettings(root, systemPrompt = null)
                 val key = root.getValue("key").jsonPrimitive.content
                 require(validApiKey(key))
-                val defaultName = settings.model.take(MAX_PROFILE_NAME_CHARS)
+                val defaultName = legacyDisplayName(settings)
                 CatalogRecord(
                     activeProfileId = DEFAULT_PROFILE_ID,
                     profiles = listOf(ProfileRecord(DEFAULT_PROFILE_ID, defaultName, settings, key, noAuth = false)),
@@ -195,7 +195,7 @@ internal object ProviderSettingsCodec {
         }
     }
 
-    private fun decodeSettings(obj: JsonObject, systemPrompt: String?): OpenAiProviderSettings {
+    internal fun decodeSettings(obj: JsonObject, systemPrompt: String?): OpenAiProviderSettings {
         val p = obj.getValue("parameters").jsonObject
         val c = obj.getValue("compat").jsonObject
         val parameters = OpenAiParameters(
@@ -225,3 +225,8 @@ internal object ProviderSettingsCodec {
         )
     }
 }
+
+/** Derive editable names from saved identifiers without introducing untranslated UI labels. */
+internal fun legacyDisplayName(settings: OpenAiProviderSettings): String = settings.model
+    .map { if (it.isISOControl()) ' ' else it }.joinToString("").trim().take(MAX_PROFILE_NAME_CHARS)
+    .ifBlank { settings.providerId }

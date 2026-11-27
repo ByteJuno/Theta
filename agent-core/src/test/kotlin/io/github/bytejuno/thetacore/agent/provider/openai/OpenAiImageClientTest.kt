@@ -32,6 +32,18 @@ class OpenAiImageClientTest {
     private val bytes = byteArrayOf(1, 2, 3, 4)
     private fun snapshot(base: String) = OpenAiRunSnapshot(OpenAiProviderSettings("image", base, "image-model"), ApiKeyCredentials("synthetic-image-key"))
     private fun response(body: String, code: Int = 200) = MockResponse.Builder().code(code).body(body).build()
+    @Test fun unauthenticatedGenerationOmitsAuthorizationHeader() = runBlocking {
+        MockWebServer().use { server ->
+            server.start()
+            server.enqueue(response("""{"data":[{"b64_json":"${Base64.getEncoder().encodeToString(bytes)}"}]}"""))
+            val snapshot = OpenAiRunSnapshot(OpenAiProviderSettings("anonymous", server.url("/v1").toString(), "image-model"), NoAuthCredentials)
+            assertArrayEquals(bytes, OpenAiImageClient().generate(snapshot, "cat"))
+            val request = server.takeRequest(5, TimeUnit.SECONDS)!!
+            assertNull(request.headers["Authorization"])
+            assertEquals("/v1/images/generations", request.url.encodedPath)
+            assertEquals(1, server.requestCount)
+        }
+    }
     @Test fun base64RequestUsesConfiguredPathModelPromptAndKey() = runBlocking {
         MockWebServer().use { server ->
             server.start()
