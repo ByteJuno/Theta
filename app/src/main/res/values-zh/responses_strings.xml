@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="responses_protocol">接口协议</string>
+    <string name="responses_chat">OpenAI Chat Completions</string>
+    <string name="responses_native">OpenAI Responses</string>
+    <string name="responses_native_hint">支持原生推理与工具调用。Chat 兼容选项在此协议下不生效。不支持停止词。</string>
+</resources>

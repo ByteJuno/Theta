@@ -210,7 +210,6 @@ class ProviderPresetsTest {
     @Test
     fun parseProviderTemplateRecognizesNonOpenAiProtocolsAndBlocksMisleadingImport(): Unit = runBlocking {
         val protocols = listOf(
-            "openai-responses" to ProviderTemplateProtocol.OPENAI_RESPONSES,
             "anthropic" to ProviderTemplateProtocol.ANTHROPIC,
             "gemini" to ProviderTemplateProtocol.GEMINI,
         )

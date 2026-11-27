@@ -11,6 +11,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import io.github.bytejuno.thetacore.*
+import io.github.bytejuno.thetacore.plugin.ProviderTemplateProtocol
 import io.github.bytejuno.thetacore.R
 import io.github.bytejuno.thetacore.agent.provider.openai.*
 import io.github.bytejuno.thetacore.chat.*
@@ -35,6 +36,7 @@ internal fun ProviderConnectionsScreen(host: ThetaApplication, onClose: () -> Un
     var editor by remember { mutableStateOf<ConfiguredProvider?>(null) }
     var form by remember { mutableStateOf(ProviderSettingsForm()) }
     var models by remember { mutableStateOf<List<EnabledModel>>(emptyList()) }
+    var protocol by remember { mutableStateOf(ProviderTemplateProtocol.OPENAI_CHAT.wire) }
     var secret by remember { mutableStateOf("") }
     var selectedModel by remember { mutableStateOf<String?>(null) }
     var fetched by remember { mutableStateOf<List<String>>(emptyList()) }
@@ -68,6 +70,7 @@ internal fun ProviderConnectionsScreen(host: ThetaApplication, onClose: () -> Un
     }
     fun edit(provider: ConfiguredProvider?) {
         editor = provider; secret = ""; fetched = emptyList(); filter = ""; selectedModel = null; templateSource = null
+        protocol = provider?.connection?.protocol ?: ProviderTemplateProtocol.OPENAI_CHAT.wire
         models = provider?.models.orEmpty()
         form = provider?.let { p ->
             val c = p.connection
@@ -117,6 +120,7 @@ internal fun ProviderConnectionsScreen(host: ThetaApplication, onClose: () -> Un
                                 if (!t.supported) Text(strings.get(R.string.chat_provider_template_unsupported, t.protocol.wire))
                                 else TextButton(enabled = editable, onClick = {
                                     edit(null)
+                                    protocol = t.protocol.wire
                                     // Copy through the same validated, key-free template projection used by #135.
                                     form = ProviderSettingsForm(endpoint = t.baseUrl, profileName = t.name)
                                     val c = t.compat ?: OpenAiChatConfig.Compat()
@@ -133,7 +137,7 @@ internal fun ProviderConnectionsScreen(host: ThetaApplication, onClose: () -> Un
                 Text(strings.get(R.string.providers_connection), style = MaterialTheme.typography.titleMedium)
                 OutlinedTextField(form.profileName, { form = form.withProfileName(it) }, enabled = editable,
                     label = { Text(strings.get(R.string.providers_name)) }, modifier = Modifier.fillMaxWidth())
-                Text(strings.get(R.string.providers_protocol))
+                ProviderProtocolChoice(protocol, editable) { protocol = it }
                 OutlinedTextField(form.endpoint, { form = form.copy(endpoint = it); fetched = emptyList() }, enabled = editable,
                     label = { Text(strings.get(R.string.chat_endpoint)) }, modifier = Modifier.fillMaxWidth())
                 form.targetHost?.let { Text(strings.get(R.string.chat_provider_target_host, it), color = MaterialTheme.colorScheme.primary) }
@@ -146,10 +150,12 @@ internal fun ProviderConnectionsScreen(host: ThetaApplication, onClose: () -> Un
                     visualTransformation = PasswordVisualTransformation(), label = { Text(strings.get(R.string.chat_key)) },
                     supportingText = { Text(strings.get(if (form.canReuseKey) R.string.providers_key_reuse else R.string.chat_provider_new_key)) },
                     modifier = Modifier.fillMaxWidth())
-                Text(strings.get(R.string.providers_defaults), style = MaterialTheme.typography.titleSmall)
-                ProviderCompat(form.providerCompat(), editable) { c ->
-                    form = form.copy(maxTokensField = c.maxTokensField, reasoningField = c.reasoningField.orEmpty(), replayReasoning = c.replayReasoning,
-                        streamUsage = c.streamUsage, explicitCacheControl = c.explicitCacheControl, supportsImageInput = c.supportsImageInput, schemaProfile = c.schemaProfile)
+                if (protocol == ProviderTemplateProtocol.OPENAI_CHAT.wire) {
+                    Text(strings.get(R.string.providers_defaults), style = MaterialTheme.typography.titleSmall)
+                    ProviderCompat(form.providerCompat(), editable) { c ->
+                        form = form.copy(maxTokensField = c.maxTokensField, reasoningField = c.reasoningField.orEmpty(), replayReasoning = c.replayReasoning,
+                            streamUsage = c.streamUsage, explicitCacheControl = c.explicitCacheControl, supportsImageInput = c.supportsImageInput, schemaProfile = c.schemaProfile)
+                    }
                 }
                 Text(strings.get(R.string.providers_models), style = MaterialTheme.typography.titleMedium)
                 OutlinedButton(enabled = editable && form.endpoint.isNotBlank() && (form.noAuth || secret.isNotEmpty() || form.canReuseKey), onClick = {
@@ -181,8 +187,10 @@ internal fun ProviderConnectionsScreen(host: ThetaApplication, onClose: () -> Un
                                     enabled = editable, label = { Text(strings.get(R.string.providers_alias)) }, modifier = Modifier.fillMaxWidth())
                                 OutlinedTextField(model.systemPrompt.orEmpty(), { if (it.length <= MAX_SYSTEM_PROMPT_CHARS) change(model.copy(systemPrompt = it)) },
                                     enabled = editable, minLines = 2, maxLines = 6, label = { Text(strings.get(R.string.chat_system_prompt)) }, modifier = Modifier.fillMaxWidth())
-                                ProviderCheck(strings.get(R.string.providers_override), model.compat != null, editable) { change(model.copy(compat = if (it) form.providerCompat() else null)) }
-                                model.compat?.let { ProviderCompat(it, editable) { c -> change(model.copy(compat = c)) } }
+                                if (protocol == ProviderTemplateProtocol.OPENAI_CHAT.wire) {
+                                    ProviderCheck(strings.get(R.string.providers_override), model.compat != null, editable) { change(model.copy(compat = if (it) form.providerCompat() else null)) }
+                                    model.compat?.let { ProviderCompat(it, editable) { c -> change(model.copy(compat = c)) } }
+                                }
                                 TextButton(enabled = editable, onClick = { models = models.filterNot { it.modelId == model.modelId } }) { Text(strings.get(R.string.providers_remove_model)) }
                             }
                         }
@@ -201,7 +209,7 @@ internal fun ProviderConnectionsScreen(host: ThetaApplication, onClose: () -> Un
             form.profileName.isNotBlank() && (form.noAuth || secret.isNotEmpty() || form.canReuseKey), onClick = {
             operate {
                 val c = ProviderConnection(form.profileId ?: UUID.randomUUID().toString(), form.profileName.trim(), form.endpoint.trim(),
-                    noAuth = form.noAuth, compat = form.providerCompat())
+                    protocol = protocol, noAuth = form.noAuth, compat = form.providerCompat())
                 catalog = withContext(Dispatchers.IO) { store.saveProvider(c, models, if (c.noAuth) "" else secret, replacing) }
                 unreadable = false; replacing = false; edit(catalog.providers.first { it.connection.providerId == c.providerId })
             }

@@ -14,7 +14,7 @@ data class ProviderConnection(
 ) {
     init {
         require(validProfileId(providerId) && validProfileDisplayName(displayName))
-        require(protocol == "openai-chat") { "Protocol is not enabled" }
+        require(protocol in setOf("openai-chat", "openai-responses")) { "Protocol is not enabled" }
         OpenAiChatConfig(providerId, baseUrl, compat = compat)
     }
 }
@@ -63,7 +63,9 @@ internal class ConnectionRecord(val connection: ProviderConnection, val models: 
         val resolved = if (imageSettings == null) settings(model) else OpenAiProviderSettings(
             imageSettings.providerId, connection.baseUrl, model.modelId, imageSettings.parameters,
             imageSettings.compat, imageSettings.systemPrompt)
-        return OpenAiRunSnapshot(resolved,
+        val effective = if (connection.protocol == "openai-chat") resolved else OpenAiProviderSettings(
+            resolved.providerId, resolved.baseUrl, resolved.model, resolved.parameters, systemPrompt = resolved.systemPrompt)
+        return OpenAiRunSnapshot(effective,
         if (connection.noAuth) NoAuthCredentials else ApiKeyCredentials(key), protocol = connection.protocol)
     }
     override fun toString() = "ConnectionRecord([REDACTED])"

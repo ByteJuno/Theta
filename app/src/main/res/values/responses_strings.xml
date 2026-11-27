@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="responses_protocol">API protocol</string>
+    <string name="responses_chat">OpenAI Chat Completions</string>
+    <string name="responses_native">OpenAI Responses</string>
+    <string name="responses_native_hint">Native reasoning and tool calls. Chat compatibility options do not apply. Stop sequences are not supported.</string>
+</resources>
