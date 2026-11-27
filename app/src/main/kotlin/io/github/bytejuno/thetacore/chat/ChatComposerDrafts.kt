@@ -76,6 +76,14 @@ internal class ChatComposerDrafts(private val store: () -> SessionComposerStore?
 
     fun isLiveDraft(id: String?, draft: ChatComposerDraft): Boolean = sessions[id] === draft
 
+    // A restored Activity can receive its picker result before chat initialization completes.
+    suspend fun pickerTarget(id: String?, openStore: suspend () -> Unit): ChatComposerDraft? {
+        if (id == null) return null
+        if (store() == null) openStore()
+        if (store() == null) return null
+        return this[id].takeIf { isLiveDraft(id, it) }
+    }
+
     fun hasCachedDraft(id: String): Boolean = id in sessions || id in saved
 
     fun cachedSessionIds(): Set<String> = (sessions.keys + saved.keys).filterNotNull().toSet()

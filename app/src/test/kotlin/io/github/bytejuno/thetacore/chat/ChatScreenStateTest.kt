@@ -24,6 +24,38 @@ class ChatScreenStateTest {
     private val session = "shared"
     private fun image(id: String) = PendingUserImage(id, "image/png", id.toByteArray())
 
+    @Test fun restoredPickerResultWaitsForStoreAndUpdatesOriginalSession() = kotlinx.coroutines.runBlocking {
+        val root = temp.newFolder()
+        var available: SessionComposerStore? = null
+        val saver = ChatComposerDrafts.saver { available }
+        val other = "another-session"
+        val token = AndroidAgentStore.open(root, BundledSQLiteDriver()).use { store ->
+            store.createHistory(session).close()
+            store.createHistory(other).close()
+            available = store.composerDrafts
+            val page = ChatComposerDrafts { available }
+            page[session].edit("original")
+            page[other].edit("other")
+            with(saver) { requireNotNull(saverScope.save(page)) }
+        }
+        available = null
+        val page = requireNotNull(saver.restore(token))
+        AndroidAgentStore.open(root, BundledSQLiteDriver()).use { store ->
+            val target = requireNotNull(page.pickerTarget(session) { available = store.composerDrafts })
+            assertEquals("original", target.input)
+            target.images = listOf(image("picked"))
+            page.checkpoint()
+        }
+        AndroidAgentStore.open(root, BundledSQLiteDriver()).use { store ->
+            val restored = store.composerDrafts.read(session)
+            assertEquals("original", restored.text)
+            assertArrayEquals("picked".toByteArray(), restored.images.single().bytes)
+            val untouched = store.composerDrafts.read(other)
+            assertEquals("other", untouched.text)
+            assertTrue(untouched.images.isEmpty())
+        }
+    }
+
     private fun writeLegacyDraftFile(root: java.io.File, sessionId: String, version: String, text: String, images: List<PendingUserImage>) {
         val dir = root.resolve("composer-drafts-v1").apply { mkdirs() }
         val file = dir.resolve(UUID.nameUUIDFromBytes(sessionId.toByteArray()).toString())

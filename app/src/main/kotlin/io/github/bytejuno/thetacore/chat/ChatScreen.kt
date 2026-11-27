@@ -89,16 +89,17 @@ internal fun ChatScreen(host: ThetaApplication, drafts: ChatComposerDrafts, resu
         ActivityResultContracts.PickMultipleVisualMedia(MAX_USER_IMAGES_PER_MESSAGE),
     ) { uris ->
         if (uris.isEmpty()) return@rememberLauncherForActivityResult
-        val target = drafts[pickerSession]
-        target.error = null
-        val remaining = MAX_USER_IMAGES_PER_MESSAGE - target.images.size
-        if (remaining <= 0) {
-            target.error = R.string.chat_image_limit
-            return@rememberLauncherForActivityResult
-        }
-        val selected = uris.take(remaining)
-        if (uris.size > remaining) target.error = R.string.chat_image_limit
+        val id = pickerSession
         uiScope.launch {
+            val target = drafts.pickerTarget(id) { owner.open().join() } ?: return@launch
+            target.error = null
+            val remaining = MAX_USER_IMAGES_PER_MESSAGE - target.images.size
+            if (remaining <= 0) {
+                target.error = R.string.chat_image_limit
+                return@launch
+            }
+            val selected = uris.take(remaining)
+            if (uris.size > remaining) target.error = R.string.chat_image_limit
             val loaded = withContext(Dispatchers.IO) {
                 val added = mutableListOf<PendingUserImage>()
                 var invalid = false
@@ -114,28 +115,29 @@ internal fun ChatScreen(host: ThetaApplication, drafts: ChatComposerDrafts, resu
                 }
                 added to invalid
             }
-            if (loaded.first.isNotEmpty() && drafts.isLiveDraft(pickerSession, target)) {
+            if (loaded.first.isNotEmpty() && drafts.isLiveDraft(id, target)) {
                 target.images = (target.images + loaded.first).take(MAX_USER_IMAGES_PER_MESSAGE)
             }
-            if (loaded.second && drafts.isLiveDraft(pickerSession, target)) target.error = R.string.chat_image_invalid
+            if (loaded.second && drafts.isLiveDraft(id, target)) target.error = R.string.chat_image_invalid
         }
     }
     val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicturePreview()) { bitmap ->
         if (bitmap == null) return@rememberLauncherForActivityResult
-        val target = drafts[pickerSession]
-        target.error = null
-        if (target.images.size >= MAX_USER_IMAGES_PER_MESSAGE) {
-            target.error = R.string.chat_image_limit
-            return@rememberLauncherForActivityResult
-        }
+        val id = pickerSession
         uiScope.launch {
+            val target = drafts.pickerTarget(id) { owner.open().join() } ?: return@launch
+            target.error = null
+            if (target.images.size >= MAX_USER_IMAGES_PER_MESSAGE) {
+                target.error = R.string.chat_image_limit
+                return@launch
+            }
             val captured = withContext(Dispatchers.IO) {
                 runCatching { encodeCameraBitmapToPng(bitmap) }.getOrNull()
             }
-            if (captured != null && drafts.isLiveDraft(pickerSession, target)) {
+            if (captured != null && drafts.isLiveDraft(id, target)) {
                 target.images = (target.images + PendingUserImage(mimeType = captured.mimeType, bytes = captured.bytes))
                     .take(MAX_USER_IMAGES_PER_MESSAGE)
-            } else if (captured == null && drafts.isLiveDraft(pickerSession, target)) {
+            } else if (captured == null && drafts.isLiveDraft(id, target)) {
                 target.error = R.string.chat_image_invalid
             }
         }
