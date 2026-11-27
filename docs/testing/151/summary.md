@@ -100,3 +100,9 @@ On the candidate, the development test endpoint selected the f512 runner and all
   - 本地 Windows 严格配置缓存检查：`scripts/preflight.py --quick` 通过（29 路径、无受保护文件改动、无 `probe` 命名、`:samples:storage-fixture:compileDebugKotlin`、`:app:verifyUiResources` 567 对双语键、`:app:lintDebug`），`:agent-core:test` 全量通过。
 
 本轮验证覆盖 JVM 与 SQLite 数据库重开。未构建 APK，真实设备冷启动、页面交互渲染、实际图片选择与发送、API 33 及 R8 运行行为未验证。新提交的 CI、独立审核和正式回归待发布后执行。
+
+### 第十轮独立审核补充：进程重建后的附件结果
+
+在 `879176c` 上，JVM 探针用已保存的会话 ID 模拟选图结果早于聊天库就绪返回。草稿恢复标记为 1，按该 ID 读取时报 `IllegalArgumentException: Required value was null.`，重开 SQLite 后仍能读到原文字。gpu-bai 探针 1/1 失败。
+
+修复提交 `abd77f7`：相册和相机回调保留发起选择的会话 ID，等待聊天库就绪后再取草稿。gpu-bai 定向运行 `ChatScreenStateTest`，16/16 通过；新增用例核对重开后的原文字、选中附件的字节，以及另一会话未受影响。本次未生成 APK，未实测系统选择器回调或界面渲染。
