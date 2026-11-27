@@ -15,6 +15,8 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.flow
+import java.util.concurrent.atomic.AtomicBoolean
 
 internal enum class EntryRuntimeStatus { NEW, INITIALIZING, READY, UNAVAILABLE, STOPPED }
 internal data class EntryRuntimeState(
@@ -30,8 +32,9 @@ internal class PluginEntryRuntime(
     private val owner: CoroutineScope,
     private val adapter: EntryAdapter,
     private val device: DeviceInfo,
-    private val openSession: suspend (EntryRequest) -> EntrySession = { throw EntryUnavailableException() },
+    private val openSession: suspend (EntryRequest, () -> Boolean) -> EntrySession = { _, _ -> throw EntryUnavailableException() },
     private val initializationTimeoutMillis: Long = 30_000,
+    private val isRegistered: () -> Boolean = { true },
 ) : AutoCloseable {
     init { require(initializationTimeoutMillis > 0) }
     private val mutableState = MutableStateFlow(EntryRuntimeState(EntryRuntimeStatus.NEW))
@@ -41,6 +44,39 @@ internal class PluginEntryRuntime(
     private var lease: PluginExecutionBudget.Lease? = null
     private var timer: ScheduledFuture<*>? = null
     private var startedNanos = 0L
+    private val sessions = mutableSetOf<OwnedSession>()
+
+    private fun requireReady() {
+        if (state.value.status != EntryRuntimeStatus.READY || !isRegistered()) throw EntryUnavailableException()
+    }
+
+    private inner class OwnedSession(private val session: EntrySession) : EntrySession {
+        private val closed = AtomicBoolean()
+        override val events = flow {
+            try {
+                session.events.collect { event ->
+                    if (closed.get() || state.value.status != EntryRuntimeStatus.READY || !isRegistered())
+                        throw CancellationException("Entry session revoked")
+                    emit(event)
+                }
+            } finally { close() }
+        }
+        override suspend fun send(text: String) {
+            synchronized(budget.gate) {
+                requireReady()
+                if (closed.get()) throw EntryUnavailableException()
+            }
+            session.send(text)
+        }
+        override fun close() {
+            val shouldClose = synchronized(budget.gate) {
+                closed.compareAndSet(false, true).also { if (it) sessions.remove(this) }
+            }
+            if (shouldClose) session.close()
+        }
+    }
+
+    private fun closeSessions() { sessions.toList().forEach { it.close() } }
 
     fun start(): Unit = synchronized(budget.gate) {
         if (state.value.status != EntryRuntimeStatus.NEW) return
@@ -75,8 +111,14 @@ internal class PluginEntryRuntime(
                             }
                         }
                         override suspend fun open(request: EntryRequest): EntrySession {
-                            if (state.value.status != EntryRuntimeStatus.READY) throw EntryUnavailableException()
-                            return openSession(request)
+                            synchronized(budget.gate) { requireReady() }
+                            val session = openSession(request) { state.value.status == EntryRuntimeStatus.READY && isRegistered() }
+                            return synchronized(budget.gate) {
+                                try {
+                                    requireReady()
+                                    OwnedSession(session).also { sessions += it }
+                                } catch (error: Throwable) { session.close(); throw error }
+                            }
                         }
                     }) }
                     unavailable("Entry listener returned unexpectedly")
@@ -111,6 +153,7 @@ internal class PluginEntryRuntime(
             mutableState.value = state.value.copy(status = EntryRuntimeStatus.UNAVAILABLE, message = message)
             timer?.cancel(false)
             timer = null
+            closeSessions()
         }
     }
 
@@ -120,6 +163,7 @@ internal class PluginEntryRuntime(
         }
         timer?.cancel(false)
         timer = null
+        closeSessions()
     }
 
     /** Revocation/owner stop is nonblocking and cannot run plugin cancellation handlers inline. */

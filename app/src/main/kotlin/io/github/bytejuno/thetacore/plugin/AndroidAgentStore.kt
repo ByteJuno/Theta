@@ -24,6 +24,7 @@ internal class AndroidAgentStore private constructor(
     private val database: AgentDatabase, private val delegate: InvocationStore,
 ) : InvocationStore by delegate {
     val privateImages = io.github.bytejuno.thetacore.agent.ledger.PrivateImageStore(database)
+    val composerDrafts = io.github.bytejuno.thetacore.agent.ledger.SessionComposerStore(database)
     fun sessionIds(before: String? = null) = database.sessionIds(before)
     fun sessionPreviews(before: String? = null) = database.sessionPreviews(before)
     fun sessionPreview(sessionId: String) = database.sessionPreview(sessionId)
@@ -95,7 +96,9 @@ internal class AndroidAgentStore private constructor(
             fault: (SqliteWriteStage) -> Unit = {}): AndroidAgentStore {
             require(root.isDirectory) { "No private no-backup directory" }
             val database = AgentDatabase.open(File(root, AgentDatabase.FILE_NAME).toPath(), driver)
-            try { return AndroidAgentStore(database, SqliteInvocationStore.open(database, fault)) }
+            try { return AndroidAgentStore(database, SqliteInvocationStore.open(database, fault)).also {
+                io.github.bytejuno.thetacore.chat.migrateComposerFiles(root, it)
+            } }
             catch (error: Throwable) { runCatching { database.close() }; throw error }
         }
     }

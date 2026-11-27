@@ -243,6 +243,8 @@ class SessionBlobTest {
             assertEquals(Decision.ALLOW_ALWAYS, before.receipts.single().decision)
             f.store.close()
             sql(f.directory) {
+                it.execute("DROP TABLE composer_chunks")
+                it.execute("DROP TABLE composer_parts")
                 it.execute("DROP TABLE run_catalog_chunks"); it.execute("DROP TABLE run_catalogs")
                 it.execute("DROP TABLE private_image_chunks"); it.execute("DROP TABLE private_image_attempts")
                 it.execute("DROP TABLE quarantined_contents"); it.execute("PRAGMA user_version=3")
@@ -264,6 +266,8 @@ class SessionBlobTest {
         val (record, ref) = publish(f)
         f.store.close()
         sql(f.directory) {
+            it.execute("DROP TABLE composer_chunks")
+            it.execute("DROP TABLE composer_parts")
             it.execute("DROP TABLE run_catalog_chunks"); it.execute("DROP TABLE run_catalogs")
             it.execute("DROP TABLE private_image_chunks"); it.execute("DROP TABLE private_image_attempts")
             it.execute("DROP TABLE quarantined_contents"); it.execute("DROP TABLE deleted_sessions"); it.execute("PRAGMA user_version=2")

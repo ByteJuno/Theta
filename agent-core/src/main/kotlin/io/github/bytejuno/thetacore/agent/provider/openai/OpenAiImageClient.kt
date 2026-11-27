@@ -24,6 +24,7 @@ class ImageRequestException(val failure: Failure) : Exception(failure.name) {
 }
 
 object ImageLimits {
+    const val PER_MESSAGE = 4
     const val BYTES = 8 * 1024 * 1024
     const val RESPONSE_BYTES = 12 * 1024 * 1024
     const val DIMENSION = 4096
