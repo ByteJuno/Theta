@@ -106,6 +106,8 @@ dependencies {
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.compose.material3)
+    implementation("org.commonmark:commonmark:0.33.0")
+    implementation("org.commonmark:commonmark-ext-gfm-strikethrough:0.33.0")
     implementation(libs.kotlinx.serialization.json)
     implementation("org.yaml:snakeyaml:2.4")
     implementation("androidx.datastore:datastore-core:1.1.7")
