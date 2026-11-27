@@ -13,6 +13,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Test
@@ -26,7 +28,7 @@ class PluginOutputSurfacesTest {
 
     @After fun close() { owner.cancel(); budget.close() }
 
-    private fun add(id: String, rank: Int, available: Boolean = true, show: () -> Unit = {}):
+    private fun add(id: String, rank: Int, available: Boolean = true, clear: () -> Unit = {}, show: () -> Unit = {}):
         PluginOutputSurfaces.Binding {
         val surface = object : OutputSurface {
             override val id = id
@@ -37,7 +39,10 @@ class PluginOutputSurfacesTest {
                 show()
                 events.add("$id show ${task.taskId} ${task.phase} ${task.toolName} ${task.waitingUser}")
             }
-            override fun clear(taskId: String) { events.add("$id clear $taskId") }
+            override fun clear(taskId: String) {
+                clear()
+                events.add("$id clear $taskId")
+            }
         }
         return router.binding(id) { failures.add(id) }.apply {
             update(listOf(RegisteredExtension(id, surface, 1)), false)
@@ -46,6 +51,64 @@ class PluginOutputSurfacesTest {
     }
 
     private fun expect(event: String) = assertEquals(event, events.poll(4, TimeUnit.SECONDS))
+
+    private fun occupyBothSlots(id: String) = runBlocking {
+        withTimeout(4_000) {
+            List(2) {
+                var lease: PluginExecutionBudget.Lease?
+                do {
+                    check(budget.awaitCapacity(id))
+                    lease = budget.reserve(id, owner, {}, {})
+                } while (lease == null)
+                lease
+            }
+        }
+    }
+
+    @Test fun revokedBusySurfaceClearsAfterTaskEndsWithoutAnotherEvent() {
+        val high = add("high", 2)
+        add("low", 1)
+        router.present(ChatTaskProgress.Approval.outputTask("a"))
+        expect("high show a APPROVAL null true")
+        val slots = occupyBothSlots("high")
+        try {
+            high.update(emptyList(), true)
+            expect("low show a APPROVAL null true")
+            router.present(null)
+            expect("low clear a")
+        } finally { slots.forEach { it.abandon() } }
+        expect("high clear a")
+        assertTrue(failures.isEmpty())
+    }
+
+    @Test fun busyFirstChoiceTakesOverPendingApprovalOnReleaseAlone() {
+        val slots = occupyBothSlots("high")
+        try {
+            add("high", 2)
+            add("low", 1)
+            router.present(ChatTaskProgress.Approval.outputTask("a"))
+            expect("low show a APPROVAL null true")
+        } finally { slots.forEach { it.abandon() } }
+        expect("low clear a")
+        expect("high show a APPROVAL null true")
+        assertTrue(failures.isEmpty())
+    }
+
+    @Test fun lateClearExitsBeforeReplacementCanShowTheSameTask() {
+        val release = CountDownLatch(1)
+        val old = add("high", 2, clear = { release.await() })
+        add("low", 1)
+        try {
+            router.present(ChatTaskProgress.Model.outputTask("a"))
+            expect("high show a MODEL null false")
+            old.update(emptyList(), true)
+            expect("low show a MODEL null false")
+            add("high", 3)
+        } finally { release.countDown() }
+        expect("high clear a")
+        expect("low clear a")
+        expect("high show a MODEL null false")
+    }
 
     @Test fun selectionReroutesOnRevokeAndDisableAndClearsWhenFinished() {
         add("unavailable", 80, false)

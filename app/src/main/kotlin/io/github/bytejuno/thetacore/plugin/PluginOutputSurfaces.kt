@@ -5,6 +5,7 @@ import io.github.bytejuno.thetacore.sdk.DeviceInfo
 import io.github.bytejuno.thetacore.sdk.Extension
 import io.github.bytejuno.thetacore.sdk.OutputSurface
 import io.github.bytejuno.thetacore.sdk.TaskProgress
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -33,6 +34,26 @@ internal class PluginOutputSurfaces(
     // Only the consumer coroutine changes the displayed projection.
     private var displayed: Surface? = null
     private var displayedTask: TaskProgress? = null
+    private data class Cleanup(val surface: Surface, val taskId: String)
+    private val pendingClears = mutableSetOf<Cleanup>()
+    private val draining = mutableSetOf<PluginExecutionBudget.Lease>()
+    private val waitingForCapacity = ConcurrentHashMap.newKeySet<String>()
+
+    private sealed interface Callback<out T> {
+        data class Done<T>(val value: T) : Callback<T>
+        data object Busy : Callback<Nothing>
+        data object Unavailable : Callback<Nothing>
+        data class Failed(val cause: Throwable? = null) : Callback<Nothing>
+    }
+
+    private fun retryOnCapacity(pluginId: String) {
+        if (!waitingForCapacity.add(pluginId)) return
+        owner.launch {
+            val retry = budget.awaitCapacity(pluginId)
+            waitingForCapacity.remove(pluginId)
+            if (retry) changes.trySend(Unit)
+        }
+    }
 
     init { owner.launch { for (change in changes) reconcile() } }
 
@@ -87,26 +108,43 @@ internal class PluginOutputSurfaces(
             cleanup: Boolean = false,
             late: () -> Unit = {},
             action: () -> T,
-        ): T? {
-            val result = CompletableDeferred<Result<T>?>()
-            var outcome: Result<T>? = null
+        ): Callback<T> {
+            val result = CompletableDeferred<Callback<T>>()
+            var outcome: Callback<T> = Callback.Unavailable
             val lease = budget.submit(binding.pluginId, owner,
-                onCancel = { result.complete(null) }, onExit = { result.complete(outcome) }) {
+                onCancel = { result.complete(Callback.Failed()) }, onExit = { result.complete(outcome) }) {
                 if (cleanup || live()) {
-                    outcome = runCatching(action)
+                    outcome = try { Callback.Done(action()) } catch (t: Throwable) {
+                        Callback.Failed(t)
+                    }
                     if (result.isCompleted) runCatching(late)
                 }
-            } ?: return null
+            } ?: run {
+                if (budget.isClosed()) return Callback.Unavailable
+                retryOnCapacity(binding.pluginId)
+                return Callback.Busy
+            }
             val value = withTimeoutOrNull(timeoutMillis) { result.await() }
             if (value == null) {
-                result.complete(null)
+                result.complete(Callback.Failed())
                 lease.cancel()
-                if (cleanup || live()) binding.fail("callback timed out or cancelled")
-            } else value.exceptionOrNull()?.let { binding.fail(pluginFailureIdentity(it)) }
-            return value?.getOrNull()
+            }
+            if (value == null || value is Callback.Failed) {
+                // A timed-out worker can still draw or clear, even across re-registration.
+                draining.add(lease)
+                lease.actualExited.invokeOnCompletion { changes.trySend(Unit) }
+                val failure = value as? Callback.Failed
+                if (cleanup || live()) binding.fail(failure?.cause?.let(::pluginFailureIdentity) ?: "callback timed out or cancelled")
+                return failure ?: Callback.Failed()
+            }
+            return value
         }
 
-        suspend fun clear(id: String) { call(cleanup = true) { output.clear(id) } }
+        suspend fun clear(id: String) {
+            val pending = Cleanup(this, id)
+            if (call(cleanup = true) { output.clear(id) } === Callback.Busy) pendingClears.add(pending)
+            else pendingClears.remove(pending)
+        }
     }
 
     private suspend fun clearDisplayed() {
@@ -116,27 +154,40 @@ internal class PluginOutputSurfaces(
         displayedTask = null
     }
 
+    private fun awaitingCleanup(item: Surface): Boolean {
+        val pluginId = item.binding.pluginId
+        return pendingClears.any { it.surface.binding.pluginId == pluginId } || draining.any { it.pluginId == pluginId }
+    }
+
     private suspend fun reconcile() {
+        draining.removeAll { it.actualExited.isCompleted }
+        pendingClears.toList().forEach { it.surface.clear(it.taskId) }
         val task = desired
         if (displayedTask?.taskId != task?.taskId || displayed?.live() == false) clearDisplayed()
         if (task == null) return
         val snapshot = synchronized(gate) { candidates.toList() }
         val ranked = snapshot.mapNotNull { item ->
-            item.call { item.output.priority }?.let { priority -> item to priority }
+            if (awaitingCleanup(item)) return@mapNotNull null
+            val priority = item.call { item.output.priority }
+            if (priority is Callback.Done) item to priority.value else null
         }.sortedByDescending { it.second }
         for ((item, _) in ranked) {
             if (desired !== task) return
-            if (item.call { item.output.isAvailable(device) } != true) continue
+            val available = item.call { item.output.isAvailable(device) }
+            if (available !is Callback.Done || !available.value) continue
             if (item !== displayed) clearDisplayed()
+            if (awaitingCleanup(item)) continue
             if (item === displayed && task == displayedTask) return
             if (desired !== task || !item.live()) return
-            if (item.call(late = { item.output.clear(task.taskId) }) { item.output.show(task) } != null) {
-                displayed = item
-                displayedTask = task
-                return
+            when (item.call(late = { item.output.clear(task.taskId) }) { item.output.show(task) }) {
+                is Callback.Done -> {
+                    displayed = item
+                    displayedTask = task
+                    return
+                }
+                is Callback.Failed -> item.clear(task.taskId)
+                else -> continue
             }
-            // show may throw after drawing or time out while still inside the plugin.
-            item.clear(task.taskId)
             displayed = null
             displayedTask = null
         }
