@@ -109,6 +109,32 @@ class PluginOutputSurfacesTest {
         assertTrue(events.isEmpty())
     }
 
+    @Test fun retiringQueuedClearsKeepsRoutingLaterTasks() = runBlocking {
+        add("low", 1)
+        repeat(100) { round ->
+            val id = "high$round"
+            val task = "task$round"
+            val high = add(id, 2)
+            router.present(ChatTaskProgress.Model.outputTask(task))
+            expect("$id show $task MODEL null false")
+            val slots = occupyBothSlots(id)
+            try {
+                val close = disable(high)
+                expect("low show $task MODEL null false")
+                // Queue the clear, then retire it concurrently with the router's retry.
+                // Keep admission occupied so an expired clear cannot execute later.
+                high.expireCleanup()
+                assertTrue(close.await(4_000)!!.getOrThrow().isNotEmpty())
+                expect("disabled")
+                expect("resources closed")
+            } finally { slots.forEach { it.abandon() } }
+            router.present(null)
+            expect("low clear $task")
+            assertTrue(events.isEmpty())
+        }
+        assertTrue(failures.isEmpty())
+    }
+
     @Test fun disableFinishesWhileUnrelatedRankingExceedsCloseDeadline() = runBlocking {
         val high = add("high", 100)
         val slow = AtomicBoolean(false)

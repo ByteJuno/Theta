@@ -228,7 +228,9 @@ internal class PluginOutputSurfaces(
 
     private suspend fun reconcile() {
         draining.keys.removeAll { it.actualExited.isCompleted }
-        pendingClears.toList().forEach { it.surface.clear(it.taskId) }
+        // Drain removes entries concurrently. Iterate the weakly consistent set directly:
+        // Kotlin toList() can observe size == 1, then call next() after that entry is gone.
+        for (pending in pendingClears) pending.surface.clear(pending.taskId)
         val task = desired
         if (displayedTask?.taskId != task?.taskId || displayed?.live() == false) clearDisplayed()
         if (task == null) return
