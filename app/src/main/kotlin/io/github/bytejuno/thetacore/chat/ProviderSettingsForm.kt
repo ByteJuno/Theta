@@ -88,7 +88,7 @@ internal class ProviderSettingsEditor {
      * template. Never attaches any existing saved API key and never links back to the source plugin.
      */
     fun applyTemplate(template: ProviderTemplate): Boolean {
-        if (!editable || !template.supported) return false
+        if (!editable || template.protocol != io.github.bytejuno.thetacore.plugin.ProviderTemplateProtocol.OPENAI_CHAT) return false
         val compat = template.compat ?: OpenAiChatConfig.Compat()
         creatingNew = true
         replacingUnreadable = false

@@ -5,7 +5,6 @@ import io.github.bytejuno.thetacore.agent.ledger.*
 import io.github.bytejuno.thetacore.agent.protocol.*
 import io.github.bytejuno.thetacore.agent.protocol.MediaKind as ProtocolMediaKind
 import io.github.bytejuno.thetacore.agent.provider.openai.OpenAiRunSnapshot
-import io.github.bytejuno.thetacore.agent.provider.openai.OpenAiChatCodec
 import io.github.bytejuno.thetacore.agent.run.*
 import io.github.bytejuno.thetacore.agent.transport.ModelTransport
 import io.github.bytejuno.thetacore.agent.transport.OkHttpModelTransport
@@ -693,10 +692,10 @@ internal class ChatSessionOwner(
                 tools?.sessionStore?.privateImages?.readUserImage(disk.sessionId, blob.id)
             }
             val target = targetWithMediaForRun?.invoke(config, mediaReader) ?: targetForRun(config)
-            val codec = OpenAiChatCodec(config.settings.adapterConfig(), mediaReader)
+            val estimateRequestBytes = config.requestByteEstimator(mediaReader)
             val requestBudget = ContextBudget({ candidate ->
                 try {
-                    256L + codec.estimateRequestBytes(candidate)
+                    256L + estimateRequestBytes(candidate)
                 } catch (_: IllegalArgumentException) {
                     null
                 }
