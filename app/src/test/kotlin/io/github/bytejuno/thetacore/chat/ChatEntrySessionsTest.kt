@@ -44,7 +44,8 @@ class ChatEntrySessionsTest {
 
     private class Fixture(val risk: ToolRisk = ToolRisk.READ, val configured: Boolean = true,
         val hold: CompletableDeferred<Unit>? = null, val presenceFails: Boolean = false,
-        val disconnectFirst: Boolean = false, val interleaved: Boolean = false) {
+        val disconnectFirst: Boolean = false, val interleaved: Boolean = false,
+        val runDispatcher: CoroutineDispatcher = Dispatchers.IO) {
         val root = Files.createTempDirectory("entry-session").toFile()
         val store = AndroidAgentStore.open(root, BundledSQLiteDriver())
         val budget = PluginExecutionBudget()
@@ -96,7 +97,7 @@ class ChatEntrySessionsTest {
                 presence += progress
             }
             override suspend fun finish(executionId: String, waiting: ChatTaskProgress?) { presence += waiting }
-        })
+        }, runDispatcher = runDispatcher)
         suspend fun initialize() { host = HostToolBridgeRoot(budget, tool).initialize { store } }
         suspend fun close() {
             hold?.complete(Unit)
@@ -268,6 +269,52 @@ class ChatEntrySessionsTest {
             f.owner.send("still bound").join()
             assertEquals(1L, f.owner.state.value.acceptedMessages)
         } finally { f.close() }
+    }
+
+    @Test fun stoppingBeforeRunDispatchReleasesAdmissionAndPreservesAcceptedHistory() = runBlocking {
+        val pending = java.util.concurrent.ConcurrentLinkedQueue<Runnable>()
+        val dispatcher = object : CoroutineDispatcher() {
+            override fun dispatch(context: CoroutineContext, block: Runnable) { pending.add(block) }
+        }
+        val f = Fixture(runDispatcher = dispatcher); f.initialize()
+        try {
+            f.owner.open().join()
+            val session = requireNotNull(f.owner.state.value.sessionId)
+            var checks = 0
+            unavailable { f.owner.entrySessions.open(EntryRequest("revoked")) { ++checks == 1 } }
+            val entry = f.owner.entrySessions.open(EntryRequest("accepted", session))
+            assertTrue(f.owner.state.value.active)
+            assertEquals(0, f.requests.get())
+            f.owner.stop().join()
+            // Deliver the cancelled launch only after stop, without a timing race or sleeping.
+            while (true) (pending.poll() ?: break).run()
+            assertFalse("A stopped undispatched run must release admission", f.owner.state.value.active)
+            assertEquals(io.github.bytejuno.thetacore.R.string.chat_stopped, f.owner.state.value.notice)
+            assertNull(f.owner.state.value.executionId)
+            assertEquals(0, f.requests.get())
+            assertEquals(0, f.executions.get())
+            assertFalse(f.presence.contains(ChatTaskProgress.Model))
+            assertEquals(listOf(session), f.store.sessionIds())
+            val saved = f.owner.state.value.messages
+            assertEquals("accepted", (saved.single().parts.single() as ContentPart.Text).text)
+            validateHistory(saved)
+            val terminal = withTimeout(10_000) { entry.events.first() }
+            assertTrue(terminal is SessionEvent.Failed)
+            assertEquals(0, f.owner.entrySessions.handleCount)
+
+            f.owner.send("next").join()
+            assertEquals(2L, f.owner.state.value.acceptedMessages)
+            f.owner.stop().join()
+            while (true) (pending.poll() ?: break).run()
+            assertFalse(f.owner.state.value.active)
+            assertEquals(0, f.requests.get())
+            assertEquals(listOf("accepted", "next"), f.owner.state.value.messages
+                .filter { it.role == Role.USER }.map { (it.parts.single() as ContentPart.Text).text })
+            validateHistory(f.owner.state.value.messages)
+        } finally {
+            f.scope.coroutineContext[Job]!!.cancelAndJoin()
+            f.budget.close(); f.store.close(); f.root.deleteRecursively()
+        }
     }
 
     @Test fun staleLedgerSnapshotCannotReviveApprovalAfterNewerRevision() = runBlocking {

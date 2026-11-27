@@ -84,6 +84,7 @@ internal class ChatSessionOwner(
     private val promptSnapshot: suspend () -> ChatPromptSnapshot = { ChatPromptSnapshot() },
     private val targetWithMediaForRun: ((OpenAiRunSnapshot, MediaContentReader) -> ModelTarget)? = null,
     private val userImageValidator: (ByteArray) -> ValidatedUserImage = ::validateAndDecodeAndroidUserImage,
+    private val runDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) {
     private val mutable = MutableStateFlow(ChatState())
     val state = mutable.asStateFlow()
@@ -566,15 +567,18 @@ internal class ChatSessionOwner(
         try { action() } finally { ticker.cancel() }
     }
 
+    @OptIn(ExperimentalCoroutinesApi::class, DelicateCoroutinesApi::class)
     private fun start(snapshot: OpenAiRunSnapshot?, pending: PendingHistoryStep?, identity: RunIdentity? = null,
         resumeId: String? = null, readmitId: String? = null, executionId: String = UUID.randomUUID().toString()) {
         check(active == null)
         val running = requireNotNull(identity ?: pending?.identity)
         activeRunId = running.runId
         mutable.update { it.copy(active = true, error = null, notice = null, draft = "", executionId = executionId) }
-        active = scope.launch(Dispatchers.IO, start = CoroutineStart.LAZY) {
+        active = scope.launch(runDispatcher, start = CoroutineStart.ATOMIC) {
             var notice = R.string.chat_complete
             try {
+                // Enter cleanup even if stopped before dispatch; publish active before any work.
+                gate.withLock { currentCoroutineContext().ensureActive() }
                 presence.update(executionId, ChatTaskProgress.Model)
                 notice = withStatusUpdates {
                     val result = executeChat(snapshot, pending, identity, resumeId, readmitId)
@@ -642,7 +646,7 @@ internal class ChatSessionOwner(
                     }
                 }
             }
-        }.also { it.start() }
+        }
     }
 
     private suspend fun executeChat(snapshot: OpenAiRunSnapshot?, pending: PendingHistoryStep?, identity: RunIdentity?,
