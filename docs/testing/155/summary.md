@@ -1,19 +1,21 @@
-# Issue 155 validation
+# Issue 155 — Anthropic native protocol validation
 
-Implementation: `403daaae95267274ee5993a78123577880791ca6`. Exact tested Git tree: `bb7f8fa9060edc6acea9c3e1536bb4805f26aa53`. Base/latest fetched main: `f47edb8b85291c04f84529460fdff73a0a1402f9`. Branch: `auto/155-anthropic-protocol`.
+Implementation SHA: `4897af9ab8965c741576fd7484945623b0274c5a`
+Tested tree: `7b27795e44e9af2412cfaeef2d04d68441afc349`
+Branch: `auto/155-anthropic-protocol`. RETURN: PR #172, `IC_kwDOVkrS_s8AAAABroxSCg`.
 
-Implemented native Anthropic /messages and paginated /models, isolated authentication, ordered thinking/signature/redacted replay, tool/result and image encoding, explicit cache markers, cumulative usage, stream errors and finish reasons. Added v3 persistence/binding/preset integration and paired feature resources for protocol and per-model thinking/output options. No protected files or host-entry logic changed.
+Native Anthropic Messages, thinking/signature/redacted replay, tools, explicit cache, pause continuation, models discovery and v3 preset/settings support remain in scope. This revision repairs all four reviewed paths:
+- A stopped/truncated tool step can precede a new user run; tool-result and user-text messages remain distinct, thinking order is preserved, and unpaired calls still fail.
+- Non-object/malformed tool arguments enter the existing checkpoint flow before wire estimation. Raw history, replay signatures and ledger remain unchanged. Explicit summary continuation completes without repeating tools. Rejected arrays/scalars/malformed JSON and existing null-to-empty execution semantics are covered separately.
+- Explicit `invalid_request_error` / `prompt is too long` errors map to `CONTEXT_TOO_LONG` over HTTP and SSE; error text remains redacted and other errors retain their classes.
+- Preset parsing uses the same parameter constructor as selection, rejecting invalid reasoning defaults/options as `PluginPackageException` before checkbox callbacks.
 
-Targeted verification: core 45 and app 25 passed, 0 failures, 33.25s. Includes real loopback HTTP header isolation and discovery pagination, fragmented UTF-8/SSE, thinking replay, tools, pause limits, refusal discard, both OpenAI checkpoint-switch directions, cold settings read/key freezing and endpoint isolation. Fake transports use synthetic protocol fixtures, not recorded production provider traffic.
+Validation on this candidate:
+- Local targeted core: 112 tests, 0 failures; app: 22 tests, 0 failures.
+- `python scripts/preflight.py` with strict configuration cache passed in 175.1s: core 680 tests (679 passed, 1 platform skip), app 817 (816 passed, 1 platform skip); lintDebug, verifyUiResources (622 English/Chinese keys), storage-fixture source verification and Kotlin compilation passed.
+- Existing `/opt/homelab-report/theta-gpu-test` entry on host `gpu`: 134 tests, 0 failures, 119.5s, strict configuration cache. Includes Anthropic, run/context policy, preset and PluginOutputSurfaces regressions.
+- Files were hash-checked unchanged through validation. Final fetch confirmed PR branch head 9c5f7e5037b31359cdb26320c28184247e96b432 and origin/main 40330df3a2758b752f90ac495e1aca69f8483e66 are included. Reviewer commits are retained.
 
-Final `python scripts/preflight.py`: passed, 161.23s; strict `--configuration-cache --configuration-cache-problems=fail`, cache stored. Core 676 = 675 passed / 1 platform skip; app 803 = 802 passed / 1 platform skip; no failures/errors. `:app:lintDebug`, `:app:verifyUiResources` (616 paired keys), `:samples:storage-fixture:verifyStorageFixtureSources` and `:samples:storage-fixture:compileDebugKotlin` passed. Source hashes stayed unchanged during validation; commit tree matches tested files. Final fetch confirmed main ancestry and no remote issue branch.
+Preserved failures: the first local run had one new test expectation failure for null arguments (existing ledger permits normalized empty arguments); corrected that expectation and added explicit no-repeat continuation assertions. The first GPU archive returned 126 before tests because it lost executable mode; the retry used indexed modes plus the unchanged HEAD LF gradlew blob. Neither failure is erased. Prior remote CI run 46032750268 failed the existing plugin close/ranking test; it passes in this round locally and on GPU, but final-head CI remains required. Original reviewer findings and raw evidence are preserved outside Git at `E:\Desktop\AI研究\theta-auto-loop\event-runs\98d3e920-bce5-4cba-8115-aea21b0422ec`.
 
-Preserved failures (no assertions/deadlines removed):
-- targeted-first: test compilation failed from local messages variable shadowing builder property; corrected
-- targeted-second: test compilation used ModelTarget instead of RecoveryProposal and assistant instead of ModelAttempt.partial; corrected
-- targeted-third: 69 tests / 1 failure; continuation assertion missed the kernel explicit cache marker on the text block; assertion corrected while retaining exact thinking comparisons
-- targeted-fourth: resource checker rejected wire strings in a Composable file; moved wire/settings mapping into a non-UI helper; no checker exemption added
-
-APK: not generated; APK SHA256: none. 本轮未生成 APK、未操作手机或模拟器，视觉未验证。需由独立审核端验证当前构建中英文、明暗主题、小屏/大字体的协议选择、思考强度、输出上限、导入/保存/模型拉取与切换。未测试真实 Anthropic 服务、API33 运行、R8、硬件或实体断电。回放封装受既有单事件 64 KiB 上限约束，超限明确失败，不截断签名。当前适配器只接入 text/thinking/redacted_thinking/tool_use；未知服务端工具块保守拒绝，未宣称完整服务端工具支持。模型默认输出上限 4096，可逐模型修改；缓存标记遇到仅思考块时不装饰该不可变块。
-
-Evidence directory: `E:\Desktop\AI研究\theta-auto-loop\event-runs\2bf4c53f-23a7-4af0-bbae-c1ac8469689c`. New-head CI, independent review and formal emulator regression are pending; no old-head result is claimed for this commit. Publication and the single docs/testing/155/summary.md record belong to the existing publisher.
+APK: not generated; SHA256: not applicable. 本轮未生成 APK，未操作手机或模拟器，视觉未验证；真实 Anthropic 接口、API33 运行、R8 与硬件未测。独立审核端仍须复核最终发布 head 的 CI 和正式模拟器回归。当前构建的预设错误展示与中英文/明暗/小屏/大字体设置交互仍需实际渲染验收。GPU 结果为 JVM 单元测试，不是设备验收。原有回放 64 KiB 封装上限、未知服务端工具块保守拒绝等限制继续适用。
