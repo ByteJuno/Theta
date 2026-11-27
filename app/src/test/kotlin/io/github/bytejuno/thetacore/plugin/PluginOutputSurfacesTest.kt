@@ -65,6 +65,66 @@ class PluginOutputSurfacesTest {
         }
     }
 
+    private fun disable(high: PluginOutputSurfaces.Binding): PluginWorker<List<Throwable>> {
+        high.update(emptyList(), true)
+        return pluginCleanupWorker("surface-disable", {},
+            { high.disableAfterCleanup { events.add("disabled") } },
+            listOf({ events.add("resources closed"); Unit }))
+    }
+
+    @Test fun disableWaitsForQueuedClearWhileFallbackShows() = runBlocking {
+        val high = add("high", 2)
+        add("low", 1)
+        router.present(ChatTaskProgress.Model.outputTask("a"))
+        expect("high show a MODEL null false")
+        val slots = occupyBothSlots("high")
+        val close = disable(high)
+        try {
+            expect("low show a MODEL null false")
+        } finally { slots.forEach { it.abandon() } }
+        assertTrue(close.awaitPluginClose(4_000, high)!!.getOrThrow().isEmpty())
+        expect("high clear a")
+        expect("disabled")
+        expect("resources closed")
+    }
+
+    @Test fun disableDeadlineReportsExhaustionAndRetiresQueuedClear() = runBlocking {
+        val high = add("high", 2)
+        add("low", 1)
+        router.present(ChatTaskProgress.Model.outputTask("a"))
+        expect("high show a MODEL null false")
+        val slots = occupyBothSlots("high")
+        try {
+            val close = disable(high)
+            expect("low show a MODEL null false")
+            assertNull(close.awaitPluginClose(100, high))
+            assertTrue(close.await(4_000)!!.getOrThrow().isNotEmpty())
+            expect("disabled")
+            expect("resources closed")
+        } finally { slots.forEach { it.abandon() } }
+        router.present(null)
+        expect("low clear a")
+        assertTrue(events.isEmpty())
+    }
+
+    @Test fun expiredInFlightClearRetainsResourcesUntilActualExit() = runBlocking {
+        val release = CountDownLatch(1)
+        val high = add("high", 2, clear = { release.await() })
+        add("low", 1)
+        router.present(ChatTaskProgress.Model.outputTask("a"))
+        expect("high show a MODEL null false")
+        val close = disable(high)
+        try {
+            expect("low show a MODEL null false")
+            assertNull(close.awaitPluginClose(100, high))
+            assertTrue(events.isEmpty())
+        } finally { release.countDown() }
+        assertTrue(close.await(4_000)!!.getOrThrow().isNotEmpty())
+        expect("high clear a")
+        expect("disabled")
+        expect("resources closed")
+    }
+
     @Test fun revokedBusySurfaceClearsAfterTaskEndsWithoutAnotherEvent() {
         val high = add("high", 2)
         add("low", 1)

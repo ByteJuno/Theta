@@ -36,7 +36,8 @@ internal class PluginOutputSurfaces(
     private var displayedTask: TaskProgress? = null
     private data class Cleanup(val surface: Surface, val taskId: String)
     private val pendingClears = mutableSetOf<Cleanup>()
-    private val draining = mutableSetOf<PluginExecutionBudget.Lease>()
+    private val draining = mutableMapOf<PluginExecutionBudget.Lease, Binding>()
+    private val closingBindings = mutableSetOf<Binding>()
     private val waitingForCapacity = ConcurrentHashMap.newKeySet<String>()
 
     private sealed interface Callback<out T> {
@@ -55,7 +56,23 @@ internal class PluginOutputSurfaces(
         }
     }
 
-    init { owner.launch { for (change in changes) reconcile() } }
+    init {
+        owner.launch {
+            for (change in changes) {
+                reconcile()
+                // Only this consumer can acquire a displayed task or enqueue another clear.
+                synchronized(gate) {
+                    closingBindings.removeAll { binding ->
+                        val done = displayed?.binding !== binding &&
+                            pendingClears.none { it.surface.binding === binding } &&
+                            draining.none { (lease, source) -> source === binding && !lease.actualExited.isCompleted }
+                        if (done) binding.drained.complete(Unit)
+                        done
+                    }
+                }
+            }
+        }
+    }
 
     fun present(task: TaskProgress?) {
         desired = task
@@ -68,6 +85,11 @@ internal class PluginOutputSurfaces(
         private val entries = mutableMapOf<Long, Surface>()
         private var active = false
         private var closed = false
+        private var registeredSurface = false
+        internal val drained = CompletableDeferred<Unit>()
+        @Volatile internal var cleanupExpired = false
+            private set
+        internal var cleanupFailed = false
         @Volatile internal var failed = false
             private set
 
@@ -87,11 +109,20 @@ internal class PluginOutputSurfaces(
             removed.forEach { id -> candidates.remove(entries.remove(id)) }
             if (!closed) for (entry in snapshot) {
                 val output = entry.value as? OutputSurface ?: continue
+                registeredSurface = true
                 val item = entries.getOrPut(entry.registrationId) { Surface(this, output) }
                 if (active) candidates.add(item)
             }
+            if (closed) {
+                if (registeredSurface) closingBindings.add(this) else drained.complete(Unit)
+            }
             changes.trySend(Unit)
             Unit
+        }
+
+        fun expireCleanup() {
+            cleanupExpired = true
+            changes.trySend(Unit)
         }
 
         fun fail(reason: String) {
@@ -113,7 +144,8 @@ internal class PluginOutputSurfaces(
             var outcome: Callback<T> = Callback.Unavailable
             val lease = budget.submit(binding.pluginId, owner,
                 onCancel = { result.complete(Callback.Failed()) }, onExit = { result.complete(outcome) }) {
-                if (cleanup || live()) {
+                val admitted = if (cleanup) !binding.cleanupExpired else live()
+                if (admitted) {
                     outcome = try { Callback.Done(action()) } catch (t: Throwable) {
                         Callback.Failed(t)
                     }
@@ -131,7 +163,7 @@ internal class PluginOutputSurfaces(
             }
             if (value == null || value is Callback.Failed) {
                 // A timed-out worker can still draw or clear, even across re-registration.
-                draining.add(lease)
+                draining[lease] = binding
                 lease.actualExited.invokeOnCompletion { changes.trySend(Unit) }
                 val failure = value as? Callback.Failed
                 if (cleanup || live()) binding.fail(failure?.cause?.let(::pluginFailureIdentity) ?: "callback timed out or cancelled")
@@ -142,8 +174,13 @@ internal class PluginOutputSurfaces(
 
         suspend fun clear(id: String) {
             val pending = Cleanup(this, id)
-            if (call(cleanup = true) { output.clear(id) } === Callback.Busy) pendingClears.add(pending)
-            else pendingClears.remove(pending)
+            val outcome = if (binding.cleanupExpired) Callback.Unavailable else call(cleanup = true) { output.clear(id) }
+            if (outcome === Callback.Busy) {
+                pendingClears.add(pending)
+            } else {
+                if (outcome !is Callback.Done) binding.cleanupFailed = true
+                pendingClears.remove(pending)
+            }
         }
     }
 
@@ -156,11 +193,11 @@ internal class PluginOutputSurfaces(
 
     private fun awaitingCleanup(item: Surface): Boolean {
         val pluginId = item.binding.pluginId
-        return pendingClears.any { it.surface.binding.pluginId == pluginId } || draining.any { it.pluginId == pluginId }
+        return pendingClears.any { it.surface.binding.pluginId == pluginId } || draining.keys.any { it.pluginId == pluginId }
     }
 
     private suspend fun reconcile() {
-        draining.removeAll { it.actualExited.isCompleted }
+        draining.keys.removeAll { it.actualExited.isCompleted }
         pendingClears.toList().forEach { it.surface.clear(it.taskId) }
         val task = desired
         if (displayedTask?.taskId != task?.taskId || displayed?.live() == false) clearDisplayed()
@@ -193,4 +230,17 @@ internal class PluginOutputSurfaces(
         }
         clearDisplayed()
     }
+}
+
+internal suspend fun PluginOutputSurfaces.Binding?.disableAfterCleanup(disable: suspend () -> Unit) {
+    this?.drained?.await()
+    disable()
+    check(this?.cleanupFailed != true) { "Output surface cleanup failed" }
+}
+
+internal suspend fun PluginWorker<List<Throwable>>.awaitPluginClose(
+    timeoutMillis: Long,
+    binding: PluginOutputSurfaces.Binding?,
+): Result<List<Throwable>>? = await(timeoutMillis).also { result ->
+    if (result == null || result.isFailure) binding?.expireCleanup()
 }

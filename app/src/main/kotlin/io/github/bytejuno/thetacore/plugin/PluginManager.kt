@@ -814,13 +814,15 @@ internal class PluginManager(context: Context) {
             onDisable = {
                 // Do not race onDisable with onEnable; a late enable sees a closed registry.
                 runtime.initialization?.join()
-                runtime.context.drainSettings()
-                runtime.entry?.onDisable()
+                runtime.context.outputBinding.disableAfterCleanup {
+                    runtime.context.drainSettings()
+                    runtime.entry?.onDisable()
+                }
             },
             actions = actions,
         )
         runtime.closing = worker
-        val result = worker.await(CLOSE_TIMEOUT_MS)
+        val result = worker.awaitPluginClose(CLOSE_TIMEOUT_MS, runtime.context.outputBinding)
         val errors = result?.getOrNull()
         runtime.closeFailed = result == null || result.isFailure || !errors.isNullOrEmpty()
         if (runtime.closeFailed) {
@@ -877,7 +879,7 @@ internal class HostPluginContext(
         } catch (error: Throwable) { logHostFailure(error) }
     }
     private fun publicationSnapshot(): List<Extension> = publication.current()
-    private val outputBinding = outputRouter?.binding(pluginId) { error -> faults.report(error) }
+    val outputBinding = outputRouter?.binding(pluginId) { error -> faults.report(error) }
     private val registrations = PluginRegistrations.tracked<Extension>(publication::update) { entries, closed ->
         outputBinding?.update(entries, closed)
         toolBridge?.onRegistrationsChanged(pluginId, this, entries, closed)
