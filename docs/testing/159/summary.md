@@ -1,28 +1,16 @@
 # Issue 159 validation
 
-Implementation SHA: `daa9e776675d168e0319d9d17f7f5e4785e94eb6`
-Tested Git tree: `e4d414da7582acf0e0176620ab48dae548084947`
-Base / fetched origin/main: `2cd1b6d78f8fe44aa2937f0d666129718df71073`
-Branch: `auto/159-provider-model-bindings`
+Implementation commit: `8f252ffe3d26f32f481261264c2e5f4eb8ab2e06`
+Branch: `auto/159-provider-model-bindings`; PR #168 RETURN: https://github.com/ByteJuno/Theta/pull/168#issuecomment-7212857614
 
-## Scope
+This return fixes per-record recovery of legacy chat/image settings, preserving readable providers, prompts and credentials. Image selection now reads the latest chat binding under the storage lock. v3 storage has a bounded 2 MiB ceiling while legacy codecs retain 256 KiB limits, accommodating both legacy records and v3 metadata expansion. Cold pending image calls without their original in-memory snapshot stop before any request or attempt claim; a new explicitly requested run uses the current binding. Prior attempted calls retain their durable no-replay result. No-auth generation omits Authorization; keyed requests remain covered. All three schema compatibility labels use paired English/Chinese feature resources.
 
-Encrypted v3 provider/model/binding catalog and UI; v1/v2 migration preserving independent credentials, prompts, parameters and shared/separate image configuration; legacy control characters in model IDs; lock-protected recovery re-read; quick-switch persistence gate and retryable errors; per-run frozen chat and image configuration. Includes #145 recovery, switching and migration defects. New bilingual strings are paired in providers_strings.xml. No protected files, signatures, wrapper or testing summaries changed in the implementation commit.
+Final `python scripts/preflight.py` passed in 132.33 seconds with `--configuration-cache --configuration-cache-problems=fail`. app: 742 tests, 741 passed, 1 existing Windows skip; agent-core: 633 tests, 632 passed, 1 existing Windows skip. UI resource parity (599 keys), lintDebug, storage-fixture source verification/compile and static protected-file/evidence checks passed. Agent-core results from the unchanged candidate were reused by the final Gradle invocation; app full suite reran successfully. Source tree: `043232c0eea75aa25d21c177e1689787d60f6d5d`.
 
-## Verification
+Seven new regressions cover partial recovery in both directions, restored storage aborting replacement, near-limit v2 migration, missing cold-run snapshots, independent image selection, real SQLite cold approval followed by a new run, and anonymous HTTP headers. ProviderConnectionsTest: 12 passed; ChatSessionOwnerTest: 61 passed; ImageAttachmentsTest: 5 passed; OpenAiImageClientTest: 8 passed. Tests use synthetic credentials and local HTTP endpoints.
 
-- `python scripts/preflight.py` with `--configuration-cache --configuration-cache-problems=fail`: PASS, 215.7 seconds.
-- `:app:testDebugUnitTest`: 736 tests, 0 failures/errors, 1 skip (`PluginUpdatesTest.snapshotKeepsExecutableBit`, Windows POSIX permission limitation).
-- `:agent-core:test`: 632 tests, 0 failures/errors, 1 skip (`SummaryWorkspaceTest.link plus parent traversal cannot clean a different active session`, Windows symlink limitation).
-- Seven `ProviderConnectionsTest` regressions pass: legacy whitespace ID; independent v2 credential slots/prompts plus shared/separate image migration; multiple models and frozen slots; recovered versus unreadable replacement; blocked/failing/retried selection; endpoint/protocol isolation; same-model distinct image parameters and image-only installs.
-- `:app:verifyUiResources`, `:app:lintDebug`, `:samples:storage-fixture:verifyStorageFixtureSources`, `:samples:storage-fixture:compileDebugKotlin`: PASS.
-- Earlier targeted provider/preset/credential tests: 61/61 passed before the additional migration edge-case test. The full preflight above supersedes that candidate coverage.
-- Initial compile/resource invocation failed on three hardcoded UI text expressions. They were corrected into resources/helpers. Original failed log: `validation-issue11/issue159-b0127-compile/gradle.log`; subsequent compile/resources passed.
-- Final fetch verified origin/main already contained in HEAD; no existing remote branch for this new issue. Capacity was 1/2 (owner-managed PR164); no remote push, PR creation or merge performed by this round.
+Retained failures outside Git: initial targeted run reproduced four failures (record loss, cold fallback, capacity and empty Bearer). First repaired run exposed a JUnit non-void test declaration, corrected without changing assertions. First full preflight had one existing oversized-history recovery timeout with its original 10-second limit. The unchanged test passed alone in 3.08 seconds and the subsequent full preflight passed. Neither timeout nor assertions were relaxed. Raw logs/XML remain in this event directory and `validation-issue11/issue159-7ba19-*`; reviewer verdict is retained locally. These earlier failures are not represented as passes.
 
-## Artifacts and limits
+APK: not generated; SHA256: unavailable. 本轮未生成 APK，未操作手机或模拟器。视觉未验证：兼容级别文案在小屏、大字体、中英文及明暗主题中的实际显示；设备上的配置迁移、冷启动审批、真实生图服务、API 33 与 R8 运行行为未验证。SQLite 冷恢复、凭据和请求头结果仅为 JVM 测试证据。新提交的 CI、独立审核与正式模拟器回归由发布后的审核端执行。
 
-APK: not generated; APK SHA256: not applicable.
-No APK was generated. Actual rendered UI (small screen, large fonts, English/Chinese, light/dark themes), live model discovery and image generation, device migration/cold start, API 33 and R8 runtime behavior were not verified. CI, independent review and formal emulator regression remain pending publication. No phone or emulator was accessed.
-
-Raw local evidence: `E:\Desktop\AI研究\theta-auto-loop\event-runs\b0127f26-4937-4187-ad45-80227764cc1f` (preflight log/result, module test manifests, new regression XML); compile and targeted logs under `validation-issue11/issue159-b0127-*`. These raw files are not committed. UI pattern reference: Android Now in Android SettingsDialog, blob `b2758e286e198dea6ec9eeae6e2309497662d54b`; adopted full-row checkbox semantics and scrolling settings groups, no copied source.
+The writer did not push, create/update a PR, merge, or commit this summary. The existing publisher owns publication, and the independent reviewer owns final acceptance.
