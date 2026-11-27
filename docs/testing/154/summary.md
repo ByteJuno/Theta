@@ -1,3 +1,28 @@
+# Issue 154 validation — function call completion status
+
+Implementation SHA: `63787ad9a66190d6c168db90dd53fbc972c04e9c`
+Tested tree: `a786bd1941487f8e7e485c61311162a3581709ee`
+Branch: `auto/154-openai-responses`
+Fetched main: `341e7c195324dad4f049b29fbfc6a23545857716`
+Observed remote head: `e6464d1475a1a8c13477a69bcdfadbde5597b10a`
+RETURN: https://github.com/ByteJuno/Theta/pull/169#issuecomment-7220830588
+
+The native Responses adapter validates and retains the final function_call status on both output_item.done and terminal output paths. Missing, malformed and unknown statuses fail closed. A completed response containing incomplete/in_progress calls fails with PROTOCOL before any tool execution or ledger registration, including mixed batches in either order. PartEnd now has a default-true completion property; the existing Events.end signature and default Chat behavior remain, while an internal tool-end factory carries native incompleteness separately from the original argument bytes. The reducer rejects non-truncated unfinished calls and discards the whole truncated assistant message if any call is unfinished. Genuinely completed calls still receive CANCELLED/NONE results under truncation. No protected files, host entry points, UI strings, size limits, timeouts or existing assertions changed.
+
+Six permanent test methods cover both completion paths, mixed complete/incomplete calls in both orders, argument-done with valid JSON, empty/partial arguments, malformed/missing status, zero submissions/ledger registrations and complete-truncation result pairing. The old implementation with these tests failed 5 of 30 GPU JVM cases (tree 1a747005784de8970054be68391a6d1f0805be79; gpu-red-r2.log). The first test build failed because the new test used the wrong ModelAttempt property; it was corrected to disposition, preserving the assertion (gpu-red.log). The repaired exact tree passed 30/30 through theta-gpu-test in 79.1s, GRADLE_EXIT=0, and the remote STAGED_TREE matched. The previously added reasoning/content/schema regressions remain included.
+
+Final python scripts/preflight.py passed in 213.6s with --configuration-cache --configuration-cache-problems=fail. agent-core: 663 tests, 662 passed, 1 existing Windows skip. App: 800 tests, 799 passed, 1 existing Windows skip. Both test tasks executed against current sources. UI resources verified 604 English/Chinese keys; lint and storage fixture verification/compile passed. Configuration cache reused. Worktree SHA256 manifest remained unchanged; the committed tree equals the GPU-tested tree. Skips: SummaryWorkspaceTest link/parent traversal and PluginUpdatesTest.snapshotKeepsExecutableBit.
+
+Final fetch before validation and again before commit found origin/main and the remote PR head already contained in HEAD, so no merge was required. Full PR comments/reviews/inline comments and the reviewer state were checked. The third OWNER RETURN matches the current remote head; prior two RETURN comments remain preserved. PR171 remains separately waiting_review with its own null cursor and original evidence; no new issue was selected at MAX_OPEN=2. No newer OWNER or RETURN appeared in the final check.
+
+The previous published head's CI run 46014463096 failed PluginOutputSurfacesTest.disableFinishesWhileUnrelatedRankingExceedsCloseDeadline at line 112; its raw failed-job log is retained in ci-failed.log. The current local suite passed without a retry, but this does not claim a repair to the separate intermittent failure or success of new-head CI. GitHub EOF query failures and a read-only SSH quoting failure occurred during inspection; successful retries verified the records, without modifying remote state. Evidence remains in `E:\Desktop\AI研究\theta-auto-loop\event-runs\308d0e48-ce49-4feb-b104-be8e2bc8d963`. No raw log or probe was committed.
+
+Limitations: 本轮仅修改 agent-core；未生成 APK，未调用真实供应商 API，未操作手机或模拟器，视觉未验证。GPU 指既有 GPU 主机上的 JVM 定向测试，使用合成 SSE/fake transport，不代表渲染或真实接口验收。原 PR 的协议选择、导入和切换界面仍需当前构建渲染与关键交互验收；API33、R8、硬件 Keystore、实体断电未测。独立审核端负责发布后的新 head CI 与正式模拟器回归。旧 head 的 PluginOutputSurfacesTest CI 失败保留，本轮本地全量通过不表示已修复该偶发问题或远端 CI 通过。缺少或未知的最终 function_call.status 保守拒绝。
+
+Only five verified implementation/regression files were committed. The writer did not edit/commit docs/testing/154/summary.md, push, create/update a PR or merge on GitHub. The existing publisher owns updating the single issue summary and publishing this RETURN; the independent reviewer owns CI, formal regression and merge.
+
+## Historical evidence — original SHA bindings and two earlier RETURN records retained
+
 # Issue 154 validation — final main alignment
 
 Implementation SHA: `ed13314c908f28044c137507d4415cc70af0b853`
