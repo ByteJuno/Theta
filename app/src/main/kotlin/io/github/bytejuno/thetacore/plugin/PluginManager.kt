@@ -87,6 +87,7 @@ internal class PluginRuntime(val context: HostPluginContext, val version: Long) 
 
 internal class PluginManager(context: Context) {
     private val app = context.applicationContext
+    val outputSurfaces = PluginOutputSurfaces.android(executionBudget)
     private companion object {
         // Multiple manager instances must never multiply the process execution allowance.
         val executionBudget = PluginExecutionBudget()
@@ -691,6 +692,7 @@ internal class PluginManager(context: Context) {
                 version = manifest.versionCode.toString(),
                 toolBridge = pluginToolBridge,
                 openEntrySession = chatEntrySessionFactory(app),
+                outputRouter = outputSurfaces,
             ) { faultContext ->
                 // Enqueue only: load/restore already holds operations. Never wait here.
                 postPluginOperation(host, Dispatchers.Main, operations, ::logHostFailure) {
@@ -813,13 +815,15 @@ internal class PluginManager(context: Context) {
             onDisable = {
                 // Do not race onDisable with onEnable; a late enable sees a closed registry.
                 runtime.initialization?.join()
-                runtime.context.drainSettings()
-                runtime.entry?.onDisable()
+                runtime.context.outputBinding.disableAfterCleanup {
+                    runtime.context.drainSettings()
+                    runtime.entry?.onDisable()
+                }
             },
             actions = actions,
         )
         runtime.closing = worker
-        val result = worker.await(CLOSE_TIMEOUT_MS)
+        val result = worker.awaitPluginClose(CLOSE_TIMEOUT_MS, runtime.context.outputBinding)
         val errors = result?.getOrNull()
         runtime.closeFailed = result == null || result.isFailure || !errors.isNullOrEmpty()
         if (runtime.closeFailed) {
@@ -844,6 +848,7 @@ internal class HostPluginContext(
     private val version: String = "1",
     private val toolBridge: PluginToolBridge? = null,
     private val openEntrySession: suspend (io.github.bytejuno.thetacore.sdk.EntryRequest, () -> Boolean) -> io.github.bytejuno.thetacore.sdk.EntrySession = { _, _ -> throw io.github.bytejuno.thetacore.sdk.EntryUnavailableException() },
+    outputRouter: PluginOutputSurfaces? = null,
     onFault: (HostPluginContext) -> Unit,
 ) : PluginContext {
     private val toolFailures = PluginToolFailureWindow()
@@ -876,16 +881,19 @@ internal class HostPluginContext(
         } catch (error: Throwable) { logHostFailure(error) }
     }
     private fun publicationSnapshot(): List<Extension> = publication.current()
+    val outputBinding = outputRouter?.binding(pluginId) { error -> faults.report(error) }
     private val registrations = PluginRegistrations.tracked<Extension>(publication::update) { entries, closed ->
+        outputBinding?.update(entries, closed)
         toolBridge?.onRegistrationsChanged(pluginId, this, entries, closed)
     }
     private val closeLock = Any()
     private var pendingCleanup: List<() -> Unit>? = null
-    val faults = PluginFaultBoundary(::closeAdmission, { onFault(this) }, ::logHostFailure)
+    val faults: PluginFaultBoundary = PluginFaultBoundary(::closeAdmission, { onFault(this) }, ::logHostFailure)
     override val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default + faults.handler)
 
     fun activateExtensions() {
         extensionsActive = true
+        outputBinding?.activate()
         extensions = publicationSnapshot()
         synchronizeExtensions()
         toolBridge?.activatePlugin(pluginId, this)

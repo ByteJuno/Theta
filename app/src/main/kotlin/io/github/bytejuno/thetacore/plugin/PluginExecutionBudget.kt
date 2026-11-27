@@ -99,8 +99,7 @@ internal class PluginExecutionBudget(
     @OptIn(InternalCoroutinesApi::class)
     fun reserve(pluginId: String, owner: CoroutineScope, onCancel: () -> Unit, onExit: () -> Unit): Lease? = synchronized(lock) {
         val ownerJob = requireNotNull(owner.coroutineContext[Job]) { "Owner scope requires a Job" }
-        if (closed || !ownerJob.isActive || active.size >= processSlots ||
-            active.count { it.pluginId == pluginId } >= perPluginSlots) return null
+        if (closed || !ownerJob.isActive || !hasCapacity(pluginId)) return null
         // Only the host bridge is parented to owner. Direct parenting of the execution job would
         // run arbitrary plugin cancellation handlers on the thread calling owner.cancel().
         val bridge = Job(ownerJob)
@@ -176,6 +175,21 @@ internal class PluginExecutionBudget(
     fun occupiedSlots(): Int = synchronized(lock) { active.size }
 
     fun isClosed(): Boolean = synchronized(lock) { closed }
+
+    private fun hasCapacity(pluginId: String) =
+        active.size < processSlots && active.count { it.pluginId == pluginId } < perPluginSlots
+
+    /** Observe admission without reserving a slot or missing a concurrent release. */
+    suspend fun awaitCapacity(pluginId: String): Boolean {
+        while (true) {
+            val release = synchronized(lock) {
+                if (closed) return false
+                if (hasCapacity(pluginId)) return true
+                slotReleaseSignal
+            }
+            release.await()
+        }
+    }
 
     /** Completes the next time any active slot is released (or immediately if closed). */
     fun nextSlotRelease(): Deferred<Unit> = synchronized(lock) {
