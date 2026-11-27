@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="markdown_code">代码</string>
+    <string name="markdown_copy_code">复制代码</string>
+    <string name="markdown_copied">已复制</string>
+    <string name="markdown_copy_failed">无法复制代码，请选中文本后复制。</string>
+    <string name="markdown_link_failed">无法打开此链接，请检查是否有可用浏览器。</string>
+    <string name="markdown_large_message">超长消息以纯文本显示，全文仍可复制。</string>
+</resources>
