@@ -93,7 +93,7 @@ def wait(description, predicate, timeout=None):
     raise FAIL(description + ": timed out")
 
 
-def scroll(down, nodes=None, observation=None):
+def scroll(down, nodes=None, observation=None, *, fling=False):
     # Use the observed scroll body, not display fractions which can fall outside
     # a short list or on a dialog's buttons. Reuse matching()'s dump per attempt.
     nodes = em.screen() if nodes is None else nodes
@@ -114,10 +114,10 @@ def scroll(down, nodes=None, observation=None):
     # A fast 60%-height swipe can fling from top straight to bottom, skipping
     # the actions between both dumps. Use short, slow drags with overlapping
     # viewports. The pixel cap also bounds velocity on very tall displays.
-    distance = min(400, (y2 - y1) // 4)
+    distance = (y2 - y1) * 3 // 4 if fling else min(400, (y2 - y1) // 4)
     top = (y1 + y2) // 2 - distance // 2
     bottom = top + distance
-    gesture = [x, bottom if down else top, x, top if down else bottom, 800]
+    gesture = [x, bottom if down else top, x, top if down else bottom, 200 if fling else 800]
     if observation is not None:
         observation.update(gesture=gesture, scroll_bounds=[x1, y1, x2, y2],
                            swipe_started_at=time.monotonic())
@@ -129,7 +129,7 @@ def scroll(down, nodes=None, observation=None):
     return True
 
 
-def matching(description, predicate, timeout=None, *, for_tap=False):
+def matching(description, predicate, timeout=None, *, for_tap=False, start_at_bottom=False):
     # Revisit offscreen content: asynchronous results may appear above the final
     # viewport after a complete sweep. Pause between sweeps without resetting
     # wait()'s deadline. Each direction retains the hard cap for changing XML.
@@ -144,6 +144,7 @@ def matching(description, predicate, timeout=None, *, for_tap=False):
         del observations[:-40]  # Retain a bounded tail, only write it on failure.
 
     def locate():
+        nonlocal start_at_bottom
         started = time.monotonic()
         nodes = em.screen()
         matches = [n for n in nodes if predicate(n.get("text", ""))]
@@ -151,17 +152,26 @@ def matching(description, predicate, timeout=None, *, for_tap=False):
         observations[-1]["screen_started_at"] = started
         require(len(matches) <= 1, f"Ambiguous match for {description}: {len(matches)} nodes")
         if matches:
-            found = tap_target(matches[0], nodes) if for_tap else matches[0]
+            found = em.tap_target(matches[0], nodes) if for_tap else matches[0]
             if found is not None:
                 return found
         if not nodes:
             sweep["last"] = None  # A failed dump cannot establish a list boundary.
             return None
+        signature = tuple((n.get("text", ""), n.get("bounds", "")) for n in nodes)
+        # A fling may only reach the first code card. Keep looking down until
+        # the viewport stops advancing, then sweep back over any skipped rows.
+        if start_at_bottom:
+            if signature != sweep["last"] and scroll(True, nodes, observations[-1], fling=True):
+                observations[-1].update(action="fling", direction="down")
+                sweep["last"] = signature
+                return None
+            start_at_bottom = False
+            sweep["last"] = None
         if sweep["retry_at"] is not None:
             if time.monotonic() < sweep["retry_at"]:
                 return None
             sweep.update(down=False, last=None, steps=0, retry_at=None)
-        signature = tuple((n.get("text", ""), n.get("bounds", "")) for n in nodes)
         if signature == sweep["last"]:
             if sweep["down"]:
                 sweep["retry_at"] = time.monotonic() + 2
@@ -201,32 +211,6 @@ def resource_text(key):
     expected = {next(n.text for n in ET.parse(resources / locale / "strings.xml").getroot()
                      if n.get("name") == key) for locale in ("values", "values-zh")}
     return matching(key, lambda value: value in expected)
-
-
-def tap_target(node, nodes):
-    def bounds(element):
-        values = re.findall(r"-?\d+", element.get("bounds", ""))
-        if len(values) != 4:
-            return None
-        left, top, right, bottom = map(int, values)
-        return (left, top, right, bottom) if left < right and top < bottom else None
-
-    visible = bounds(node)
-    if visible is None:
-        return None
-    parents = {child: parent for parent in nodes for child in parent}
-    ancestor = parents.get(node)
-    while ancestor is not None:
-        clip = bounds(ancestor)
-        if clip is None:
-            return None
-        visible = (max(visible[0], clip[0]), max(visible[1], clip[1]),
-                   min(visible[2], clip[2]), min(visible[3], clip[3]))
-        ancestor = parents.get(ancestor)
-    left, top, right, bottom = visible
-    if left < 0 or top < 0 or left >= right or top >= bottom:
-        return None
-    return ET.Element("node", bounds=f"[{left},{top}][{right},{bottom}]")
 
 
 def tap(value):
@@ -646,7 +630,8 @@ def managed_scope_fault(host, apks, hello, flavor):
     # An independent short deadline, not the generic 180s test timeout. The
     # Data packages section pushes the fixture card below the fold, so sweep.
     matching("managed scope disabled promptly",
-             lambda t: t == "Managed scope failed; disabled; restart required", timeout=20)
+             lambda t: t == "Managed scope failed; disabled; restart required", timeout=20,
+             start_at_bottom=True)
     require(adb("shell", "pidof", PACKAGE).strip() == pid, "Managed fault restarted/killed host")
     absent("Fixture page")
     tap("Hello")
@@ -665,7 +650,8 @@ def managed_scope_fault(host, apks, hello, flavor):
         page(flavor, 0)
         tap("Throw in managed scope")
     matching("automatic scope disable",
-             lambda t: t == "Managed scope failed; disabled; restart required", timeout=20)
+             lambda t: t == "Managed scope failed; disabled; restart required", timeout=20,
+             start_at_bottom=True)
     clear_logs()
     restart()
     text("Enable Fixture")
