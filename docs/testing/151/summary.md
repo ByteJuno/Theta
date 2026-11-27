@@ -84,3 +84,19 @@ On the candidate, the development test endpoint selected the f512 runner and all
   - 本地 Windows 严格配置缓存检查：静态检查（29 路径、无受保护文件改动、无 `probe` 命名）、`:samples:storage-fixture:verifyStorageFixtureSources`、`:samples:storage-fixture:compileDebugKotlin`、`:app:verifyUiResources`（567 对双语键）、`:app:lintDebug` 与 `:agent-core:test`（632 通过、1 跳过）全部通过；`:app:testDebugUnitTest` 753 通过、1 跳过、1 失败为本机 Windows 开发者模式符号链接路径导致的 `AndroidAgentOwnershipTest.trustedContextAliasResolvesButInjectedAliasAndDuplicateWriterAreRejected`（已在 Linux `gpu-bai` 4/4 验证通过）。
 
 本轮验证覆盖 JVM 与 SQLite 数据库重开。未构建 APK，真实设备冷启动、页面交互渲染、实际图片选择与发送、API 33 及 R8 运行行为未验证。新提交的 CI、独立审核和正式回归待发布后执行。
+
+## PR 164 第十轮：旧草稿单文件格式隔离与删会话草稿缓存释放
+
+实现提交 `871167bfa0c9639c1940a0352b8eed56f314d915`，验证树 `49a59ef34166dd01239444e808578f279080f37d`（基于 `d04a7a6b6ca2b2f04036a264b31b32724bea2f87`）。
+
+- 基线复现：在 `d04a7a6` 上新增两条回归（树 `bcf2b1c92c9f467de9c4107f1313c7d43536efa2`），`theta-gpu-test`（`gpu-bai`）2/2 失败：
+  - `corruptLegacyDraftIsIsolatedAcrossTwoReopensWhileDatabaseErrorsPropagate` 抛出 `java.io.EOFException`，单个损坏的旧草稿文件导致 `AndroidAgentStore.open` 失败；
+  - `deletingSessionReleasesCachedDraftAndAttachmentsWhilePreservingOtherSessions` 报 `ComparisonFailure: expected:<[]> but was:<[delete me]>`，删除会话成功后草稿缓存仍滞留已删会话文字与附件。
+- 修复方案：
+  1. `LegacyComposerDrafts` 将旧草稿格式/截断/越界/重名/尾字节错误封装为 `LegacyDraftFormatException` 并隔离到单个文件，同时记录存活会话文件名 `liveNames` 使孤儿清理跳过存活会话对应的损坏原件，保证正常会话迁移并能连续两次重开；数据库读写（`store.sessionIds` 与 `store.composerDrafts.save`）位于 `catch` 之外，绝不吞掉数据库自身错误。
+  2. `SessionComposerStore` 增加 `isSessionDeleted` / `deletedSessions` 查询并在 `save` 入口加删会话墓碑守卫；`ChatSessionOwner.deleteCurrentSession` 删除成功后递增 `draftSync` 且 `selectInternal` 保留 `draftSync`；`ChatComposerDrafts`（含 `reconcile`、`checkpoint`、`get` 与 `rememberChatComposerDrafts`）在删除成功后释放已删会话缓存及附件引用，拒绝将已删会话重新塞回缓存或由旧页面回写，同时保留其他存活会话的未发送编辑与附件；删除被拦截时保留草稿；`ChatScreen` 相册/拍照异步回调在写入前校验目标草稿仍存活。
+- 验证结果：
+  - `theta-gpu-test`（`gpu-bai`，验证树 `49a59ef34166dd01239444e808578f279080f37d`，严格配置缓存）：定向运行 `ChatEntrySessionsTest`、`ChatScreenStateTest`、`ChatSessionOwnerTest`、`PluginEntryRuntimeTest`、`UserImageChatTest` 与 `AndroidAgentOwnershipTest`，**113/113 通过，0 失败**（保留全部既有跨页发送、延迟回执、删会话和数据库重开断言）。
+  - 本地 Windows 严格配置缓存检查：`scripts/preflight.py --quick` 通过（29 路径、无受保护文件改动、无 `probe` 命名、`:samples:storage-fixture:compileDebugKotlin`、`:app:verifyUiResources` 567 对双语键、`:app:lintDebug`），`:agent-core:test` 全量通过。
+
+本轮验证覆盖 JVM 与 SQLite 数据库重开。未构建 APK，真实设备冷启动、页面交互渲染、实际图片选择与发送、API 33 及 R8 运行行为未验证。新提交的 CI、独立审核和正式回归待发布后执行。
