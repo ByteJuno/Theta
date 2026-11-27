@@ -10,6 +10,7 @@ internal class OpenAiResponsesStream(private val request: ChatRequest, private v
         val reasoning = ResponsesReasoningText()
         val message = ResponsesMessageText()
         var argumentsDone: String? = null
+        var callStatus: String? = null
         var ended = false
         var final: JsonObject? = null
         var refusal = false
@@ -117,6 +118,8 @@ internal class OpenAiResponsesStream(private val request: ChatRequest, private v
                         if (!item.ended) finish(item, obj, emit)
                         else protocol(item.final == obj, "Terminal item differs from completed item")
                     }
+                    protocol(status != "completed" || items.none { it.type == "function_call" && it.callStatus != "completed" },
+                        "Completed response contains unfinished function call")
                     response["usage"]?.takeUnless { it == JsonNull }?.jsonObject?.let { usage ->
                         fun count(obj: JsonObject?, key: String): Long? {
                             val v = obj?.get(key)?.takeUnless { it == JsonNull } ?: return null
@@ -177,6 +180,9 @@ internal class OpenAiResponsesStream(private val request: ChatRequest, private v
         val full = when (item.type) {
             "function_call" -> {
                 protocol(obj.string("call_id") == item.initial.string("call_id") && obj.string("name") == item.initial.string("name"), "Function identity changed")
+                val status = (obj["status"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+                protocol(status in setOf("completed", "incomplete", "in_progress"), "Invalid final function call status")
+                item.callStatus = status
                 val arguments = obj.string("arguments") ?: throw ProtocolException("Missing final arguments")
                 protocol(item.argumentsDone == null || arguments == item.argumentsDone, "Final arguments contradict done")
                 arguments
@@ -195,7 +201,8 @@ internal class OpenAiResponsesStream(private val request: ChatRequest, private v
         protocol(full.startsWith(item.text.toString()), "Final item contradicts deltas")
         append(item, full.substring(item.text.length), emit)
         val replay = if (item.type == "reasoning") codec.replay(request.model, obj) else null
-        emit(Events.end(item.index, replay))
+        emit(if (item.type == "function_call") Events.toolEnd(item.index, item.callStatus == "completed")
+            else Events.end(item.index, replay))
         item.final = obj; item.ended = true
     }
     override fun endOfInput() { protocol(done, "EOF without Responses terminal") }

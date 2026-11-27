@@ -196,7 +196,12 @@ sealed interface ModelEvent {
     interface ReasoningDelta : ModelEvent { val index: Int; val text: String }
     interface ToolCallStart : ModelEvent { val index: Int; val wireId: String?; val name: String }
     interface ToolCallDelta : ModelEvent { val index: Int; val argsFragment: String }
-    interface PartEnd : ModelEvent { val index: Int; val replay: ReplayData? }
+    interface PartEnd : ModelEvent {
+        val index: Int
+        val replay: ReplayData?
+        /** Closing a part does not imply a native tool call completed, even with valid JSON arguments. */
+        val complete: Boolean get() = true
+    }
     interface Usage : ModelEvent { val usage: TokenUsage }
     interface KeepAlive : ModelEvent
     interface Finished : ModelEvent { val reason: FinishReason; val rawReason: String? }
@@ -209,6 +214,7 @@ object Events {
     fun toolStart(index: Int, wireId: String?, name: String): ModelEvent = ToolStart(index, wireId, name)
     fun toolDelta(index: Int, fragment: String): ModelEvent = ToolDelta(index, fragment)
     fun end(index: Int, replay: ReplayData? = null): ModelEvent = End(index, replay)
+    internal fun toolEnd(index: Int, complete: Boolean): ModelEvent = End(index, null, complete)
     fun usage(usage: TokenUsage): ModelEvent = Usage(usage)
     fun keepAlive(): ModelEvent = Heartbeat
     fun finished(reason: FinishReason, rawReason: String? = null): ModelEvent = Finish(reason, rawReason)
@@ -218,7 +224,8 @@ object Events {
     private data class Reasoning(override val index: Int, override val text: String) : ModelEvent.ReasoningDelta
     private data class ToolStart(override val index: Int, override val wireId: String?, override val name: String) : ModelEvent.ToolCallStart
     private data class ToolDelta(override val index: Int, override val argsFragment: String) : ModelEvent.ToolCallDelta
-    private data class End(override val index: Int, override val replay: ReplayData?) : ModelEvent.PartEnd
+    private data class End(override val index: Int, override val replay: ReplayData?,
+        override val complete: Boolean = true) : ModelEvent.PartEnd
     private data class Usage(override val usage: TokenUsage) : ModelEvent.Usage
     private data object Heartbeat : ModelEvent.KeepAlive
     private data class Finish(override val reason: FinishReason, override val rawReason: String?) : ModelEvent.Finished

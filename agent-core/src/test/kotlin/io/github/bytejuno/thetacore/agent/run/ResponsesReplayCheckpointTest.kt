@@ -13,10 +13,89 @@ import kotlin.test.*
 
 class ResponsesReplayCheckpointTest {
     @get:Rule val temp = TemporaryFolder()
+    private fun callStatusProvider(statuses: List<String>, responseStatus: String, itemDone: Boolean): ModelProvider {
+        val transport = ModelTransport { _, _, _ -> flow {
+            fun frame(type: String, fields: JsonObjectBuilder.() -> Unit) =
+                "data: " + buildJsonObject { put("type", type); fields() } + "\n\n"
+            val output = statuses.mapIndexed { index, status -> buildJsonObject {
+                put("id", "fc$index"); put("type", "function_call"); put("call_id", "wire$index")
+                put("name", "read"); put("arguments", "{}"); put("status", status)
+            } }
+            val stream = buildString {
+                append(frame("response.created") { putJsonObject("response") { put("id", "r"); put("model", "m") } })
+                output.forEachIndexed { index, item ->
+                    append(frame("response.output_item.added") {
+                        put("output_index", index)
+                        put("item", JsonObject(item + mapOf("arguments" to JsonPrimitive(""), "status" to JsonPrimitive("in_progress"))))
+                    })
+                    // Even the argument-done event does not establish that the function call completed.
+                    append(frame("response.function_call_arguments.done") {
+                        put("output_index", index); put("item_id", "fc$index"); put("arguments", "{}")
+                    })
+                    if (itemDone) append(frame("response.output_item.done") { put("output_index", index); put("item", item) })
+                }
+                append(frame("response.$responseStatus") { putJsonObject("response") {
+                    put("id", "r"); put("model", "m"); put("status", responseStatus); put("output", JsonArray(output))
+                    if (responseStatus == "incomplete") putJsonObject("incomplete_details") { put("reason", "max_output_tokens") }
+                } })
+            }
+            emit(TransportEvent.Headers(200, "text/event-stream", null))
+            emit(TransportEvent.Bytes(stream.toByteArray()))
+        } }
+        return OpenAiResponsesProvider(OpenAiResponsesConfig("provider", "https://example.invalid/v1"), transport)
+    }
+
+    @Test fun `completed response with unfinished calls never registers or executes any sibling`() = runTest {
+        for (status in listOf("incomplete", "in_progress")) for (itemDone in listOf(false, true)) {
+            for (statuses in listOf(listOf(status), listOf("completed", status), listOf(status, "completed"))) {
+                val f = RunFixture(listOf(testDefinition("read")))
+                val result = f.loop(callStatusProvider(statuses, "completed", itemDone), limits = RunLimits(maxRetries = 0)).run()
+                assertEquals(RunState.FAILED, result.state, "$statuses/$itemDone")
+                assertTrue(f.submitted.isEmpty()); assertTrue(f.store.records().isEmpty())
+                assertEquals(1, f.history.snapshot().messages.size)
+                assertEquals(ModelErrorCode.PROTOCOL, assertIs<ModelEvent.Failed>(f.journal.attempts().single().terminal).error.code)
+            }
+        }
+    }
+
+    @Test fun `truncation with any unfinished call discards the entire assistant turn`() = runTest {
+        for (status in listOf("incomplete", "in_progress")) for (itemDone in listOf(false, true)) {
+            for (statuses in listOf(listOf(status), listOf("completed", status), listOf(status, "completed"))) {
+                val f = RunFixture(listOf(testDefinition("read")))
+                val result = f.loop(callStatusProvider(statuses, "incomplete", itemDone)).run()
+                assertEquals(RunState.PAUSED, result.state, "$statuses/$itemDone")
+                assertTrue(f.submitted.isEmpty()); assertTrue(f.store.records().isEmpty())
+                assertEquals(1, f.history.snapshot().messages.size)
+                val attempt = f.journal.attempts().single()
+                assertEquals(FinishReason.LENGTH, assertIs<ModelEvent.Finished>(attempt.terminal).reason)
+                assertEquals(HistoryDisposition.DISCARD, attempt.disposition)
+            }
+        }
+    }
+
+    @Test fun `truncation with genuinely completed calls preserves cancelled none results`() = runTest {
+        for (itemDone in listOf(false, true)) {
+            val f = RunFixture(listOf(testDefinition("read")))
+            val result = f.loop(callStatusProvider(listOf("completed", "completed"), "incomplete", itemDone)).run()
+            assertEquals(RunState.PAUSED, result.state)
+            assertTrue(f.submitted.isEmpty())
+            assertEquals(2, f.store.records().size)
+            f.store.records().forEach { record ->
+                assertEquals(LogicalResult(Status.CANCELLED, Effect.NONE, "Truncated model turn: not executed", false), record.result)
+            }
+            val history = f.history.snapshot().messages
+            assertEquals(3, history.size)
+            assertEquals(2, history[1].parts.filterIsInstance<ContentPart.ToolCall>().size)
+            assertEquals(2, history[2].parts.filterIsInstance<ContentPart.ToolResult>().size)
+            validateHistory(history)
+            assertEquals(HistoryDisposition.NEEDS_CANCELLED_NONE_RESULTS, f.journal.attempts().single().disposition)
+        }
+    }
+
     @Test fun `contradictory argument done never reaches tool execution or successful history`() = runTest {
         val f = RunFixture(listOf(testDefinition("read")))
         val transport = ModelTransport { _, _, _ -> flow {
-            val call = Json.parseToJsonElement("""{"id":"fc","type":"function_call","call_id":"wire","name":"read","arguments":"{\"q\":\"B\"}"}""").jsonObject
+            val call = Json.parseToJsonElement("""{"id":"fc","type":"function_call","call_id":"wire","name":"read","arguments":"{\"q\":\"B\"}","status":"completed"}""").jsonObject
             val frames = listOf(
                 """{"type":"response.created","response":{"id":"r","model":"m"}}""",
                 """{"type":"response.output_item.added","output_index":0,"item":${JsonObject(call + ("arguments" to JsonPrimitive("")))}}""",
@@ -79,7 +158,7 @@ class ResponsesReplayCheckpointTest {
     @Test fun `native tool loop executes once and returns call id with original reasoning`() = runTest {
         val f = RunFixture(listOf(testDefinition("read")))
         val reasoning = Json.parseToJsonElement("""{"id":"rs","type":"reasoning","content":[{"type":"reasoning_text","text":"raw plan"}],"summary":[{"type":"summary_text","text":"summary plan"}],"encrypted_content":"opaque","metadata":{"retain":true}}""").jsonObject
-        val call = Json.parseToJsonElement("""{"id":"fc","type":"function_call","call_id":"wire","name":"read","arguments":"{}"}""").jsonObject
+        val call = Json.parseToJsonElement("""{"id":"fc","type":"function_call","call_id":"wire","name":"read","arguments":"{}","status":"completed"}""").jsonObject
         val answer = Json.parseToJsonElement("""{"id":"msg","type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}""").jsonObject
         var submissions = 0
         val transport = ModelTransport { _, body, _ -> flow {

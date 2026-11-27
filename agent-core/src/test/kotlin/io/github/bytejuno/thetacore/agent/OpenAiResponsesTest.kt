@@ -46,8 +46,9 @@ class OpenAiResponsesTest {
         if (type.startsWith("content_part")) putJsonObject("part") { put("type", "output_text"); put("text", value) }
         else put(if (type.endsWith(".delta")) "delta" else "text", value)
     }
-    private fun call(id: String, args: String) = buildJsonObject {
+    private fun call(id: String, args: String, status: String = "completed") = buildJsonObject {
         put("id", "item_$id"); put("type", "function_call"); put("call_id", "call_$id"); put("name", "read"); put("arguments", args)
+        put("status", status)
     }
     private fun reasoning(summary: String, encrypted: String = "opaque-final") = buildJsonObject {
         put("id", "rs_1"); put("type", "reasoning"); put("encrypted_content", encrypted)
@@ -333,6 +334,49 @@ class OpenAiResponsesTest {
         assertFalse(OpenAiChatProvider(OpenAiChatConfig("test", "https://example.invalid/v1")).canReplay(replay, "m"))
         assertFalse(OpenAiResponsesCodec(OpenAiResponsesConfig("test", "https://else.invalid/v1")).canReplay(replay, "m"))
         assertFalse(codec.canReplay(replayData("openai-responses", "m", "{}"), "m"))
+    }
+
+    @Test fun `completed response rejects unfinished call status on both completion paths`() = runTest {
+        for (status in listOf("incomplete", "in_progress")) for (itemDone in listOf(false, true)) {
+            val final = call("a", "{}", status)
+            val result = collect(listOf(created(), added(0, call("a", "", "in_progress"))) +
+                (if (itemDone) listOf(ended(0, final)) else emptyList()) + terminal(listOf(final)))
+            assertEquals(ModelErrorCode.PROTOCOL, assertIs<ModelEvent.Failed>(result.last()).error.code)
+            assertTrue(result.none { it is ModelEvent.Finished })
+            assertTrue(reduced(result).toolCandidates().isEmpty())
+            assertEquals(HistoryDisposition.DISCARD, reduced(result).historyDisposition())
+        }
+    }
+
+    @Test fun `truncated call status remains incomplete even with complete or empty arguments`() = runTest {
+        for (status in listOf("incomplete", "in_progress")) for (args in listOf("{}", "", "{")) {
+            for (itemDone in listOf(false, true)) {
+                val final = call("a", args, status)
+                val result = collect(listOf(created(), added(0, call("a", "", "in_progress"))) +
+                    (if (itemDone) listOf(ended(0, final)) else emptyList()) +
+                    terminal(listOf(final), "incomplete", "max_output_tokens"))
+                assertEquals(FinishReason.LENGTH, assertIs<ModelEvent.Finished>(result.last()).reason)
+                val reducer = reduced(result)
+                assertEquals(args, reducer.calls().single().argsJson)
+                assertFalse(reducer.calls().single().complete)
+                assertFalse(reducer.calls().single().emptyArguments)
+                assertTrue(reducer.toolCandidates().isEmpty())
+                assertEquals(HistoryDisposition.DISCARD, reducer.historyDisposition())
+            }
+        }
+    }
+
+    @Test fun `missing malformed and unknown final call statuses fail closed`() = runTest {
+        for (status in listOf(null, JsonNull, JsonPrimitive("unknown"), JsonPrimitive(1), JsonPrimitive(true))) {
+            for (itemDone in listOf(false, true)) {
+                val fields = call("a", "{}").toMutableMap().apply { remove("status"); status?.let { put("status", it) } }
+                val final = JsonObject(fields)
+                val result = collect(listOf(created(), added(0, call("a", "", "in_progress"))) +
+                    (if (itemDone) listOf(ended(0, final)) else emptyList()) +
+                    terminal(listOf(final), "incomplete", "max_output_tokens"))
+                assertEquals(ModelErrorCode.PROTOCOL, assertIs<ModelEvent.Failed>(result.last()).error.code)
+            }
+        }
     }
 
     @Test fun `incomplete refusal filtering and failed events never execute tools`() = runTest {
