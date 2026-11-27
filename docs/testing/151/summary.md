@@ -106,3 +106,15 @@ On the candidate, the development test endpoint selected the f512 runner and all
 在 `879176c` 上，JVM 探针用已保存的会话 ID 模拟选图结果早于聊天库就绪返回。草稿恢复标记为 1，按该 ID 读取时报 `IllegalArgumentException: Required value was null.`，重开 SQLite 后仍能读到原文字。gpu-bai 探针 1/1 失败。
 
 修复提交 `abd77f7`：相册和相机回调保留发起选择的会话 ID，等待聊天库就绪后再取草稿。gpu-bai 定向运行 `ChatScreenStateTest`，16/16 通过；新增用例核对重开后的原文字、选中附件的字节，以及另一会话未受影响。本次未生成 APK，未实测系统选择器回调或界面渲染。
+
+## PR164 第十一轮：首次调度前取消的运行清理
+
+实现提交 `51e2b39e0fd36e4a7dbf844b60d3e17479d645c9`，验证树 `9dcc405f7e41593e9a1df80046247dac16181a84`。包含远端 PR head `0dda953e79c15e049196b11df3cda3dd904d326a`（含审核员修复）和 main `2cd1b6d78f8fe44aa2937f0d666129718df71073`。最终检查前已 fetch，两个远端引用均为 HEAD 祖先。
+
+- 失败来源：GitHub CI https://github.com/ByteJuno/Theta/actions/runs/45961103548 ，在旧 head 上 ChatEntrySessionsTest.revocationAtAdmissionDiscardsOnlyTheUnpublishedNewSession 超时，769 项中 1 失败。原始日志保存在本轮 ci-failure.log。该用例在隔离 Linux 基线中 18/18 通过，不能据此否认 CI 的时序失败。
+- 确定性复现：只注入运行调度器并新增正式回归的树 `ace5f0ede98613adada7c0196b2fc9b6e46e1aae`，theta-gpu-test 19 项中 1 失败：stoppingBeforeRunDispatchReleasesAdmissionAndPreservesAcceptedHistory 报 A stopped undispatched run must release admission。LAZY 协程在首次执行前被取消，不进入 finally，留下 active=true。失败证据 deterministic-red.log/json 保留。
+- 修复：ATOMIC 启动确保进入清理；在聊天 gate 内检查取消，避免未发布运行句柄或已取消运行执行前台/模型工作。保留所有既有断言及超时限制，没有修改受保护文件或 UI 文案。
+- 修复树首次定向：19/19 通过。最终同树 theta-gpu-test（TEST_HOST=gpu）：ChatEntrySessionsTest、ChatSessionOwnerTest、PluginEntryRuntimeTest 共 92/92 通过，耗时 72.1 秒。覆盖提前停止、历史保留、入口终态、句柄释放、再次接纳，以及原有审批、工具退出与草稿消费回归。
+- 提交前 scripts/preflight.py 完整通过，严格 --configuration-cache --configuration-cache-problems=fail，耗时 253.4 秒。应用 770 项=769 通过/1 跳过；agent-core 632 项=631 通过/1 跳过（FROM-CACHE，非本轮重执行）；:sdk:test UP-TO-DATE/NO-SOURCE；567 对中英文资源、:app:lintDebug、storage-fixture 源码检查和编译通过。工作树散列核验未变，提交树与 Linux 验证树相同。
+
+本轮未生成 APK，未操作手机或模拟器。验证仅覆盖 JVM/SQLite；设备冷启动、真实图片选择与发送、实际界面渲染、API 33 与 R8 运行行为未验证。新提交的 CI、独立审核及正式模拟器回归待发布后由审核端执行。 APK SHA256：未生成。本轮证据目录：E:\Desktop\AI研究\theta-auto-loop\event-runs\b27138b8-c83a-4d10-8653-f2894faa6e7e。历轮失败证据与限制在本摘要中保留。
