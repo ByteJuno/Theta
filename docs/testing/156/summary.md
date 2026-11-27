@@ -1,3 +1,37 @@
+# Issue 156 validation — RETURN: concurrent output cleanup
+
+Implementation SHA: `ae27cf1c010e1c1f7eb22916ee6b43c7559885af`
+Tested tree: `47608adef1bc2bc1e4e1d55f16cc8d38784dce9b`
+Branch: `auto/156-compose-markdown`
+Remote PR head incorporated: `8f2c42d04810d39dbbcfcdd1369560b145a97a72`
+Fetched main: `341e7c195324dad4f049b29fbfc6a23545857716`
+Run: `e9d38463-1d13-4533-901d-c421c30feb9a`
+RETURN: https://github.com/ByteJuno/Theta/pull/171#issuecomment-7221845847
+
+## Repair and evidence
+
+The OWNER RETURN and CI run 46019137840 were verified against the actual PR head. build failed in PluginOutputSurfacesTest.disableDeadlineReportsExhaustionAndRetiresQueuedClear (809 tests, one failure); paired-keep-size passed and the reviewer skipped emulator regression. Full comments, reviews and inline comments were read. Reviewer state identifies this same head as waiting_writer/own_commit. Reviewer commits e736c2653de42d5b35cbc0a8691e786a005e881f and 8f2c42d04810d39dbbcfcdd1369560b145a97a72 were fast-forwarded locally, preserving the Markdown chunk boundary/performance fix, license correction and historical summary.
+
+The failure is a production concurrency defect: independent binding drain removes pendingClears entries while Kotlin Collection.toList checks size. At size one, its optimized path calls iterator.next without hasNext; a concurrent removal throws NoSuchElementException and kills the sole reconcile consumer. Subsequent task completion then never clears the fallback surface. Iterate ConcurrentHashMap's weakly consistent key set directly using hasNext/next instead. No cleanup deadline, resource release semantics, assertion or timeout was weakened.
+
+Original failure reproduced locally at zero-based repetition 10 of the unchanged deadline test (baseline-repeat): expected low clear a, got null; system-err records NoSuchElementException at PluginOutputSurfaces.reconcile:231. The new formal regression retiringQueuedClearsKeepsRoutingLaterTasks also failed on old production code at task17 (regression-red) with the same exception. It runs 100 task cycles with both plugin slots occupied, retires queued clears concurrently, asserts cleanup exhaustion, disable/resource ordering, fallback clearing, no late high clear and continuing routing. Both red logs/XMLs and the temporary repetition harness remain outside Git in the run output.
+
+## Validation on repaired sources
+
+- Targeted suite: 25/25 passed, no skips, 44.3s. Includes all output-surface tests, 12 Markdown regressions, and the temporary harness executing the original deadline test 100 times. The permanent regression executes 100 routing/cleanup cycles. The temporary harness was moved outside the checkout before final preflight and was not committed.
+- Final python scripts/preflight.py passed in 149.4s with --configuration-cache --configuration-cache-problems=fail. Configuration cache stored. app: 810 tests, 809 passed, one existing platform skip; agent-core: 633 tests, 632 passed, one existing platform skip, Gradle FROM-CACHE on unchanged inputs. No failed test was retried to claim a green final run.
+- UI resources: 606 paired English/Chinese keys. lint, storage fixture source verification and compile passed. git diff --check passed. Source SHA256 manifest unchanged during checks and after commit; tested tree is recorded above.
+- Final fetch before preflight found both origin/auto/156-compose-markdown and origin/main already contained in HEAD. Final remote comments/reviews/inline comments showed no newer OWNER or RETURN. PR169 remains separately open and waiting for its review, with unchanged tracking and evidence.
+- This commit changes only PluginOutputSurfaces.kt and its permanent test. No protected files, shared host wiring, UI strings, docs/testing summary, raw logs, temporary harness, APK or diagnostic file committed. No push, PR update/create, merge, device action or new scheduler was performed. Existing untracked scripts/__pycache__ and all stashes preserved.
+
+## Limits and handoff
+
+本轮未生成 APK，未操作手机或模拟器，视觉未验证。未进行真实供应商、API33 运行、R8、硬件或实体断电验证。原 Markdown 界面的中英文、明暗主题、小屏/大字体、流式性能、TalkBack、链接打开和代码复制仍需当前构建验收。旧 APK 身份及此前结果仅保留为历史证据；新 head 的 CI、正式模拟器回归、独立审核与合并由审核端负责。
+
+The writer hands publication.json to the existing publisher with state.status=publication_pending. Publisher owns updating this single issue summary, verifying refs again and publishing. The independent reviewer owns new-head CI, formal regression and merge. This local repair is not a claim that PR169 or new-head remote CI passed.
+
+## Historical evidence — original SHA bindings retained
+
 # Issue 156 validation
 
 - Implementation commit: `cb1f0d322a7e0884f0f721bb0aa39f44040fac97`
