@@ -29,6 +29,7 @@ internal fun openAiEventFlow(
     endpoint: String, transport: ModelTransport, auth: Credentials,
     encode: () -> String,
     stream: () -> OpenAiEventStream,
+    normalizeErrorParameter: (String) -> String = { it },
 ): Flow<ModelEvent> = flow {
     val body = try { encode() } catch (error: IllegalArgumentException) {
         emit(Events.failed(modelError(ModelErrorCode.INVALID_REQUEST, "Invalid model request or incompatible history")))
@@ -96,10 +97,14 @@ internal fun openAiEventFlow(
     // Servers may echo Authorization in error.param as well as message/body. Never journal it.
     if (terminal is ModelEvent.Failed) {
         val error = terminal.error
-        emit(Events.failed(modelError(error.code, "Model request failed", error.httpStatus,
-            error.retryAfterMs, error.param?.takeIf {
+        // Check the original wire value before normalization as well as the canonical value.
+        // Otherwise a credential equal to an alias could bypass the existing redaction check.
+        val param = error.param?.takeIf { token.isEmpty() || !it.contains(token) }
+            ?.let(normalizeErrorParameter)?.takeIf {
                 it in SAFE_ERROR_PARAMETERS && (token.isEmpty() || !it.contains(token))
-            })))
+            }
+        emit(Events.failed(modelError(error.code, "Model request failed", error.httpStatus,
+            error.retryAfterMs, param)))
     } else emit(terminal)
 }.catch { error ->
     // Only the collector's own cancellation stays silent; an adapter's internal one is a failure.

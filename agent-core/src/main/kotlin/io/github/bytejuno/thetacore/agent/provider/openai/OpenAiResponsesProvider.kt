@@ -31,5 +31,12 @@ class OpenAiResponsesProvider(
     override fun chat(request: ChatRequest, auth: Credentials): Flow<ModelEvent> = openAiEventFlow(
         config.endpoint.toString(), transport, auth, { codec.encode(request, onSchemaDiagnostics) },
         { OpenAiResponsesStream(request, codec) },
+        normalizeErrorParameter = { param ->
+            // Only known schema fields map to the kernel's protocol-neutral recovery parameter.
+            // Never accept arbitrary paths or change Chat's error handling.
+            if (request.responseSchema != null && param in setOf("text", "text.format", "text.format.type",
+                    "text.format.schema", "text.format.name", "text.format.strict", "text.format.description"))
+                "response_format" else param
+        },
     )
 }

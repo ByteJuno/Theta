@@ -38,6 +38,14 @@ class OpenAiResponsesTest {
             put("type", if (refusal) "refusal" else "output_text"); put(if (refusal) "refusal" else "text", value)
         } }
     }
+    private fun messageParts(vararg values: String) = JsonObject(text("") + ("content" to JsonArray(values.map {
+        buildJsonObject { put("type", "output_text"); put("text", it) }
+    })))
+    private fun messageEvent(type: String, index: Int, value: String) = event("response.$type") {
+        put("output_index", 0); put("item_id", "msg_1"); put("content_index", index)
+        if (type.startsWith("content_part")) putJsonObject("part") { put("type", "output_text"); put("text", value) }
+        else put(if (type.endsWith(".delta")) "delta" else "text", value)
+    }
     private fun call(id: String, args: String) = buildJsonObject {
         put("id", "item_$id"); put("type", "function_call"); put("call_id", "call_$id"); put("name", "read"); put("arguments", args)
     }
@@ -123,6 +131,86 @@ class OpenAiResponsesTest {
             added(1, text("")), delta(1, "msg_1", "output_text", "answer"), ended(1, answer), terminal(listOf(reason, answer))), 1)
         assertReasoningAnswer(result, reason, "思考 🌍 complete")
         assertEquals(listOf("", "思考 🌍", " complete"), result.filterIsInstance<ModelEvent.ReasoningDelta>().map { it.text })
+    }
+
+    @Test fun `message content indices preserve ordering across interleaved deltas and done text`() = runTest {
+        val final = messageParts("left", "right 🌍")
+        for (prefix in listOf(
+            listOf(messageEvent("output_text.delta", 0, "le"), messageEvent("output_text.delta", 1, "right 🌍"),
+                messageEvent("output_text.delta", 0, "ft")),
+            listOf(messageEvent("content_part.added", 0, ""), messageEvent("output_text.delta", 0, "le"),
+                messageEvent("output_text.done", 0, "left"), messageEvent("content_part.done", 0, "left"),
+                messageEvent("output_text.delta", 1, "right 🌍")),
+            listOf(messageEvent("content_part.done", 1, "right 🌍"), messageEvent("content_part.done", 0, "left")),
+        )) {
+            val result = collect(listOf(created(), added(0, messageParts())) + prefix + listOf(ended(0, final), terminal(listOf(final))), 1)
+            assertEquals(FinishReason.STOP, assertIs<ModelEvent.Finished>(result.last()).reason)
+            assertEquals("leftright 🌍", assertIs<ContentPart.Text>(reduced(result).assistantMessage().parts.single()).text)
+            assertEquals(1, result.count { it is ModelEvent.PartEnd })
+        }
+    }
+
+    @Test fun `message completion checks each part type index and completed value`() = runTest {
+        val final = messageParts("left", "right")
+        for (prefix in listOf(
+            listOf(messageEvent("output_text.done", 0, "wrong")),
+            listOf(messageEvent("content_part.done", 0, "le")),
+            listOf(messageEvent("output_text.delta", 2, "")),
+            listOf(messageEvent("output_text.done", 0, "left"), messageEvent("output_text.delta", 0, "")),
+            listOf(messageEvent("output_text.delta", 0, "le"), messageEvent("content_part.added", 0, "")),
+            listOf(event("response.refusal.done") {
+                put("output_index", 0); put("item_id", "msg_1"); put("content_index", 0); put("refusal", "left")
+            }),
+            listOf(JsonObject(messageEvent("output_text.delta", 0, "left") + ("content_index" to JsonPrimitive("0")))),
+        )) {
+            val result = collect(listOf(created(), added(0, messageParts())) + prefix + listOf(ended(0, final), terminal(listOf(final))))
+            assertEquals(ModelErrorCode.PROTOCOL, assertIs<ModelEvent.Failed>(result.last()).error.code)
+            assertTrue(result.none { it is ModelEvent.Finished })
+        }
+        val refusal = text("Cannot answer", true)
+        val result = collect(listOf(created(), added(0, messageParts()), event("response.refusal.done") {
+            put("output_index", 0); put("item_id", "msg_1"); put("content_index", 0); put("refusal", "Cannot answer")
+        }, ended(0, refusal), terminal(listOf(refusal))))
+        assertEquals(FinishReason.REFUSAL, assertIs<ModelEvent.Finished>(result.last()).reason)
+    }
+
+    @Test fun `function argument done reconciles deltas and forbids later mutations`() = runTest {
+        val args = "{\"q\":\"ok\"}"
+        fun done(value: String) = event("response.function_call_arguments.done") {
+            put("output_index", 0); put("item_id", "item_a"); put("arguments", value)
+        }
+        val final = call("a", args)
+        for (prefix in listOf(listOf(done(args)), listOf(delta(0, "item_a", "function_call_arguments", "{\"q\":"), done(args)))) {
+            val result = collect(listOf(created(), added(0, call("a", ""))) + prefix + listOf(ended(0, final), terminal(listOf(final))))
+            assertEquals(args, reduced(result).calls().single().argsJson)
+        }
+        for (prefix in listOf(listOf(done("{}")),
+            listOf(delta(0, "item_a", "function_call_arguments", "{\"other\":"), done(args)),
+            listOf(done(args), delta(0, "item_a", "function_call_arguments", "")))) {
+            val result = collect(listOf(created(), added(0, call("a", ""))) + prefix + listOf(ended(0, final), terminal(listOf(final))))
+            assertEquals(ModelErrorCode.PROTOCOL, assertIs<ModelEvent.Failed>(result.last()).error.code)
+            assertTrue(reduced(result).toolCandidates().isEmpty())
+        }
+    }
+
+    @Test fun `Responses schema parameter normalization preserves credential sanitization and Chat isolation`() = runTest {
+        for (param in listOf("text", "text.format", "text.format.type", "text.format.schema", "text.format.unknown", "text.format.synthetic-key")) {
+            val t = ModelTransport { _, _, _ -> flow {
+                emit(TransportEvent.Headers(400, "application/json", null))
+                emit(TransportEvent.Bytes(buildJsonObject { putJsonObject("error") {
+                    put("code", "unsupported_parameter"); put("param", param); put("message", "synthetic-key")
+                } }.toString().toByteArray()))
+            } }
+            val request = chatRequest("m") { responseSchema = schema }
+            val error = assertIs<ModelEvent.Failed>(OpenAiResponsesProvider(config, t).chat(request, auth).toList().single()).error
+            assertEquals(if (param in setOf("text", "text.format", "text.format.type", "text.format.schema")) "response_format" else null, error.param)
+            assertFalse(error.toString().contains("synthetic-key"))
+            if (param == "text.format") {
+                val chat = OpenAiChatProvider(OpenAiChatConfig("test", "https://example.invalid/v1"), t)
+                assertNull(assertIs<ModelEvent.Failed>(chat.chat(request, auth).toList().single()).error.param)
+                assertNull(assertIs<ModelEvent.Failed>(OpenAiResponsesProvider(config, t).chat(request, Credentials { "text.format" }).toList().single()).error.param)
+            }
+        }
     }
 
     @Test fun `terminal only raw reasoning is delivered with complete replay`() = runTest {

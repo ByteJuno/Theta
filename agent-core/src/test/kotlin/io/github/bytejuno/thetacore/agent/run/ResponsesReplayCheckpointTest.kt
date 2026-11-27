@@ -13,6 +13,69 @@ import kotlin.test.*
 
 class ResponsesReplayCheckpointTest {
     @get:Rule val temp = TemporaryFolder()
+    @Test fun `contradictory argument done never reaches tool execution or successful history`() = runTest {
+        val f = RunFixture(listOf(testDefinition("read")))
+        val transport = ModelTransport { _, _, _ -> flow {
+            val call = Json.parseToJsonElement("""{"id":"fc","type":"function_call","call_id":"wire","name":"read","arguments":"{\"q\":\"B\"}"}""").jsonObject
+            val frames = listOf(
+                """{"type":"response.created","response":{"id":"r","model":"m"}}""",
+                """{"type":"response.output_item.added","output_index":0,"item":${JsonObject(call + ("arguments" to JsonPrimitive("")))}}""",
+                """{"type":"response.function_call_arguments.done","output_index":0,"item_id":"fc","arguments":"{\"q\":\"A\"}"}""",
+                """{"type":"response.output_item.done","output_index":0,"item":$call}""",
+                """{"type":"response.completed","response":{"id":"r","model":"m","status":"completed","output":[$call]}}""",
+            )
+            emit(TransportEvent.Headers(200, "text/event-stream", null))
+            emit(TransportEvent.Bytes(frames.joinToString("") { "data: $it\n\n" }.toByteArray()))
+        } }
+        val result = f.loop(OpenAiResponsesProvider(OpenAiResponsesConfig("provider", "https://example.invalid/v1"), transport),
+            limits = RunLimits(maxRetries = 0)).run()
+        assertEquals(RunState.FAILED, result.state)
+        assertTrue(f.submitted.isEmpty())
+        assertTrue(f.store.records().isEmpty())
+        assertEquals(1, f.history.snapshot().messages.size)
+        assertEquals(ModelErrorCode.PROTOCOL, assertIs<ModelEvent.Failed>(f.journal.attempts().single().terminal).error.code)
+    }
+
+    @Test fun `Responses schema errors recover through the existing responseSchema policy for HTTP and SSE`() = runTest {
+        for (param in listOf("response_format", "text", "text.format", "text.format.type", "text.format.schema")) {
+            for (channel in listOf("http", "error", "failed")) {
+                val f = RunFixture(); var requests = 0; var recoveries = 0
+                val transport = ModelTransport { _, body, _ -> flow {
+                    val request = Json.parseToJsonElement(body).jsonObject
+                    if (requests++ == 0) {
+                        assertNotNull(request["text"])
+                        val error = buildJsonObject { put("code", "unsupported_parameter"); put("param", param); put("message", "fake") }
+                        emit(TransportEvent.Headers(if (channel == "http") 400 else 200,
+                            if (channel == "http") "application/json" else "text/event-stream", null))
+                        val payload = when (channel) {
+                            "http" -> "{\"error\":$error}"
+                            "error" -> "data: ${JsonObject(error + ("type" to JsonPrimitive("error")))}\n\n"
+                            else -> "data: {\"type\":\"response.failed\",\"response\":{\"id\":\"r\",\"model\":\"m\",\"status\":\"failed\",\"error\":$error}}\n\n"
+                        }
+                        emit(TransportEvent.Bytes(payload.toByteArray()))
+                    } else {
+                        assertEquals(2, requests); assertNull(request["text"])
+                        val answer = """{"id":"msg","type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}"""
+                        val frames = listOf("""{"type":"response.created","response":{"id":"r","model":"m"}}""",
+                            """{"type":"response.output_item.added","output_index":0,"item":$answer}""",
+                            """{"type":"response.completed","response":{"id":"r","model":"m","status":"completed","output":[$answer]}}""")
+                        emit(TransportEvent.Headers(200, "text/event-stream", null))
+                        emit(TransportEvent.Bytes(frames.joinToString("") { "data: $it\n\n" }.toByteArray()))
+                    }
+                } }
+                val base = f.request()
+                val request = object : ChatRequest by base { override val responseSchema = Json.parseToJsonElement("""{"type":"object"}""").jsonObject }
+                val recovery = RecoveryStrategy { action, error, target, original ->
+                    assertEquals(RecoveryAction.REMOVE_PARAMETER, action); assertEquals("response_format", error!!.param); recoveries++
+                    RecoveryProposal(target, object : ChatRequest by original { override val responseSchema: JsonObject? = null })
+                }
+                val result = f.loop(OpenAiResponsesProvider(OpenAiResponsesConfig("provider", "https://example.invalid/v1"), transport),
+                    recovery, request = request).run()
+                assertEquals(RunState.COMPLETED, result.state, "$param/$channel")
+                assertEquals(2, requests); assertEquals(1, recoveries)
+            }
+        }
+    }
     @Test fun `native tool loop executes once and returns call id with original reasoning`() = runTest {
         val f = RunFixture(listOf(testDefinition("read")))
         val reasoning = Json.parseToJsonElement("""{"id":"rs","type":"reasoning","content":[{"type":"reasoning_text","text":"raw plan"}],"summary":[{"type":"summary_text","text":"summary plan"}],"encrypted_content":"opaque","metadata":{"retain":true}}""").jsonObject
