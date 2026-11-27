@@ -1,16 +1,23 @@
 # Issue 159 validation
 
-Implementation commit: `8f252ffe3d26f32f481261264c2e5f4eb8ab2e06`
-Branch: `auto/159-provider-model-bindings`; PR #168 RETURN: https://github.com/ByteJuno/Theta/pull/168#issuecomment-7212857614
+Implementation commit: e3497c5d6222ef5e5b2cba76567aad710ec6c841
+Tested tree: 18e4bf6662d6c7c58716e15969f545f12e8d6fc8
+Base main: 2cd1b6d78f8fe44aa2937f0d666129718df71073
+Reviewed remote head before this repair: c9c2c414c2f080fb8fc9962feadcd28b61988578
+RETURN: https://github.com/ByteJuno/Theta/pull/168#issuecomment-7213492679
 
-This return fixes per-record recovery of legacy chat/image settings, preserving readable providers, prompts and credentials. Image selection now reads the latest chat binding under the storage lock. v3 storage has a bounded 2 MiB ceiling while legacy codecs retain 256 KiB limits, accommodating both legacy records and v3 metadata expansion. Cold pending image calls without their original in-memory snapshot stop before any request or attempt claim; a new explicitly requested run uses the current binding. Prior attempted calls retain their durable no-replay result. No-auth generation omits Authorization; keyed requests remain covered. All three schema compatibility labels use paired English/Chinese feature resources.
+## Change and evidence
 
-Final `python scripts/preflight.py` passed in 132.33 seconds with `--configuration-cache --configuration-cache-problems=fail`. app: 742 tests, 741 passed, 1 existing Windows skip; agent-core: 633 tests, 632 passed, 1 existing Windows skip. UI resource parity (599 keys), lintDebug, storage-fixture source verification/compile and static protected-file/evidence checks passed. Agent-core results from the unchanged candidate were reused by the final Gradle invocation; app full suite reran successfully. Source tree: `043232c0eea75aa25d21c177e1689787d60f6d5d`.
+New v3 writes use an authoritative atomic record separate from the legacy input, preserving the migration/recovery distinction even when v3 cannot decrypt. Recovery cannot revive old image credentials or bindings. First legacy migration remains independently recoverable. Last-provider deletion and explicit clear preserve the no-import boundary. No protected files or host UI wiring changed.
 
-Seven new regressions cover partial recovery in both directions, restored storage aborting replacement, near-limit v2 migration, missing cold-run snapshots, independent image selection, real SQLite cold approval followed by a new run, and anonymous HTTP headers. ProviderConnectionsTest: 12 passed; ChatSessionOwnerTest: 61 passed; ImageAttachmentsTest: 5 passed; OpenAiImageClientTest: 8 passed. Tests use synthetic credentials and local HTTP endpoints.
+Full preflight passed in 167.53 seconds with --configuration-cache --configuration-cache-problems=fail. app 750 tests: 749 passed, 1 existing Windows skip. agent-core 633: 632 passed, 1 existing Windows skip; FROM-CACHE. UI resource parity, lintDebug and storage-fixture source/compile checks passed. All 54 provider tests passed, including 8 new tests and the prior 12 ProviderConnectionsTest regressions. Prior cold SQLite image-approval and unauthenticated HTTP-header regressions remain in the full suite.
 
-Retained failures outside Git: initial targeted run reproduced four failures (record loss, cold fallback, capacity and empty Bearer). First repaired run exposed a JUnit non-void test declaration, corrected without changing assertions. First full preflight had one existing oversized-history recovery timeout with its original 10-second limit. The unchanged test passed alone in 3.08 seconds and the subsequent full preflight passed. Neither timeout nor assertions were relaxed. Raw logs/XML remain in this event directory and `validation-issue11/issue159-7ba19-*`; reviewer verdict is retained locally. These earlier failures are not represented as passes.
+Initial red run on the old production code: 6 tests, 5 failed, proving legacy image resurrection after deletion, unbinding, replacement, last-provider deletion and explicit clear. First candidate run: all 8 new tests and 12 prior connection regressions passed; 3 other fixtures still targeted active.bin after migration. Those fixtures now target the authoritative record without dropping assertions or changing timeouts; the final full preflight passed.
 
-APK: not generated; SHA256: unavailable. 本轮未生成 APK，未操作手机或模拟器。视觉未验证：兼容级别文案在小屏、大字体、中英文及明暗主题中的实际显示；设备上的配置迁移、冷启动审批、真实生图服务、API 33 与 R8 运行行为未验证。SQLite 冷恢复、凭据和请求头结果仅为 JVM 测试证据。新提交的 CI、独立审核与正式模拟器回归由发布后的审核端执行。
+Evidence is retained outside Git at E:\Desktop\AI研究\theta-auto-loop\event-runs\529b7f53-d565-42e3-ad15-b5ae3dd70950. Reviewer failure: reviewer-failed-test.log and reviewer-verdict.json.log. Local initial failure: theta-auto-loop/validation-issue11/issue159-529b7-red. Intermediate fixture failure: theta-auto-loop/validation-issue11/issue159-529b7-green. Final evidence: preflight.log, preflight-result.json, TEST-io.github.bytejuno.thetacore.provider.ProviderMigrationRecoveryTest.xml and final-ref-check.json. Previous round evidence remains at event-runs/7ba19f43-a644-4320-8299-6a59108ccea7 and its referenced validation runs.
 
-The writer did not push, create/update a PR, merge, or commit this summary. The existing publisher owns publication, and the independent reviewer owns final acceptance.
+## Limits
+
+APK: not generated; APK SHA-256: unavailable. No phone or emulator accessed. 本轮未生成 APK，未操作手机或模拟器。验证为 JVM 文件存储与合成 AES 密钥证据；Android Keystore 失效、设备冷启动、真实生图请求、API 33、R8 和实体断电未验证。视觉未验证（本轮无 UI 改动）；原 PR 界面的实际渲染仍由审核端覆盖。当前实现的 CI、独立审核和正式模拟器回归待发布后执行。
+
+Fetch before final checks confirmed remote PR branch and origin/main are ancestors. GitHub head/comments were rechecked before commit and were unchanged. This writer only committed implementation/tests; the existing publisher owns summary commit/push/PR publication and the independent reviewer owns acceptance/merge.
