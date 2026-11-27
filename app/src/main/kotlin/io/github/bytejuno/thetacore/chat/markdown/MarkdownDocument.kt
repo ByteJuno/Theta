@@ -46,15 +46,19 @@ internal fun safeMarkdownUrl(destination: String): String? {
 }
 
 /** Avoid splitting a surrogate pair, and prefer original line boundaries for code blocks. */
-internal fun markdownTextChunks(text: String): List<String> {
+internal fun markdownTextChunks(text: String, code: Boolean = false): List<String> {
     if (text.isEmpty()) return listOf("")
     val chunks = mutableListOf<String>()
     var start = 0
     while (start < text.length) {
         var end = minOf(start + MARKDOWN_TEXT_CHUNK, text.length)
         if (end < text.length) {
-            val newline = text.lastIndexOf('\n', end - 1)
+            // Search only this chunk; rescanning earlier newline-free text is quadratic.
+            var newline = end - 1
+            while (newline >= start && text[newline] != '\n') newline--
             if (newline >= start) end = newline + 1
+            // A boundary newline terminates this code row, not a new empty Text row.
+            else if (code && text[end] == '\n') end++
             else if (text[end - 1].isHighSurrogate() && text[end].isLowSurrogate()) end--
         }
         chunks += text.substring(start, end)
@@ -68,6 +72,9 @@ internal fun plainMarkdownDocument(source: String) = MarkdownDocument(
 )
 
 internal fun codeChunkDisplay(chunk: String): String = chunk.removeSuffix("\n")
+
+internal fun markdownCodeChunks(text: String): List<String> =
+    markdownTextChunks(text, code = true).map(::codeChunkDisplay)
 
 /** AST only: no HTML renderer, image loader, transport or persistence side effects. */
 internal object MarkdownParser {

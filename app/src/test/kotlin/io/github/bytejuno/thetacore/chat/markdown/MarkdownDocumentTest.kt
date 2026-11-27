@@ -82,6 +82,24 @@ class MarkdownDocumentTest {
         assertEquals(source, doc.blocks.flatMap { (it as MarkdownBlock.Paragraph).runs }.joinToString("") { it.text })
     }
 
+    @Test fun codeLineBoundaryDoesNotCreateBlankRowsAndKeepsRealBlankLines() {
+        for (length in listOf(MARKDOWN_TEXT_CHUNK, MARKDOWN_TEXT_CHUNK * 2)) {
+            val line = "x".repeat(length)
+            val rows = List(length / MARKDOWN_TEXT_CHUNK) { "x".repeat(MARKDOWN_TEXT_CHUNK) }
+            assertEquals(rows, markdownCodeChunks("$line\n"))
+            assertEquals(rows + "next", markdownCodeChunks("$line\nnext\n"))
+            assertEquals(rows + "\nnext", markdownCodeChunks("$line\n\nnext\n"))
+            assertEquals(rows + "", markdownCodeChunks("$line\n\n"))
+        }
+        assertEquals(listOf(""), markdownCodeChunks(""))
+        assertEquals(listOf(""), markdownCodeChunks("\n"))
+        val code = "😀".repeat(MARKDOWN_TEXT_CHUNK) + "\nlast\n"
+        val chunks = markdownTextChunks(code, code = true)
+        assertEquals(code, chunks.joinToString(""))
+        assertTrue(chunks.none { it.last().isHighSurrogate() || it.first().isLowSurrogate() })
+        assertTrue(markdownCodeChunks(code).all { it.length <= MARKDOWN_TEXT_CHUNK })
+    }
+
     @Test fun tinyBlockFloodFallsBackWithoutDroppingText() {
         val source = "a\n\n".repeat(3000)
         val doc = MarkdownParser.parse(source)

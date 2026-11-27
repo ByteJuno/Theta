@@ -126,7 +126,7 @@ private fun MarkdownCode(block: MarkdownBlock.Code) {
     var copied by remember(block.text) { mutableStateOf(false) }
     val copyLabel = strings.get(R.string.markdown_copy_code)
     val copyFailed = strings.get(R.string.markdown_copy_failed)
-    val chunks = remember(block.text) { markdownTextChunks(block.text) }
+    val chunks = remember(block.text) { markdownCodeChunks(block.text) }
     Surface(Modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.surfaceContainer,
         shape = MaterialTheme.shapes.small) {
         Column(Modifier.padding(8.dp)) {
@@ -145,7 +145,7 @@ private fun MarkdownCode(block: MarkdownBlock.Code) {
             }
             Column(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
                 chunks.forEach { chunk ->
-                    Text(codeChunkDisplay(chunk), fontFamily = FontFamily.Monospace,
+                    Text(chunk, fontFamily = FontFamily.Monospace,
                         style = MaterialTheme.typography.bodySmall, softWrap = false)
                 }
             }
