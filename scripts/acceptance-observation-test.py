@@ -249,7 +249,7 @@ class LifecycleSearch(unittest.TestCase):
             self.assertTrue(1550 < y2 < y1 < 1850)
             self.assertEqual(1, adb.call_count, 'XML bounds avoid a wm size round trip')
 
-    def continuous_search(self, *, initial=0, target=True, duplicate=False):
+    def continuous_search(self, *, initial=0, target=True, duplicate=False, fault=False, fling_gain=3):
         """Model pixel displacement, including overshoot, rather than one page per swipe.
 
         The reviewer trace alternates disjoint top/bottom viewports. The 3x gain
@@ -257,10 +257,12 @@ class LifecycleSearch(unittest.TestCase):
         """
         state = {'offset': initial, 'clock': 0, 'taps': [], 'swipes': [], 'views': []}
         top, bottom, end = 136, 2208, 3000
-        target_top, target_bottom = 2400, 2448
+        target_top = 4500 if fault else 2400
+        target_bottom = target_top + 48
+        label = 'Managed scope failed; disabled; restart required' if fault else 'Uninstall Fixture'
 
         def screen():
-            state['clock'] += 2  # A dump consumes time, unlike the page-step fixture.
+            state['clock'] += 2.3 if fault else 2
             offset = state['offset']
             state['views'].append(offset)
             nodes = [ET.Element('node', bounds=f'[0,{top}][1080,{bottom}]', scrollable='true')]
@@ -270,7 +272,7 @@ class LifecycleSearch(unittest.TestCase):
                     nodes.append(ET.Element('node', text=f'row {y}',
                                             bounds=f'[44,{y-offset}][1036,{y+40-offset}]'))
             if target and top <= target_top - offset and target_bottom - offset <= bottom:
-                nodes.append(ET.Element('node', text='Uninstall Fixture',
+                nodes.append(ET.Element('node', text=label,
                     bounds=f'[44,{target_top-offset}][1036,{target_bottom-offset}]'))
                 if duplicate:
                     nodes.append(ET.Element('node', text='Uninstall Fixture',
@@ -284,7 +286,8 @@ class LifecycleSearch(unittest.TestCase):
                 self.assertTrue(top < min(y1, y2) < max(y1, y2) < bottom)
                 state['swipes'].append((y1, y2, duration))
                 state['clock'] += duration / 1000
-                state['offset'] = max(0, min(end, state['offset'] + 3 * (y1 - y2)))
+                gain = (1 if duration == 800 else fling_gain) if fault else 3
+                state['offset'] = max(0, min(end, state['offset'] + gain * (y1 - y2)))
             elif args[:3] == ('shell', 'input', 'tap'):
                 x, y = map(int, args[3:])
                 self.assertTrue(top < y < bottom)
@@ -305,11 +308,34 @@ class LifecycleSearch(unittest.TestCase):
                 patch.object(lc.time, 'monotonic', side_effect=lambda: state['clock']), \
                 patch.object(lc.time, 'sleep', side_effect=sleep), patch.object(lc, 'TIMEOUT', 30):
             try:
-                lc.tap('Uninstall Fixture')
+                if fault:
+                    status = lc.matching(label, lambda value: value == label, timeout=20,
+                                         start_at_bottom=True)
+                    state['status'] = status.get('text')
+                else:
+                    lc.tap('Uninstall Fixture')
             except lc.FAIL as error:
                 state['error'] = str(error)
                 state['trace'] = json.loads((Path(output) / ('FAILED-' + lc.CURRENT) / 'search.json').read_text())
         return state
+
+    def test_fault_status_reached_within_short_deadline(self):
+        state = self.continuous_search(fault=True)
+        self.assertEqual('Managed scope failed; disabled; restart required', state.get('status'))
+        self.assertLess(state['clock'], 20)
+
+    def test_missing_fault_status_still_fails_at_original_deadline(self):
+        state = self.continuous_search(fault=True, target=False)
+        self.assertIn('error', state)
+        self.assertEqual(20, state['trace']['timeout'])
+        self.assertEqual(2, sum(o['action'] == 'fling' for o in state['trace']['observations']))
+        self.assertGreaterEqual(state['clock'], 20)
+
+    def test_short_first_fling_continues_toward_trailing_fault_card(self):
+        state = self.continuous_search(fault=True, fling_gain=1)
+        self.assertEqual('Managed scope failed; disabled; restart required', state.get('status'))
+        self.assertEqual([0, 1554, 3000], state['views'])
+        self.assertLess(state['clock'], 20)
 
     def test_continuous_scroll_finds_action_between_disjoint_endpoint_views(self):
         for initial in (0, 3000):

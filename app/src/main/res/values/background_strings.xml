@@ -1,0 +1,11 @@
+<resources>
+    <string name="background_title">Background tasks</string>
+    <string name="background_exempt">Android battery optimization is off for Theta.</string>
+    <string name="background_optimized">Android battery optimization is on for Theta.</string>
+    <string name="background_unknown">Battery optimization status is unavailable.</string>
+    <string name="background_vendor_hint">If a reply stops when you switch apps or lock the screen, check Theta’s battery settings. On ColorOS, choose Allow full background activity. Other systems may call this Unrestricted or let you lock Theta in Recents. These controls can apply even when Android battery optimization is off.</string>
+    <string name="background_open_settings">Open system app settings</string>
+    <string name="background_manual_path">Open Settings → Apps → Theta → Battery to review background activity.</string>
+    <string name="background_first_task_hint">For background tasks and notifications, see Plugins and diagnostics.</string>
+    <string name="background_enable_notifications">Allow task notifications</string>
+</resources>
