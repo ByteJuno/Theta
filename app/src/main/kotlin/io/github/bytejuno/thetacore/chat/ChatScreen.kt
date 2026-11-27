@@ -5,13 +5,9 @@ import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -63,7 +59,7 @@ internal fun ChatScreen(host: ThetaApplication, drafts: ChatComposerDrafts, resu
         else stream = ""
     }
     val listState = rememberLazyListState()
-    LaunchedEffect(state.messages.size, stream.isNotEmpty(), state.active) {
+    LaunchedEffect(state.messages.size, stream.isNotEmpty(), state.active, state.error, composer.error, state.pending) {
         if (!state.showingOlder && listState.layoutInfo.totalItemsCount > 0)
             listState.animateScrollToItem(listState.layoutInfo.totalItemsCount - 1)
     }
@@ -139,70 +135,20 @@ internal fun ChatScreen(host: ThetaApplication, drafts: ChatComposerDrafts, resu
     LaunchedEffect(drafts, state.sessionId, state.acceptedMessages, state.acceptedDraft, state.draftSync, resumed) {
         reconcileDraftsAsync(drafts, state.sessionId, state.acceptedDraft)
     }
-    Column(Modifier.fillMaxSize().imePadding().padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(strings.get(R.string.chat_title), style = MaterialTheme.typography.headlineMedium)
-            val activeProfile = modelState.catalog.model(modelState.catalog.bindings.activeChatModelRef)
-            OutlinedButton(
-                onClick = {
-                    if (modelState.catalog.providers.isEmpty()) settings = true else profilePicker = true
-                },
-                enabled = !state.active && !state.loading,
-            ) {
-                Text(
-                    text = activeProfile?.label ?: strings.get(R.string.chat_profile_unconfigured),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-        }
-        // Wrapping actions keep navigation available at large font scales and narrow widths.
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            TextButton(onClick = onPlugins) { Text(strings.get(R.string.chat_plugins)) }
-            TextButton(onClick = { settings = true }) { Text(strings.get(R.string.chat_provider)) }
-            TextButton(onClick = { approvalDialog = true }) { Text(strings.get(R.string.chat_approval_settings)) }
-            TextButton(onClick = { sessions = true }, enabled = !state.active && !state.loading) { Text(strings.get(R.string.chat_sessions)) }
-            TextButton(onClick = { owner.newSession() }, enabled = !state.active && !state.loading) { Text(strings.get(R.string.chat_new)) }
-            TextButton(onClick = { deleting = true }, enabled = !state.active && !state.pending && !state.loading) {
-                Text(strings.get(R.string.chat_delete_session))
-            }
-        }
+    ChatWindowLayout { compact ->
+        ChatToolbar(compact, state, modelState.catalog.model(modelState.catalog.bindings.activeChatModelRef)?.label,
+            { if (modelState.catalog.providers.isEmpty()) settings = true else profilePicker = true },
+            onPlugins, { settings = true }, { approvalDialog = true }, { sessions = true },
+            { owner.newSession() }, { deleting = true })
         if (approvalSettings.mode == ApprovalMode.FULL_AUTO) {
-            Surface(
-                onClick = { approvalDialog = true },
-                color = MaterialTheme.colorScheme.errorContainer,
-                contentColor = MaterialTheme.colorScheme.onErrorContainer,
-                shape = MaterialTheme.shapes.small,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text(strings.get(R.string.chat_full_auto_banner), style = MaterialTheme.typography.labelLarge)
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        TextButton(onClick = {
-                            uiScope.launch {
-                                withContext(Dispatchers.IO) {
-                                    runCatching { host.approvalSettings.setMode(ApprovalMode.BALANCED) }
-                                }
-                            }
-                        }) {
-                            Text(strings.get(R.string.chat_full_auto_switch_balanced))
-                        }
-                        TextButton(onClick = { approvalDialog = true }) {
-                            Text(strings.get(R.string.chat_approval_settings))
-                        }
-                    }
-                }
+            ChatFullAutoBanner(compact, { approvalDialog = true }) {
+                uiScope.launch { withContext(Dispatchers.IO) { runCatching { host.approvalSettings.setMode(ApprovalMode.BALANCED) } } }
             }
         }
         if (state.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
-        state.error?.let { Text(strings.get(it), color = MaterialTheme.colorScheme.error) }
-        if (state.personaUnavailable) Text(strings.get(R.string.chat_persona_unavailable))
-        if (state.personaRecovered) Text(strings.get(R.string.chat_persona_recovered))
         LazyColumn(Modifier.weight(1f).fillMaxWidth(), state = listState, verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            if (state.personaUnavailable) item { Text(strings.get(R.string.chat_persona_unavailable)) }
+            if (state.personaRecovered) item { Text(strings.get(R.string.chat_persona_recovered)) }
             if (state.older != null && !state.active && !state.pending) item {
                 TextButton(onClick = { owner.older() }) { Text(strings.get(R.string.chat_older)) }
             }
@@ -269,70 +215,31 @@ internal fun ChatScreen(host: ThetaApplication, drafts: ChatComposerDrafts, resu
             }
             if (state.active) item { Text(strings.get(if (state.records.values.any { it.pending != null })
                 R.string.chat_tool_approval else R.string.chat_running)) }
-        }
-        if (state.pending && !state.active && state.records.values.none { it.pending != null }) {
-            TextButton(onClick = { launchTask { owner.continueSavedStep() } }) { Text(strings.get(R.string.chat_finish_saved)) }
-        }
-        if (state.active || state.pending) TextButton(onClick = { owner.stop() }) { Text(strings.get(R.string.chat_stop)) }
-        composer.error?.let { err ->
-            val errText = if (err == R.string.chat_image_limit) strings.get(err, MAX_USER_IMAGES_PER_MESSAGE) else strings.get(err)
-            Text(errText, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-        }
-        if (composer.images.isNotEmpty()) {
-            Text(
-                strings.get(R.string.chat_image_pending_count, composer.images.size, MAX_USER_IMAGES_PER_MESSAGE),
-                style = MaterialTheme.typography.labelMedium,
-            )
-            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                items(composer.images, key = { it.localId }) { item ->
-                    PendingImagePreview(
-                        item = item,
-                        enabled = !state.loading && !state.active && !state.pending && !modelState.saving,
-                        onRemove = {
-                            composer.images = composer.images.filterNot { it.localId == item.localId }
-                            composer.error = null
-                        },
-                    )
-                }
+            state.error?.let { error -> item { Text(strings.get(error), color = MaterialTheme.colorScheme.error) } }
+            if (state.pending && !state.active && state.records.values.none { it.pending != null }) item {
+                TextButton(onClick = { launchTask { owner.continueSavedStep() } }) { Text(strings.get(R.string.chat_finish_saved)) }
             }
+            composer.error?.let { error -> item {
+                Text(if (error == R.string.chat_image_limit) strings.get(error, MAX_USER_IMAGES_PER_MESSAGE) else strings.get(error),
+                    color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            } }
         }
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(
-                enabled = !state.loading && !state.active && !state.pending && !modelState.saving && composer.images.size < MAX_USER_IMAGES_PER_MESSAGE,
-                onClick = {
-                    composer.error = null
-                    pickerSession = state.sessionId
-                    photoPickerLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-                },
-            ) {
-                Text(strings.get(R.string.chat_image_add_photo))
-            }
-            OutlinedButton(
-                enabled = !state.loading && !state.active && !state.pending && !modelState.saving && composer.images.size < MAX_USER_IMAGES_PER_MESSAGE,
-                onClick = {
-                    composer.error = null
-                    pickerSession = state.sessionId
-                    cameraLauncher.launch(null)
-                },
-            ) {
-                Text(strings.get(R.string.chat_image_take_photo))
-            }
-        }
-        OutlinedTextField(value = composer.input, onValueChange = composer::edit,
-            label = { Text(strings.get(R.string.chat_message)) }, modifier = Modifier.fillMaxWidth(),
-            minLines = 1, maxLines = 5, enabled = !state.loading && !state.active && !state.pending && !modelState.saving)
-        Button(
-            onClick = {
+        ChatComposer(compact, state, modelState.saving, composer,
+            onGallery = {
+                composer.error = null
+                pickerSession = state.sessionId
+                photoPickerLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+            },
+            onCamera = { composer.error = null; pickerSession = state.sessionId; cameraLauncher.launch(null) },
+            onSend = {
                 val text = composer.input
                 val images = composer.images
                 composer.error = null
                 val receipt = drafts.receipt(requireNotNull(state.sessionId))
                 if (!modelState.saving) launchTask { owner.send(text, images, receipt) }
-            },
-            enabled = state.sessionId != null && (composer.input.isNotBlank() || composer.images.isNotEmpty()) && !state.loading && !state.active && !state.pending && !modelState.saving,
-            modifier = Modifier.fillMaxWidth(),
-        ) { Text(strings.get(R.string.chat_send)) }
+            }, onStop = { owner.stop() })
     }
+
     if (settings) ProviderScreen(host) { settings = false; owner.latest() }
     if (profilePicker) io.github.bytejuno.thetacore.provider.ChatModelPicker(modelSelection, !state.active && !state.pending && !state.loading,
         { profilePicker = false }, { profilePicker = false; settings = true })
