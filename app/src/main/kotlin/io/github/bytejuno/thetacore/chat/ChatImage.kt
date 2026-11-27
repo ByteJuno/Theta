@@ -5,8 +5,10 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import io.github.bytejuno.thetacore.R
 import io.github.bytejuno.thetacore.uiStrings
@@ -75,13 +77,27 @@ internal fun UserChatImage(blob: BlobRef, sessionId: String?, owner: ChatSession
 }
 
 @Composable
-internal fun PendingImagePreview(item: PendingUserImage, enabled: Boolean, onRemove: () -> Unit) {
+internal fun PendingImagePreview(item: PendingUserImage, enabled: Boolean, compact: Boolean = false, onRemove: () -> Unit) {
     val strings = uiStrings()
     var bitmap by remember(item.localId) { mutableStateOf<android.graphics.Bitmap?>(null) }
     LaunchedEffect(item.localId) {
         bitmap = withContext(Dispatchers.IO) { runCatching { decodeImage(item.bytes) }.getOrNull() }
     }
-    OutlinedCard(Modifier.width(96.dp)) {
+    if (compact) {
+        OutlinedCard {
+            Row(Modifier.padding(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.size(48.dp)) {
+                    bitmap?.let { image ->
+                        Image(image.asImageBitmap(), strings.get(R.string.chat_image_user_description),
+                            modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                    }
+                }
+                IconButton(onClick = onRemove, enabled = enabled) {
+                    Icon(painterResource(R.drawable.ic_chat_remove_image), strings.get(R.string.chat_image_remove))
+                }
+            }
+        }
+    } else OutlinedCard(Modifier.width(96.dp)) {
         Column(Modifier.padding(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             bitmap?.let { image ->
                 Image(
