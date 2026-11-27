@@ -24,6 +24,104 @@ class ChatScreenStateTest {
     private val session = "shared"
     private fun image(id: String) = PendingUserImage(id, "image/png", id.toByteArray())
 
+    private fun writeLegacyDraftFile(root: java.io.File, sessionId: String, version: String, text: String, images: List<PendingUserImage>) {
+        val dir = root.resolve("composer-drafts-v1").apply { mkdirs() }
+        val file = dir.resolve(UUID.nameUUIDFromBytes(sessionId.toByteArray()).toString())
+        java.io.DataOutputStream(file.outputStream().buffered()).use { out ->
+            out.writeUTF(version)
+            out.writeInt(text.length)
+            out.writeChars(text)
+            out.writeInt(images.size)
+            for (img in images) {
+                out.writeUTF(img.localId)
+                out.writeUTF(img.mimeType)
+                val bytes = img.bytes
+                out.writeInt(bytes.size)
+                out.write(bytes)
+            }
+        }
+    }
+
+    @Test fun corruptLegacyDraftIsIsolatedAcrossTwoReopensWhileDatabaseErrorsPropagate() {
+        val root = temp.newFolder()
+        val good = "good-session"
+        val bad = "bad-session"
+        val badHeader = "bad-header-session"
+        val removed = "removed-session"
+        AndroidAgentStore.open(root, BundledSQLiteDriver()).use { store ->
+            store.createHistory(good).close()
+            store.createHistory(bad).close()
+            store.createHistory(badHeader).close()
+        }
+        val legacyDir = root.resolve("composer-drafts-v1").apply { mkdirs() }
+        writeLegacyDraftFile(root, good, "v-good", "keep good", listOf(image("g1")))
+        val corruptBytes = byteArrayOf(0x00, 0x05, 0x41)
+        val corruptFile = legacyDir.resolve(UUID.nameUUIDFromBytes(bad.toByteArray()).toString())
+        corruptFile.writeBytes(corruptBytes)
+        val badHeaderFile = legacyDir.resolve(UUID.nameUUIDFromBytes(badHeader.toByteArray()).toString())
+        java.io.DataOutputStream(badHeaderFile.outputStream().buffered()).use { out ->
+            out.writeUTF("v-bad-header")
+            out.writeInt(999_999)
+        }
+        val badHeaderBytes = badHeaderFile.readBytes()
+        val orphanFile = legacyDir.resolve(UUID.nameUUIDFromBytes(removed.toByteArray()).toString())
+        orphanFile.writeBytes(byteArrayOf(1, 2, 3))
+
+        // First reopen migrates the healthy session, removes orphan, and preserves corrupt originals.
+        AndroidAgentStore.open(root, BundledSQLiteDriver()).use { store ->
+            val goodDraft = store.composerDrafts.read(good)
+            assertEquals("keep good", goodDraft.text)
+            assertEquals(listOf("g1"), goodDraft.images.map { it.id })
+            assertEquals("", store.composerDrafts.read(bad).text)
+            assertTrue(store.composerDrafts.read(bad).images.isEmpty())
+            assertEquals("", store.composerDrafts.read(badHeader).text)
+            assertTrue(corruptFile.isFile)
+            assertArrayEquals(corruptBytes, corruptFile.readBytes())
+            assertTrue(badHeaderFile.isFile)
+            assertArrayEquals(badHeaderBytes, badHeaderFile.readBytes())
+            assertFalse(orphanFile.exists())
+        }
+
+        // Second consecutive reopen also succeeds with corrupt originals still intact.
+        AndroidAgentStore.open(root, BundledSQLiteDriver()).use { store ->
+            val goodDraft = store.composerDrafts.read(good)
+            assertEquals("keep good", goodDraft.text)
+            assertEquals(listOf("g1"), goodDraft.images.map { it.id })
+            assertTrue(corruptFile.isFile)
+            assertArrayEquals(corruptBytes, corruptFile.readBytes())
+            assertTrue(badHeaderFile.isFile)
+            assertArrayEquals(badHeaderBytes, badHeaderFile.readBytes())
+        }
+
+        // Database read/write errors during migration must NOT be swallowed.
+        val dbFailRoot = temp.newFolder()
+        AndroidAgentStore.open(dbFailRoot, BundledSQLiteDriver()).use { it.createHistory(good).close() }
+        writeLegacyDraftFile(dbFailRoot, good, "v-fail", "must not swallow", emptyList())
+        fun failingDriver(sqlMatch: String) = object : androidx.sqlite.SQLiteDriver {
+            private val base = BundledSQLiteDriver()
+            override fun open(fileName: String): androidx.sqlite.SQLiteConnection {
+                val delegate = base.open(fileName)
+                return object : androidx.sqlite.SQLiteConnection by delegate {
+                    override fun prepare(sql: String): androidx.sqlite.SQLiteStatement {
+                        if (sql.contains(sqlMatch)) {
+                            throw androidx.sqlite.SQLiteException("simulated database error: $sqlMatch")
+                        }
+                        return delegate.prepare(sql)
+                    }
+                }
+            }
+        }
+        assertThrows(androidx.sqlite.SQLiteException::class.java) {
+            AndroidAgentStore.open(dbFailRoot, failingDriver("composer_parts"))
+        }
+        assertThrows(androidx.sqlite.SQLiteException::class.java) {
+            AndroidAgentStore.open(dbFailRoot, failingDriver("SELECT session_id FROM sessions"))
+        }
+        val preservedGood = dbFailRoot.resolve("composer-drafts-v1")
+            .resolve(UUID.nameUUIDFromBytes(good.toByteArray()).toString())
+        assertTrue(preservedGood.isFile)
+    }
+
     @Test fun crossPageReconcileClearsConsumedPartsKeepsUnsentImageAndProtectsNewerDraft() {
         val root = temp.newFolder()
         val otherSession = "other"

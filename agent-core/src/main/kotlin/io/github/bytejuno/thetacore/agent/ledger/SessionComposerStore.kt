@@ -70,7 +70,8 @@ class SessionComposerStore(private val database: AgentDatabase) {
     }
 
     fun save(session: String, draft: ComposerSnapshot, previousImages: List<String>, textChanged: Boolean = true) = database.transaction {
-        // A stale page can outlive its session. Never bootstrap a session while saving a draft.
+        // A stale page can outlive its session. Never bootstrap or resurrect a deleted session.
+        if (database.isSessionDeleted(session)) return@transaction
         db.prepare("SELECT 1 FROM sessions WHERE session_id=?").use {
             it.bindText(1, session)
             if (!it.step()) return@transaction
@@ -137,6 +138,14 @@ class SessionComposerStore(private val database: AgentDatabase) {
                 }
             }
         }
+    }
+
+    fun isSessionDeleted(session: String): Boolean = database.access {
+        database.isSessionDeleted(session)
+    }
+
+    fun deletedSessions(sessionIds: Collection<String>): Set<String> = database.access {
+        sessionIds.filter { database.isSessionDeleted(it) }.toSet()
     }
 
     fun consumed(session: String, version: String?, imageIds: Collection<String>): ComposerConsumption = database.access {

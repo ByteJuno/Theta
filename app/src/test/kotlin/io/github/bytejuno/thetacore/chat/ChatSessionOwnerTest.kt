@@ -21,6 +21,104 @@ import java.nio.file.Files
 import java.util.concurrent.atomic.AtomicInteger
 
 class ChatSessionOwnerTest {
+    @Test fun deletingSessionReleasesCachedDraftAndAttachmentsWhilePreservingOtherSessions() = runBlocking {
+        val root = Files.createTempDirectory("chat-draft-delete-lifecycle").toFile()
+        val f = fixture(root, AtomicInteger(), provider(tool = false))
+        try {
+            f.owner.open().join()
+            val keepId = requireNotNull(f.owner.state.value.sessionId)
+            f.owner.newSession().join()
+            val deleteId = requireNotNull(f.owner.state.value.sessionId)
+            assertNotEquals(keepId, deleteId)
+
+            val activePage = ChatComposerDrafts { f.store.composerDrafts }
+            val keepImg = PendingUserImage("keep-img", "image/png", byteArrayOf(7, 8, 9))
+            val deleteImg = PendingUserImage("del-img", "image/png", byteArrayOf(1, 2, 3, 4))
+            activePage[keepId].edit("unsent on other session")
+            activePage[keepId].images = listOf(keepImg)
+            val activeDeletedDraft = activePage[deleteId]
+            activeDeletedDraft.edit("delete me")
+            activeDeletedDraft.images = listOf(deleteImg)
+            activePage.checkpoint()
+
+            val oldPage = ChatComposerDrafts { f.store.composerDrafts }
+            val oldDeletedDraft = oldPage[deleteId]
+            val oldKeepDraft = oldPage[keepId]
+            assertEquals("delete me", oldDeletedDraft.input)
+            assertEquals(listOf("del-img"), oldDeletedDraft.images.map { it.localId })
+            assertEquals("unsent on other session", oldKeepDraft.input)
+
+            // Delete the current session; deletion succeeds and switches back to keepId.
+            f.owner.deleteCurrentSession().join()
+            assertFalse(deleteId in f.store.sessionIds())
+            assertEquals(keepId, f.owner.state.value.sessionId)
+
+            // Reconciling the active page after deletion releases the deleted draft and attachments
+            // while preserving unsent edits and attachments on the other session.
+            activePage.reconcile(f.owner.state.value.sessionId, f.owner.state.value.acceptedDraft)
+            assertFalse(activePage.hasCachedDraft(deleteId))
+            assertTrue(activePage.hasCachedDraft(keepId))
+            assertEquals("", activeDeletedDraft.input)
+            assertTrue(activeDeletedDraft.images.isEmpty())
+            assertEquals("", activePage[deleteId].input)
+            assertTrue(activePage[deleteId].images.isEmpty())
+            assertFalse(activePage.hasCachedDraft(deleteId))
+            assertEquals("unsent on other session", activePage[keepId].input)
+            assertEquals(listOf("keep-img"), activePage[keepId].images.map { it.localId })
+            assertArrayEquals(byteArrayOf(7, 8, 9), activePage[keepId].images.single().bytes)
+
+            // An old page attempting late edits and checkpoint cannot write back to the deleted session,
+            // releases its cached deleted draft/attachments, and still preserves other sessions' edits.
+            oldDeletedDraft.edit("late stale write")
+            oldDeletedDraft.images = listOf(PendingUserImage("late-img", "image/png", byteArrayOf(5, 6)))
+            oldKeepDraft.edit("updated on other session")
+            oldPage.checkpoint()
+
+            assertFalse(oldPage.hasCachedDraft(deleteId))
+            assertTrue(oldPage.hasCachedDraft(keepId))
+            assertEquals("", oldDeletedDraft.input)
+            assertTrue(oldDeletedDraft.images.isEmpty())
+            val storedDeleted = f.store.composerDrafts.read(deleteId)
+            assertNull(storedDeleted.version)
+            assertEquals("", storedDeleted.text)
+            assertTrue(storedDeleted.images.isEmpty())
+            val storedKept = f.store.composerDrafts.read(keepId)
+            assertEquals("updated on other session", storedKept.text)
+            assertEquals(listOf("keep-img"), storedKept.images.map { it.id })
+            assertTrue(f.failures.toString(), f.failures.isEmpty())
+        } finally { f.close(); root.deleteRecursively() }
+    }
+
+    @Test fun blockedSessionDeletionRetainsCachedDraftAndAttachments() = runBlocking {
+        val root = Files.createTempDirectory("chat-draft-delete-blocked").toFile()
+        val executions = AtomicInteger()
+        val f = fixture(root, executions, provider(), tool(executions, ToolResult("unknown", effect = ToolEffect.UNKNOWN)))
+        try {
+            f.owner.open().join()
+            f.owner.send("trigger unknown").join()
+            await { f.owner.state.value.records.values.any { it.pending != null } }
+            val call = f.owner.state.value.records.values.single()
+            f.owner.decide(call.callId, call.pending!!.id, Decision.ALLOW_ONCE).join()
+            await { !f.owner.state.value.active }
+            val id = requireNotNull(f.owner.state.value.sessionId)
+
+            val drafts = ChatComposerDrafts { f.store.composerDrafts }
+            val img = PendingUserImage("blocked-img", "image/png", byteArrayOf(3, 4))
+            drafts[id].edit("keep when blocked")
+            drafts[id].images = listOf(img)
+            drafts.checkpoint()
+
+            f.owner.deleteCurrentSession().join()
+            assertEquals(R.string.chat_delete_recovery_required, f.owner.state.value.error)
+            assertTrue(id in f.store.sessionIds())
+
+            drafts.reconcile(f.owner.state.value.sessionId, f.owner.state.value.acceptedDraft)
+            assertTrue(drafts.hasCachedDraft(id))
+            assertEquals("keep when blocked", drafts[id].input)
+            assertEquals(listOf("blocked-img"), drafts[id].images.map { it.localId })
+        } finally { f.close(); root.deleteRecursively() }
+    }
+
     @Test fun twoPagesConsecutiveSendsClearReturnedDraftAndBlockDuplicateHistory() = runBlocking {
         val root = Files.createTempDirectory("chat-draft-two-pages-double-send").toFile()
         val model = visionProvider()

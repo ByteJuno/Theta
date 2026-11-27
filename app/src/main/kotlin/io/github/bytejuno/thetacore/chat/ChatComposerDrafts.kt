@@ -1,16 +1,21 @@
 package io.github.bytejuno.thetacore.chat
 
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
-import androidx.compose.runtime.Composable
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import io.github.bytejuno.thetacore.agent.ledger.ComposerConsumption
 import io.github.bytejuno.thetacore.agent.ledger.ComposerImage
 import io.github.bytejuno.thetacore.agent.ledger.ComposerSnapshot
 import io.github.bytejuno.thetacore.agent.ledger.SessionComposerStore
 import java.util.UUID
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.withContext
 
 internal data class DraftIdentitySnapshot(val sessionId: String, val textVersion: String, val imageIds: List<String>)
 
@@ -55,12 +60,47 @@ internal class ChatComposerDrafts(private val store: () -> SessionComposerStore?
         id?.let { sessionId -> { receipt -> reconcile(sessionId, receipt) } },
     )
 
-    operator fun get(id: String?) = sessions.getOrPut(id) {
-        val row = id?.let { requireNotNull(store()).read(it) }
-        createDraft(id, row?.text.orEmpty(), row?.version ?: UUID.randomUUID().toString()).apply {
+    operator fun get(id: String?): ChatComposerDraft {
+        sessions[id]?.let { return it }
+        val activeStore = id?.let { requireNotNull(store()) }
+        if (id != null && activeStore != null && activeStore.isSessionDeleted(id)) {
+            return ChatComposerDraft()
+        }
+        val row = id?.let { requireNotNull(activeStore).read(it) }
+        return createDraft(id, row?.text.orEmpty(), row?.version ?: UUID.randomUUID().toString()).apply {
             images = row?.images.orEmpty().map { PendingUserImage(it.id, it.mime, it.bytes) }
+            sessions[id] = this
             saved[id] = identity()
         }
+    }
+
+    fun isLiveDraft(id: String?, draft: ChatComposerDraft): Boolean = sessions[id] === draft
+
+    fun hasCachedDraft(id: String): Boolean = id in sessions || id in saved
+
+    fun cachedSessionIds(): Set<String> = (sessions.keys + saved.keys).filterNotNull().toSet()
+
+    fun evict(id: String) {
+        sessions.remove(id)?.let { draft ->
+            draft.input = ""
+            draft.images = emptyList()
+            draft.error = null
+        }
+        saved.remove(id)
+    }
+
+    fun evictDeleted(deletedIds: Set<String>) {
+        deletedIds.forEach(::evict)
+    }
+
+    fun readDeleted(ids: Collection<String>): Set<String> {
+        if (ids.isEmpty()) return emptySet()
+        return store()?.deletedSessions(ids).orEmpty()
+    }
+
+    fun pruneDeleted() {
+        val ids = cachedSessionIds()
+        if (ids.isNotEmpty()) evictDeleted(readDeleted(ids))
     }
 
     // Empty text after acknowledgment can have the same receipt version as the submitted text.
@@ -119,6 +159,7 @@ internal class ChatComposerDrafts(private val store: () -> SessionComposerStore?
     }
 
     fun reconcile(id: String?, receipt: ChatDraftReceipt? = null) {
+        pruneDeleted()
         val targets = buildSet {
             if (id != null && id in sessions) add(id)
             if (receipt != null && receipt.sessionId in sessions) add(receipt.sessionId)
@@ -129,6 +170,7 @@ internal class ChatComposerDrafts(private val store: () -> SessionComposerStore?
     }
 
     fun checkpoint(): Int {
+        pruneDeleted()
         for ((id, draft) in sessions) {
             val identity = draft.identity()
             val baseline = saved[id]
@@ -154,9 +196,44 @@ internal class ChatComposerDrafts(private val store: () -> SessionComposerStore?
     }
 }
 
+private data class DraftSyncKey(
+    val sessionId: String?,
+    val acceptedMessages: Long,
+    val acceptedDraft: ChatDraftReceipt?,
+    val draftSync: Long,
+)
+
+internal suspend fun reconcileDraftsAsync(
+    drafts: ChatComposerDrafts,
+    currentId: String?,
+    receipt: ChatDraftReceipt?,
+) {
+    val cached = drafts.cachedSessionIds()
+    val targets = buildSet {
+        if (currentId != null && currentId in cached) add(currentId)
+        if (receipt != null && receipt.sessionId in cached) add(receipt.sessionId)
+    }
+    if (cached.isEmpty() && targets.isEmpty()) return
+    val snapshots = drafts.identities(targets)
+    val (deleted, consumed) = withContext(Dispatchers.IO) {
+        drafts.readDeleted(cached) to drafts.readConsumed(snapshots)
+    }
+    drafts.evictDeleted(deleted)
+    drafts.applyConsumed(consumed, receipt)
+}
+
 @Composable
 internal fun rememberChatComposerDrafts(owner: ChatSessionOwner): ChatComposerDrafts {
-    return rememberSaveable(saver = ChatComposerDrafts.saver { owner.composerStore }) {
+    val drafts = rememberSaveable(saver = ChatComposerDrafts.saver { owner.composerStore }) {
         ChatComposerDrafts { owner.composerStore }
     }
+    LaunchedEffect(owner, drafts) {
+        owner.state
+            .map { DraftSyncKey(it.sessionId, it.acceptedMessages, it.acceptedDraft, it.draftSync) }
+            .distinctUntilChanged()
+            .collect { key ->
+                reconcileDraftsAsync(drafts, key.sessionId, key.acceptedDraft)
+            }
+    }
+    return drafts
 }

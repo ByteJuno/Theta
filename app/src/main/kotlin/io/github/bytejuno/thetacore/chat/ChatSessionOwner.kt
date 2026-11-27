@@ -186,6 +186,7 @@ internal class ChatSessionOwner(
         }
         val sessions = requireNotNull(host.sessionStore).sessionPreviews()
         selectInternal(sessions.firstOrNull()?.sessionId, sessions)
+        mutable.update { it.copy(draftSync = it.draftSync + 1) }
     }
     private suspend fun selectInternal(id: String?, sessions: List<SessionPreview>,
         admit: (SqliteRunHistory) -> Unit = {}) {
@@ -201,6 +202,7 @@ internal class ChatSessionOwner(
         val next = try {
             prepareSelectedHistory(disk, host)
             val initial = ChatState(loading = false, acceptedDraft = mutable.value.acceptedDraft,
+                draftSync = mutable.value.draftSync,
                 sessions = (listOf(store.sessionPreview(key)) + sessions).distinctBy { it.sessionId },
                 moreSessionsAvailable = sessions.size == 50, sessionId = key)
             pageState(disk, null)(initial).also { admit(disk) }

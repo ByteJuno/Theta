@@ -114,10 +114,10 @@ internal fun ChatScreen(host: ThetaApplication, drafts: ChatComposerDrafts, resu
                 }
                 added to invalid
             }
-            if (loaded.first.isNotEmpty()) {
+            if (loaded.first.isNotEmpty() && drafts.isLiveDraft(pickerSession, target)) {
                 target.images = (target.images + loaded.first).take(MAX_USER_IMAGES_PER_MESSAGE)
             }
-            if (loaded.second) target.error = R.string.chat_image_invalid
+            if (loaded.second && drafts.isLiveDraft(pickerSession, target)) target.error = R.string.chat_image_invalid
         }
     }
     val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicturePreview()) { bitmap ->
@@ -132,26 +132,17 @@ internal fun ChatScreen(host: ThetaApplication, drafts: ChatComposerDrafts, resu
             val captured = withContext(Dispatchers.IO) {
                 runCatching { encodeCameraBitmapToPng(bitmap) }.getOrNull()
             }
-            if (captured != null) {
+            if (captured != null && drafts.isLiveDraft(pickerSession, target)) {
                 target.images = (target.images + PendingUserImage(mimeType = captured.mimeType, bytes = captured.bytes))
                     .take(MAX_USER_IMAGES_PER_MESSAGE)
-            } else {
+            } else if (captured == null && drafts.isLiveDraft(pickerSession, target)) {
                 target.error = R.string.chat_image_invalid
             }
         }
     }
     LaunchedEffect(owner) { owner.open() }
     LaunchedEffect(drafts, state.sessionId, state.acceptedMessages, state.acceptedDraft, state.draftSync, resumed) {
-        val currentId = state.sessionId
-        val receipt = state.acceptedDraft
-        val targets = buildSet {
-            if (currentId != null) add(currentId)
-            if (receipt != null) add(receipt.sessionId)
-        }
-        if (targets.isEmpty()) return@LaunchedEffect
-        val snapshots = drafts.identities(targets)
-        val consumed = withContext(Dispatchers.IO) { drafts.readConsumed(snapshots) }
-        drafts.applyConsumed(consumed, receipt)
+        reconcileDraftsAsync(drafts, state.sessionId, state.acceptedDraft)
     }
     Column(Modifier.fillMaxSize().imePadding().padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(
