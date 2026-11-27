@@ -87,6 +87,7 @@ internal class PluginRuntime(val context: HostPluginContext, val version: Long) 
 
 internal class PluginManager(context: Context) {
     private val app = context.applicationContext
+    val outputSurfaces = PluginOutputSurfaces.android(executionBudget)
     private companion object {
         // Multiple manager instances must never multiply the process execution allowance.
         val executionBudget = PluginExecutionBudget()
@@ -690,6 +691,7 @@ internal class PluginManager(context: Context) {
                 manifest.id, app, dataDir, host, executionBudget, settings,
                 version = manifest.versionCode.toString(),
                 toolBridge = pluginToolBridge,
+                outputRouter = outputSurfaces,
             ) { faultContext ->
                 // Enqueue only: load/restore already holds operations. Never wait here.
                 postPluginOperation(host, Dispatchers.Main, operations, ::logHostFailure) {
@@ -842,6 +844,7 @@ internal class HostPluginContext(
     private val settings: PluginSettingsStorage,
     private val version: String = "1",
     private val toolBridge: PluginToolBridge? = null,
+    outputRouter: PluginOutputSurfaces? = null,
     onFault: (HostPluginContext) -> Unit,
 ) : PluginContext {
     private val toolFailures = PluginToolFailureWindow()
@@ -874,16 +877,19 @@ internal class HostPluginContext(
         } catch (error: Throwable) { logHostFailure(error) }
     }
     private fun publicationSnapshot(): List<Extension> = publication.current()
+    private val outputBinding = outputRouter?.binding(pluginId) { error -> faults.report(error) }
     private val registrations = PluginRegistrations.tracked<Extension>(publication::update) { entries, closed ->
+        outputBinding?.update(entries, closed)
         toolBridge?.onRegistrationsChanged(pluginId, this, entries, closed)
     }
     private val closeLock = Any()
     private var pendingCleanup: List<() -> Unit>? = null
-    val faults = PluginFaultBoundary(::closeAdmission, { onFault(this) }, ::logHostFailure)
+    val faults: PluginFaultBoundary = PluginFaultBoundary(::closeAdmission, { onFault(this) }, ::logHostFailure)
     override val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default + faults.handler)
 
     fun activateExtensions() {
         extensionsActive = true
+        outputBinding?.activate()
         extensions = publicationSnapshot()
         synchronizeExtensions()
         toolBridge?.activatePlugin(pluginId, this)

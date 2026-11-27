@@ -37,7 +37,8 @@ private const val TASK_NOTIFICATION = 8301
 private const val WAITING_NOTIFICATION = 8302
 private const val EXECUTION_ID = "execution_id"
 
-internal class AndroidChatTaskPresence(private val context: Context) : ChatTaskPresence {
+internal class AndroidChatTaskPresence(private val context: Context,
+    private val output: (io.github.bytejuno.thetacore.sdk.TaskProgress?) -> Unit) : ChatTaskPresence {
     private val gate = Mutex()
     private var executionId: String? = null
     private var progress: ChatTaskProgress? = null
@@ -73,6 +74,7 @@ internal class AndroidChatTaskPresence(private val context: Context) : ChatTaskP
                 throw ChatTaskPresenceException(error)
             }
         }
+        output(progress.outputTask(executionId))
     } }
 
     override suspend fun finish(executionId: String, waiting: ChatTaskProgress?) = withContext(Dispatchers.Main.immediate) { gate.withLock {
@@ -83,6 +85,7 @@ internal class AndroidChatTaskPresence(private val context: Context) : ChatTaskP
         ready = null
         stopService()
         if (waiting != null) attention(waiting) else notifications.cancel(WAITING_NOTIFICATION)
+        output(waiting?.outputTask(executionId))
     } }
 
     fun attach(candidate: ChatTaskService, token: String?): Boolean {
