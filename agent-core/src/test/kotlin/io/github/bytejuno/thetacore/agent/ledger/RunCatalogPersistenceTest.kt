@@ -124,6 +124,8 @@ class RunCatalogPersistenceTest {
         openDb(file).use { db ->
             SqliteRunHistory.create(db, "existing").close()
             assertTrue(PrivateImageStore(db).claim("existing", "img-1"))
+            db.connection.execute("DROP TABLE composer_chunks")
+            db.connection.execute("DROP TABLE composer_parts")
             db.connection.execute("DROP TABLE run_catalog_chunks")
             db.connection.execute("DROP TABLE run_catalogs")
             db.connection.execute("PRAGMA user_version=5")

@@ -9,7 +9,7 @@ import java.nio.ByteBuffer
 import java.util.Locale
 import java.util.UUID
 
-internal const val MAX_USER_IMAGES_PER_MESSAGE = 4
+internal const val MAX_USER_IMAGES_PER_MESSAGE = ImageLimits.PER_MESSAGE
 internal const val IMAGE_ONLY_GOAL_FALLBACK = "[image]"
 internal val ALLOWED_USER_IMAGE_MIMES = setOf("image/jpeg", "image/png", "image/webp")
 

@@ -132,6 +132,9 @@ private fun ThetaCoreApp(
     LaunchedEffect(incoming) { if (incoming != null) showPlugins = true }
     val strings = uiStrings()
     val context = LocalContext.current
+    val application = context.applicationContext as ThetaApplication
+    // The plugin route replaces ChatScreen within this same Activity.
+    val drafts = io.github.bytejuno.thetacore.chat.rememberChatComposerDrafts(application.chat)
     val colors = if (isSystemInDarkTheme()) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
     val scope = rememberCoroutineScope()
     var openPage by remember { mutableStateOf<SettingsPage?>(null) }
@@ -274,7 +277,7 @@ private fun ThetaCoreApp(
                     BackHandler { leavePage() }
                     activePage.Content()
                 } else if (!showPlugins) {
-                    io.github.bytejuno.thetacore.chat.ChatScreen(context.applicationContext as ThetaApplication) { showPlugins = true }
+                    io.github.bytejuno.thetacore.chat.ChatScreen(application, drafts, resumed) { showPlugins = true }
                 } else {
                     BackHandler { showPlugins = false }
                     TextButton(onClick = { showPlugins = false }) { Text(strings.get(R.string.chat_back)) }
