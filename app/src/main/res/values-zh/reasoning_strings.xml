@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="reasoning_level_adjusted">此模型不支持“%1$s”思考档位，本次运行使用“%2$s”。</string>
+</resources>

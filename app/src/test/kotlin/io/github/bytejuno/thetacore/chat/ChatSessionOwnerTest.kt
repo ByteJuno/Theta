@@ -21,6 +21,42 @@ import java.nio.file.Files
 import java.util.concurrent.atomic.AtomicInteger
 
 class ChatSessionOwnerTest {
+    @Test fun loweredEffortNoticeSurvivesToolLoopAndSavedEditsOnlyAffectNextRun() = runBlocking {
+        val root = Files.createTempDirectory("chat-reasoning-selection").toFile()
+        val delegate = provider()
+        val efforts = java.util.concurrent.CopyOnWriteArrayList<String?>()
+        val model = object : ModelProvider by delegate {
+            override fun chat(request: ChatRequest, auth: Credentials): Flow<ModelEvent> {
+                efforts += request.reasoningLevel
+                return delegate.chat(request, auth)
+            }
+        }
+        var selected = "medium"
+        var snapshots = 0
+        val f = fixture(root, AtomicInteger(), model, snapshot = {
+            snapshots++
+            OpenAiRunSnapshot(OpenAiProviderSettings("test", "https://example.invalid/v1", "model",
+                OpenAiParameters(reasoningLevel = selected), reasoningLevels = listOf("low", "high")), ApiKeyCredentials("test-key"))
+        })
+        try {
+            f.owner.open().join(); f.owner.send("use a tool").join()
+            await { f.owner.state.value.records.values.any { it.pending != null } }
+            assertEquals(ReasoningLevelAdjustment("medium", "low"), f.owner.state.value.reasoningAdjustment)
+            selected = "high"
+            val record = f.owner.state.value.records.values.single()
+            f.owner.decide(record.callId, record.pending!!.id, Decision.ALLOW_ONCE).join()
+            await { !f.owner.state.value.active }
+            assertEquals(listOf("low", "low"), efforts.toList())
+            assertEquals(1, snapshots)
+            assertEquals(ReasoningLevelAdjustment("medium", "low"), f.owner.state.value.reasoningAdjustment)
+            f.owner.send("new run").join(); await { !f.owner.state.value.active }
+            assertEquals(listOf("low", "low", "high"), efforts.toList())
+            assertNull(f.owner.state.value.reasoningAdjustment)
+            assertEquals(2, snapshots)
+            assertTrue(f.failures.toString(), f.failures.isEmpty())
+        } finally { f.close(); root.deleteRecursively() }
+    }
+
     @Test fun deletingSessionReleasesCachedDraftAndAttachmentsWhilePreservingOtherSessions() = runBlocking {
         val root = Files.createTempDirectory("chat-draft-delete-lifecycle").toFile()
         val f = fixture(root, AtomicInteger(), provider(tool = false))

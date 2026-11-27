@@ -18,13 +18,18 @@ class OpenAiProviderSettings(
     val parameters: OpenAiParameters = OpenAiParameters(),
     val compat: OpenAiChatConfig.Compat = OpenAiChatConfig.Compat(),
     systemPrompt: String? = null,
+    reasoningLevels: List<String>? = null,
 ) {
     val systemPrompt: String? = systemPrompt?.trim()?.takeIf { it.isNotEmpty() }
+    val reasoningLevels: List<String>? = reasoningLevels?.let { Collections.unmodifiableList(ArrayList(it)) }
 
     init {
         require(providerId.matches(Regex("[A-Za-z0-9._-]{1,128}"))) { "Invalid provider identifier" }
         require(model.isNotBlank() && model.length <= 256) { "Invalid model name" }
         require(baseUrl.length <= 4096) { "Invalid provider URL" }
+        require(this.reasoningLevels == null || (this.reasoningLevels.size <= 16 &&
+            this.reasoningLevels.distinct().size == this.reasoningLevels.size &&
+            this.reasoningLevels.all { it.matches(Regex("[A-Za-z0-9_-]{1,64}")) })) { "Invalid reasoning levels" }
         require(this.systemPrompt == null || this.systemPrompt.length <= MAX_SYSTEM_PROMPT_CHARS) {
             "Invalid system prompt length"
         }
@@ -81,16 +86,21 @@ fun validApiKey(token: String): Boolean = token.length in 1..16384 && token.all 
  * inside a running loop. Updates/deletion affect future snapshots only. Adapters still request
  * Credentials on every attempt (2.12), rather than caching them in the provider. */
 class OpenAiRunSnapshot(
-    val settings: OpenAiProviderSettings,
+    settings: OpenAiProviderSettings,
     private val credentials: Credentials,
     val protocol: String = "openai-chat",
     val imageSnapshot: OpenAiRunSnapshot? = null,
 ) {
+    private val requestedSettings = settings
+    val settings: OpenAiProviderSettings = settings.resolveReasoning()
+    val reasoningAdjustment: ReasoningLevelAdjustment? = settings.parameters.reasoningLevel
+        ?.takeIf { it != this.settings.parameters.reasoningLevel }
+        ?.let { ReasoningLevelAdjustment(it, this.settings.parameters.reasoningLevel) }
     constructor(settings: OpenAiProviderSettings, credentials: ApiKeyCredentials) : this(settings, credentials as Credentials)
 
     init { require(protocol in setOf("openai-chat", "openai-responses", "anthropic")) { "Protocol is not enabled" } }
 
-    fun withImageSnapshot(image: OpenAiRunSnapshot?) = OpenAiRunSnapshot(settings, credentials, protocol, image)
+    fun withImageSnapshot(image: OpenAiRunSnapshot?) = OpenAiRunSnapshot(requestedSettings, credentials, protocol, image)
 
     fun target(
         transport: ModelTransport = OkHttpModelTransport(if (protocol == "anthropic") ModelAuthentication.ANTHROPIC else ModelAuthentication.BEARER),

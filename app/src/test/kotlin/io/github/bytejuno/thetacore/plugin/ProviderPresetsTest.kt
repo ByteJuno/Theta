@@ -169,7 +169,7 @@ class ProviderPresetsTest {
                 assertEquals("model", template.models.single().id)
                 assertNull(template.models.single().contextWindow)
                 assertNull(template.models.single().maxOutputTokens)
-                assertEquals(emptyList<String>(), template.models.single().reasoningLevels)
+                assertNull(template.models.single().reasoningLevels)
                 assertNull(template.models.single().defaultReasoningLevel)
             }
         } finally {

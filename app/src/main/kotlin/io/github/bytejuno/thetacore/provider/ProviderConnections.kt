@@ -31,6 +31,7 @@ data class EnabledModel(
     // Preserve the adapter identity of migrated profiles for replay compatibility.
     val runtimeProviderId: String? = null,
     val legacyImageSettings: OpenAiProviderSettings? = null,
+    val reasoningLevels: List<String>? = null,
 ) {
     init {
         require(modelId.isNotBlank() && modelId.length <= 256)
@@ -58,15 +59,16 @@ internal class ConnectionRecord(val connection: ProviderConnection, val models: 
     }
     fun settings(model: EnabledModel) = OpenAiProviderSettings(
         model.runtimeProviderId ?: connection.providerId, connection.baseUrl, model.modelId,
-        model.parameters, model.compat ?: connection.compat, model.systemPrompt,
+        model.parameters, model.compat ?: connection.compat, model.systemPrompt, model.reasoningLevels,
     )
     fun snapshot(model: EnabledModel, image: Boolean = false): OpenAiRunSnapshot {
         val imageSettings = model.legacyImageSettings?.takeIf { image }
         val resolved = if (imageSettings == null) settings(model) else OpenAiProviderSettings(
             imageSettings.providerId, connection.baseUrl, model.modelId, imageSettings.parameters,
-            imageSettings.compat, imageSettings.systemPrompt)
+            imageSettings.compat, imageSettings.systemPrompt, imageSettings.reasoningLevels)
         val effective = if (connection.protocol == "openai-chat") resolved else OpenAiProviderSettings(
-            resolved.providerId, resolved.baseUrl, resolved.model, resolved.parameters, systemPrompt = resolved.systemPrompt)
+            resolved.providerId, resolved.baseUrl, resolved.model, resolved.parameters, systemPrompt = resolved.systemPrompt,
+            reasoningLevels = resolved.reasoningLevels)
         return OpenAiRunSnapshot(effective,
         if (connection.noAuth) NoAuthCredentials else ApiKeyCredentials(key), protocol = connection.protocol)
     }
@@ -101,7 +103,7 @@ internal object ProviderConnectionsCodec {
         old.profiles.map { p -> ConnectionRecord(
             ProviderConnection(p.id, p.displayName, p.settings.baseUrl, noAuth = p.noAuth, compat = p.settings.compat),
             listOf(EnabledModel(p.settings.model, systemPrompt = p.settings.systemPrompt, parameters = p.settings.parameters,
-                runtimeProviderId = p.settings.providerId)), p.key,
+                runtimeProviderId = p.settings.providerId, reasoningLevels = p.settings.reasoningLevels)), p.key,
         ) }, ModelBindings(ModelRef(old.active.id, old.active.settings.model)),
     )
 
@@ -159,7 +161,8 @@ internal object ProviderConnectionsCodec {
                     m.getValue("chat").jsonPrimitive.boolean, m.getValue("image").jsonPrimitive.boolean,
                     if (m.getValue("overrideCompat").jsonPrimitive.boolean) settings.compat else null,
                     m["system"]?.jsonPrimitive?.content, settings.parameters, m["runtimeProvider"]?.jsonPrimitive?.content,
-                    m["legacyImage"]?.jsonObject?.let { ProviderSettingsCodec.decodeSettings(it, m["imageSystem"]?.jsonPrimitive?.content) })
+                    m["legacyImage"]?.jsonObject?.let { ProviderSettingsCodec.decodeSettings(it, m["imageSystem"]?.jsonPrimitive?.content) },
+                    settings.reasoningLevels)
             }
             if (c.noAuth) require(p["key"] == null || p["key"]?.jsonPrimitive?.content == "")
             ConnectionRecord(c, models, if (c.noAuth) "" else p.getValue("key").jsonPrimitive.content)

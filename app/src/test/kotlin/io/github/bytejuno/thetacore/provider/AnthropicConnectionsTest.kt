@@ -1,11 +1,15 @@
 package io.github.bytejuno.thetacore.provider
 
 import io.github.bytejuno.thetacore.agent.provider.anthropic.AnthropicProvider
+import io.github.bytejuno.thetacore.agent.provider.anthropic.AnthropicCodec
+import io.github.bytejuno.thetacore.agent.provider.anthropic.AnthropicConfig
+import io.github.bytejuno.thetacore.agent.protocol.*
 import io.github.bytejuno.thetacore.agent.provider.openai.OpenAiChatProvider
 import io.github.bytejuno.thetacore.agent.provider.openai.OpenAiParameters
 import io.github.bytejuno.thetacore.plugin.*
 import io.github.bytejuno.thetacore.storage.AesGcmSecretCipher
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.*
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
@@ -15,6 +19,54 @@ import javax.crypto.KeyGenerator
 class AnthropicConnectionsTest {
     @get:Rule val temp = TemporaryFolder()
     private fun cipher() = KeyGenerator.getInstance("AES").apply { init(256) }.generateKey().let { key -> AesGcmSecretCipher("anthropic") { key } }
+
+    @Test fun unsupportedPresetEffortIsLoweredBeforeSubmissionAfterColdRead() {
+        val raw = """{"id":"claude","name":"Claude","protocol":"anthropic","baseUrl":"https://example.invalid/v1","models":[{"id":"m","reasoningLevels":["low","high"],"defaultReasoningLevel":"high"}]}"""
+        val template = parseProviderTemplate("pack", "Pack", "1", "providers/claude.json", raw.toByteArray())
+        val selected = anthropicTemplateModel(template, "m").let {
+            it.copy(parameters = anthropicParameters(it.parameters, effort = "medium"))
+        }
+        assertEquals(listOf("low", "high"), selected.reasoningLevels)
+        val dir = temp.newFolder(); val cipher = cipher()
+        val connection = ProviderConnection(template.id, template.name, template.baseUrl, template.protocol.wire)
+        OpenAiSettingsStore(dir, cipher).saveProvider(connection, listOf(selected), "key")
+        val cold = OpenAiSettingsStore(dir, cipher)
+        cold.selectChatModel(ModelRef(template.id, "m"))
+        val restored = cold.readProviderCatalog().providers.single().models.single()
+        assertEquals(listOf("low", "high"), restored.reasoningLevels)
+        assertEquals("medium", restored.parameters.reasoningLevel)
+        val frozen = cold.snapshotForNewRun()
+        assertEquals(listOf("low", "high"), frozen.settings.reasoningLevels)
+        assertEquals("medium", frozen.reasoningAdjustment?.requested)
+        assertEquals("low", frozen.reasoningAdjustment?.effective)
+        val request = frozen.request { messages = listOf(message(Role.USER, textPart("hello"))) }
+        val body = Json.parseToJsonElement(AnthropicCodec(AnthropicConfig(template.id, template.baseUrl)).encode(request)).jsonObject
+        assertEquals("low", body.getValue("output_config").jsonObject.getValue("effort").jsonPrimitive.content)
+        cold.saveProvider(connection, listOf(restored.copy(reasoningLevels = listOf("medium", "high"))), "")
+        assertEquals("medium", cold.snapshotForNewRun().request().reasoningLevel)
+        assertEquals("low", frozen.request().reasoningLevel)
+    }
+
+    @Test fun absentAndEmptyPresetCapabilitiesRemainDistinctAfterColdRead() {
+        for (metadata in listOf("", "null", "[]")) {
+            val field = if (metadata.isEmpty()) "" else ",\"reasoningLevels\":$metadata"
+            val raw = """{"id":"claude","name":"Claude","protocol":"anthropic","baseUrl":"https://example.invalid/v1","models":[{"id":"m"$field}]}"""
+            val template = parseProviderTemplate("pack", "Pack", "1", "providers/claude.json", raw.toByteArray())
+            val model = anthropicTemplateModel(template, "m").copy(parameters = OpenAiParameters(reasoningLevel = "medium"))
+            val dir = temp.newFolder(); val cipher = cipher()
+            OpenAiSettingsStore(dir, cipher).saveProvider(ProviderConnection("claude", "Claude", template.baseUrl, "anthropic"), listOf(model), "key")
+            val snapshot = OpenAiSettingsStore(dir, cipher).snapshotForNewRun()
+            if (metadata == "[]") {
+                assertEquals(emptyList<String>(), snapshot.settings.reasoningLevels)
+                assertNull(snapshot.request().reasoningLevel)
+                assertNotNull(snapshot.reasoningAdjustment)
+            } else {
+                assertNull(snapshot.settings.reasoningLevels)
+                assertEquals("medium", snapshot.request().reasoningLevel)
+                assertNull(snapshot.reasoningAdjustment)
+            }
+        }
+    }
 
     @Test fun thinkingOptionsAndTemplateDefaultsPreserveAllOtherParameters() {
         val original = OpenAiParameters(123, 0.5, 0.8, "low", false, listOf("stop"))
