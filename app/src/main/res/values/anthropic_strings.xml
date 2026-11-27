@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="anthropic_protocol">Anthropic Messages</string>
+    <string name="anthropic_hint">Supports Claude chat, image input and thinking replay. Enter an API key and a base URL ending in /v1. Image generation is unavailable.</string>
+    <string name="anthropic_max_tokens">Maximum output tokens</string>
+    <string name="anthropic_tokens_hint">Leave blank for 4096 tokens. Invalid input keeps the last valid value.</string>
+    <string name="anthropic_tokens_invalid">Enter a positive whole number. The last valid value is retained.</string>
+    <string name="anthropic_effort">Thinking effort</string>
+    <string name="anthropic_effort_default">Model default</string>
+    <string name="anthropic_effort_low">Low</string>
+    <string name="anthropic_effort_medium">Medium</string>
+    <string name="anthropic_effort_high">High</string>
+    <string name="anthropic_effort_max">Maximum</string>
+    <string name="anthropic_effort_hint">Selecting an effort enables adaptive thinking. Available levels depend on the model.</string>
+</resources>

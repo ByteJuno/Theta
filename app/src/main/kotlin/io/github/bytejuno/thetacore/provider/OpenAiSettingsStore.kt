@@ -244,7 +244,8 @@ class OpenAiSettingsStore internal constructor(
         apiKey: String,
         profileId: String? = null,
         noAuth: Boolean = false,
-    ): List<String> = fetchModels(endpoint, apiKey, profileId, noAuth, OpenAiModelsClient()::fetch)
+        protocol: String = "openai-chat",
+    ): List<String> = fetchModels(endpoint, apiKey, profileId, noAuth, providerModelsFetcher(protocol))
 
     /** Credentials are constructed and consumed in IO, never returned to a UI caller. */
     internal suspend fun fetchModels(

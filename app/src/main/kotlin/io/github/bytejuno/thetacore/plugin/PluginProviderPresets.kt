@@ -12,7 +12,7 @@ import kotlinx.serialization.json.JsonPrimitive
 internal enum class ProviderTemplateProtocol(val wire: String, val supported: Boolean) {
     OPENAI_CHAT("openai-chat", true),
     OPENAI_RESPONSES("openai-responses", true),
-    ANTHROPIC("anthropic", false),
+    ANTHROPIC("anthropic", true),
     GEMINI("gemini", false);
 
     companion object {

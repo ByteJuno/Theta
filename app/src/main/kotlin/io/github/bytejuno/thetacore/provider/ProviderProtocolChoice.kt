@@ -13,9 +13,12 @@ internal fun ProviderProtocolChoice(protocol: String, enabled: Boolean, select: 
     val strings = uiStrings()
     Column {
         Text(strings.get(R.string.responses_protocol))
-        listOf(ProviderTemplateProtocol.OPENAI_CHAT.wire to R.string.responses_chat, ProviderTemplateProtocol.OPENAI_RESPONSES.wire to R.string.responses_native).forEach { (wire, label) ->
+        listOf(ProviderTemplateProtocol.OPENAI_CHAT.wire to R.string.responses_chat,
+            ProviderTemplateProtocol.OPENAI_RESPONSES.wire to R.string.responses_native,
+            ProviderTemplateProtocol.ANTHROPIC.wire to R.string.anthropic_protocol).forEach { (wire, label) ->
             FilterChip(protocol == wire, { select(wire) }, enabled = enabled, label = { Text(strings.get(label)) })
         }
         if (protocol == ProviderTemplateProtocol.OPENAI_RESPONSES.wire) Text(strings.get(R.string.responses_native_hint))
+        if (protocol == ProviderTemplateProtocol.ANTHROPIC.wire) Text(strings.get(R.string.anthropic_hint))
     }
 }

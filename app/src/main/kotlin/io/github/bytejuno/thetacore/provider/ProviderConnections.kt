@@ -14,7 +14,8 @@ data class ProviderConnection(
 ) {
     init {
         require(validProfileId(providerId) && validProfileDisplayName(displayName))
-        require(protocol in setOf("openai-chat", "openai-responses")) { "Protocol is not enabled" }
+        require(protocol in setOf("openai-chat", "openai-responses", "anthropic")) { "Protocol is not enabled" }
+        require(protocol != "anthropic" || !noAuth) { "Anthropic requires an API key" }
         OpenAiChatConfig(providerId, baseUrl, compat = compat)
     }
 }
@@ -52,6 +53,7 @@ internal class ConnectionRecord(val connection: ProviderConnection, val models: 
     init {
         require(models.size in 1..256 && models.map { it.modelId }.distinct().size == models.size)
         require(if (connection.noAuth) key.isEmpty() else validApiKey(key))
+        require(connection.protocol != "anthropic" || models.none { it.image }) { "Anthropic does not generate images" }
         models.forEach { settings(it) }
     }
     fun settings(model: EnabledModel) = OpenAiProviderSettings(

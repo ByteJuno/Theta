@@ -4,6 +4,8 @@ import io.github.bytejuno.thetacore.agent.protocol.*
 import io.github.bytejuno.thetacore.agent.run.ModelTarget
 import io.github.bytejuno.thetacore.agent.transport.ModelTransport
 import io.github.bytejuno.thetacore.agent.transport.OkHttpModelTransport
+import io.github.bytejuno.thetacore.agent.transport.ModelAuthentication
+import io.github.bytejuno.thetacore.agent.provider.anthropic.*
 import java.util.Collections
 
 const val MAX_SYSTEM_PROMPT_CHARS = 32_000
@@ -86,25 +88,28 @@ class OpenAiRunSnapshot(
 ) {
     constructor(settings: OpenAiProviderSettings, credentials: ApiKeyCredentials) : this(settings, credentials as Credentials)
 
-    init { require(protocol in setOf("openai-chat", "openai-responses")) { "Protocol is not enabled" } }
+    init { require(protocol in setOf("openai-chat", "openai-responses", "anthropic")) { "Protocol is not enabled" } }
 
     fun withImageSnapshot(image: OpenAiRunSnapshot?) = OpenAiRunSnapshot(settings, credentials, protocol, image)
 
     fun target(
-        transport: ModelTransport = OkHttpModelTransport(),
+        transport: ModelTransport = OkHttpModelTransport(if (protocol == "anthropic") ModelAuthentication.ANTHROPIC else ModelAuthentication.BEARER),
         mediaReader: MediaContentReader? = null,
     ): ModelTarget = when (protocol) {
         "openai-chat" -> ModelTarget(settings.providerId, OpenAiChatProvider(settings.adapterConfig(), transport, mediaReader), credentials)
         "openai-responses" -> ModelTarget(settings.providerId, OpenAiResponsesProvider(responsesConfig(), transport, mediaReader), credentials)
+        "anthropic" -> ModelTarget(settings.providerId, AnthropicProvider(anthropicConfig(), transport, mediaReader), credentials)
         else -> error("Protocol is not enabled")
     }
 
     private fun responsesConfig() = OpenAiResponsesConfig(settings.providerId, settings.baseUrl, setOf(settings.model))
+    private fun anthropicConfig() = AnthropicConfig(settings.providerId, settings.baseUrl, setOf(settings.model))
 
     /** Use the same wire representation for admission and submission, including opaque replay. */
     fun requestByteEstimator(mediaReader: MediaContentReader? = null): (ChatRequest) -> Long = when (protocol) {
         "openai-chat" -> OpenAiChatCodec(settings.adapterConfig(), mediaReader)::estimateRequestBytes
         "openai-responses" -> OpenAiResponsesCodec(responsesConfig(), mediaReader)::estimateRequestBytes
+        "anthropic" -> AnthropicCodec(anthropicConfig(), mediaReader)::estimateRequestBytes
         else -> error("Protocol is not enabled")
     }
 

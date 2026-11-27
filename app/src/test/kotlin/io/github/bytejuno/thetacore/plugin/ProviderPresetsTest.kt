@@ -232,7 +232,7 @@ class ProviderPresetsTest {
                 """.trimIndent().toByteArray(Charsets.UTF_8)
                 val parsed = parseProviderTemplate("com.example.pack", "Pack", "1.0", "providers/$wire.json", raw)
                 assertEquals(expected, parsed.protocol)
-                assertFalse(parsed.supported)
+                assertEquals(wire == "anthropic", parsed.supported)
                 assertNull(parsed.compat)
                 assertEquals("api.$wire.example", parsed.host)
 
@@ -363,7 +363,7 @@ class ProviderPresetsTest {
             val goodTemplate = loadedV1.templates.single { it.id == "good" }
             val anthropicTemplate = loadedV1.templates.single { it.id == "claude" }
             assertTrue(goodTemplate.supported)
-            assertFalse(anthropicTemplate.supported)
+            assertTrue(anthropicTemplate.supported)
 
             // Prefill editor from template and verify key isolation & target host preview.
             val editor = ProviderSettingsEditor()

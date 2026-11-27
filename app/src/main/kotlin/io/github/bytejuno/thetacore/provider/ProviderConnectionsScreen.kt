@@ -137,7 +137,13 @@ internal fun ProviderConnectionsScreen(host: ThetaApplication, onClose: () -> Un
                 Text(strings.get(R.string.providers_connection), style = MaterialTheme.typography.titleMedium)
                 OutlinedTextField(form.profileName, { form = form.withProfileName(it) }, enabled = editable,
                     label = { Text(strings.get(R.string.providers_name)) }, modifier = Modifier.fillMaxWidth())
-                ProviderProtocolChoice(protocol, editable) { protocol = it }
+                ProviderProtocolChoice(protocol, editable) {
+                    protocol = it; fetched = emptyList()
+                    if (it == ProviderTemplateProtocol.ANTHROPIC.wire) {
+                        form = form.copy(noAuth = false)
+                        models = models.map { model -> model.copy(chat = true, image = false) }
+                    }
+                }
                 OutlinedTextField(form.endpoint, { form = form.copy(endpoint = it); fetched = emptyList() }, enabled = editable,
                     label = { Text(strings.get(R.string.chat_endpoint)) }, modifier = Modifier.fillMaxWidth())
                 form.targetHost?.let { Text(strings.get(R.string.chat_provider_target_host, it), color = MaterialTheme.colorScheme.primary) }
@@ -145,7 +151,8 @@ internal fun ProviderConnectionsScreen(host: ThetaApplication, onClose: () -> Un
                     Text(strings.get(R.string.chat_provider_template_copy_notice, it.pluginName))
                     if (it.authorUnverified) Text(strings.get(R.string.chat_provider_template_unverified), color = MaterialTheme.colorScheme.error)
                 }
-                ProviderCheck(strings.get(R.string.chat_provider_no_auth), form.noAuth, editable) { form = form.copy(noAuth = it); secret = "" }
+                if (protocol != ProviderTemplateProtocol.ANTHROPIC.wire)
+                    ProviderCheck(strings.get(R.string.chat_provider_no_auth), form.noAuth, editable) { form = form.copy(noAuth = it); secret = "" }
                 if (!form.noAuth) OutlinedTextField(secret, { secret = it }, enabled = editable,
                     visualTransformation = PasswordVisualTransformation(), label = { Text(strings.get(R.string.chat_key)) },
                     supportingText = { Text(strings.get(if (form.canReuseKey) R.string.providers_key_reuse else R.string.chat_provider_new_key)) },
@@ -159,13 +166,13 @@ internal fun ProviderConnectionsScreen(host: ThetaApplication, onClose: () -> Un
                 }
                 Text(strings.get(R.string.providers_models), style = MaterialTheme.typography.titleMedium)
                 OutlinedButton(enabled = editable && form.endpoint.isNotBlank() && (form.noAuth || secret.isNotEmpty() || form.canReuseKey), onClick = {
-                    operate { fetched = store.fetchModels(form.endpoint, secret, form.profileId, form.noAuth) }
+                    operate { fetched = store.fetchModels(form.endpoint, secret, form.profileId, form.noAuth, protocol) }
                 }) { Text(strings.get(R.string.chat_models_fetch)) }
                 if (fetched.isNotEmpty()) {
                     OutlinedTextField(filter, { filter = it }, label = { Text(strings.get(R.string.chat_models_filter)) }, modifier = Modifier.fillMaxWidth())
                     fetched.filter { it.contains(filter, true) }.forEach { id ->
                         ProviderCheck(id, models.any { it.modelId == id }, editable) { checked ->
-                            models = if (checked) models + EnabledModel(id) else models.filterNot { it.modelId == id }
+                            models = if (checked) models + anthropicTemplateModel(templateSource, id) else models.filterNot { it.modelId == id }
                         }
                     }
                 }
@@ -181,8 +188,10 @@ internal fun ProviderConnectionsScreen(host: ThetaApplication, onClose: () -> Un
                             TextButton(enabled = editable, onClick = { selectedModel = if (selectedModel == model.modelId) null else model.modelId }) { Text(model.label) }
                             fun change(next: EnabledModel) { models = models.map { if (it.modelId == model.modelId) next else it } }
                             ProviderCheck(strings.get(R.string.providers_chat_use), model.chat, editable && (model.image || !model.chat)) { change(model.copy(chat = it)) }
-                            ProviderCheck(strings.get(R.string.providers_image_use), model.image, editable && (model.chat || !model.image)) { change(model.copy(image = it)) }
+                            if (protocol != ProviderTemplateProtocol.ANTHROPIC.wire)
+                                ProviderCheck(strings.get(R.string.providers_image_use), model.image, editable && (model.chat || !model.image)) { change(model.copy(image = it)) }
                             if (selectedModel == model.modelId) {
+                                if (protocol == ProviderTemplateProtocol.ANTHROPIC.wire) AnthropicModelOptions(model, editable, ::change)
                                 OutlinedTextField(model.alias.orEmpty(), { if (it.isBlank() || validProfileDisplayName(it)) change(model.copy(alias = it.takeIf(String::isNotBlank))) },
                                     enabled = editable, label = { Text(strings.get(R.string.providers_alias)) }, modifier = Modifier.fillMaxWidth())
                                 OutlinedTextField(model.systemPrompt.orEmpty(), { if (it.length <= MAX_SYSTEM_PROMPT_CHARS) change(model.copy(systemPrompt = it)) },
