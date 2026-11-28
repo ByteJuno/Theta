@@ -1759,7 +1759,13 @@ class ChatSessionOwnerTest {
             await { fixture.owner.previewText().isNotEmpty() }
             fixture.owner.stop("old-execution").join()
             assertTrue(fixture.owner.state.value.active)
-            fixture.owner.stop(fixture.owner.state.value.executionId!!).join()
+            // A saved-step overlay action queued before this run started must not stop it.
+            fixture.owner.stop(expectedPendingSessionId = fixture.owner.state.value.sessionId).join()
+            assertTrue(fixture.owner.state.value.active)
+            val current = fixture.owner.state.value
+            io.github.bytejuno.thetacore.overlay.stopFloatingTask(
+                io.github.bytejuno.thetacore.overlay.FloatingTask(current.executionId!!, TaskPhase.MODEL, null),
+                current.sessionId, current) { execution, pendingSession -> fixture.owner.stop(execution, pendingSession) }
             await { !fixture.owner.state.value.active }
             assertEquals(R.string.chat_stopped, fixture.owner.state.value.notice)
             assertNull(presence.events.last().second)

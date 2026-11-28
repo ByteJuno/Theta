@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="floating_progress_title">控屏悬浮进度条</string>
+    <string name="floating_progress_description">控屏、后台运行或需要你处理时显示进度胶囊。拖动文字可避让，点击可回到 Theta。停止会立即请求取消；已在运行的工具可能仍需时间退出。</string>
+    <string name="floating_progress_fallback">未授予悬浮窗权限时，任务进度仍通过通知显示。请在系统设置中允许通知。</string>
+    <string name="floating_progress_granted">已授予悬浮窗权限。关闭此开关可立即移除胶囊。</string>
+    <string name="floating_progress_grant">允许显示在其他应用上层</string>
+    <string name="floating_progress_settings_failed">无法打开系统设置。请前往 Theta 应用设置，允许显示在其他应用上层。</string>
+    <string name="floating_progress_model">思考中…</string>
+    <string name="floating_progress_tool">正在执行 %1$s</string>
+    <string name="floating_progress_approval">等待审批 · 点击处理</string>
+    <string name="floating_progress_recovery">等待恢复确认 · 点击处理</string>
+    <string name="floating_progress_stop">停止</string>
+    <string name="floating_progress_open">%1$s。打开 Theta</string>
+</resources>

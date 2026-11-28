@@ -491,8 +491,9 @@ internal class ChatSessionOwner(
         }
         refresh()
     }
-    fun stop(expectedExecutionId: String? = null) = launchOperation {
+    fun stop(expectedExecutionId: String? = null, expectedPendingSessionId: String? = null) = launchOperation {
         if (expectedExecutionId != null && expectedExecutionId != mutable.value.executionId) return@launchOperation
+        if (expectedPendingSessionId != null && (active != null || history?.sessionId != expectedPendingSessionId)) return@launchOperation
         active?.cancel()
         if (active == null) {
             val pending = history?.pendingStep(tools!!.ledger)

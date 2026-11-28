@@ -24,6 +24,7 @@ internal fun SettingsScreen(host: ThetaApplication, destination: SettingsDestina
             SettingsGroup(R.string.settings_customization, listOf(R.string.settings_appearance to SettingsDestination.APPEARANCE), navigate)
             SettingsGroup(R.string.settings_system, listOf(
                 R.string.language_title to SettingsDestination.LANGUAGE,
+                R.string.floating_progress_title to SettingsDestination.FLOATING_PROGRESS,
                 R.string.background_title to SettingsDestination.BACKGROUND), navigate)
         }
         SettingsDestination.PROVIDERS -> ProviderScreen(host, back)
@@ -35,6 +36,7 @@ internal fun SettingsScreen(host: ThetaApplication, destination: SettingsDestina
         SettingsDestination.APPEARANCE -> AppearanceSettingsScreen(back)
         SettingsDestination.LANGUAGE -> SettingsPage(strings.get(R.string.language_title), back) { AppLanguageSetting() }
         SettingsDestination.BACKGROUND -> SettingsPage(strings.get(R.string.background_title), back) { BackgroundDiagnostics() }
+        SettingsDestination.FLOATING_PROGRESS -> io.github.bytejuno.thetacore.overlay.FloatingProgressSettings(host, back)
         SettingsDestination.CHAT -> Unit
     }
 }
