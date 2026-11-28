@@ -14,6 +14,12 @@ internal fun anthropicParameters(value: OpenAiParameters, maxTokens: Int? = valu
     effort: String? = value.reasoningLevel) = OpenAiParameters(maxTokens, value.temperature, value.topP,
     effort, value.parallelToolCalls, value.stopSequences)
 
+/** An explicit selection can retry a previously rejected parameter on a future run. */
+internal fun EnabledModel.withSelectedReasoningLevel(level: String?) = copy(
+    parameters = anthropicParameters(parameters, effort = level),
+    reasoningLevels = if (level != null && reasoningLevels?.isEmpty() == true) null else reasoningLevels,
+)
+
 internal enum class AnthropicEffort(val wire: String?, val label: Int) {
     DEFAULT(null, R.string.anthropic_effort_default),
     LOW("low", R.string.anthropic_effort_low),

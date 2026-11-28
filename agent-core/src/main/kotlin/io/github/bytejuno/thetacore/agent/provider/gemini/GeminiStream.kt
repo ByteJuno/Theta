@@ -36,8 +36,11 @@ internal class GeminiStream(private val request: ChatRequest, private val codec:
                 protocol(v is JsonPrimitive && !v.isString && v.longOrNull != null && v.long >= 0, "Invalid Gemini usage")
                 return v.jsonPrimitive.long
             }
+            val candidates = count("candidatesTokenCount")
+            val thoughts = count("thoughtsTokenCount")
+            val output = candidates?.let { Math.addExact(it, thoughts ?: 0) }
             emit(Events.usage(tokenUsage(count("promptTokenCount"), count("cachedContentTokenCount"), null,
-                count("candidatesTokenCount"), count("thoughtsTokenCount"))))
+                output, thoughts)))
         }
         val blocked = (root["promptFeedback"] as? JsonObject)?.string("blockReason")
         val reason = candidate?.string("finishReason") ?: blocked

@@ -28,7 +28,7 @@ internal fun GeminiModelOptions(model: EnabledModel, enabled: Boolean, change: (
         Text(strings.get(R.string.gemini_thinking))
         GeminiEffort.entries.forEach { choice ->
             FilterChip(model.parameters.reasoningLevel == choice.wire,
-                { change(model.copy(parameters = anthropicParameters(model.parameters, effort = choice.wire))) },
+                { change(model.withSelectedReasoningLevel(choice.wire)) },
                 enabled = enabled, label = { Text(strings.get(choice.label)) })
         }
         Text(strings.get(R.string.gemini_thinking_hint))

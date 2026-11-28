@@ -36,7 +36,7 @@ class GeminiContractTest {
         assertEquals("Hello 世界", reducer.assistantMessage().parts.filterIsInstance<ContentPart.Text>().joinToString("") { it.text })
         assertEquals(1, reducer.assistantMessage().parts.size)
         assertEquals(FinishReason.STOP, assertIs<ModelEvent.Finished>(events.last()).reason)
-        assertEquals(listOf(20L, 5L, 7L, 9L), reducer.usage!!.let { listOf(it.inputTokens, it.cacheReadTokens, it.outputTokens, it.reasoningTokens) })
+        assertEquals(listOf(20L, 5L, 16L, 9L), reducer.usage!!.let { listOf(it.inputTokens, it.cacheReadTokens, it.outputTokens, it.reasoningTokens) })
         assertEquals(1, events.count { it is ModelEvent.Started })
     }
 
@@ -73,6 +73,20 @@ class GeminiContractTest {
         }) }
         val restored = toolCallPart(calls[0].binding, calls[0].name, calls[0].argsJson, calls[0].replay)
         assertEquals(calls[0].binding.callId, restored.binding.callId)
+    }
+
+    @Test fun `usage without thinking keeps visible output and missing output remains unknown`() = runTest {
+        for ((metadata, expected) in listOf(
+            """{"candidatesTokenCount":7}""" to 7L,
+            """{"candidatesTokenCount":0,"thoughtsTokenCount":9}""" to 9L,
+            """{"thoughtsTokenCount":9}""" to null,
+            "{}" to null,
+        )) {
+            val response = """{"candidates":[{"content":{"parts":[{"text":"done"}]},"finishReason":"STOP"}],"usageMetadata":$metadata}"""
+            val (events, reducer) = collect(wire(response))
+            assertIs<ModelEvent.Finished>(events.last())
+            assertEquals(expected, reducer.usage!!.outputTokens)
+        }
     }
 
     @Test fun `signed text and thought replay remain bound to their exact content`() = runTest {

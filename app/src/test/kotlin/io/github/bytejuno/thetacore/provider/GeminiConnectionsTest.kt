@@ -62,6 +62,28 @@ class GeminiConnectionsTest {
         }
     }
 
+    @Test fun explicitThinkingSelectionCanOverridePersistedRejectionForFutureRuns() {
+        for (protocol in listOf("gemini", "anthropic")) {
+            val root = temp.newFolder(); val cipher = cipher(); val store = OpenAiSettingsStore(root, cipher)
+            val native = connection.copy(protocol = protocol)
+            store.saveProvider(native, listOf(model()), "key")
+            store.snapshotForNewRun().recordUnsupportedReasoning()
+            val defaultRun = store.snapshotForNewRun()
+            val rejected = store.readProviderCatalog().providers.single().models.single()
+            val edited = rejected.withSelectedReasoningLevel("low")
+            store.saveProvider(native, listOf(edited), "")
+            val cold = OpenAiSettingsStore(root, cipher).snapshotForNewRun()
+            assertEquals("low", cold.request().reasoningLevel)
+            assertNull(cold.settings.reasoningLevels)
+            assertNull(defaultRun.request().reasoningLevel)
+            assertEquals(emptyList<String>(), rejected.withSelectedReasoningLevel(null).reasoningLevels)
+        }
+        val known = model().copy(reasoningLevels = listOf("low", "high")).withSelectedReasoningLevel("medium")
+        val store = OpenAiSettingsStore(temp.newFolder(), cipher())
+        store.saveProvider(connection, listOf(known), "key")
+        assertEquals("low", store.snapshotForNewRun().request().reasoningLevel)
+    }
+
     @Test fun nativeConfigurationRejectsUnauthenticatedAndImageGenerationAndKeyReuse() {
         val store = OpenAiSettingsStore(temp.newFolder(), cipher())
         assertThrows(IllegalArgumentException::class.java) { connection.copy(noAuth = true) }
