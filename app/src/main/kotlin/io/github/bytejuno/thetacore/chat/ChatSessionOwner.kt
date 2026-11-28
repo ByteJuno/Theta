@@ -697,8 +697,9 @@ internal class ChatSessionOwner(
             val mediaReader = MediaContentReader { blob ->
                 tools?.sessionStore?.privateImages?.readUserImage(disk.sessionId, blob.id)
             }
-            val target = targetWithMediaForRun?.invoke(config, mediaReader) ?: targetForRun(config)
-            val estimateRequestBytes = config.requestByteEstimator(mediaReader)
+            val screenMedia = io.github.bytejuno.thetacore.screen.ScreenModelMedia(tools?.ledger, disk.sessionId, mediaReader)
+            val target = screenMedia.target(targetWithMediaForRun?.invoke(config, screenMedia.reader) ?: targetForRun(config))
+            val estimateRequestBytes = screenMedia.estimator(target, config.requestByteEstimator(screenMedia.reader))
             val requestBudget = ContextBudget({ candidate ->
                 try {
                     256L + estimateRequestBytes(candidate)
