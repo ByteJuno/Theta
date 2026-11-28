@@ -1,22 +1,22 @@
-# Issue 155 — Anthropic native protocol validation
+# Issue 155 validation
 
-Implementation SHA: `c9cd641d4facfeac8d962480e05c7845407e3866`
-Tested tree: `e4dbdf84ffb29c62395815c21d6656c0ea5ea865`
-Branch: `auto/155-anthropic-protocol`. RETURN: PR #172, `IC_kwDOVkrS_s8AAAABrwbJTw`.
+Implementation source: `6fabaf5b39963e484a71c8d0f5e681320483d4b1`
+Tested tree: `c25102637f5b8b69f450da3ecb3980f533480298`
+Branch: `auto/155-anthropic-protocol`
+Latest included main: `baa65b8c7bd6d8bc392d1ddc79c373d7e33d12c3` (PR183 merge verified separately).
 
-This revision stops superseded output-surface ranking before its next priority callback, letting the conflated task update restart selection promptly. It preserves all cleanup, callback deadlines and worker-exit semantics. No assertions were removed, no timeout was increased, and the existing slow-ranking/disable regression is unchanged. Only PluginOutputSurfaces.kt and its permanent test changed in this implementation commit.
+This RETURN assessed official anthropic-java 3.14.0 (source b0349e817c4cb805a2906b019d4ac0caa66d02e6), published POMs/licenses, resolved transitive dependencies and actual public-client loopback behavior. Candidate maxRetries(0) still sent 2 HTTP requests for 503 Retry-After:0 with OkHttp 4.12.0 and 5.5.1; public streaming dropped ping/unnamed events; default thinking toParam lost unknown fields while explicitly copying additionalProperties preserved them. Cancellation is supported according to source, not experimentally certified here. Retain the existing bounded adapter; no SDK dependency added. Committed rationale links exact upstream source and defines necessary custom scope. Three permanent tests guard these native transport/replay contracts; no production behavior, assertion or timeout was weakened.
 
-Current implementation evidence:
-- Original reviewer evidence on 2cf4a6d26712c0e635011511d87c60e7108e28fb: disable, clear and resources-closed events completed; backup21 APPROVAL show was absent after the 8-second wait. Preserved XML identifies the exact failed assertion at line 161. An obsolete pass traversing the remaining slow callbacks provides a concrete delay path consistent with that failure.
-- Permanent latch regression on unchanged production code: 1 test / 1 failure, expected first callback for the new task but observed second callback from the stale pass. This distinguishes stale work from cleanup deadline failure.
-- Windows output-surface suite: 13 tests, zero failures/skips, 33.9s. Existing original regression and the new latch regression pass.
-- Existing /opt/homelab-report/theta-gpu-test entry on host gpu: 13 tests, zero failures, 72.4s, strict configuration cache, same source hashes. This is Linux JVM evidence, not emulator acceptance.
-- python scripts/preflight.py passed in 188.9s with --configuration-cache --configuration-cache-problems=fail; configuration cache reused. Core 685 tests = 684 passed + 1 Windows platform skip; app 821 = 820 passed + 1 Windows platform skip; zero failures/errors. Includes the reviewer's new Anthropic pause/recovery regression.
-- lintDebug, verifyUiResources (623 English/Chinese keys), storage-fixture source checks and compileDebugKotlin passed. Source hashes unchanged throughout validation and checked again after commit. No APK generated; SHA256 not applicable.
-- Final fetch: origin/main 40330df3a2758b752f90ac495e1aca69f8483e66 and origin/auto/155-anthropic-protocol 2cf4a6d26712c0e635011511d87c60e7108e28fb are ancestors of this implementation. Reviewer changes retained, including the pause-turn side-effect barrier and regression. No protected files changed by this repair.
+Validation on unchanged candidate files:
+- New Windows boundary tests: 3 passed.
+- GPU after merging main: 63 tests, 0 failed (Anthropic, transport, Root and output-surface paths), 63.8s.
+- Full preflight after merging main: passed in 185.6s; strict configuration cache reused; lint, UI resources and storage fixture passed.
+- App: 843 tests, 0 failures/errors, 7 Windows platform skips. Core: 688 tests, 0 failures/errors, 1 platform skip executed earlier this round; identical core sources reused UP-TO-DATE by the final preflight.
+- Final static preflight and git diff checks passed. Upstream branch and latest main are ancestors. Reviewer additions retained.
 
-Evidence directory: `E:\Desktop\AI研究\theta-auto-loop\event-runs\2d139b81-c130-489c-828e-b3b32fcc04db`. Original reviewer failure XML/run log, baseline failure, local/GPU manifests and results remain outside Git. Tests were not weakened and no temporary Probe files are committed.
+Preserved evidence: all previous RETURN comments, reviewer-original-failure.xml / reviewer-original-run.log and failed permanent latch regression in event-runs/2d139b81-c130-489c-828e-b3b32fcc04db; earlier failure pointers remain in state-before.json. This round retains the candidate harness compilation failure, initial network/clone failures, missing-identity merge failure, candidate successful experiments and post-main validation under event-runs/ddc7fff9-d0a0-424d-a9b1-963a550aa727. No raw logs or experimental SDK source are committed. The writer authored no docs/testing summary; the main merge includes only its existing upstream summary.
 
-Historical evidence is bound to its original source, not promoted to this head: 072f496d9816f0d6006b5b058c5cd769f2a6e827 preserved reasoning capabilities through presets/encrypted reload and froze supported effort; its Windows/GPU 47-test results and original medium-vs-low failure are in event-runs/8ec273de-2581-48b4-8ebd-0c79592a660d. 4897af9ab8965c741576fd7484945623b0274c5a repaired tool history separation, rejected-argument checkpoint continuation, context-too-long classification and invalid preset handling; prior failures remain in event-runs/98d3e920-bce5-4cba-8115-aea21b0422ec. Reviewer 2cf4a6d26712c0e635011511d87c60e7108e28fb added the server continuation barrier with 54 GPU tests; its review failure/probe evidence remains with the independent reviewer. This round adds no live provider or device evidence.
+APK: not generated; SHA256: not available.
+Limitations: 未生成 APK；未操作手机或模拟器，视觉未验证。本轮没有界面改动，原有 reasoning 提示的中英文、小屏、大字体与明暗主题仍待审核端验收。真实 Anthropic API、Android API33 运行、R8 与硬件未测。GPU 和官方 SDK 实验均为 Linux JVM；SDK 取消能力仅核对源码。Standard Webhooks 1.2.0 缺少发布产物许可证元数据，若未来引入需核对精确版本许可来源。最终发布 head 的 CI、独立审核及正式模拟器回归仍待发布器和审核端。
 
-未生成 APK；未操作手机或模拟器，视觉未验证。本轮未改布局或文案，输出面实际呈现及此前降档提示的中英文、小屏、大字体、明暗主题仍待审核端验证。真实 Anthropic API、Android API33 运行、R8、硬件未测。GPU 为 Linux JVM 测试。独立审核、最终发布 head CI 与正式模拟器回归仍须完成；不把本地测试当作正式验收。
+Independent review, final-head CI and formal emulator regression remain required. This local handoff does not claim publication or merge of PR172.
