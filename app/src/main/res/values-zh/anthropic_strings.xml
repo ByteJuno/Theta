@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="anthropic_protocol">Anthropic Messages 协议</string>
+    <string name="anthropic_hint">支持 Claude 对话、图片输入与思考块回放。请填写 API 密钥及以 /v1 结尾的服务地址。不支持生成图片。</string>
+    <string name="anthropic_max_tokens">最大输出 Token 数</string>
+    <string name="anthropic_tokens_hint">留空使用 4096 Token。输入无效时保留上次有效值。</string>
+    <string name="anthropic_tokens_invalid">请输入正整数。当前保留上次有效值。</string>
+    <string name="anthropic_effort">思考强度</string>
+    <string name="anthropic_effort_default">模型默认</string>
+    <string name="anthropic_effort_low">低</string>
+    <string name="anthropic_effort_medium">中</string>
+    <string name="anthropic_effort_high">高</string>
+    <string name="anthropic_effort_max">最高</string>
+    <string name="anthropic_effort_hint">选择强度后启用自适应思考。可用档位取决于模型。</string>
+</resources>

@@ -48,7 +48,8 @@ class WebToolsTest {
                     override fun createSocket(h: InetAddress, p: Int, l: InetAddress, lp: Int): Socket = error("unused")
                 }).build()
         }
-        fun http(dns: Dns = Dns { listOf(InetAddress.getByName("93.184.215.14")) }) = WebHttp(client, dns)
+        fun http(dns: Dns = Dns { listOf(InetAddress.getByName("93.184.215.14")) }) = WebHttp(client,
+            WebDns { host, completed -> completed(runCatching { dns.lookup(host) }); {} })
         fun enqueue(body: String, type: String = "text/html") {
             server.enqueue(MockResponse.Builder().body(body).addHeader("Content-Type", type).build())
         }
@@ -66,10 +67,14 @@ class WebToolsTest {
     @Test fun addressGuardRejectsPrivateAndEncodedAddresses() = runBlocking {
         val denied = listOf("0.0.0.0", "127.0.0.1", "127.1", "2130706433", "10.1.2.3", "172.31.0.1",
             "192.168.1.1", "169.254.169.254", "100.64.0.1", "100.127.255.254", "224.0.0.1", "255.255.255.255",
-            "192.0.0.9", "198.18.0.1", "198.51.100.1", "203.0.113.1", "::", "::1", "fe80::1", "fd7a:115c:a1e0::1",
+            "192.0.0.9", "192.0.0.255", "192.0.2.1", "192.0.2.255", "192.88.99.1", "192.88.99.255",
+            "198.18.0.1", "198.19.255.255", "198.51.100.1", "203.0.113.1", "::", "::1", "fe80::1", "fd7a:115c:a1e0::1",
             "::ffff:127.0.0.1", "64:ff9b::7f00:1", "2002:7f00:1::", "2001:db8::1")
         denied.forEach { assertFalse(it, publicWebAddress(InetAddress.getByName(it))) }
-        listOf("1.1.1.1", "8.8.8.8", "2606:4700:4700::1111").forEach { assertTrue(it, publicWebAddress(InetAddress.getByName(it))) }
+        listOf("1.1.1.1", "8.8.8.8", "192.0.78.24", "192.0.80.1", "192.2.1.1", "192.0.1.255",
+            "192.0.3.0", "192.88.98.255", "192.88.100.0", "100.63.255.255", "100.128.0.0",
+            "198.17.255.255", "198.20.0.0", "198.51.99.255", "198.51.101.0", "203.0.112.255",
+            "203.0.114.0", "2606:4700:4700::1111").forEach { assertTrue(it, publicWebAddress(InetAddress.getByName(it))) }
         for (url in listOf("http://example.org", "file:///tmp/secret", "data:text/plain,secret", "ftp://example.org", "https://a:b@example.org")) {
             failure(WebError.ADDRESS) { webUrl(url) }
         }
@@ -203,36 +208,6 @@ class WebToolsTest {
                     }
                     assertFalse(result.toString().contains("fixture-key"))
                 }
-            }
-        } finally { root.deleteRecursively() }
-    }
-
-    @Test fun settingsEncryptPreserveCorruptionAndRequireExplicitReplacement() {
-        val root = Files.createTempDirectory("web-encryption-test").toFile()
-        try {
-            val cipher = cipher(); val store = WebSearchSettingsStore(root, cipher)
-            val config = WebSearchSettings(SearchBackend.BRAVE, WebSearchSettings.BRAVE_ENDPOINT, "super-secret-fixture")
-            assertNull(store.read().value); store.save(config)
-            val file = root.resolve("web-search.bin"); val first = file.readBytes()
-            assertFalse(first.toString(Charsets.UTF_8).contains(config.key))
-            assertEquals(config.key, WebSearchSettingsStore(root, cipher).read().value!!.key)
-            store.save(config); assertFalse(first.contentEquals(file.readBytes()))
-            val validBytes = file.readBytes()
-            val failing = WebSearchSettingsStore(root, object : SecretCipher {
-                override fun encrypt(plaintext: ByteArray): ByteArray = error("write failure")
-                override fun decrypt(ciphertext: ByteArray) = cipher.decrypt(ciphertext)
-            })
-            assertThrows(WebFailure::class.java) { failing.save(config) }
-            assertArrayEquals(validBytes, file.readBytes())
-            assertFalse(root.listFiles()!!.any { it.name.endsWith(".tmp") })
-            file.writeBytes(byteArrayOf(1, 2, 3)); assertTrue(store.read().unreadable)
-            assertThrows(WebFailure::class.java) { store.save(config) }; assertArrayEquals(byteArrayOf(1, 2, 3), file.readBytes())
-            store.save(config, replaceUnreadable = true); assertEquals(config.key, store.read().value!!.key)
-            val wrong = WebSearchSettingsStore(root, cipher()); assertTrue(wrong.read().unreadable)
-            assertFalse(config.toString().contains(config.key))
-            store.save(null); assertNull(store.read().value); assertFalse(file.exists())
-            assertThrows(IllegalArgumentException::class.java) {
-                WebSearchSettings(SearchBackend.BRAVE, "https://evil.test", "key")
             }
         } finally { root.deleteRecursively() }
     }

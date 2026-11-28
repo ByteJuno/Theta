@@ -123,6 +123,7 @@ internal object ProviderSettingsCodec {
         put("provider", settings.providerId)
         put("base", settings.baseUrl)
         put("model", settings.model)
+        settings.reasoningLevels?.let { put("reasoningLevels", JsonArray(it.map(::JsonPrimitive))) }
         putJsonObject("parameters") {
             val p = settings.parameters
             p.maxOutputTokens?.let { put("maxOutput", it) }
@@ -222,6 +223,7 @@ internal object ProviderSettingsCodec {
             parameters = parameters,
             compat = compat,
             systemPrompt = systemPrompt,
+            reasoningLevels = obj["reasoningLevels"]?.jsonArray?.map { it.jsonPrimitive.content },
         )
     }
 }

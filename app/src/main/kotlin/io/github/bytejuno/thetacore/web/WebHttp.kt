@@ -27,7 +27,8 @@ internal fun publicWebAddress(address: InetAddress): Boolean {
         b[0] == 100 && b[1] in 64..127 -> false
         b[0] == 169 && b[1] == 254 -> false
         b[0] == 172 && b[1] in 16..31 -> false
-        b[0] == 192 && (b[1] == 168 || b[1] == 0 || b[1] == 2 || (b[1] == 88 && b[2] == 99)) -> false
+        b[0] == 192 && (b[1] == 168 || (b[1] == 0 && b[2] in listOf(0, 2)) ||
+            (b[1] == 88 && b[2] == 99)) -> false
         b[0] == 198 && (b[1] in 18..19 || (b[1] == 51 && b[2] == 100)) -> false
         b[0] == 203 && b[1] == 0 && b[2] == 113 -> false
         else -> true
@@ -51,15 +52,16 @@ internal class WebResponse(val url: HttpUrl, val type: String, val bytes: ByteAr
  * HTTP/1.1 prevents HTTP/2 cross-origin connection coalescing across validated host boundaries. */
 internal class WebHttp(
     private val client: OkHttpClient = SharedHttpClient.instance,
-    private val dns: Dns = Dns.SYSTEM,
+    private val dns: WebDns = AndroidWebDns,
+    private val requestTimeoutMillis: Long = 20_000,
 ) {
     suspend fun get(url: String): WebResponse = request(Request.Builder().url(webUrl(url)).get().build(), redirects = true)
 
-    suspend fun request(initial: Request, redirects: Boolean = false): WebResponse = withTimeoutOrNull(20_000) {
+    suspend fun request(initial: Request, redirects: Boolean = false): WebResponse = withTimeoutOrNull(requestTimeoutMillis) {
         var request = initial
         repeat(6) { hop ->
             val url = webUrl(request.url.toString())
-            val addresses = try { dns.lookup(url.host) } catch (_: Exception) { throw WebFailure(WebError.NETWORK) }
+            val addresses = dns.resolve(url.host)
             if (addresses.isEmpty() || addresses.any { !publicWebAddress(it) }) throw WebFailure(WebError.ADDRESS)
             val attempted = AtomicBoolean()
             val safe = client.newBuilder().proxy(Proxy.NO_PROXY).cache(null)

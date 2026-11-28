@@ -208,6 +208,7 @@ internal fun ChatScreen(host: ThetaApplication, drafts: ChatComposerDrafts, resu
                 Text(strings.get(R.string.chat_assistant), style = MaterialTheme.typography.labelLarge)
                 MarkdownText(stream)
             }
+            state.reasoningAdjustment?.let { adjustment -> item { ChatReasoningNotice(adjustment) } }
             if (state.notice != null || chatDiagnostic(state) != null) item {
                 Column {
                     state.notice?.let { Text(strings.get(it), style = MaterialTheme.typography.bodyMedium) }

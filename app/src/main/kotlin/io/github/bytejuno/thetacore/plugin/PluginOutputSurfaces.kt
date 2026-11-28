@@ -236,6 +236,9 @@ internal class PluginOutputSurfaces(
         if (task == null) return
         val snapshot = synchronized(gate) { candidates.toList() }
         val ranked = snapshot.mapNotNull { item ->
+            // A new projection already queued a reconcile. Do not spend another callback
+            // budget on every remaining candidate for the superseded task.
+            if (desired !== task) return
             if (awaitingCleanup(item)) return@mapNotNull null
             val priority = item.read { item.output.priority }
             if (priority is Callback.Done) item to priority.value else null

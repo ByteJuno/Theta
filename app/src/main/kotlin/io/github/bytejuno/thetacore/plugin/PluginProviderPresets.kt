@@ -2,6 +2,7 @@ package io.github.bytejuno.thetacore.plugin
 
 import io.github.bytejuno.thetacore.agent.provider.openai.OpenAiChatConfig
 import io.github.bytejuno.thetacore.agent.provider.openai.OpenAiProviderSettings
+import io.github.bytejuno.thetacore.agent.provider.openai.OpenAiParameters
 import io.github.bytejuno.thetacore.agent.provider.openai.SchemaProfile
 import io.github.bytejuno.thetacore.provider.validProfileDisplayName
 import kotlinx.serialization.json.JsonArray
@@ -12,7 +13,7 @@ import kotlinx.serialization.json.JsonPrimitive
 internal enum class ProviderTemplateProtocol(val wire: String, val supported: Boolean) {
     OPENAI_CHAT("openai-chat", true),
     OPENAI_RESPONSES("openai-responses", true),
-    ANTHROPIC("anthropic", false),
+    ANTHROPIC("anthropic", true),
     GEMINI("gemini", false);
 
     companion object {
@@ -25,9 +26,11 @@ internal data class ProviderTemplateModel(
     val displayName: String? = null,
     val contextWindow: Long? = null,
     val maxOutputTokens: Int? = null,
-    val reasoningLevels: List<String> = emptyList(),
+    val reasoningLevels: List<String>? = null,
     val defaultReasoningLevel: String? = null,
-)
+) {
+    fun parameters() = OpenAiParameters(maxOutputTokens = maxOutputTokens, reasoningLevel = defaultReasoningLevel)
+}
 
 internal data class ProviderTemplate(
     val pluginId: String,
@@ -162,9 +165,10 @@ private fun parseTemplateModels(json: JsonObject): List<ProviderTemplateModel> {
         val displayName = templateOptionalString(obj, "displayName", 128)
         val contextWindow = templateOptionalLong(obj, "contextWindow", 1L..100_000_000L)
         val maxOutputTokens = templateOptionalLong(obj, "maxOutputTokens", 1L..10_000_000L)?.toInt()
-        val reasoningLevels = templateOptionalStringList(obj, "reasoningLevels", maxItems = 16, maxLen = 64)
+        val reasoningLevels = if ("reasoningLevels" in obj)
+            templateOptionalStringList(obj, "reasoningLevels", maxItems = 16, maxLen = 64) else null
         val defaultReasoningLevel = templateOptionalString(obj, "defaultReasoningLevel", 64)
-        if (defaultReasoningLevel != null && reasoningLevels.isNotEmpty()) {
+        if (defaultReasoningLevel != null && reasoningLevels != null) {
             dataRequire(defaultReasoningLevel in reasoningLevels, "defaultReasoningLevel must be in reasoningLevels")
         }
         val inputKinds = templateOptionalStringList(obj, "inputKinds", maxItems = 16, maxLen = 32)
@@ -181,7 +185,14 @@ private fun parseTemplateModels(json: JsonObject): List<ProviderTemplateModel> {
             maxOutputTokens = maxOutputTokens,
             reasoningLevels = reasoningLevels,
             defaultReasoningLevel = defaultReasoningLevel,
-        )
+        ).also { model ->
+            try {
+                model.parameters()
+                model.reasoningLevels.orEmpty().forEach { OpenAiParameters(reasoningLevel = it) }
+            } catch (_: IllegalArgumentException) {
+                throw PluginPackageException("Invalid provider model parameters")
+            }
+        }
     }
 }
 

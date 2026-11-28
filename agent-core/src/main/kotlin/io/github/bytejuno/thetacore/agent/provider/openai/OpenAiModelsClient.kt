@@ -1,6 +1,8 @@
 package io.github.bytejuno.thetacore.agent.provider.openai
 
 import io.github.bytejuno.thetacore.agent.protocol.Credentials
+import io.github.bytejuno.thetacore.agent.transport.ModelAuthentication
+import io.github.bytejuno.thetacore.agent.transport.modelAuthentication
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
@@ -19,7 +21,7 @@ class ModelsRequestException(val failure: Failure) : Exception(failure.name) {
 }
 
 /** Explicit read-only discovery. Never changes settings or invokes a model/tool. */
-class OpenAiModelsClient internal constructor(client: OkHttpClient) {
+class OpenAiModelsClient internal constructor(client: OkHttpClient, private val authentication: ModelAuthentication = ModelAuthentication.BEARER) {
     constructor() : this(OkHttpClient())
     private val client = client.newBuilder().followRedirects(false).followSslRedirects(false)
         .retryOnConnectionFailure(false).connectTimeout(10, TimeUnit.SECONDS)
@@ -34,20 +36,33 @@ class OpenAiModelsClient internal constructor(client: OkHttpClient) {
             val endpoint = chat.newBuilder().removePathSegment(chat.pathSize - 1)
                 .removePathSegment(chat.pathSize - 2).addPathSegment("models").build()
             val token = credentials.accessToken()
+            if (authentication == ModelAuthentication.ANTHROPIC && token.isEmpty()) fail(ModelsRequestException.Failure.INVALID_SETTINGS)
             if (token.isNotEmpty() && !validApiKey(token)) fail(ModelsRequestException.Failure.INVALID_SETTINGS)
             val builder = Request.Builder().url(endpoint).get().header("Accept", "application/json")
-            if (token.isNotEmpty()) builder.header("Authorization", "Bearer $token")
+            builder.modelAuthentication(token, authentication)
             val request = builder.build()
             // OkHttp cannot deliver its timeout callback until a blocking DNS lookup returns.
             // Bound the caller's wait independently; cancellation also cancels the underlying call.
-            return withTimeoutOrNull(30_000) { read(request) }
+            return withTimeoutOrNull(30_000) {
+                val models = sortedSetOf<String>(); val cursors = mutableSetOf<String>()
+                var next = request
+                while (true) {
+                    val page = read(next); models.addAll(page.models)
+                    if (models.size > MAX_MODELS) fail(ModelsRequestException.Failure.TOO_LARGE)
+                    val cursor = page.cursor ?: break
+                    if (cursors.size >= 32 || !cursors.add(cursor)) fail(ModelsRequestException.Failure.INVALID_RESPONSE)
+                    next = request.newBuilder().url(endpoint.newBuilder().addQueryParameter("after_id", cursor).build()).build()
+                }
+                models.toList()
+            }
                 ?: fail(ModelsRequestException.Failure.TIMEOUT)
         } catch (error: CancellationException) { throw error }
         catch (error: ModelsRequestException) { throw error }
         catch (_: Exception) { fail(ModelsRequestException.Failure.INVALID_SETTINGS) }
     }
 
-    private suspend fun read(request: Request): List<String> = suspendCancellableCoroutine { continuation ->
+    private data class Page(val models: List<String>, val cursor: String?)
+    private suspend fun read(request: Request): Page = suspendCancellableCoroutine { continuation ->
         // OkHttp can follow up 503 Retry-After:0 even when connection retries are disabled.
         val exchanged = AtomicBoolean()
         val call = client.newBuilder().addNetworkInterceptor { chain ->
@@ -84,7 +99,7 @@ class OpenAiModelsClient internal constructor(client: OkHttpClient) {
         })
     }
 
-    private fun parse(text: String): List<String> {
+    private fun parse(text: String): Page {
         // Bound parser nesting as well as bytes before constructing the JSON tree.
         var depth = 0; var quoted = false; var escaped = false
         for (c in text) {
@@ -96,7 +111,8 @@ class OpenAiModelsClient internal constructor(client: OkHttpClient) {
                 '}', ']' -> depth--
             }
         }
-        val data = (Json.parseToJsonElement(text) as? JsonObject)?.get("data") as? JsonArray
+        val root = Json.parseToJsonElement(text) as? JsonObject ?: fail(ModelsRequestException.Failure.INVALID_RESPONSE)
+        val data = root["data"] as? JsonArray
             ?: fail(ModelsRequestException.Failure.INVALID_RESPONSE)
         val result = sortedSetOf<String>()
         for (entry in data) {
@@ -108,7 +124,18 @@ class OpenAiModelsClient internal constructor(client: OkHttpClient) {
             result.add(value)
             if (result.size > MAX_MODELS) fail(ModelsRequestException.Failure.TOO_LARGE)
         }
-        return result.toList()
+        var cursor: String? = null
+        if (authentication == ModelAuthentication.ANTHROPIC && root["has_more"] != null) {
+            val more = root["has_more"] as? JsonPrimitive ?: fail(ModelsRequestException.Failure.INVALID_RESPONSE)
+            if (more.isString || more.booleanOrNull == null) fail(ModelsRequestException.Failure.INVALID_RESPONSE)
+            if (more.boolean) {
+                val last = root["last_id"] as? JsonPrimitive ?: fail(ModelsRequestException.Failure.INVALID_RESPONSE)
+                if (!last.isString || last.content.isBlank() || last.content.length > 256 || last.content.any { it.isISOControl() })
+                    fail(ModelsRequestException.Failure.INVALID_RESPONSE)
+                cursor = last.content
+            }
+        }
+        return Page(result.toList(), cursor)
     }
 
     companion object {

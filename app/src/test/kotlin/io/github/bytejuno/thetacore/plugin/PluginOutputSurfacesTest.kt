@@ -163,6 +163,34 @@ class PluginOutputSurfacesTest {
         slow.set(false)
     }
 
+    @Test fun supersededRankingStopsBeforeCallingRemainingSurfaces() {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val ranks = LinkedBlockingQueue<String>()
+        val firstRead = AtomicBoolean(true)
+        add("first", 2, onRank = {
+            ranks.add("first")
+            if (firstRead.getAndSet(false)) {
+                entered.countDown()
+                release.await()
+            }
+        })
+        add("second", 1, onRank = { ranks.add("second") })
+        try {
+            router.present(ChatTaskProgress.Model.outputTask("a"))
+            assertTrue(entered.await(2, TimeUnit.SECONDS))
+            assertEquals("first", ranks.poll())
+            router.present(ChatTaskProgress.Approval.outputTask("a"))
+        } finally { release.countDown() }
+
+        // Restart at the latest task before invoking any remaining stale ranking callbacks.
+        assertEquals("first", ranks.poll(2, TimeUnit.SECONDS))
+        assertEquals("second", ranks.poll(2, TimeUnit.SECONDS))
+        expect("first show a APPROVAL null true")
+        assertTrue(events.isEmpty())
+        assertTrue(failures.isEmpty())
+    }
+
     @Test fun lateShowCompensationFailureIsReturnedByDisable() = runBlocking {
         val release = CountDownLatch(1)
         val drawn = AtomicBoolean(false)

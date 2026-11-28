@@ -4,6 +4,8 @@ import io.github.bytejuno.thetacore.agent.protocol.*
 import io.github.bytejuno.thetacore.agent.run.ModelTarget
 import io.github.bytejuno.thetacore.agent.transport.ModelTransport
 import io.github.bytejuno.thetacore.agent.transport.OkHttpModelTransport
+import io.github.bytejuno.thetacore.agent.transport.ModelAuthentication
+import io.github.bytejuno.thetacore.agent.provider.anthropic.*
 import java.util.Collections
 
 const val MAX_SYSTEM_PROMPT_CHARS = 32_000
@@ -16,13 +18,18 @@ class OpenAiProviderSettings(
     val parameters: OpenAiParameters = OpenAiParameters(),
     val compat: OpenAiChatConfig.Compat = OpenAiChatConfig.Compat(),
     systemPrompt: String? = null,
+    reasoningLevels: List<String>? = null,
 ) {
     val systemPrompt: String? = systemPrompt?.trim()?.takeIf { it.isNotEmpty() }
+    val reasoningLevels: List<String>? = reasoningLevels?.let { Collections.unmodifiableList(ArrayList(it)) }
 
     init {
         require(providerId.matches(Regex("[A-Za-z0-9._-]{1,128}"))) { "Invalid provider identifier" }
         require(model.isNotBlank() && model.length <= 256) { "Invalid model name" }
         require(baseUrl.length <= 4096) { "Invalid provider URL" }
+        require(this.reasoningLevels == null || (this.reasoningLevels.size <= 16 &&
+            this.reasoningLevels.distinct().size == this.reasoningLevels.size &&
+            this.reasoningLevels.all { it.matches(Regex("[A-Za-z0-9_-]{1,64}")) })) { "Invalid reasoning levels" }
         require(this.systemPrompt == null || this.systemPrompt.length <= MAX_SYSTEM_PROMPT_CHARS) {
             "Invalid system prompt length"
         }
@@ -79,32 +86,40 @@ fun validApiKey(token: String): Boolean = token.length in 1..16384 && token.all 
  * inside a running loop. Updates/deletion affect future snapshots only. Adapters still request
  * Credentials on every attempt (2.12), rather than caching them in the provider. */
 class OpenAiRunSnapshot(
-    val settings: OpenAiProviderSettings,
+    settings: OpenAiProviderSettings,
     private val credentials: Credentials,
     val protocol: String = "openai-chat",
     val imageSnapshot: OpenAiRunSnapshot? = null,
 ) {
+    private val requestedSettings = settings
+    val settings: OpenAiProviderSettings = settings.resolveReasoning()
+    val reasoningAdjustment: ReasoningLevelAdjustment? = settings.parameters.reasoningLevel
+        ?.takeIf { it != this.settings.parameters.reasoningLevel }
+        ?.let { ReasoningLevelAdjustment(it, this.settings.parameters.reasoningLevel) }
     constructor(settings: OpenAiProviderSettings, credentials: ApiKeyCredentials) : this(settings, credentials as Credentials)
 
-    init { require(protocol in setOf("openai-chat", "openai-responses")) { "Protocol is not enabled" } }
+    init { require(protocol in setOf("openai-chat", "openai-responses", "anthropic")) { "Protocol is not enabled" } }
 
-    fun withImageSnapshot(image: OpenAiRunSnapshot?) = OpenAiRunSnapshot(settings, credentials, protocol, image)
+    fun withImageSnapshot(image: OpenAiRunSnapshot?) = OpenAiRunSnapshot(requestedSettings, credentials, protocol, image)
 
     fun target(
-        transport: ModelTransport = OkHttpModelTransport(),
+        transport: ModelTransport = OkHttpModelTransport(if (protocol == "anthropic") ModelAuthentication.ANTHROPIC else ModelAuthentication.BEARER),
         mediaReader: MediaContentReader? = null,
     ): ModelTarget = when (protocol) {
         "openai-chat" -> ModelTarget(settings.providerId, OpenAiChatProvider(settings.adapterConfig(), transport, mediaReader), credentials)
         "openai-responses" -> ModelTarget(settings.providerId, OpenAiResponsesProvider(responsesConfig(), transport, mediaReader), credentials)
+        "anthropic" -> ModelTarget(settings.providerId, AnthropicProvider(anthropicConfig(), transport, mediaReader), credentials)
         else -> error("Protocol is not enabled")
     }
 
     private fun responsesConfig() = OpenAiResponsesConfig(settings.providerId, settings.baseUrl, setOf(settings.model))
+    private fun anthropicConfig() = AnthropicConfig(settings.providerId, settings.baseUrl, setOf(settings.model))
 
     /** Use the same wire representation for admission and submission, including opaque replay. */
     fun requestByteEstimator(mediaReader: MediaContentReader? = null): (ChatRequest) -> Long = when (protocol) {
         "openai-chat" -> OpenAiChatCodec(settings.adapterConfig(), mediaReader)::estimateRequestBytes
         "openai-responses" -> OpenAiResponsesCodec(responsesConfig(), mediaReader)::estimateRequestBytes
+        "anthropic" -> AnthropicCodec(anthropicConfig(), mediaReader)::estimateRequestBytes
         else -> error("Protocol is not enabled")
     }
 
