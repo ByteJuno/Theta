@@ -20,8 +20,9 @@ internal class PluginThemeLifecycle(context: Context,
 
     /** Must run before cold inventory admission, even when a damaged archive became readable. */
     suspend fun recover(pluginId: String? = null) = withContext(Dispatchers.IO) {
-        revocations.pending().filter { pluginId == null || it == pluginId }.forEach { id ->
-            preferences.clearPluginTheme(id)
+        revocations.pending().filter { it == PluginThemeRevocations.ALL_THEMES || pluginId == null || it == pluginId }.forEach { id ->
+            if (id == PluginThemeRevocations.ALL_THEMES) preferences.retainPluginThemes(emptySet())
+            else preferences.clearPluginTheme(id)
             revocations.finish(id)
         }
     }
@@ -31,6 +32,9 @@ internal class PluginThemeLifecycle(context: Context,
     suspend fun restore(catalog: PluginDataCatalog, onFailure: (String) -> Unit,
         crashSuspects: Set<String>, skipPlugins: Boolean, skipInventory: Boolean): List<PluginDataRecord> =
         withContext(Dispatchers.IO) {
+            // The recovery policy makes every data theme unavailable without consulting
+            // possibly broken inventory. Preserve that decision before preference reads too.
+            if (skipInventory) revocations.beginAll()
             val unavailable = mutableSetOf<String>()
             val records = if (skipInventory) emptyList() else
                 catalog.restoreInventory(onFailure, crashSuspects, unavailable::add)

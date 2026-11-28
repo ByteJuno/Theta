@@ -11,9 +11,19 @@ import java.util.Properties
 internal class PluginThemeRevocations(filesDir: File) {
     private val root = pluginPath(filesDir, "plugin-theme-revocations")
 
+    companion object {
+        const val ALL_THEMES = "*"
+        private const val ALL_FILE = "all.properties" // Cannot collide with a dotted plugin ID.
+    }
+
     fun begin(id: String) {
         checkId(id)
         writePluginProperties(root, "$id.properties", Properties().apply { setProperty("plugin", id) })
+    }
+
+    /** Safe mode must not inspect the catalog, which may itself be the cause of recovery. */
+    fun beginAll() {
+        writePluginProperties(root, ALL_FILE, Properties().apply { setProperty("plugin", ALL_THEMES) })
     }
 
     fun pending(): List<String> {
@@ -21,8 +31,8 @@ internal class PluginThemeRevocations(filesDir: File) {
         dataRequire(Files.isDirectory(root.toPath(), NOFOLLOW_LINKS), "Invalid theme revocation directory")
         return Files.newDirectoryStream(root.toPath(), "*.properties").use { entries ->
             entries.map { entry ->
-                val id = entry.fileName.toString().removeSuffix(".properties")
-                checkId(id)
+                val id = if (entry.fileName.toString() == ALL_FILE) ALL_THEMES
+                    else entry.fileName.toString().removeSuffix(".properties").also(::checkId)
                 val file = pluginPath(root, entry.fileName.toString())
                 dataRequire(Files.isRegularFile(file.toPath(), NOFOLLOW_LINKS) && file.length() <= 4096,
                     "Invalid theme revocation intent")
@@ -35,7 +45,10 @@ internal class PluginThemeRevocations(filesDir: File) {
     }
 
     fun finish(id: String) {
-        checkId(id)
-        Files.deleteIfExists(pluginPath(root, "$id.properties").toPath())
+        val name = if (id == ALL_THEMES) ALL_FILE else {
+            checkId(id)
+            "$id.properties"
+        }
+        Files.deleteIfExists(pluginPath(root, name).toPath())
     }
 }
