@@ -22,7 +22,8 @@ private const val TERMINAL_GRACE_MS = 2_000L
 private class TerminalGraceExpired : Exception()
 // Do not retain arbitrary echoed strings or truncated credentials in error metadata.
 private val SAFE_ERROR_PARAMETERS = setOf("temperature", "top_p", "parallel_tool_calls", "response_format",
-    "max_output_tokens", "reasoning", "text", "stop", "reasoning_effort", "max_tokens", "max_completion_tokens", "stream_options", "cache_control")
+    "max_output_tokens", "reasoning", "text", "stop", "reasoning_effort", "max_tokens", "max_completion_tokens", "stream_options", "cache_control",
+    "thinkingConfig", "thinking_level", "thinkingBudget")
 
 /** Shared transport lifecycle for the two OpenAI wire protocols. */
 internal fun openAiEventFlow(

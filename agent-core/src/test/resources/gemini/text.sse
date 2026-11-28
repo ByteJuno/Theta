@@ -1,0 +1,4 @@
+data: {"responseId":"r","modelVersion":"gemini-model","candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"Hello "}]}}]}
+
+data: {"candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"世界"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":20,"cachedContentTokenCount":5,"candidatesTokenCount":7,"thoughtsTokenCount":9}}
+

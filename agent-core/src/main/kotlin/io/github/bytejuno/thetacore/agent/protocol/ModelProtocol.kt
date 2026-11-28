@@ -14,6 +14,9 @@ interface ModelProvider {
     fun canReplay(data: ReplayData, targetModel: String): Boolean = false
     fun canReplayMessage(message: Message, targetModel: String): Boolean =
         message.parts.all { part -> part.replay?.let { canReplay(it, targetModel) } != false }
+    /** Request-wide replay constraints, such as IDs reused across assistant turns. Pure: no I/O. */
+    fun canReplayMessages(messages: List<Message>, targetModel: String): Boolean =
+        messages.all { canReplayMessage(it, targetModel) }
     /** True when this provider/model permits sending user media of [kind]. Default true per PROTOCOL 2.2. */
     fun supportsMediaInput(kind: MediaKind, model: String): Boolean = true
     /** Pure request-local admission view matching the adapter's outgoing tool catalog. The host

@@ -93,6 +93,21 @@ class OpenAiSettingsStore internal constructor(
         val catalog = readConnections()
         val chat = catalog.snapshot(catalog.bindings.activeChatModelRef)
         return chat.withImageSnapshot(catalog.bindings.activeImageModelRef?.let { catalog.snapshot(it, image = true) })
+            .withReasoningCapabilityRecorder { recordUnsupportedReasoning(catalog, requireNotNull(catalog.bindings.activeChatModelRef)) }
+    }
+
+    private fun recordUnsupportedReasoning(admitted: ConnectionsRecord, ref: ModelRef) = synchronized(lock) {
+        val current = readConnections()
+        val (old, model) = admitted.resolve(ref)
+        val provider = current.providers.firstOrNull { it.connection.providerId == ref.providerId } ?: return@synchronized
+        val liveModel = provider.models.firstOrNull { it.modelId == ref.modelId } ?: return@synchronized
+        // Never attach an observation to a concurrently edited endpoint, protocol or model.
+        if (provider.connection.baseUrl != old.connection.baseUrl || provider.connection.protocol != old.connection.protocol ||
+            liveModel.parameters.reasoningLevel != model.parameters.reasoningLevel || liveModel.reasoningLevels != model.reasoningLevels) return@synchronized
+        val updated = ConnectionRecord(provider.connection, provider.models.map {
+            if (it.modelId == ref.modelId) it.copy(reasoningLevels = emptyList()) else it
+        }, provider.key)
+        writeConnections(ConnectionsRecord(current.providers.map { if (it === provider) updated else it }, current.bindings), false)
     }
 
     fun snapshotForImage(): OpenAiRunSnapshot = synchronized(lock) {

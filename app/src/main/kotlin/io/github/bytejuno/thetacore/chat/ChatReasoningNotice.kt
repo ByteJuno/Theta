@@ -16,6 +16,7 @@ internal fun ChatState.withReasoningAdjustment(snapshot: OpenAiRunSnapshot?): Ch
 internal fun ChatReasoningNotice(adjustment: ReasoningLevelAdjustment) {
     val strings = uiStrings()
     fun level(value: String?): String = AnthropicEffort.entries.firstOrNull { it.wire == value }
+        ?.let { strings.get(it.label) } ?: io.github.bytejuno.thetacore.provider.GeminiEffort.entries.firstOrNull { it.wire == value }
         ?.let { strings.get(it.label) } ?: value.orEmpty()
     Text(strings.get(R.string.reasoning_level_adjusted, level(adjustment.requested), level(adjustment.effective)),
         style = MaterialTheme.typography.bodyMedium)

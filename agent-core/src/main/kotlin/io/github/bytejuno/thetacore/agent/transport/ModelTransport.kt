@@ -34,11 +34,12 @@ object SharedHttpClient {
 }
 
 /** Fixed by the adapter, never inferred from a URL or a credential's contents. */
-enum class ModelAuthentication { BEARER, ANTHROPIC }
+enum class ModelAuthentication { BEARER, ANTHROPIC, GEMINI }
 
 internal fun Request.Builder.modelAuthentication(token: String, authentication: ModelAuthentication): Request.Builder = apply {
     when (authentication) {
         ModelAuthentication.BEARER -> if (token.isNotEmpty()) header("Authorization", "Bearer $token")
+        ModelAuthentication.GEMINI -> { require(token.isNotEmpty()); header("x-goog-api-key", token) }
         ModelAuthentication.ANTHROPIC -> {
             require(token.isNotEmpty())
             header("x-api-key", token)
