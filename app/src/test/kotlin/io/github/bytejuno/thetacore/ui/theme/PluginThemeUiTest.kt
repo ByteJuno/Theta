@@ -267,6 +267,102 @@ class PluginThemeUiTest {
         assertLiveAndRecreatedBrand()
     }
 
+    @Test fun coldInvalidArchiveRecordsRevocationBeforePreferenceCommit() =
+        coldInventoryFailureRecovers(corruptRecord = false, unreadablePreference = false)
+
+    @Test fun coldInvalidArchiveRecordsRevocationBeforePreferenceRead() =
+        coldInventoryFailureRecovers(corruptRecord = false, unreadablePreference = true)
+
+    @Test fun coldInvalidInstallRecordRetainsIdentityBeforePreferenceCommit() =
+        coldInventoryFailureRecovers(corruptRecord = true, unreadablePreference = false)
+
+    private fun coldInventoryFailureRecovers(corruptRecord: Boolean, unreadablePreference: Boolean) = screen {
+        select()
+        beforeNextFrame {
+            val damaged = if (corruptRecord) files.resolve("plugin-data-catalog/test.prompts/selection.properties")
+                else files.resolve("plugins/test.prompts/1/plugin.zip")
+            val original = damaged.readBytes()
+            val preferenceFile = context.noBackupFilesDir.resolve(ThemePreferenceStore.FILE_NAME)
+            val originalPreference = preferenceFile.readBytes()
+            val revocations = PluginThemeRevocations(files)
+            val failingFileSystem = object : okio.ForwardingFileSystem(okio.FileSystem.SYSTEM) {
+                override fun atomicMove(source: okio.Path, target: okio.Path) {
+                    throw java.io.IOException("Cold theme preference commit unavailable")
+                }
+            }
+            val blocked = PluginManager(context, PluginThemeLifecycle(context,
+                ThemePreferenceStore(context.noBackupFilesDir, fileSystem = failingFileSystem)))
+            damaged.writeText("broken")
+            if (unreadablePreference) { check(preferenceFile.delete()); check(preferenceFile.mkdir()) }
+            try {
+                try { blocked.restore(); fail("Cold admission must await durable theme revocation") }
+                catch (error: Exception) {
+                    if (unreadablePreference) assertTrue(error is IllegalStateException)
+                    else assertTrue(error is java.io.IOException)
+                }
+                assertFalse(blocked.dataThemesReady)
+                assertTrue(blocked.dataPlugins.isEmpty())
+                assertEquals("Isolation identity must survive failed preference IO",
+                    listOf("test.prompts"), revocations.pending())
+                if (!unreadablePreference) assertArrayEquals(originalPreference, preferenceFile.readBytes())
+            } finally {
+                damaged.writeBytes(original)
+                if (unreadablePreference) { check(preferenceFile.delete()); preferenceFile.writeBytes(originalPreference) }
+            }
+            val restored = PluginManager(context)
+            restored.restore()
+            assertTrue(restored.dataThemesReady)
+            assertEquals(1, restored.activeThemes().size)
+            assertDiskBrand()
+            assertTrue("Committed recovery must remove its intent", revocations.pending().isEmpty())
+            PluginManager(context).restore()
+            assertDiskBrand()
+        }
+        assertLiveAndRecreatedBrand()
+    }
+
+    @Test fun coldIsolationRetainsOtherPluginChoiceAndDoesNotRevokeFreshReplacementChoice() = screen {
+        select()
+        beforeNextFrame {
+            installVersion(1, id = "other.plugin")
+            val archive = files.resolve("plugins/test.prompts/1/plugin.zip")
+            val original = archive.readBytes()
+            val file = context.noBackupFilesDir.resolve(ThemePreferenceStore.FILE_NAME)
+            val preference = file.readBytes()
+            archive.writeText("broken")
+            check(file.delete()); check(file.mkdir())
+            try {
+                val blocked = PluginManager(context)
+                try { blocked.restore(); fail("Cold admission must await preference recovery") }
+                catch (_: IllegalStateException) { }
+                assertFalse(blocked.dataThemesReady)
+                assertTrue(blocked.dataPlugins.isEmpty())
+                assertEquals(listOf("test.prompts"), PluginThemeRevocations(files).pending())
+            } finally { check(file.delete()); file.writeBytes(preference); archive.writeBytes(original) }
+            val preferences = ThemePreferenceStore(context.noBackupFilesDir)
+            preferences.setTheme("other.plugin/ocean")
+            PluginManager(context).restore()
+            assertEquals("other.plugin/ocean", preferences.current().themeKey)
+            assertEquals("other.plugin/ocean", ThemePreferenceSerializer().readFrom(okio.Buffer().write(file.readBytes())).themeKey)
+            assertTrue(PluginThemeRevocations(files).pending().isEmpty())
+        }
+        await { !choices.loading && state.preference.themeKey == "other.plugin/ocean" }
+        assertEquals(MessageStyle.COMPACT, tokens.messageStyle)
+        val previous = state
+        rule.runOnIdle { appearanceGeneration++ }
+        await { state !== previous && !state.loading && !choices.loading }
+        assertEquals("other.plugin/ocean", state.preference.themeKey)
+        beforeNextFrame {
+            val preferences = ThemePreferenceStore(context.noBackupFilesDir)
+            preferences.setTheme("test.prompts/ocean")
+            PluginManager(context).restore()
+            assertEquals("test.prompts/ocean", preferences.current().themeKey)
+            assertTrue(PluginThemeRevocations(files).pending().isEmpty())
+        }
+        await { state.preference.themeKey == "test.prompts/ocean" }
+        assertEquals(MessageStyle.COMPACT, tokens.messageStyle)
+    }
+
     @Test fun digestMismatchedOldArchiveIsIsolatedBeforeConfirmedReplacement() = screen {
         select()
         beforeNextFrame {

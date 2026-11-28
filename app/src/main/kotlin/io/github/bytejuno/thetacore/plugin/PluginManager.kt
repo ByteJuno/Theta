@@ -167,11 +167,8 @@ internal class PluginManager(context: Context,
         val interrupted = mutableSetOf<String>()
         val messages = mutableListOf<String>()
         val rejected = mutableSetOf<String>()
-        themeLifecycle.recover()
-        val restoredData = if (policy?.skipData == true) emptyList() else
-            withContext(Dispatchers.IO) { dataCatalog.restoreInventory(messages::add, crashSuspects) }
+        val restoredData = themeLifecycle.restore(dataCatalog, messages::add, crashSuspects, skipDataLoading, dataRecoveryBlocked)
         restoredData.forEach { replaceDataInventory(dataInventory, dataPlugins, it, skipDataLoading) }
-        themeLifecycle.reconcile(dataCatalog, dataInventory, dataPlugins)
         val installed = withContext(Dispatchers.IO) {
             try { store.cleanupColdStages() }
             catch (e: Exception) { messages += "Code stage cleanup failed: ${e.message}" }

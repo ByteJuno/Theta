@@ -26,6 +26,25 @@ internal class PluginThemeLifecycle(context: Context,
         }
     }
 
+    /** Discover isolation without consulting preferences. Journal every unavailable identity
+     * before any preference IO; keep pages local until recovery and reconciliation succeed. */
+    suspend fun restore(catalog: PluginDataCatalog, onFailure: (String) -> Unit,
+        crashSuspects: Set<String>, skipPlugins: Boolean, skipInventory: Boolean): List<PluginDataRecord> =
+        withContext(Dispatchers.IO) {
+            val unavailable = mutableSetOf<String>()
+            val records = if (skipInventory) emptyList() else
+                catalog.restoreInventory(onFailure, crashSuspects, unavailable::add)
+            records.filter { it.error != null || it.crashQuarantined || it.selection?.active(skipPlugins) != true }
+                .forEach { unavailable += it.id }
+            unavailable.forEach(revocations::begin)
+            recover()
+            val inventory = mutableListOf<ManagedDataRecord>()
+            val pages = mutableListOf<ManagedPluginData>()
+            records.forEach { replaceDataInventory(inventory, pages, it, skipPlugins) }
+            reconcile(catalog, inventory, pages)
+            inventory.map { it.record }
+        }
+
     suspend fun reconcile(catalog: PluginDataCatalog, inventory: MutableList<ManagedDataRecord>,
         pages: MutableList<ManagedPluginData>, pluginId: String? = null) = withContext(Dispatchers.IO) {
         recover(pluginId)
@@ -44,7 +63,11 @@ internal class PluginThemeLifecycle(context: Context,
         }
         // An active package may have removed or invalidated this particular theme. Comparing
         // the exact key again under the preference mutex preserves a newer user selection.
-        if (!available) preferences.clearUnavailableTheme(key)
+        if (!available) {
+            revocations.begin(owner)
+            preferences.clearUnavailableTheme(key)
+            revocations.finish(owner)
+        }
     }
 
     suspend fun quarantine(inventory: MutableList<ManagedDataRecord>, pages: MutableList<ManagedPluginData>,
