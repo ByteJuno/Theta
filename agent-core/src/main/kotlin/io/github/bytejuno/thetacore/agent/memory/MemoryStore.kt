@@ -54,11 +54,12 @@ class MemoryStore(private val database: AgentDatabase, private val clock: () -> 
         requireEnabled: Boolean = false): List<MemoryEntry> = database.access {
         require(query.length <= MAX_QUERY_CHARS && HistoryCodec.isUtf8(query))
         require(limit in 1..100 && offset in 0..MAX_ENTRIES)
+        val keyword = normalize(query)
         val filter = category?.let(::category)
         if (requireEnabled) checkEnabled()
         db.prepare("""SELECT * FROM memories WHERE (instr(lower(content),lower(?))>0 OR instr(lower(category),lower(?))>0)
             AND (? IS NULL OR category=?) ORDER BY pinned DESC, updated_at DESC, id LIMIT ? OFFSET ?""").use {
-            it.bindText(1, query.trim()); it.bindText(2, query.trim())
+            it.bindText(1, keyword); it.bindText(2, keyword)
             if (filter == null) { it.bindNull(3); it.bindNull(4) } else { it.bindText(3, filter); it.bindText(4, filter) }
             it.bindLong(5, limit.toLong()); it.bindLong(6, offset.toLong())
             buildList { while (it.step()) add(it.entry()) }

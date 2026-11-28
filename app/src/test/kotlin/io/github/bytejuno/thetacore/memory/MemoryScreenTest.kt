@@ -79,4 +79,20 @@ class MemoryScreenTest {
         rule.onNodeWithText(activity.getString(R.string.memory_confirm)).performClick(); saved()
         assertEquals(0, store.usage().count)
     }
+
+    @Test fun correctingInvalidCategoryRestoresResultsAndClearsInputFeedback() = screen { activity, store ->
+        store.save("A saved fact", "prefs")
+        rule.waitUntil(10_000) { rule.onAllNodesWithTag(MemoryUiKeys.ENTRY).fetchSemanticsNodes().isNotEmpty() }
+        val filter = rule.onNodeWithText(activity.getString(R.string.memory_filter))
+        filter.performScrollTo().performTextReplacement("a\nb")
+        rule.waitUntil(10_000) {
+            rule.onAllNodesWithText(activity.getString(R.string.memory_input_error)).fetchSemanticsNodes().isNotEmpty()
+        }
+        rule.onNodeWithText(activity.getString(R.string.memory_storage_error)).assertDoesNotExist()
+        assertEquals(1, store.search().size)
+        filter.performTextReplacement("prefs")
+        rule.waitUntil(10_000) { rule.onAllNodesWithTag(MemoryUiKeys.ENTRY).fetchSemanticsNodes().isNotEmpty() }
+        rule.onNodeWithText(activity.getString(R.string.memory_input_error)).assertDoesNotExist()
+        rule.onNodeWithText(activity.getString(R.string.memory_retry)).assertDoesNotExist()
+    }
 }

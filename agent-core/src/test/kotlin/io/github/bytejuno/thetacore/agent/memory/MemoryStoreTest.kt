@@ -69,6 +69,18 @@ class MemoryStoreTest {
         db.ready()
     }
 
+    @Test fun originalUnicodeAndLineEndingInputStillFindsNormalizedFacts() = database().use { db ->
+        val store = MemoryStore(db)
+        val original = "cafe\u0301\r\nau lait"
+        val originalCategory = "the\u0301"
+        val entry = store.save(original, originalCategory)
+        assertEquals(listOf(entry), store.search(original))
+        assertEquals(listOf(entry), store.search("cafe\u0301"))
+        assertEquals(listOf(entry), store.search("café"))
+        assertEquals(listOf(entry), store.search(originalCategory))
+        assertEquals(listOf(entry), store.search(original, originalCategory))
+    }
+
     @Test fun invalidAndCountCapacityRejectionsNeverPoisonSharedDatabase() = database().use { db ->
         val store = MemoryStore(db)
         for (text in listOf("", " ", "x".repeat(2001), "\uD800", "x\u0000y"))

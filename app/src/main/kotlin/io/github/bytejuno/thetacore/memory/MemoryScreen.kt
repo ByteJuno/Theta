@@ -44,6 +44,7 @@ internal fun MemoryContent(store: MemoryStore, back: () -> Unit) {
     var busy by remember { mutableStateOf(false) }
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<Int?>(null) }
+    var loadError by remember { mutableStateOf<Int?>(null) }
     var feedback by remember { mutableStateOf<Int?>(null) }
     var editing by rememberSaveable { mutableStateOf(false) }
     var editingId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -57,6 +58,7 @@ internal fun MemoryContent(store: MemoryStore, back: () -> Unit) {
 
     LaunchedEffect(store, query, category, offset, revision, reload) {
         loading = true
+        loadError = null
         try {
             val result = withContext(Dispatchers.IO) {
                 val entries = store.search(query, category.ifBlank { null }, 21, offset)
@@ -65,7 +67,8 @@ internal fun MemoryContent(store: MemoryStore, back: () -> Unit) {
             if (result.items.isEmpty() && offset > 0) offset = (offset - 20).coerceAtLeast(0)
             else page = result
         } catch (cancelled: CancellationException) { throw cancelled }
-        catch (_: Exception) { page = null; error = R.string.memory_storage_error }
+        catch (_: IllegalArgumentException) { page = null; loadError = R.string.memory_input_error }
+        catch (_: Exception) { page = null; loadError = R.string.memory_storage_error }
         finally { loading = false }
     }
 
@@ -121,9 +124,9 @@ internal fun MemoryContent(store: MemoryStore, back: () -> Unit) {
             Modifier.fillMaxWidth(), singleLine = true, label = { Text(strings.get(R.string.memory_filter)) })
         Button(onClick = { editingId = null; content = ""; editCategory = MemoryUiKeys.GENERAL; pinned = false; error = null; editing = true },
             enabled = page != null && !busy, modifier = Modifier.fillMaxWidth()) { Text(strings.get(R.string.memory_add)) }
-        error?.let {
+        (error ?: loadError)?.let {
             Text(strings.get(it), color = MaterialTheme.colorScheme.error)
-            TextButton(onClick = { error = null; reload++ }, enabled = !busy) { Text(strings.get(R.string.memory_retry)) }
+            TextButton(onClick = { error = null; loadError = null; reload++ }, enabled = !busy) { Text(strings.get(R.string.memory_retry)) }
         }
         feedback?.let { Text(strings.get(it), Modifier.testTag(MemoryUiKeys.FEEDBACK)) }
         if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
