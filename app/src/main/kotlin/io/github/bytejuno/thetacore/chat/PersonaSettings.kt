@@ -27,6 +27,7 @@ internal data class ChatPromptSnapshot(
     val persona: DataPersona? = null,
     val unavailable: Boolean = false,
     val recovered: Boolean = false,
+    val memorySection: String = "",
 )
 
 /** DataStore owns serialization of updates, fsync and atomic replacement. Application supplies

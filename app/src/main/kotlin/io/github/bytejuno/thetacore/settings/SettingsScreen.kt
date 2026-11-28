@@ -18,6 +18,7 @@ internal fun SettingsScreen(host: ThetaApplication, destination: SettingsDestina
             SettingsGroup(R.string.settings_models_agent, listOf(
                 R.string.providers_title to SettingsDestination.PROVIDERS,
                 R.string.settings_personas_skills to SettingsDestination.PERSONAS,
+                R.string.memory_title to SettingsDestination.MEMORY,
                 R.string.mcp_title to SettingsDestination.MCP), navigate)
             SettingsGroup(R.string.settings_safety, listOf(R.string.chat_approval_settings to SettingsDestination.SAFETY), navigate)
             SettingsGroup(R.string.settings_customization, listOf(R.string.settings_appearance to SettingsDestination.APPEARANCE), navigate)
@@ -28,6 +29,7 @@ internal fun SettingsScreen(host: ThetaApplication, destination: SettingsDestina
         SettingsDestination.PROVIDERS -> ProviderScreen(host, back)
         SettingsDestination.SAFETY -> ChatApprovalDialog(host, back) { navigate(SettingsDestination.TOOLS) }
         SettingsDestination.TOOLS -> ToolApprovalDialog(host, back)
+        SettingsDestination.MEMORY -> io.github.bytejuno.thetacore.memory.MemoryScreen(host, back)
         SettingsDestination.MCP -> io.github.bytejuno.thetacore.mcp.McpScreen(host, back)
         SettingsDestination.PERSONAS -> PersonaSettingsScreen(host, personaEnabled, back)
         SettingsDestination.APPEARANCE -> AppearanceSettingsScreen(back)

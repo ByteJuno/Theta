@@ -200,7 +200,7 @@ class SessionDocumentBlobsTest {
                 SqliteRunHistory.create(db, "session").close()
                 SessionComposerStore(db).save("session", ComposerSnapshot("v", "draft", emptyList()), emptyList())
                 db.connection.execute("DROP TABLE document_blobs")
-                db.connection.execute("PRAGMA user_version=7")
+                db.connection.execute("DROP TABLE memories"); db.connection.execute("DROP TABLE memory_settings"); db.connection.execute("PRAGMA user_version=7")
             }
             AgentDatabase.open(file, BundledSQLiteDriver()).use { db ->
                 assertEquals("draft", SessionComposerStore(db).read("session").text)

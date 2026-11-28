@@ -63,7 +63,7 @@ class PrivateImageStoreTest {
             owner.connection.execute("DROP TABLE run_catalogs")
             owner.connection.execute("DROP TABLE private_image_chunks")
             owner.connection.execute("DROP TABLE private_image_attempts")
-            owner.connection.execute("PRAGMA user_version=4")
+            owner.connection.execute("DROP TABLE memories"); owner.connection.execute("DROP TABLE memory_settings"); owner.connection.execute("PRAGMA user_version=4")
         }
         database(path).use { owner ->
             assertEquals(listOf("existing"), owner.sessionIds())

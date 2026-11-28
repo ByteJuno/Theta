@@ -133,7 +133,7 @@ class AgentDatabase private constructor(
 
     companion object {
         const val FILE_NAME = "agent.db"
-        const val SCHEMA_VERSION = 8
+        const val SCHEMA_VERSION = 9
         private const val APPLICATION_ID = 0x54485441
         // On POSIX, closing ANY descriptor of a locked file can drop this process's lock.
         // Reject duplicate instances before even opening a second descriptor.
@@ -162,6 +162,7 @@ class AgentDatabase private constructor(
             createRunCatalogSchema(connection)
             createComposerSchema(connection)
             createDocumentBlobSchema(connection)
+            io.github.bytejuno.thetacore.agent.memory.createMemorySchema(connection)
             connection.execute("PRAGMA application_id=$APPLICATION_ID")
             connection.execute("PRAGMA user_version=$SCHEMA_VERSION")
         }
@@ -197,7 +198,8 @@ class AgentDatabase private constructor(
             if (oldVersion < 5) createPrivateImageSchema(connection)
             if (oldVersion < 6) createRunCatalogSchema(connection)
             if (oldVersion < 7) createComposerSchema(connection)
-            createDocumentBlobSchema(connection)
+            if (oldVersion < 8) createDocumentBlobSchema(connection)
+            io.github.bytejuno.thetacore.agent.memory.createMemorySchema(connection)
             connection.execute("PRAGMA user_version=$SCHEMA_VERSION")
         }
 
