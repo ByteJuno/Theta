@@ -1,10 +1,8 @@
 package io.github.bytejuno.thetacore.provider
 
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.ui.semantics.Role
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -18,8 +16,9 @@ import io.github.bytejuno.thetacore.chat.*
 import io.github.bytejuno.thetacore.plugin.ProviderTemplate
 import kotlinx.coroutines.*
 import java.util.UUID
+import io.github.bytejuno.thetacore.settings.SettingsPage
 
-/** Non-saveable editor: typed secrets are discarded when the dialog is disposed. */
+/** Non-saveable editor: typed secrets are discarded when the page is disposed. */
 @Composable
 internal fun ProviderConnectionsScreen(host: ThetaApplication, onClose: () -> Unit) {
     val strings = uiStrings()
@@ -29,6 +28,7 @@ internal fun ProviderConnectionsScreen(host: ThetaApplication, onClose: () -> Un
     var templates by remember { mutableStateOf<List<ProviderTemplate>>(emptyList()) }
     var loading by remember { mutableStateOf(true) }
     var busy by remember { mutableStateOf(false) }
+    var saved by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<Int?>(null) }
     var unreadable by remember { mutableStateOf(false) }
     var replacing by remember { mutableStateOf(false) }
@@ -42,8 +42,6 @@ internal fun ProviderConnectionsScreen(host: ThetaApplication, onClose: () -> Un
     var fetched by remember { mutableStateOf<List<String>>(emptyList()) }
     var filter by remember { mutableStateOf("") }
     var templateSource by remember { mutableStateOf<ProviderTemplate?>(null) }
-    var approval by remember { mutableStateOf(false) }
-    var mcp by remember { mutableStateOf(false) }
 
     suspend fun reload() {
         loading = true
@@ -58,7 +56,7 @@ internal fun ProviderConnectionsScreen(host: ThetaApplication, onClose: () -> Un
     }
     LaunchedEffect(store) { reload() }
     fun operate(action: suspend () -> Unit) {
-        busy = true; error = null
+        busy = true; error = null; saved = false
         scope.launch {
             try { action() }
             catch (cancelled: CancellationException) { throw cancelled }
@@ -69,6 +67,7 @@ internal fun ProviderConnectionsScreen(host: ThetaApplication, onClose: () -> Un
         }
     }
     fun edit(provider: ConfiguredProvider?) {
+        saved = false
         editor = provider; secret = ""; fetched = emptyList(); filter = ""; selectedModel = null; templateSource = null
         protocol = provider?.connection?.protocol ?: ProviderTemplateProtocol.OPENAI_CHAT.wire
         models = provider?.models.orEmpty()
@@ -80,13 +79,14 @@ internal fun ProviderConnectionsScreen(host: ThetaApplication, onClose: () -> Un
         } ?: ProviderSettingsForm()
     }
     val editable = !loading && !busy && (!unreadable || replacing)
-    AlertDialog(
-        onDismissRequest = { if (!busy) onClose() },
-        title = { Text(strings.get(R.string.providers_title)) },
-        text = {
-            Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+    SettingsPage(
+        onBack = onClose, canGoBack = !busy,
+        title = strings.get(R.string.providers_title),
+        content = {
+            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 if (loading || busy) LinearProgressIndicator(Modifier.fillMaxWidth())
                 error?.let { Text(strings.get(it), color = MaterialTheme.colorScheme.error) }
+                if (saved) Text(strings.get(R.string.settings_provider_saved))
                 if (unreadable || error == R.string.providers_recovered) {
                     TextButton(enabled = !busy, onClick = { scope.launch { reload() } }) { Text(strings.get(R.string.chat_provider_reload)) }
                     if (unreadable) TextButton(enabled = !busy, onClick = { consent = true }) { Text(strings.get(R.string.chat_provider_reenter)) }
@@ -208,29 +208,22 @@ internal fun ProviderConnectionsScreen(host: ThetaApplication, onClose: () -> Un
                 if (editor != null) TextButton(enabled = editable, onClick = { operate {
                     catalog = withContext(Dispatchers.IO) { store.deleteProvider(requireNotNull(editor).connection.providerId) }; edit(null)
                 } }) { Text(strings.get(R.string.providers_delete)) }
-                PersonaPicker(host, editable)
-                OutlinedButton(enabled = !busy, onClick = { approval = true }) { Text(strings.get(R.string.chat_approval_settings)) }
-                OutlinedButton(enabled = !busy, onClick = { mcp = true }) { Text(strings.get(R.string.mcp_title)) }
-                AppLanguageSetting()
             }
         },
-        confirmButton = { Button(enabled = editable && models.isNotEmpty() && form.endpoint.isNotBlank() &&
+        actions = { Button(enabled = editable && models.isNotEmpty() && form.endpoint.isNotBlank() &&
             form.profileName.isNotBlank() && (form.noAuth || secret.isNotEmpty() || form.canReuseKey), onClick = {
             operate {
                 val c = ProviderConnection(form.profileId ?: UUID.randomUUID().toString(), form.profileName.trim(), form.endpoint.trim(),
                     protocol = protocol, noAuth = form.noAuth, compat = form.providerCompat())
                 catalog = withContext(Dispatchers.IO) { store.saveProvider(c, models, if (c.noAuth) "" else secret, replacing) }
-                unreadable = false; replacing = false; edit(catalog.providers.first { it.connection.providerId == c.providerId })
+                unreadable = false; replacing = false; edit(catalog.providers.first { it.connection.providerId == c.providerId }); saved = true
             }
         }) { Text(strings.get(R.string.chat_save)) } },
-        dismissButton = { TextButton(enabled = !busy, onClick = onClose) { Text(strings.get(R.string.chat_close)) } },
     )
     if (consent) AlertDialog(onDismissRequest = { consent = false }, title = { Text(strings.get(R.string.chat_provider_reenter)) },
         text = { Text(strings.get(R.string.providers_replace_warning)) },
         confirmButton = { TextButton(onClick = { consent = false; replacing = true; edit(null); error = null }) { Text(strings.get(R.string.providers_replace_confirm)) } },
         dismissButton = { TextButton(onClick = { consent = false }) { Text(strings.get(R.string.chat_close)) } })
-    if (approval) ChatApprovalDialog(host) { approval = false }
-    if (mcp) io.github.bytejuno.thetacore.mcp.McpScreen(host) { mcp = false }
 }
 
 @Composable

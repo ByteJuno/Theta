@@ -1,0 +1,25 @@
+<resources>
+    <string name="settings_back">返回</string>
+    <string name="settings_models_agent">模型与智能体</string>
+    <string name="settings_personas_skills">人设与技能</string>
+    <string name="settings_safety">安全与权限</string>
+    <string name="settings_customization">界面与自定义</string>
+    <string name="settings_system">系统与诊断</string>
+    <string name="settings_appearance">外观与主题</string>
+    <string name="settings_theme_mode">深浅色模式</string>
+    <string name="settings_theme_system">跟随系统</string>
+    <string name="settings_theme_light">浅色</string>
+    <string name="settings_theme_dark">深色</string>
+    <string name="settings_theme_palette">配色方案</string>
+    <string name="settings_theme_brand">Theta 品牌默认色 · 钴蓝与暖金</string>
+    <string name="settings_theme_failed">无法读取或保存主题，已保留上次保存的选择。请重新加载或重试。</string>
+    <string name="settings_future_themes">主题皮肤包</string>
+    <string name="settings_future_themes_detail">数据插件主题皮肤包将在后续版本开放。目前可使用上方的系统配色或 Theta 品牌色。</string>
+    <string name="settings_future_chat">聊天界面插件</string>
+    <string name="settings_future_chat_detail">自定义聊天界面将在后续版本开放。目前使用 Theta 内置聊天界面与安全控件。</string>
+    <string name="settings_persona_busy">请先完成或停止当前任务，再更改人设。</string>
+    <string name="settings_skills">可用技能</string>
+    <string name="settings_skills_detail">技能来自已启用的数据插件，智能体会按需读取技能文档。可在“扩展与诊断”中管理对应插件包。</string>
+    <string name="settings_skills_empty">已启用的数据插件中没有可用技能。</string>
+    <string name="settings_provider_saved">服务商已保存。</string>
+</resources>

@@ -6,9 +6,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
+import io.github.bytejuno.thetacore.settings.SettingsPage
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
@@ -38,7 +36,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 @Composable
-internal fun ChatApprovalDialog(host: ThetaApplication, onClose: () -> Unit) {
+internal fun ChatApprovalDialog(host: ThetaApplication, onClose: () -> Unit, onTools: () -> Unit) {
     val strings = uiStrings()
     val scope = rememberCoroutineScope()
     val store = host.approvalSettings
@@ -47,13 +45,6 @@ internal fun ChatApprovalDialog(host: ThetaApplication, onClose: () -> Unit) {
     var error by remember { mutableStateOf<Int?>(null) }
     var pendingFullAuto by remember { mutableStateOf(false) }
     var confirmFullAuto by remember { mutableStateOf(false) }
-    var manageTools by remember { mutableStateOf(false) }
-
-    if (manageTools) {
-        ToolApprovalDialog(host) { manageTools = false }
-        return
-    }
-
     LaunchedEffect(store) {
         withContext(Dispatchers.IO) { runCatching { store.ensureLoaded() } }
     }
@@ -94,12 +85,12 @@ internal fun ChatApprovalDialog(host: ThetaApplication, onClose: () -> Unit) {
         }
     }
 
-    AlertDialog(
-        onDismissRequest = { if (!busy) onClose() },
-        title = { Text(strings.get(R.string.chat_approval_settings)) },
-        text = {
+    SettingsPage(
+        onBack = onClose, canGoBack = !busy,
+        title = strings.get(R.string.chat_approval_settings),
+        content = {
             Column(
-                modifier = Modifier.verticalScroll(rememberScrollState()),
+                modifier = Modifier.fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 Text(strings.get(R.string.chat_approval_mode_intro), style = MaterialTheme.typography.bodySmall)
@@ -141,7 +132,7 @@ internal fun ChatApprovalDialog(host: ThetaApplication, onClose: () -> Unit) {
                                     style = MaterialTheme.typography.bodySmall,
                                 )
                             }
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Button(
                                     enabled = !busy && confirmFullAuto,
                                     onClick = { applyMode(ApprovalMode.FULL_AUTO) },
@@ -181,14 +172,11 @@ internal fun ChatApprovalDialog(host: ThetaApplication, onClose: () -> Unit) {
                     )
                 }
                 Text(strings.get(R.string.chat_approval_safety_invariants), style = MaterialTheme.typography.bodySmall)
-                TextButton(onClick = { manageTools = true }, enabled = !busy) {
+                TextButton(onClick = onTools, enabled = !busy) {
                     Text(strings.get(R.string.tool_rules_title))
                 }
                 error?.let { Text(strings.get(it), color = MaterialTheme.colorScheme.error) }
             }
-        },
-        confirmButton = {
-            TextButton(onClick = onClose, enabled = !busy) { Text(strings.get(R.string.chat_close)) }
         },
     )
 }
