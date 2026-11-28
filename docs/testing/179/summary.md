@@ -1,22 +1,29 @@
-# Issue 179 测试摘要
+# Issue 179 validation
 
-实现提交：b6dc58f040306fe9196890011540191630099ba5
-源码树：93c2f456c2d288b9c2a041a3a88da319ab5f1a70
-基线：ff36db923493a523ce5f3936b4846af99fea783e
-APK SHA：未生成。
+Implementation SHA: `3671224deb450de885293265004674e6e06d4900`
+Tested source tree: `cab6295a3ca3321440fe1960b828ca9ea5dbc3bd`
+Branch: `auto/179-floating-progress`; PR #193 RETURN: https://github.com/ByteJuno/Theta/pull/193#issuecomment-7245642018
+Base main: `ff36db923493a523ce5f3936b4846af99fea783e`. Remote PR head before publication: `52cc53bd070da74b72ace273f1c26f7a8e7a4117`.
 
-实现：可选悬浮权限设置、进度胶囊、贴边拖动、红色停止按钮、审批/恢复回拉和截屏隐藏/恢复；默认关闭。宿主使用短接线，新UI文案成对独立资源。保留现有前台通知。停止区分取消请求与worker实际退出。
+## Implemented
 
-验证：
-- 16项定向测试全部通过：状态机、真实ScreenController成功/失败/取消的隐藏恢复顺序、窗口注册/移除、双语320dp/2倍字体/明暗主题布局、点击/拖动、实际ChatSessionOwner.stop及过期动作保护。
-- 最终完整 preflight 通过，耗时 158.2 秒；严格 --configuration-cache --configuration-cache-problems=fail，缓存复用。
-- app：948项，939通过，9平台跳过，0失败/错误，108个suite本轮实际执行。
-- agent-core：734项，733通过，1跳过，0失败/错误；本轮 UP-TO-DATE，输入未改，未重复执行。
-- :app:verifyUiResources：778对英/中文key通过；:app:lintDebug：0错误/113警告；storage-fixture源码校验和compileDebugKotlin通过。
-- 测试树与提交树相同；提交前fetch，main未前进，任务远端分支尚不存在。
+- Runtime observes ChatSessionOwner from installation, before the first progress event. Saved approvals and late-exit recovery requests are projected read-only from the selected session; no model/tool work is admitted for display.
+- Active progress remains execution-ID scoped. Saved entries use session/request IDs; stop refreshes current state before accepting a window action. Old session/request windows cannot cancel newer work.
+- Resolving/denying/stopping a pending step or switching sessions removes the window. Accepting uncertainty preserves the ledger's remaining verification action; VERIFIED_CLEAR removes it. No ledger semantics changed.
+- Three new integration tests use real ChatSessionOwner, SQLite, HostToolExecutionService and Robolectric WindowManager: cold approval restoration and stale-action rejection; cancellation with late exit; timeout with late exit. They exercise open/switch/resolve/stop and assert no tool/model replay.
 
-限制：未生成 APK（APK SHA 未生成）；未操作手机或模拟器；视觉未验证。Robolectric 只验证原生 View 布局、点击/拖动回调及窗口注册/移除，不证明当前 APK 像素、触摸、OEM 悬浮权限回调或合成器截屏时序。待独立审核端验证：中英文、小屏、大字体、明暗主题实际显示；后台/审批/恢复回拉；授权/撤销权限；真实截图无胶囊残影；停止延迟及实际工具退出；当前 head CI、S1/S2、签名、R8/API33 设备验收。agent-core 输入未变，734 项为 Gradle UP-TO-DATE 既有 XML，非本轮重跑。
+## Current implementation checks
 
-原始失败保留于本轮证据目录和 validation-issue11/issue179-b9cb-targeted、-r2、-r3；分别为UI字符串检测、测试异常捕获顺序、测试shadow类型编译问题，修复后-r4通过；未删断言或放宽超时。提交前PR190新head已按独立审核端状态/verdict核对，仅更新其观察head并保留游标与旧证据绑定，不把PR190测试计入本任务。
+- Full `python scripts/preflight.py`: passed in 158.8s, strict `--configuration-cache --configuration-cache-problems=fail`, configuration cache reused, no build cache. Tested tree equals committed tree.
+- App: 951 tests, 942 passed, 9 skipped, 0 failures/errors; all 109 suites fresh this round.
+- Agent-core: 734 tests (733 passed, 1 skipped, 0 failures/errors), Gradle UP-TO-DATE from unchanged inputs; not rerun this round.
+- `:app:verifyUiResources`: 778 English/Chinese keys; lint: 0 errors/113 warnings; storage-fixture source checks and Kotlin compilation passed.
+- Required `/opt/homelab-report/theta-gpu-test`: 14 tests, 0 failed, exit 0 in 103.9s. Remote staged tree matched `cab6295a3ca3321440fe1960b828ca9ea5dbc3bd` before testing. Entry did not separately report skips/errors.
+- Earlier local targeted run: 13 tests, 0 failures/errors/skips, before adding the timeout counterpart; final preflight/GPU above cover the final tests.
+- Final fetch confirmed both PR branch and origin/main are ancestors of HEAD; no reviewer commits or main changes required merging. PR #190 remains independently tracked at its own cursor/head.
 
-证据目录：E:\Desktop\AI研究\theta-auto-loop\event-runs\b9cb1c62-ecf7-4bce-b26f-f6f5d0999f57
+## Evidence and limits
+
+未生成 APK（APK SHA 未生成），未操作手机或模拟器，视觉未验证。本轮未改变布局或文案。真实 ChatSessionOwner、SQLite、工具执行器和 Robolectric WindowManager 联动测试验证状态、点击与窗口注册/移除；Linux GPU 测试入口不是当前 APK 的像素、触摸或系统合成器验收。当前实现的 GitHub CI、规定 S1/S2、实际中英文/小屏/大字体/明暗主题、悬浮权限、截屏避让、停止延迟、签名及 R8/API33 设备验收仍由独立审核端完成。agent-core 输入未变，734 项为 UP-TO-DATE 既有 XML，非本轮重跑。
+
+Evidence directory: `E:\Desktop\AI研究\theta-auto-loop\event-runs\ef6c422d-82a8-43d8-8152-aaaabc37dbab`. Original reviewer diagnosis and all failed test attempts are retained locally. Initial harness compilation/session-binding errors and recovery-contract counterexamples were corrected without increasing timeouts or weakening assertions. Prior APK, CI or device evidence is not rebound to this implementation. No testing summary is committed by the writer; the publisher owns the single issue summary and remote publication.
