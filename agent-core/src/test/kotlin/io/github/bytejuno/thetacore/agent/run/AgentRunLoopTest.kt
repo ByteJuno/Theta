@@ -459,14 +459,16 @@ class AgentRunLoopTest {
             assertEquals(1, q.requests.size)
             assertEquals(1, g.history.snapshot().messages.size)
         }
-        // A signature on an empty text part is opaque replay data, not an empty response.
+        // An empty text signature stays in the journal and cannot count as an answer.
         val signed = listOf(Events.started("r", "m"), Events.text(0, ""),
             Events.end(0, replayData("p", "m", "signature")), Events.finished(FinishReason.STOP))
         val f = RunFixture()
         val p = ScriptProvider(listOf(signed, answer()))
         assertEquals(RunState.COMPLETED, f.loop(p).run().state)
-        assertEquals(1, p.requests.size)
-        assertEquals("signature", f.history.snapshot().messages.last().parts.single().replay!!.payload)
+        assertEquals(2, p.requests.size)
+        assertEquals("signature", f.journal.attempts().first().partial.parts.single().replay!!.payload)
+        assertEquals(HistoryDisposition.DISCARD, f.journal.attempts().first().disposition)
+        assertEquals("done", (f.history.snapshot().messages.last().parts.single() as ContentPart.Text).text)
     }
 
     @Test fun cancellationExceptionFromLiveCollaboratorsPausesInsteadOfEndingRun() = runTest {

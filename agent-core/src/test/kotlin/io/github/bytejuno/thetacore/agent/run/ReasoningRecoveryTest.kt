@@ -3,10 +3,54 @@ package io.github.bytejuno.thetacore.agent.run
 import io.github.bytejuno.thetacore.agent.protocol.*
 import io.github.bytejuno.thetacore.agent.ledger.*
 import kotlinx.coroutines.test.runTest
+import org.junit.Rule
+import org.junit.rules.TemporaryFolder
 import kotlin.test.*
 
 class ReasoningRecoveryTest {
+    @get:Rule val temp = TemporaryFolder()
     private fun request() = chatRequest("m") { reasoningLevel = "high" }
+
+    @Test fun `prior summary accounting permits first assistant thinking recovery without resetting budgets`() = runTest {
+        for (inheritedSteps in listOf(0, 1)) {
+            val f = RunFixture()
+            val provider = ScriptProvider(listOf(failure(ModelErrorCode.UNSUPPORTED_PARAMETER, "thinkingConfig"), answer()))
+            val summarizer = ScriptProvider(listOf(answer("old facts")))
+            val budget = ContextBudget({ r ->
+                (r.system?.length ?: 0).toLong() + r.messages.sumOf { m ->
+                    m.parts.filterIsInstance<ContentPart.Text>().sumOf { it.text.length.toLong() }
+                }
+            }, { 1500L })
+            val summary = SummaryModel(ModelTarget("summary", summarizer, Credentials { "fake" }), chatRequest("m") {
+                toolChoice = ToolChoice.None; maxOutputTokens = 100
+            }, ContextBudget({ 100L }, { 10000L }))
+            val dir = temp.newFolder().toPath()
+            TestRunHistory.create(dir, "session", Durability.PROCESS_CRASH_ONLY).use { history ->
+                history.append(0, listOf(message(Role.USER, textPart("old".repeat(1000))),
+                    message(Role.ASSISTANT, textPart("past")), message(Role.USER, textPart("goal"))))
+                var notices = 0
+                val result = AgentRunLoop(RunIdentity("chain", "session", "run"),
+                    ModelTarget("provider", provider, Credentials { "fake" }),
+                    chatRequest("m") { reasoningLevel = "high"; maxOutputTokens = 100 }, history,
+                    LedgerToolExecutor(f.ledger, f.gate, f.definitions, f.bridge, RunApprovals { Decision.ALLOW_ONCE }),
+                    budget = budget, contextPolicy = ContextPolicy("goal", 2, summary), initialSteps = inheritedSteps,
+                    reasoningCapabilities = ReasoningCapabilityObserver { _, _ -> notices++ }).run()
+                assertEquals(1, summarizer.requests.size)
+                assertEquals(if (inheritedSteps == 0) RunState.COMPLETED else RunState.FAILED, result.state)
+                assertEquals(if (inheritedSteps == 0) listOf("high", null) else listOf("high"), provider.requests.map { it.reasoningLevel })
+                assertEquals(if (inheritedSteps == 0) 1 else 0, notices)
+                assertEquals(2, result.steps)
+                assertEquals(if (inheritedSteps == 0) 2 else 1, result.retries)
+                assertEquals(result.steps, history.loadAccounting("chain")!!.steps)
+                assertEquals(result.retries, history.loadAccounting("chain")!!.retries)
+            }
+            TestRunHistory.open(dir, Durability.PROCESS_CRASH_ONLY).use { history ->
+                assertEquals(2, history.loadAccounting("chain")!!.steps)
+                assertEquals(if (inheritedSteps == 0) 2 else 1, history.loadAccounting("chain")!!.retries)
+            }
+        }
+    }
+
     @Test fun `confirmed first step removes thinking once and records capability before retry`() = runTest {
         val fixture = RunFixture(); var notices = 0
         val provider = ScriptProvider(listOf(failure(ModelErrorCode.UNSUPPORTED_PARAMETER, "thinkingConfig"), answer()))

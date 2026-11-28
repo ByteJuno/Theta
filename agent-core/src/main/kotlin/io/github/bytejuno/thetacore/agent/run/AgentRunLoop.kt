@@ -78,6 +78,7 @@ class AgentRunLoop(
     private var rejectedContextReadmission = false
     private var reasoningRemoved = false
     private var reasoningOutputObserved = false
+    private var summarySteps = 0
 
     private fun persistAccounting() {
         if (accountingActive) (history as? SqliteRunHistory)?.saveAccounting(
@@ -291,7 +292,7 @@ class AgentRunLoop(
                 beforeModelSubmit()
                 currentCoroutineContext().ensureActive()
                 check(history.revision() == snapshot.revision) { "History changed during active run" }
-                steps++; retries++
+                steps++; summarySteps++; retries++
                 persistAccounting()
                 disk.saveCheckpoint(checkpoint(snapshot, snapshot.messages.size,
                     null, "PAUSED", "Summary attempt reserved; interrupted work requires review", false,
@@ -547,7 +548,9 @@ class AgentRunLoop(
                     serverUnknown = true
                     return pauseContext(view, "Server execution state unknown")
                 }
-                if (canRemoveReasoning(request, terminal.error, mode, steps, reducer.assistantMessage(),
+                // Summary reservations consume the task budget, but are not new assistant turns.
+                // Inherited steps remain conservative evidence of a previously started run.
+                if (canRemoveReasoning(request, terminal.error, mode, steps - summarySteps, reducer.assistantMessage(),
                         confirmedGenerationResponse, reasoningRemoved || reasoningOutputObserved) && retries < limits.maxRetries) {
                     reasoningCapabilities.unsupported(target, request)
                     config = copyRequest(object : ChatRequest by config { override val reasoningLevel: String? = null }, emptyList())

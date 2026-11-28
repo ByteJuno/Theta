@@ -19,6 +19,44 @@ class GeminiRunTest {
     private fun response(parts: String, reason: String = "STOP") =
         "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":$parts},\"finishReason\":\"$reason\"}]}\n\n"
 
+    @Test fun `empty signed replies stay in the journal and obey empty response recovery`() = runTest {
+        for (thought in listOf(false, true)) for (outcome in listOf("answer", "empty", "server")) {
+            val f = RunFixture()
+            var sends = 0
+            val empty = "[" + (if (thought) """{"text":"thought","thought":true},""" else "") +
+                """{"text":"","thoughtSignature":"c2ln"}]"""
+            val provider = GeminiProvider(config, ModelTransport { _, _, _ -> flow {
+                val parts = if (sends++ > 0 && outcome == "answer") """[{"text":"done"}]""" else empty
+                emit(TransportEvent.Headers(200, "text/event-stream", null))
+                emit(TransportEvent.Bytes(response(parts).toByteArray()))
+            } })
+            val dir = temp.newFolder().toPath()
+            TestRunHistory.create(dir, "session", Durability.PROCESS_CRASH_ONLY).use { history ->
+                history.append(0, listOf(message(Role.USER, textPart("goal"))))
+                val request = chatRequest("m") {
+                    if (outcome == "server") extraBody = buildJsonObject { put("testGatewayOption", true) }
+                }
+                val result = f.loop(provider, history = history, request = request).run()
+                assertEquals(when (outcome) {
+                    "answer" -> RunState.COMPLETED
+                    "empty" -> RunState.FAILED
+                    else -> RunState.PAUSED
+                }, result.state)
+                assertEquals(if (outcome == "server") 1 else 2, sends)
+                assertEquals(if (outcome == "server") 0 else 1, result.retries)
+                assertEquals(outcome == "server", result.serverExecutionUnknown)
+                assertEquals(HistoryDisposition.DISCARD, f.journal.attempts().first().disposition)
+                assertTrue(f.journal.attempts().first().partial.parts.last().replay!!.payload.contains("c2ln"))
+                assertTrue(f.submitted.isEmpty())
+            }
+            TestRunHistory.open(dir, Durability.PROCESS_CRASH_ONLY).use { history ->
+                val assistants = history.snapshot().messages.filter { it.role == Role.ASSISTANT }
+                assertEquals(if (outcome == "answer") 1 else 0, assistants.size)
+                if (outcome == "answer") assertEquals("done", (assistants.single().parts.single() as ContentPart.Text).text)
+            }
+        }
+    }
+
     @Test fun `native parallel calls persist stable bindings and return one ordered result group`() = runTest {
         val f = RunFixture(listOf(testDefinition("first", true), testDefinition("second", true)))
         var sends = 0
