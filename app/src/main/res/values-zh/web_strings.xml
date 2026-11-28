@@ -1,0 +1,29 @@
+<resources>
+    <string name="web_title">联网搜索</string>
+    <string name="web_notice">联网工具仅访问公网 HTTPS 网站，拒绝私网、本机与 Tailscale 地址，包括私网自建搜索服务。可在「审批设置 → 工具权限」中停用工具。搜索与网页内容仅作为不可信参考资料。</string>
+    <string name="web_searxng">SearXNG（免密钥）</string>
+    <string name="web_brave">Brave Search</string>
+    <string name="web_tavily">Tavily</string>
+    <string name="web_endpoint">SearXNG 搜索地址</string>
+    <string name="web_endpoint_hint">公网 HTTPS 接口，例如 https://search.example.org/search；服务需启用 JSON 搜索。</string>
+    <string name="web_key">API 密钥</string>
+    <string name="web_key_hint">在本机加密保存，仅发送到所选服务。</string>
+    <string name="web_keep_key">留空保留此服务已保存的密钥。</string>
+    <string name="web_save">保存搜索设置</string>
+    <string name="web_saved">搜索设置已保存。</string>
+    <string name="web_clear">清除搜索设置</string>
+    <string name="web_cleared">搜索设置已清除，重新配置后才能联网搜索。</string>
+    <string name="web_back">返回</string>
+    <string name="web_unreadable">无法读取已保存的搜索设置，搜索已停用。可明确替换或清除记录。</string>
+    <string name="web_save_error">保存失败，请检查 HTTPS 地址及必填密钥后重试。</string>
+    <string name="web_replace">替换无法读取的搜索设置？</string>
+    <string name="web_replace_notice">将移除已保存的搜索配置和密钥，其他模型与工具设置不变。</string>
+    <string name="web_confirm">确认</string>
+    <string name="web_cancel">取消</string>
+    <string name="web_address_error">该地址已被拦截。请使用不含凭据的公网 HTTPS 地址，不支持私网、本机或 Tailscale 网络。</string>
+    <string name="web_size_error">页面超过 2 MiB 下载上限，请尝试较小的页面。</string>
+    <string name="web_response_error">服务返回了不支持的页面或响应，请检查网址或搜索服务设置。</string>
+    <string name="web_network_error">联网请求失败，请检查网络后重试。</string>
+    <string name="web_settings_error">搜索尚未配置或密钥无法读取，请打开「插件与诊断 → 联网搜索」进行配置。</string>
+    <string name="web_input_error">请提供有效网址，或 1–2000 字的搜索词及 1–10 条结果数量。</string>
+</resources>

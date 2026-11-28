@@ -103,7 +103,8 @@ internal class PluginManager(context: Context) {
             AndroidInvocationClock(app, executionBudget),
             imageTool = { store -> io.github.bytejuno.thetacore.plugin.tools.HostImageGenerationTool(
                 io.github.bytejuno.thetacore.chat.ImageAttachments((store as AndroidAgentStore).privateImages)) },
-            policy = policy, skillReader = ::readSkill, rootTool = io.github.bytejuno.thetacore.root.RootRuntime.tool(app)) {
+            policy = policy, skillReader = ::readSkill, rootTool = io.github.bytejuno.thetacore.root.RootRuntime.tool(app),
+            webTools = io.github.bytejuno.thetacore.web.WebRuntime.tools(app)) {
             AndroidAgentStore.open(app)
         }.also { service ->
             pluginToolBridge.attachCatalog(service.catalog)

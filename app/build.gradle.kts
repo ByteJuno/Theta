@@ -109,6 +109,10 @@ dependencies {
     implementation("org.commonmark:commonmark:0.33.0")
     implementation("org.commonmark:commonmark-ext-gfm-strikethrough:0.33.0")
     implementation(libs.kotlinx.serialization.json)
+    implementation(libs.okhttp)
+    implementation("org.jsoup:jsoup:1.21.2") // MIT; bounded HTML parsing for built-in web tools.
+    testImplementation("com.squareup.okhttp3:mockwebserver3:5.5.1")
+    testImplementation("com.squareup.okhttp3:okhttp-tls:5.5.1")
     implementation("org.yaml:snakeyaml:2.4")
     implementation("androidx.datastore:datastore-core:1.1.7")
     implementation("androidx.datastore:datastore-core-okio:1.1.7")
