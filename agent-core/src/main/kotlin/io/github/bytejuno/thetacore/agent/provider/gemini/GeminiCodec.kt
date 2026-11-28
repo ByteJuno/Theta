@@ -72,6 +72,11 @@ class GeminiCodec(private val config: GeminiConfig, private val mediaReader: Med
         }.getOrDefault(false)
     }
 
+    internal fun canReplayMessages(messages: List<Message>, model: String): Boolean =
+        messages.all { canReplayMessage(it, model) } && runCatching {
+            geminiCallIds(messages, config.providerId)
+        }.isSuccess
+
     fun encode(request: ChatRequest, diagnostics: (ToolSchemaPreparation) -> Unit = {}): String {
         require(ImagePayloadBudget.admitsMessages(request.messages))
         return encodeInternal(request, true, diagnostics)
@@ -119,6 +124,7 @@ class GeminiCodec(private val config: GeminiConfig, private val mediaReader: Med
     private fun history(request: ChatRequest, readMedia: Boolean): JsonArray {
         var pending = emptyList<ContentPart.ToolCall>()
         val used = mutableSetOf<String>()
+        val ids = geminiCallIds(request.messages, config.providerId)
         return JsonArray(request.messages.map { m ->
             require(m.parts.isNotEmpty() && canReplayMessage(m, request.model)) { "Incompatible replay; checkpoint required" }
             val parts = if (m.role == Role.TOOL) {
@@ -127,7 +133,7 @@ class GeminiCodec(private val config: GeminiConfig, private val mediaReader: Med
                     require(p is ContentPart.ToolResult && p.callId == call.binding.callId) { "Out of order tool result" }
                     buildJsonObject { putJsonObject("functionResponse") {
                         put("name", call.name)
-                        call.binding.wireId?.takeIf { call.binding.provider == config.providerId }?.let { put("id", it) }
+                        ids[call.binding.callId]?.let { put("id", it) }
                         putJsonObject("response") { put(if (p.isError) "error" else "output", p.text) }
                     } }
                 }.also { pending = emptyList() }
@@ -140,7 +146,7 @@ class GeminiCodec(private val config: GeminiConfig, private val mediaReader: Med
                         is ContentPart.Media -> { require(m.role == Role.USER); image(p, readMedia) }
                         is ContentPart.ToolCall -> buildJsonObject { putJsonObject("functionCall") {
                             put("name", p.name); put("args", Json.parseToJsonElement(p.argsJson))
-                            p.binding.wireId?.takeIf { p.binding.provider == config.providerId }?.let { put("id", it) }
+                            ids[p.binding.callId]?.let { put("id", it) }
                         } }
                         else -> throw IllegalArgumentException("Unsupported Gemini content")
                     })

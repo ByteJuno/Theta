@@ -34,6 +34,7 @@ class GeminiProvider(
     }.toString()
     override fun canReplay(data: ReplayData, targetModel: String) = codec.canReplay(data, targetModel)
     override fun canReplayMessage(message: Message, targetModel: String) = codec.canReplayMessage(message, targetModel)
+    override fun canReplayMessages(messages: List<Message>, targetModel: String) = codec.canReplayMessages(messages, targetModel)
     override fun supportsMediaInput(kind: MediaKind, model: String) = kind == MediaKind.IMAGE
     override fun executionMode(request: ChatRequest) = if (request.extraBody.isEmpty())
         ModelExecutionMode.GENERATION_ONLY else ModelExecutionMode.MAY_EXECUTE_SERVER_TOOLS

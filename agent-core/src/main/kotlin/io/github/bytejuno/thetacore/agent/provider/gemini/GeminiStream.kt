@@ -27,7 +27,8 @@ internal class GeminiStream(private val request: ChatRequest, private val codec:
             protocol(c["index"] == null || c["index"] == JsonPrimitive(0), "Unexpected Gemini candidate")
             (c["content"] as? JsonObject)?.let { content ->
                 protocol(content.string("role") == null || content.string("role") == "model", "Unexpected Gemini role")
-                content.getValue("parts").jsonArray.forEach { part -> consume(part.jsonObject, emit) }
+                // A terminal candidate can contain only a role, with usage/finish outside content.
+                content["parts"]?.jsonArray?.forEach { part -> consume(part.jsonObject, emit) }
             }
         }
         (root["usageMetadata"] as? JsonObject)?.let { usage ->

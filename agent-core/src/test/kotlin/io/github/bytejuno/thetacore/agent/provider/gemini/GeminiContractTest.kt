@@ -89,6 +89,23 @@ class GeminiContractTest {
         }
     }
 
+    @Test fun `role only terminal frames retain finish usage and preceding text`() = runTest {
+        for (reason in listOf("SAFETY", "MAX_TOKENS")) for (textFirst in listOf(false, true)) {
+            val terminal = """{"candidates":[{"content":{"role":"model"},"finishReason":"$reason"}],"usageMetadata":{"promptTokenCount":8,"candidatesTokenCount":3,"thoughtsTokenCount":2}}"""
+            val (events, reducer) = collect((if (textFirst) wire(root("""[{"text":"partial"}]""")) else "") + wire(terminal))
+            assertEquals(if (reason == "SAFETY") FinishReason.CONTENT_FILTER else FinishReason.LENGTH,
+                assertIs<ModelEvent.Finished>(events.last()).reason)
+            assertEquals(reason, (events.last() as ModelEvent.Finished).rawReason)
+            assertEquals(8L, reducer.usage!!.inputTokens)
+            assertEquals(5L, reducer.usage!!.outputTokens)
+            assertEquals(if (textFirst) "partial" else "", reducer.assistantMessage().parts.filterIsInstance<ContentPart.Text>().joinToString("") { it.text })
+            assertFalse(events.any { it is ModelEvent.Failed })
+        }
+        // Only omission is accepted. A malformed present parts field must still fail.
+        val (bad, _) = collect(wire("""{"candidates":[{"content":{"parts":{}},"finishReason":"MAX_TOKENS"}]}"""))
+        assertIs<ModelEvent.Failed>(bad.last())
+    }
+
     @Test fun `signed text and thought replay remain bound to their exact content`() = runTest {
         for (thinking in listOf(false, true)) {
             val part = """{"text":"thought or answer","thought":$thinking,"thoughtSignature":"c2ln"}"""

@@ -728,9 +728,8 @@ class AgentRunLoop(
         return result(RunState.PAUSED, "Step limit")
     }
 
-    private fun compatible(target: ModelTarget, request: ChatRequest): Boolean = request.messages.all { m ->
-        target.provider.canReplayMessage(m, request.model)
-    }
+    private fun compatible(target: ModelTarget, request: ChatRequest): Boolean =
+        target.provider.canReplayMessages(request.messages, request.model)
 
     private fun hasUnsupportedMedia(target: ModelTarget, model: String, messages: List<Message>): Boolean =
         messages.any { m ->
