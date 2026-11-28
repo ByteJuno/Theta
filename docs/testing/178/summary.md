@@ -1,28 +1,30 @@
 # Issue 178 validation
 
-- Implementation SHA: `ef0328d795209cb68e78c39eea761dc2acee7bde`
-- Branch: `auto/178-screen-tools`; base/fetched main: `49097146a429dc3a3a5cb245be928b69a37530e8`.
-- Tested Git tree: `79bf4e7f62f58ca60e5e0e1596d8b1f19d544e40`. Commit contains the exact tested tree; no testing summary committed by the writer.
-- APK: not generated; APK SHA: not generated. Device/visual acceptance: not performed.
+- Implementation SHA: `084c250a46aabf0b42c57b5b03ca18822b0f71f4`
+- Branch: `auto/178-screen-tools`; PR #191 RETURN: https://github.com/ByteJuno/Theta/pull/191#issuecomment-7240677243
+- Exact tested Git tree: `b1ad7eee5b8bd1a2a90c71ee4c7155c1a8b074aa`; fetched main: `49097146a429dc3a3a5cb245be928b69a37530e8`; observed PR head before publication: `a17ee69b8b26d990b9406c3f4c245d546e57a35f`.
+- APK and APK SHA: not generated. No phone/emulator operations. Visual acceptance: not performed.
 
-Implemented nine built-in screen tools alongside unchanged screen_info, Root-first routing with safe Accessibility fallback, standard disabled-by-default Accessibility service, bounded image/tree/app data, Unicode clipboard/set-text paths, session-scoped image storage and model request media projection, paired strings and overlay capture hooks. All tools share the existing screen lease; writes retain UNKNOWN on cancellation/timeout until confirmed actual exit. Root clipboard replaces the clipboard and pastes at selection; Accessibility replaces focused editor text.
+The RETURN fixes initialize PNG sampling at 1, preserve screenshot media inside its original ToolResult, and admit the complete outgoing user/tool image request against the existing memory ceiling before encoding. Anthropic and Responses encode native tool-result images; unknown/Chat/Gemini tool-media capability uses explicit text placeholders. No synthetic USER message is added. SQLite history and frozen content retain media references; legacy text-only history remains readable and ledger agreement still checks text/call/error identity. User images and the 64 MiB memory ceiling are unchanged. Existing Root-first/Accessibility routing, Unicode input, screen leases and UNKNOWN semantics remain covered.
 
-Validation on this exact tree:
-- `python scripts/preflight.py` passed in 148.1s with strict configuration cache reused.
-- `:app:testDebugUnitTest`: 930 tests, 922 passed, 8 skipped, 0 failures/errors; executed this final preflight. Screen suite: 14 cases, 13 passed, 1 Windows native-graphics skip. Includes real host SQLite/ledger resource and session-blob integration, model codec image bytes/size-estimator check, Unicode and backend routing.
-- `:agent-core:test`: UP-TO-DATE, unchanged inputs; existing 720 tests / 719 passed / 1 skipped, not rerun this round.
-- `:app:verifyUiResources`: 733 paired English/Chinese keys.
-- `:app:lintDebug`: 0 errors, 109 warnings.
-- Storage fixture source verification and `:samples:storage-fixture:compileDebugKotlin`: passed/UP-TO-DATE in preflight.
-- No protected-file changes; no diagnostics, APKs or temporary fixtures committed.
+Validation:
+- Final `python scripts/preflight.py` passed, strict configuration cache stored, 1275.6s including the first 165 MB native test-library download. App: 931 tests, 922 passed, 9 platform skips, 0 failures/errors (103 suites freshly executed). Core: 723 results, 722 passed, 1 skip; UP-TO-DATE in final pass. Core's unchanged code was actually tested in this round's earlier preflight: 723 results, 0 failures/errors, 1 skip.
+- Final exact-tree Linux GPU run used `--no-build-cache --configuration-cache --configuration-cache-problems=fail`, completed in 163.8s: entire app 931/931 passed with zero skips, and 3/3 ToolResultMediaTest cases passed. Native PNG cases exercised 48x64 and 3600x4800 PNGs through RootScreenBackend's real decoding/encoding path with injected process output; JPEG bounds/original coordinates, no fallback and cleanup asserted. This is not real su/device execution.
+- Core tests cover native tool-result wire structure/order/call ID, text fallback independent of user-image support, SQLite reopen/legacy encoding, and 3,500,000-byte user image + 700,000-byte screenshot pausing BEFORE encoding. Normal captures complete, unsupported tool media keeps the original user image. Full original source history remains intact.
+- 733 paired UI keys, lint 0 errors/109 warnings, storage-fixture source verification and Kotlin compile passed. No protected-file changes; no testing summary, logs, XML or APK committed by this writer.
+
+Test-runtime repair: native tests failed in a combined suite on Robolectric 4.17 with FileSystemAlreadyExistsException in DefaultNativeRuntimeLoader.maybeCopyFonts, while isolated cases passed. Updated test-only dependency to 4.18.1 after confirming upstream fix source: https://github.com/robolectric/robolectric/commit/a52004a71eca5ec6c144108e6d436cb8a4e330ba . No assertions removed, timeouts expanded, or pixel mocks substituted.
 
 Failures retained outside Git:
-1. First targeted run: test compile references used wrong ledger/protocol fields; corrected to current APIs and identified missing image-to-model projection.
-2. Second run: Windows native Bitmap library UnsatisfiedLinkError; no image assertion had run. Native test remains active on supported hosts and is explicitly skipped on Windows, with a separate platform-independent size-budget check.
-3. Third run: new JUnit method inferred a non-void result; corrected the test return type.
-4. First full preflight: media codec test generated a second random call ID instead of using the persisted binding. Fixed the fixture to use the original binding; all assertions retained. Final preflight passed.
-Evidence: `E:\Desktop\AI研究\theta-auto-loop\event-runs\b4914cdc-dc1c-4346-a725-e8946dd22b36` and sibling `validation-issue11/issue178-b4914cdc-*` directories.
+1. Original reviewer GPU diagnostics and old-head CI failure (native font JAR filesystem conflict).
+2. First compile: recursive HistoryCodec inference required an explicit return type; fixed.
+3. First targeted test: synthetic history lacked its authoritative ledger record; rebuilt fixture through real ledger output/actual-exit. Assertions retained.
+4. First two GPU wrapper attempts exited 127 before tests because tracked gradlew contains CRLF. Linux scratch alone normalizes line endings; repo wrapper unchanged.
+5. Combined 4.17 native tests reproduced the font filesystem collision. Isolated native tests passed but were not used as final combination evidence.
+6. A later disposable GPU helper run still reported two native initialization failures without full stack retention; preserved, not promoted to a pass. Preserved-directory 4.18.1 combined checks and final exact-tree, no-build-cache FULL app run then passed. Final full XML is retained for independent review.
 
-Limitations: 未生成 APK（APK SHA 未生成）；未操作手机或模拟器，视觉未验证。Root screencap/uiautomator、app_process 剪贴板 Binder/UID 与 ROM 限制、真实中文粘贴、无障碍手势/截屏回调及服务断开行为仍需当前构建设备验收。Windows 原生图形库不可用，原生 Bitmap 编码测试 1 项明确跳过，需 Linux 审核环境执行；JVM 尺寸预算测试不能替代像素验证。未运行新 head CI、S1/S2、R8、签名或 API33 设备测试。core 输入未变，720 项为 Gradle UP-TO-DATE 的既有 XML 结果，不是本轮重跑。
+Evidence directory: `E:\Desktop\AI研究\theta-auto-loop\event-runs\a294c861-e9fe-40f8-821e-8fa0923353e4`. Primary final evidence: preflight-final.log/preflight-result.json/preflight-xml, gpu-exact.log/gpu-exact-result.json/gpu-exact-counts.json/gpu-exact-evidence.tar. Prior failures and reviewer evidence remain alongside; these artifacts are not committed.
 
-Required reviewer continuation: current-head CI and prescribed S1/S2/signature checks, Linux native bitmap test, then authorized emulator checks of Root and Accessibility capture/tree/input/action paths including callback cancellation and Unicode. No real phone was accessed. PR190's separate RETURN remains queued, independent of this issue.
+Limits: 未生成 APK（APK SHA 未生成）；未操作手机或模拟器，视觉未验证。GPU 是 Linux JVM/Robolectric 验证，真实 PNG 编解码通过不等于实际设备 screencap、Root 权限、剪贴板粘贴或无障碍回调通过。Anthropic/Responses 只验证本地编码结构，未调用实际模型端点。当前提交的 GitHub CI、S1/S2、R8、签名及 API33 设备验收仍由独立审核端完成。Windows 最终 app 9 项平台跳过；GPU 完整 app 931 项零跳过。最终 core 为 UP-TO-DATE，723 项在本轮较早 preflight 实际执行且 core 输入未变。
+
+Publication handoff only: writer commit is local and not pushed. Scheduler owns the unique testing summary and push/PR update; independent reviewer owns current-head CI, prescribed regression and merge. PR190 tracking remains unchanged.
