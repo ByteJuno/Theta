@@ -36,7 +36,7 @@ class OpenAiModelsClient internal constructor(client: OkHttpClient, private val 
             val endpoint = chat.newBuilder().removePathSegment(chat.pathSize - 1)
                 .removePathSegment(chat.pathSize - 2).addPathSegment("models").build()
             val token = credentials.accessToken()
-            if (authentication == ModelAuthentication.ANTHROPIC && token.isEmpty()) fail(ModelsRequestException.Failure.INVALID_SETTINGS)
+            if (authentication != ModelAuthentication.BEARER && token.isEmpty()) fail(ModelsRequestException.Failure.INVALID_SETTINGS)
             if (token.isNotEmpty() && !validApiKey(token)) fail(ModelsRequestException.Failure.INVALID_SETTINGS)
             val builder = Request.Builder().url(endpoint).get().header("Accept", "application/json")
             builder.modelAuthentication(token, authentication)
@@ -51,7 +51,7 @@ class OpenAiModelsClient internal constructor(client: OkHttpClient, private val 
                     if (models.size > MAX_MODELS) fail(ModelsRequestException.Failure.TOO_LARGE)
                     val cursor = page.cursor ?: break
                     if (cursors.size >= 32 || !cursors.add(cursor)) fail(ModelsRequestException.Failure.INVALID_RESPONSE)
-                    next = request.newBuilder().url(endpoint.newBuilder().addQueryParameter("after_id", cursor).build()).build()
+                    next = request.newBuilder().url(endpoint.newBuilder().addQueryParameter(if (authentication == ModelAuthentication.GEMINI) "pageToken" else "after_id", cursor).build()).build()
                 }
                 models.toList()
             }
@@ -112,19 +112,27 @@ class OpenAiModelsClient internal constructor(client: OkHttpClient, private val 
             }
         }
         val root = Json.parseToJsonElement(text) as? JsonObject ?: fail(ModelsRequestException.Failure.INVALID_RESPONSE)
-        val data = root["data"] as? JsonArray
+        val data = root[if (authentication == ModelAuthentication.GEMINI) "models" else "data"] as? JsonArray
             ?: fail(ModelsRequestException.Failure.INVALID_RESPONSE)
         val result = sortedSetOf<String>()
         for (entry in data) {
-            val id = (entry as? JsonObject)?.get("id") as? JsonPrimitive ?: continue
+            val obj = entry as? JsonObject ?: continue
+            if (authentication == ModelAuthentication.GEMINI &&
+                (obj["supportedGenerationMethods"] as? JsonArray)?.contains(JsonPrimitive("generateContent")) != true) continue
+            val id = obj[if (authentication == ModelAuthentication.GEMINI) "name" else "id"] as? JsonPrimitive ?: continue
             if (!id.isString) continue
-            val value = id.content.trim()
+            val value = id.content.trim().let { if (authentication == ModelAuthentication.GEMINI) it.removePrefix("models/") else it }
             if (value.isEmpty()) continue
             if (value.length > 256 || value.any { it.isISOControl() }) fail(ModelsRequestException.Failure.INVALID_RESPONSE)
             result.add(value)
             if (result.size > MAX_MODELS) fail(ModelsRequestException.Failure.TOO_LARGE)
         }
         var cursor: String? = null
+        if (authentication == ModelAuthentication.GEMINI && root["nextPageToken"] != null) {
+            val next = root["nextPageToken"] as? JsonPrimitive ?: fail(ModelsRequestException.Failure.INVALID_RESPONSE)
+            if (!next.isString || next.content.length > 2048 || next.content.any { it.isISOControl() }) fail(ModelsRequestException.Failure.INVALID_RESPONSE)
+            cursor = next.content.takeIf { it.isNotBlank() }
+        }
         if (authentication == ModelAuthentication.ANTHROPIC && root["has_more"] != null) {
             val more = root["has_more"] as? JsonPrimitive ?: fail(ModelsRequestException.Failure.INVALID_RESPONSE)
             if (more.isString || more.booleanOrNull == null) fail(ModelsRequestException.Failure.INVALID_RESPONSE)

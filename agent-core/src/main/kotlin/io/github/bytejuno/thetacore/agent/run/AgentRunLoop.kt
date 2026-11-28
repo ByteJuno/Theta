@@ -53,6 +53,7 @@ class AgentRunLoop(
     private val requestViewLimit: RequestViewLimit = RequestViewLimit(),
     private val onEvent: (String, ModelEvent) -> Unit = { _, _ -> },
     private val beforeModelSubmit: suspend () -> Unit = {},
+    private val reasoningCapabilities: ReasoningCapabilityObserver = ReasoningCapabilityObserver { _, _ -> },
 ) {
     private var target = target.copy()
     private var config = copyRequest(request, emptyList())
@@ -75,6 +76,8 @@ class AgentRunLoop(
     private var accountingActive = false
     private var confirmedGenerationResponse = false
     private var rejectedContextReadmission = false
+    private var reasoningRemoved = false
+    private var reasoningOutputObserved = false
 
     private fun persistAccounting() {
         if (accountingActive) (history as? SqliteRunHistory)?.saveAccounting(
@@ -513,7 +516,12 @@ class AgentRunLoop(
             try {
                 // Wrap creation as well as collection: synchronous chat() failures obey 2.8 too.
                 evidence.observe(flow { emitAll(target.provider.chat(request, target.credentials)) })
-                    .validated(target.id, request.requestId, timeouts).collect { reducer.accept(it); onEvent(request.requestId, it) }
+                    .validated(target.id, request.requestId, timeouts).collect {
+                        reducer.accept(it)
+                        if (it is ModelEvent.TextDelta || it is ModelEvent.ReasoningDelta || it is ModelEvent.ToolCallStart ||
+                            it is ModelEvent.PartEnd && it.replay != null) reasoningOutputObserved = true
+                        onEvent(request.requestId, it)
+                    }
             } catch (e: CancellationException) {
                 cancelled = true
                 throw e
@@ -538,6 +546,14 @@ class AgentRunLoop(
                 if (decision.serverUnknown) {
                     serverUnknown = true
                     return pauseContext(view, "Server execution state unknown")
+                }
+                if (canRemoveReasoning(request, terminal.error, mode, steps, reducer.assistantMessage(),
+                        confirmedGenerationResponse, reasoningRemoved || reasoningOutputObserved) && retries < limits.maxRetries) {
+                    reasoningCapabilities.unsupported(target, request)
+                    config = copyRequest(object : ChatRequest by config { override val reasoningLevel: String? = null }, emptyList())
+                    reasoningRemoved = true; retries++; causes[key] = n + 1
+                    persistAccounting()
+                    continue
                 }
                 if (terminal.error.code == ModelErrorCode.UNSUPPORTED_PARAMETER && terminal.error.param == "cache_control" &&
                     !cacheDisabled && request.messages.any { it.cacheBreakpoint } && retries < limits.maxRetries) {
@@ -728,6 +744,7 @@ class AgentRunLoop(
 
     private suspend fun recover(decision: RecoveryDecision, error: ModelError?, request: ChatRequest): Boolean {
         val action = decision.action ?: return false
+        if (action == RecoveryAction.REMOVE_PARAMETER && isReasoningParameter(error?.param)) return false
         if (retries >= limits.maxRetries || decision.delayMs > limits.maxRetryWaitMs) return false
         val proposal = try {
             when (action) {

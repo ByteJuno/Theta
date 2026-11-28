@@ -5,7 +5,7 @@ import io.github.bytejuno.thetacore.agent.provider.openai.OpenAiParameters
 import io.github.bytejuno.thetacore.plugin.ProviderTemplate
 
 internal fun anthropicTemplateModel(template: ProviderTemplate?, id: String): EnabledModel {
-    val model = template?.takeIf { it.protocol.wire == "anthropic" }?.models?.firstOrNull { it.id == id }
+    val model = template?.takeIf { it.protocol.wire in setOf("anthropic", "gemini") }?.models?.firstOrNull { it.id == id }
     return EnabledModel(id, alias = model?.displayName, parameters = model?.parameters() ?: OpenAiParameters(),
         reasoningLevels = model?.reasoningLevels?.toList())
 }

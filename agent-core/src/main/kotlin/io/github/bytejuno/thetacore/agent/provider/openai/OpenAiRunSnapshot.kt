@@ -6,6 +6,7 @@ import io.github.bytejuno.thetacore.agent.transport.ModelTransport
 import io.github.bytejuno.thetacore.agent.transport.OkHttpModelTransport
 import io.github.bytejuno.thetacore.agent.transport.ModelAuthentication
 import io.github.bytejuno.thetacore.agent.provider.anthropic.*
+import io.github.bytejuno.thetacore.agent.provider.gemini.*
 import java.util.Collections
 
 const val MAX_SYSTEM_PROMPT_CHARS = 32_000
@@ -90,6 +91,7 @@ class OpenAiRunSnapshot(
     private val credentials: Credentials,
     val protocol: String = "openai-chat",
     val imageSnapshot: OpenAiRunSnapshot? = null,
+    private val onReasoningUnsupported: () -> Unit = {},
 ) {
     private val requestedSettings = settings
     val settings: OpenAiProviderSettings = settings.resolveReasoning()
@@ -98,9 +100,11 @@ class OpenAiRunSnapshot(
         ?.let { ReasoningLevelAdjustment(it, this.settings.parameters.reasoningLevel) }
     constructor(settings: OpenAiProviderSettings, credentials: ApiKeyCredentials) : this(settings, credentials as Credentials)
 
-    init { require(protocol in setOf("openai-chat", "openai-responses", "anthropic")) { "Protocol is not enabled" } }
+    init { require(protocol in setOf("openai-chat", "openai-responses", "anthropic", "gemini")) { "Protocol is not enabled" } }
 
-    fun withImageSnapshot(image: OpenAiRunSnapshot?) = OpenAiRunSnapshot(requestedSettings, credentials, protocol, image)
+    fun withImageSnapshot(image: OpenAiRunSnapshot?) = OpenAiRunSnapshot(requestedSettings, credentials, protocol, image, onReasoningUnsupported)
+    fun withReasoningCapabilityRecorder(record: () -> Unit) = OpenAiRunSnapshot(requestedSettings, credentials, protocol, imageSnapshot, record)
+    fun recordUnsupportedReasoning() = onReasoningUnsupported()
 
     fun target(
         transport: ModelTransport = OkHttpModelTransport(if (protocol == "anthropic") ModelAuthentication.ANTHROPIC else ModelAuthentication.BEARER),
@@ -109,10 +113,12 @@ class OpenAiRunSnapshot(
         "openai-chat" -> ModelTarget(settings.providerId, OpenAiChatProvider(settings.adapterConfig(), transport, mediaReader), credentials)
         "openai-responses" -> ModelTarget(settings.providerId, OpenAiResponsesProvider(responsesConfig(), transport, mediaReader), credentials)
         "anthropic" -> ModelTarget(settings.providerId, AnthropicProvider(anthropicConfig(), transport, mediaReader), credentials)
+        "gemini" -> ModelTarget(settings.providerId, GeminiProvider(geminiConfig(), transport, mediaReader), credentials)
         else -> error("Protocol is not enabled")
     }
 
     private fun responsesConfig() = OpenAiResponsesConfig(settings.providerId, settings.baseUrl, setOf(settings.model))
+    private fun geminiConfig() = GeminiConfig(settings.providerId, settings.baseUrl, setOf(settings.model))
     private fun anthropicConfig() = AnthropicConfig(settings.providerId, settings.baseUrl, setOf(settings.model))
 
     /** Use the same wire representation for admission and submission, including opaque replay. */
@@ -120,6 +126,7 @@ class OpenAiRunSnapshot(
         "openai-chat" -> OpenAiChatCodec(settings.adapterConfig(), mediaReader)::estimateRequestBytes
         "openai-responses" -> OpenAiResponsesCodec(responsesConfig(), mediaReader)::estimateRequestBytes
         "anthropic" -> AnthropicCodec(anthropicConfig(), mediaReader)::estimateRequestBytes
+        "gemini" -> GeminiCodec(geminiConfig(), mediaReader)::estimateRequestBytes
         else -> error("Protocol is not enabled")
     }
 

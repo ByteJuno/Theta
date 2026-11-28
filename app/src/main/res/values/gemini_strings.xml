@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="gemini_protocol">Google Gemini</string>
+    <string name="gemini_hint">Native Gemini API. Enter an API base URL such as https://generativelanguage.googleapis.com/v1beta and an API key. Supports chat, images as input, and tools.</string>
+    <string name="gemini_thinking">Thinking level</string>
+    <string name="gemini_thinking_hint">Available levels depend on the model. An unsupported level can fall back to the model default before a new reply starts; active tool conversations keep their settings.</string>
+    <string name="gemini_default">Model default</string>
+    <string name="gemini_minimal">Minimal</string>
+    <string name="gemini_low">Low</string>
+    <string name="gemini_medium">Medium</string>
+    <string name="gemini_high">High</string>
+    <string name="gemini_xhigh">Extra high</string>
+    <string name="gemini_max_tokens">Maximum output tokens</string>
+    <string name="gemini_tokens_hint">Leave blank to use the model or conversation limit.</string>
+    <string name="gemini_tokens_invalid">Enter a positive whole number or leave blank.</string>
+</resources>

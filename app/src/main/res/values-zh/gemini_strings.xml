@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="gemini_protocol">Google Gemini</string>
+    <string name="gemini_hint">原生 Gemini 协议。填写 API 基础地址（例如 https://generativelanguage.googleapis.com/v1beta）及 API 密钥，支持聊天、图片输入和工具调用。</string>
+    <string name="gemini_thinking">思考档位</string>
+    <string name="gemini_thinking_hint">可用档位取决于模型。不支持的档位可在新回复开始前回退到模型默认；已进入工具循环的对话保持原设置。</string>
+    <string name="gemini_default">模型默认</string>
+    <string name="gemini_minimal">最低</string>
+    <string name="gemini_low">低</string>
+    <string name="gemini_medium">中</string>
+    <string name="gemini_high">高</string>
+    <string name="gemini_xhigh">极高</string>
+    <string name="gemini_max_tokens">最大输出 token 数</string>
+    <string name="gemini_tokens_hint">留空使用模型或对话限制。</string>
+    <string name="gemini_tokens_invalid">请输入正整数，或留空。</string>
+</resources>
