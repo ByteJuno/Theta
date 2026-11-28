@@ -10,6 +10,30 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ThemePreferenceStateTest {
+    @Test fun fallbackFromOldCompositionCannotClearLaterIdenticalChoice() = runBlocking {
+        val directory = Files.createTempDirectory("theta-theme-stale-composition").toFile()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        try {
+            val store = ThemePreferenceStore(directory)
+            val key = "test.prompts/ocean"
+            store.setTheme(key)
+            val state = ThemePreferenceState(store, scope)
+            state.load()
+            withTimeout(5000) { while (state.loading) delay(1) }
+            val observed = state.revision
+            ThemePreferenceStore(directory).setTheme(key)
+            assertTrue(state.revision > observed)
+            state.clearUnavailableTheme(key, observed)
+            withTimeout(5000) { while (state.saving) delay(1) }
+            assertFalse(state.failed)
+            assertFalse(state.themeUnavailable)
+            assertEquals(key, store.current().themeKey)
+            state.clearUnavailableTheme(key, state.revision)
+            withTimeout(5000) { while (state.saving) delay(1) }
+            assertEquals(ThemePreference(dynamic = false), store.current())
+        } finally { scope.cancel(); directory.deleteRecursively() }
+    }
+
     @Test fun liveActivityOwnersObserveOnlyCommittedChangesAndCanRetryFailures() = runBlocking {
         val directory = Files.createTempDirectory("theta-theme-owners").toFile()
         val owners = Job()

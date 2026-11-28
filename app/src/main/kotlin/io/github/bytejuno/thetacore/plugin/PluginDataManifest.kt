@@ -203,6 +203,9 @@ internal fun dataStrings(json: JsonObject, key: String): List<String> {
 }
 
 internal fun readDataDestination(path: String, bytes: ByteArray): PluginDataDestination? {
+    // Themes have no network destination. Parse them only in readThemes, where malformed
+    // JSON/UTF-8 isolates the entry rather than rejecting otherwise usable package content.
+    if (path.startsWith("themes/")) return null
     if (path.startsWith("skills/")) {
         dataUtf8(bytes) // Markdown only, no shell/script execution or SKILL frontmatter semantics.
         return null

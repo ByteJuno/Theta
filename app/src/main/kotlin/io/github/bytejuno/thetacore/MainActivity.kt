@@ -251,7 +251,7 @@ private fun ThetaCoreApp(
     // Activity. A stopped/non-owner host list must never clear the foreground journal.
     val pageAdmitted = resumed && pageLease.beforeRender(selectedOwner)
 
-    io.github.bytejuno.thetacore.ui.theme.ThetaTheme {
+    io.github.bytejuno.thetacore.ui.theme.ThetaTheme(manager = manager) {
         Surface(modifier = Modifier.fillMaxSize()) {
             Column(modifier = Modifier.safeDrawingPadding()) {
                 if ((activeDataPage != null || activePage != null) && !pageAdmitted) {

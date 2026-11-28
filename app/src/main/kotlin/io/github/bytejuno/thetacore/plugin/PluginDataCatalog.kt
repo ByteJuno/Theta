@@ -83,6 +83,7 @@ internal class PluginDataCatalog(
     fun restoreInventory(
         onFailure: (String) -> Unit,
         crashSuspects: Set<String> = emptySet(),
+        onUnavailable: (String) -> Unit = {},
     ): List<PluginDataRecord> {
         try { store.recoverPublications() }
         catch (e: Exception) { onFailure("Data publication cleanup failed: ${e.message}") }
@@ -94,8 +95,13 @@ internal class PluginDataCatalog(
         states.ids().forEach { id ->
             try {
                 requireNoCodeOwnership(files, id)
-                val state = states.read(id) ?: return@forEach
+                val state = states.read(id)
+                if (state == null) {
+                    onUnavailable(id)
+                    return@forEach
+                }
                 if (state.pendingDelete) {
+                    onUnavailable(id)
                     try { finishDelete(id) } catch (e: Exception) {
                         result += PluginDataRecord(id, state, error = "Uninstall pending: ${e.message}")
                         onFailure("$id: data uninstall pending: ${e.message}")
@@ -104,8 +110,13 @@ internal class PluginDataCatalog(
                     val record = managementRecord(id, crashQuarantined = id in crashSuspects)
                     result += record
                     record.error?.let { onFailure("$id: data isolated: $it") }
-                }
-            } catch (e: Exception) { onFailure("$id: data isolated: ${e.message}") }
+                } else onUnavailable(id)
+            } catch (e: Exception) {
+                // The ownership-directory ID survives even when no lifecycle state can be
+                // trusted. Keep it separate from management records and page capabilities.
+                onUnavailable(id)
+                onFailure("$id: data isolated: ${e.message}")
+            }
         }
         return result
     }
@@ -176,7 +187,11 @@ internal class PluginDataCatalog(
         var text: String? = null
         validateSelection(selection.manifest.id, current) { name, bytes ->
             paths += name
-            if (name == path) text = dataUtf8(bytes)
+            if (name == path) text = if (name.startsWith("themes/")) {
+                // Invalid theme bytes are isolated by readThemes, not a package failure.
+                // The management preview stays inert and readable even for invalid UTF-8.
+                bytes.toString(Charsets.UTF_8).map { if (it.isISOControl() && it !in "\n\r\t") '\uFFFD' else it }.joinToString("")
+            } else dataUtf8(bytes)
         }.also { dataRequire(it == selection.manifest, "Selected manifest changed") }
         dataRequire(path == null || text != null, "Unknown data resource")
         return PluginDataContent(paths.toList(), text)

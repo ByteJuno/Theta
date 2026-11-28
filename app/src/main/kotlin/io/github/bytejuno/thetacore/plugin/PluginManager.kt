@@ -85,7 +85,8 @@ internal class PluginRuntime(val context: HostPluginContext, val version: Long) 
     var closeFailed = false
 }
 
-internal class PluginManager(context: Context) {
+internal class PluginManager(context: Context,
+    private val themeLifecycle: PluginThemeLifecycle = PluginThemeLifecycle(context.applicationContext)) {
     private val app = context.applicationContext
     val outputSurfaces = PluginOutputSurfaces.android(executionBudget)
     private companion object {
@@ -127,7 +128,8 @@ internal class PluginManager(context: Context) {
     private val recoveryBlocked = mutableSetOf<String>()
     // 已安排更新或回滚的 ID：这个进程里不能再加载，等冷启动切换。
     private val deferred = mutableSetOf<String>()
-    private var restored = false
+    private var restored by mutableStateOf(false)
+    val dataThemesReady get() = restored
     private var skipLoading = false
     private var skipDataLoading = false
     var dataRecoveryBlocked by mutableStateOf(false)
@@ -167,8 +169,7 @@ internal class PluginManager(context: Context) {
         val interrupted = mutableSetOf<String>()
         val messages = mutableListOf<String>()
         val rejected = mutableSetOf<String>()
-        val restoredData = if (policy?.skipData == true) emptyList() else
-            withContext(Dispatchers.IO) { dataCatalog.restoreInventory(messages::add, crashSuspects) }
+        val restoredData = themeLifecycle.restore(dataCatalog, messages::add, crashSuspects, skipDataLoading, dataRecoveryBlocked)
         restoredData.forEach { replaceDataInventory(dataInventory, dataPlugins, it, skipDataLoading) }
         val installed = withContext(Dispatchers.IO) {
             try { store.cleanupColdStages() }
@@ -345,6 +346,9 @@ internal class PluginManager(context: Context) {
         restoreInternal()
         dataRequire(!dataRecoveryBlocked, "Data recovery mode; importing unavailable", PluginFailureReason.DATA_RECOVERY)
         dataRequire(!session.closed && session.source == null && session.data === staged, "Unknown data confirmation", PluginFailureReason.CONFIRMATION_EXPIRED)
+        // Repair a failed revocation against the OLD inventory before replacement can make
+        // its theme available again. A failed commit leaves the confirmation owned by session.
+        themeLifecycle.reconcile(dataCatalog, dataInventory, dataPlugins, staged.manifest.id)
         session.data = null // ownership transfers to install, disposal cannot delete it.
         val selected = withContext(Dispatchers.IO) { dataCatalog.install(staged, digest, acknowledged) }
         if (stageCleanup.hasPending) failures += "Data installed; import cleanup pending; use Retry import cleanup"
@@ -352,12 +356,18 @@ internal class PluginManager(context: Context) {
             dataCatalog.managementRecord(selected.manifest.id, crashQuarantined = true)
         } else PluginDataRecord(selected.manifest.id, selected.state, selected)
         replaceDataInventory(dataInventory, dataPlugins, record, skipDataLoading)
+        // Installation is already durable: publish its actual inventory even if preferences
+        // cannot commit. Cold restore and the next install retry this exact-theme check.
+        themeLifecycle.reconcile(dataCatalog, dataInventory, dataPlugins, selected.manifest.id)
     }
 
     suspend fun setDataEnabled(id: String, enabled: Boolean) = operation {
         restoreInternal()
         dataRequire(!dataRecoveryBlocked, "Data recovery mode; data selection unavailable", PluginFailureReason.DATA_RECOVERY)
         val previous = dataPlugins.firstOrNull { it.selection.manifest.id == id }?.selection
+        // Finish preference revocation before any later enable can enter this operation mutex.
+        // Retrying enable after quarantine/persistence failure also has to finish the commit.
+        if (!enabled || dataPlugins.none { it.active && it.selection.manifest.id == id }) themeLifecycle.revoke(id)
         withContext(Dispatchers.IO) { dataCatalog.setEnabled(id, enabled, previous) }
         // Durable disable precedes revocation; management survives invalid or missing bytes.
         dataPlugins.removeAll { it.selection.manifest.id == id }
@@ -372,6 +382,7 @@ internal class PluginManager(context: Context) {
     }
 
     suspend fun uninstallData(id: String) = operation {
+        themeLifecycle.revoke(id)
         withContext(Dispatchers.IO) { dataCatalog.beginDelete(id) }
         dataPlugins.removeAll { it.selection.manifest.id == id }
         val pending = withContext(Dispatchers.IO) { dataCatalog.managementRecord(id) }
@@ -391,7 +402,7 @@ internal class PluginManager(context: Context) {
         dataRequire(isDataPageActive(page), "Data page revoked", PluginFailureReason.DATA_PAGE_REVOKED)
         try { withContext(Dispatchers.IO) { dataCatalog.content(page.selection, path) } }
         catch (e: Exception) {
-            quarantineDataPage(dataInventory, dataPlugins, page, e.message ?: "Invalid data content")
+            themeLifecycle.quarantine(dataInventory, dataPlugins, page, e.message ?: "Invalid data content")
             failures += "${page.selection.manifest.id}: data page isolated: ${e.message}"
             throw e
         }
@@ -406,7 +417,7 @@ internal class PluginManager(context: Context) {
                 collected += withContext(Dispatchers.IO) { dataCatalog.promptData(page.selection) }
             } catch (error: Exception) {
                 if (error is CancellationException) throw error
-                quarantineDataPage(dataInventory, dataPlugins, page, "Invalid prompt archive")
+                themeLifecycle.quarantine(dataInventory, dataPlugins, page, "Invalid prompt archive")
                 failures += "${page.selection.manifest.id}: prompt archive isolated"
             }
         }
@@ -435,6 +446,35 @@ internal class PluginManager(context: Context) {
         result.sortedBy { it.key }
     }
 
+    suspend fun selectTheme(key: String) = operation {
+        // Never initialize inventory here: startup owns the safe-mode restore policy.
+        dataRequire(restored, "Theme recovery has not finished", PluginFailureReason.DATA_RECOVERY)
+        themeLifecycle.select(dataCatalog, dataInventory, dataPlugins, key)
+    }
+
+    suspend fun selectThemePalette(dynamic: Boolean) = operation {
+        dataRequire(restored, "Theme recovery has not finished", PluginFailureReason.DATA_RECOVERY)
+        themeLifecycle.selectPalette(dynamic)
+    }
+
+    suspend fun activeThemes(): List<io.github.bytejuno.thetacore.ui.theme.PluginTheme> = operation {
+        // Theme observers must not race the Activity's skip_plugins restore decision.
+        if (!restored) return@operation emptyList()
+        val collected = mutableListOf<io.github.bytejuno.thetacore.ui.theme.PluginTheme>()
+        for (page in dataPlugins.filter { it.active }) {
+            try {
+                val result = withContext(Dispatchers.IO) { dataCatalog.readThemes(page.selection) }
+                collected += result.themes
+                result.errors.forEach { if (it !in failures) failures += it }
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+                themeLifecycle.quarantine(dataInventory, dataPlugins, page, "Invalid theme archive")
+                failures += "${page.selection.manifest.id}: theme archive isolated"
+            }
+        }
+        collected.sortedBy { it.key }
+    }
+
     suspend fun activeProviderTemplates(): List<ProviderTemplate> = operation {
         restoreInternal()
         val activePages = dataPlugins.filter { it.active }
@@ -446,7 +486,7 @@ internal class PluginManager(context: Context) {
                 collected += result.templates
                 result.errors.forEach { failures += it }
             } catch (error: Exception) {
-                quarantineDataPage(dataInventory, dataPlugins, page, error.message ?: "Invalid data content")
+                themeLifecycle.quarantine(dataInventory, dataPlugins, page, error.message ?: "Invalid data content")
                 failures += "${page.selection.manifest.id}: provider templates isolated: ${error.message}"
             }
         }

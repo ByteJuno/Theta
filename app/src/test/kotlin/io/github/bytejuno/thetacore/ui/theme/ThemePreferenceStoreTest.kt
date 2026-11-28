@@ -4,6 +4,7 @@ import androidx.datastore.core.CorruptionException
 import java.io.IOException
 import java.nio.file.Files
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.first
 import okio.Buffer
 import okio.FileSystem
 import okio.ForwardingFileSystem
@@ -15,6 +16,68 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ThemePreferenceStoreTest {
+    @Test fun repeatedExplicitChoiceInvalidatesOnlyOlderFallbacksAcrossStoreOwners() = runBlocking {
+        val root = Files.createTempDirectory("theta-theme-fallback-generation").toFile()
+        try {
+            val first = ThemePreferenceStore(root)
+            val second = ThemePreferenceStore(root)
+            val key = "test.prompts/ocean"
+            first.setTheme(key)
+            val old = first.updates.first()
+            assertEquals(old.preference, second.current())
+            assertEquals(old.revision, second.updates.first().revision)
+            second.setTheme(key)
+            val fresh = second.updates.first()
+            assertEquals(old.preference, fresh.preference)
+            assertTrue(fresh.revision > old.revision)
+            first.clearUnavailableTheme(key, old.revision)
+            assertEquals(key, second.current().themeKey)
+            assertEquals(fresh, first.updates.first())
+            first.clearUnavailableTheme(key, fresh.revision)
+            assertEquals(ThemePreference(dynamic = false), second.current())
+            assertTrue(second.updates.first().themeUnavailable)
+        } finally { root.deleteRecursively() }
+    }
+
+    @Test fun lifecycleRevocationPreservesNewerChoicesAndPublishesOnlyDurableFallback() = runBlocking {
+        val root = Files.createTempDirectory("theta-theme-revocation").toFile()
+        var failMove = false
+        val fileSystem = object : ForwardingFileSystem(FileSystem.SYSTEM) {
+            override fun atomicMove(source: Path, target: Path) {
+                if (failMove) throw IOException("Preference replacement unavailable")
+                super.atomicMove(source, target)
+            }
+        }
+        try {
+            val store = ThemePreferenceStore(root, fileSystem = fileSystem)
+            store.setMode(ThemeMode.DARK)
+            store.setTheme("old.plugin/ocean")
+            failMove = true
+            try { store.clearPluginTheme("old.plugin"); fail("Revocation must report the IO failure") }
+            catch (_: IOException) { }
+            assertEquals("old.plugin/ocean", store.updates.first().preference.themeKey)
+            assertEquals("old.plugin/ocean", ThemePreferenceStore(root).current().themeKey)
+            failMove = false
+            store.clearPluginTheme("old.plugin")
+            val brand = ThemePreference(ThemeMode.DARK, false)
+            assertEquals(brand, store.updates.first().preference)
+            assertTrue(store.updates.first().themeUnavailable)
+            assertEquals(brand, ThemePreferenceSerializer().readFrom(Buffer().write(root.resolve(ThemePreferenceStore.FILE_NAME).readBytes())))
+
+            store.setTheme("new.plugin/forest")
+            store.clearPluginTheme("old.plugin")
+            store.clearUnavailableTheme("old.plugin/ocean")
+            store.retainPluginThemes(setOf("new.plugin"))
+            assertEquals("new.plugin/forest", store.current().themeKey)
+            assertFalse(store.updates.first().themeUnavailable)
+            store.retainPluginThemes(emptySet())
+            assertEquals(brand, ThemePreferenceStore(root).current())
+            store.setDynamic(true)
+            store.clearPluginTheme("old.plugin")
+            assertEquals(ThemePreference(ThemeMode.DARK, true), store.current())
+        } finally { root.deleteRecursively() }
+    }
+
     @Test fun modesAndPaletteRoundTripThroughDiskAndWrapperRecreation() = runBlocking {
         val root = Files.createTempDirectory("theta-theme").toFile()
         val store = ThemePreferenceStore(root)

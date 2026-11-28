@@ -30,4 +30,5 @@ internal fun thetaBrandScheme(dark: Boolean): ColorScheme = if (dark) darkColorS
     surfaceContainerLow = brandColor("#F5F6FA"), surfaceContainerHighest = brandColor("#E2E6EF"),
 )
 internal fun thetaTokens(colors: ColorScheme) = ThetaThemeTokens(colors.surface,
-    colors.primaryContainer, colors.onPrimaryContainer, colors.surfaceContainer, brandColor("#FFC94D"))
+    colors.primaryContainer, colors.onPrimaryContainer, colors.surfaceContainer, brandColor("#FFC94D"),
+    assistantText = colors.onSurface, onCapsule = colors.onSurfaceVariant)

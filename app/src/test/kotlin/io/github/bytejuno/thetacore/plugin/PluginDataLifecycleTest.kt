@@ -180,6 +180,20 @@ class PluginDataLifecycleTest {
         assertEquals(2, corrupt.second.size)
     }
 
+    @Test fun invalidStateRetainsOnlyOwnershipIdentityWithoutInventingAPageOrState() = root { dir, c ->
+        install(c)
+        install(c, name = "test.good")
+        dir.resolve("plugin-data-catalog/$id/selection.properties").writeText("broken")
+        val failures = mutableListOf<String>()
+        val unavailable = mutableSetOf<String>()
+        val records = PluginDataCatalog(dir, 1).restoreInventory(failures::add, onUnavailable = unavailable::add)
+        assertEquals(setOf(id), unavailable)
+        assertEquals(listOf("test.good"), records.map { it.id })
+        assertNotNull(records.single().selection)
+        assertEquals(1, failures.size)
+        assertEquals("broken", dir.resolve("plugin-data-catalog/$id/selection.properties").readText())
+    }
+
     @Test fun codeCleanupNeverDeletesDataOrRetainedOwnership() = root { dir, c ->
         install(c)
         val code = PluginStore(dir, dir.resolve("cache"), PluginSignatureVerifier { PluginSigners(listOf("a".repeat(64))) })

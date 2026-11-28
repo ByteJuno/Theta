@@ -1,17 +1,24 @@
 package io.github.bytejuno.thetacore.ui.theme
 
-import android.content.Context
 import androidx.compose.runtime.*
 import androidx.compose.ui.platform.LocalContext
+import io.github.bytejuno.thetacore.plugin.PluginManager
 import kotlinx.coroutines.*
 
-internal class ThemePreferenceState(private val store: ThemePreferenceStore, private val scope: CoroutineScope) {
+internal class ThemePreferenceState(private val store: ThemePreferenceStore, private val scope: CoroutineScope,
+    private val manager: PluginManager? = null) {
     var preference by mutableStateOf(ThemePreference()); private set
     var loading by mutableStateOf(true); private set
     var saving by mutableStateOf(false); private set
     var failed by mutableStateOf(false); private set
+    var themeUnavailable by mutableStateOf(false); private set
+    var revision by mutableLongStateOf(0L); private set
     init {
-        scope.launch { store.updates.collect { preference = it } }
+        scope.launch { store.updates.collect {
+            preference = it.preference
+            themeUnavailable = it.themeUnavailable
+            revision = it.revision
+        } }
     }
     fun load() {
         loading = true; failed = false
@@ -23,7 +30,13 @@ internal class ThemePreferenceState(private val store: ThemePreferenceStore, pri
         }
     }
     fun setMode(mode: ThemeMode) = save { store.setMode(mode) }
-    fun setDynamic(dynamic: Boolean) = save { store.setDynamic(dynamic) }
+    fun setDynamic(dynamic: Boolean) { themeUnavailable = false; save {
+        if (manager != null) manager.selectThemePalette(dynamic) else store.setDynamic(dynamic)
+    } }
+    fun setTheme(key: String) { themeUnavailable = false; save { requireNotNull(manager).selectTheme(key) } }
+    fun clearUnavailableTheme(key: String, expectedRevision: Long = revision) {
+        save { store.clearUnavailableTheme(key, expectedRevision) }
+    }
     private fun save(change: suspend () -> Unit) {
         if (saving || loading) return
         saving = true; failed = false
@@ -39,13 +52,11 @@ internal class ThemePreferenceState(private val store: ThemePreferenceStore, pri
 internal val LocalThemePreferenceState = staticCompositionLocalOf<ThemePreferenceState> { throw IllegalStateException() }
 
 @Composable
-internal fun rememberThemePreferenceState(): ThemePreferenceState {
+internal fun rememberThemePreferenceState(manager: PluginManager? = null): ThemePreferenceState {
     val context = LocalContext.current.applicationContext
     val scope = rememberCoroutineScope()
-    val state = remember(context, scope) {
-        val legacy = runCatching { context.getSharedPreferences(APPEARANCE_STORE, Context.MODE_PRIVATE)
-            .getBoolean(DYNAMIC_KEY, true) }.getOrDefault(true)
-        ThemePreferenceState(ThemePreferenceStore(context.noBackupFilesDir, legacy), scope)
+    val state = remember(context, scope, manager) {
+        ThemePreferenceState(themePreferenceStore(context), scope, manager)
     }
     LaunchedEffect(state) { state.load() }
     return state

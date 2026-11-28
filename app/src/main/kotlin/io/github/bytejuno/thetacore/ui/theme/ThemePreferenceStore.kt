@@ -3,6 +3,7 @@ package io.github.bytejuno.thetacore.ui.theme
 import androidx.datastore.core.CorruptionException
 import androidx.datastore.core.okio.OkioSerializer
 import java.io.File
+import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.file.Files
@@ -22,13 +23,15 @@ import okio.FileSystem
 import okio.Path.Companion.toOkioPath
 
 internal enum class ThemeMode { SYSTEM, LIGHT, DARK }
-internal data class ThemePreference(val mode: ThemeMode = ThemeMode.SYSTEM, val dynamic: Boolean = true) {
+internal data class ThemePreference(val mode: ThemeMode = ThemeMode.SYSTEM, val dynamic: Boolean = true, val themeKey: String? = null) {
     fun isDark(systemDark: Boolean) = when (mode) {
         ThemeMode.SYSTEM -> systemDark
         ThemeMode.LIGHT -> false
         ThemeMode.DARK -> true
     }
 }
+internal data class ThemePreferenceUpdate(val preference: ThemePreference, val themeUnavailable: Boolean = false,
+    val revision: Long = 0)
 
 /** Same commit ordering as ChatApprovalSettingsStore: serialize, fsync a temporary file,
  * atomically replace, then publish the durable preference. No speculative cache.
@@ -43,13 +46,38 @@ internal class ThemePreferenceStore(directory: File, private val legacyDynamic: 
     private val serializer = ThemePreferenceSerializer()
     val updates = shared.committed.filterNotNull()
 
-    suspend fun current(): ThemePreference = lock.withLock { read().also { shared.committed.value = it } }
+    suspend fun current(): ThemePreference = lock.withLock { read().also {
+        if (shared.committed.value?.preference != it) publish(it)
+    } }
     suspend fun setMode(mode: ThemeMode) { lock.withLock { persist(read().copy(mode = mode)) } }
-    suspend fun setDynamic(dynamic: Boolean) { lock.withLock { persist(read().copy(dynamic = dynamic)) } }
+    suspend fun setDynamic(dynamic: Boolean) { lock.withLock { persist(read().copy(dynamic = dynamic, themeKey = null)) } }
+    suspend fun setTheme(key: String) { lock.withLock { persist(read().copy(themeKey = key, dynamic = false)) } }
+    // UI fallbacks carry the observed commit, so a delayed Activity cannot clear a new
+    // explicit choice of the same key. Lifecycle callers already hold the manager gate.
+    suspend fun clearUnavailableTheme(expected: String, revision: Long? = null) { lock.withLock {
+        val current = read()
+        if (current.themeKey == expected && (revision == null || shared.committed.value?.revision == revision))
+            persist(current.copy(themeKey = null, dynamic = false), unavailable = true)
+    } }
+    /** Lifecycle callers await this durable commit before disabling/deleting or re-enabling.
+     * The same preference mutex protects newer choices: no captured value is written back. */
+    suspend fun clearPluginTheme(pluginId: String) { lock.withLock {
+        val current = read()
+        if (current.themeKey?.substringBefore('/') == pluginId)
+            persist(current.copy(themeKey = null, dynamic = false), unavailable = true)
+    } }
+    suspend fun retainPluginThemes(activePluginIds: Set<String>) { lock.withLock {
+        val current = read()
+        val owner = current.themeKey?.substringBefore('/')
+        if (owner != null && owner !in activePluginIds)
+            persist(current.copy(themeKey = null, dynamic = false), unavailable = true)
+    } }
 
     private fun checkPaths() {
-        check(Files.notExists(root, NOFOLLOW_LINKS) || Files.isDirectory(root, NOFOLLOW_LINKS))
-        check(Files.notExists(file, NOFOLLOW_LINKS) || Files.isRegularFile(file, NOFOLLOW_LINKS))
+        if (!(Files.notExists(root, NOFOLLOW_LINKS) || Files.isDirectory(root, NOFOLLOW_LINKS)))
+            throw IOException("Theme preference directory unavailable")
+        if (!(Files.notExists(file, NOFOLLOW_LINKS) || Files.isRegularFile(file, NOFOLLOW_LINKS)))
+            throw IOException("Theme preference file unavailable")
     }
     private suspend fun read(): ThemePreference {
         checkPaths()
@@ -61,7 +89,7 @@ internal class ThemePreferenceStore(directory: File, private val legacyDynamic: 
             ThemePreference().also { persist(it) }
         }
     }
-    private suspend fun persist(preference: ThemePreference) {
+    private suspend fun persist(preference: ThemePreference, unavailable: Boolean = false) {
         checkPaths()
         Files.createDirectories(root)
         val buffer = Buffer()
@@ -76,11 +104,17 @@ internal class ThemePreferenceStore(directory: File, private val legacyDynamic: 
             }
             fileSystem.atomicMove(temp.toFile().toOkioPath(), file.toFile().toOkioPath())
         } finally { Files.deleteIfExists(temp) }
-        shared.committed.value = preference
+        publish(preference, unavailable)
+    }
+    private fun publish(preference: ThemePreference, unavailable: Boolean = false) {
+        // Only live UI callbacks use this generation; process-loss recovery uses the
+        // durable plugin revocation journal. Equal explicit choices still invalidate it.
+        shared.committed.value = ThemePreferenceUpdate(preference, unavailable, ++shared.revision)
     }
     private class SharedState {
         val lock = Mutex()
-        val committed = MutableStateFlow<ThemePreference?>(null)
+        val committed = MutableStateFlow<ThemePreferenceUpdate?>(null)
+        var revision = 0L
     }
     companion object {
         internal const val FILE_NAME = "theme-preferences.json"
@@ -96,16 +130,21 @@ internal class ThemePreferenceSerializer(legacyDynamic: Boolean = true) : OkioSe
         try {
             require(bytes.size <= 4096)
             val value = Json.parseToJsonElement(bytes.toString(Charsets.UTF_8)).jsonObject
-            require(value.keys == setOf("mode", "dynamic"))
+            require(value.keys == setOf("mode", "dynamic") || value.keys == setOf("mode", "dynamic", "themeKey"))
             val mode = value.getValue("mode").jsonPrimitive
             val dynamic = value.getValue("dynamic").jsonPrimitive
             require(mode.isString && !dynamic.isString)
-            return ThemePreference(ThemeMode.valueOf(mode.content), requireNotNull(dynamic.booleanOrNull))
+            val themeKey = value["themeKey"]?.let {
+                if (it == JsonNull) null else it.jsonPrimitive.also { key -> require(key.isString) }.content.also { key ->
+                    require(key.length <= 265 && Regex("[a-zA-Z0-9_.-]+/[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}").matches(key))
+                }
+            }
+            return ThemePreference(ThemeMode.valueOf(mode.content), requireNotNull(dynamic.booleanOrNull), themeKey)
         } catch (error: Exception) {
             throw CorruptionException("Invalid theme preference", error)
         }
     }
     override suspend fun writeTo(t: ThemePreference, sink: BufferedSink) {
-        sink.writeUtf8(buildJsonObject { put("mode", t.mode.name); put("dynamic", t.dynamic) }.toString())
+        sink.writeUtf8(buildJsonObject { put("mode", t.mode.name); put("dynamic", t.dynamic); put("themeKey", t.themeKey) }.toString())
     }
 }
