@@ -9,6 +9,7 @@
     TEST_OUTPUT   失败时的截图和日志目录，默认 build/emulator-test
 """
 import os
+import json
 import pathlib
 import re
 import subprocess
@@ -54,13 +55,42 @@ def crashed():
     return PACKAGE in adb("logcat", "-d", "-b", "crash", check=False)
 
 
-def scroll(down):
-    """滑动宿主列表。数据包和代码包两栏会把后面的插件卡片挤出首屏。"""
-    size = re.findall(r"(\d+)x(\d+)", adb("shell", "wm", "size"))[-1]
-    width, height = map(int, size)
-    top, bottom = int(height * 0.25), int(height * 0.80)
-    adb("shell", "input", "swipe", str(width // 2), str(bottom if down else top),
-        str(width // 2), str(top if down else bottom), "200")
+def scroll(down, nodes=None):
+    """Use the lifecycle acceptance runner's slow, overlapping viewport drags."""
+    nodes = screen() if nodes is None else nodes
+    bodies = []
+    for node in nodes:
+        values = re.findall(r"-?\d+", node.get("bounds", ""))
+        if node.get("scrollable") != "true" or len(values) != 4:
+            continue
+        left, top, right, bottom = map(int, values)
+        if 0 <= left < right and 0 <= top < bottom and bottom - top > 60:
+            bodies.append((left, top, right, bottom))
+    if not bodies:
+        return False
+    left, top, right, bottom = min(bodies, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]))
+    x = (left + right) // 2
+    distance = min(400, (bottom - top) // 4)
+    start = (top + bottom) // 2 - distance // 2
+    end = start + distance
+    adb("shell", "input", "swipe", str(x), str(end if down else start),
+        str(x), str(start if down else end), "800")
+    return True
+
+
+def viewport(nodes):
+    return tuple((n.get("text", ""), n.get("bounds", "")) for n in nodes)
+
+
+def search_failure(message, observations):
+    # A final screenshot alone cannot show which intermediate viewports were searched.
+    try:
+        OUTPUT.mkdir(parents=True, exist_ok=True)
+        (OUTPUT / "search.json").write_text(json.dumps({"error": message, "timeout": TIMEOUT,
+            "observations": observations}, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError as error:
+        print(f"Could not save search evidence: {error}", file=sys.stderr)
+    raise TestFailure(message)
 
 
 def tap_target(node, nodes):
@@ -97,10 +127,16 @@ def wait_for(description, matches, fail=None, sweep=False, for_tap=False):
     """
     deadline = time.monotonic() + TIMEOUT
     texts = []
-    attempts = 0
+    down, previous, steps = True, None, 0
+    observations = []
     while time.monotonic() < deadline:
         nodes = screen()
         texts = [n.get("text") for n in nodes if n.get("text")]
+        observations.append({"at": time.monotonic(), "down": down,
+            "nodes": [{k: n.get(k, "") for k in ("text", "bounds", "scrollable")} for n in nodes]})
+        del observations[:-40]
+        if time.monotonic() > deadline:
+            break
         node = find(nodes, matches)
         if node is not None and for_tap:
             node = tap_target(node, nodes)
@@ -111,19 +147,53 @@ def wait_for(description, matches, fail=None, sweep=False, for_tap=False):
         if crashed():
             raise TestFailure(f"{description}: app crashed")
         if sweep and nodes:
-            scroll(attempts % 6 < 3)
-            attempts += 1
-        time.sleep(1)
-    raise TestFailure(f"{description}: timed out, screen has {texts}")
+            current = viewport(nodes)
+            if current == previous:
+                down = not down
+                steps = 0
+                if down:
+                    time.sleep(min(2, max(0, deadline - time.monotonic())))
+            if steps >= 30:
+                search_failure(f"{description}: could not reach list end", observations)
+            if time.monotonic() < deadline and scroll(down, nodes):
+                observations[-1]["swipe_down"] = down
+                previous = current
+                steps += 1
+        elif not nodes:
+            previous = None
+        time.sleep(min(1, max(0, deadline - time.monotonic())))
+    search_failure(f"{description}: timed out, screen has {texts}", observations)
 
 
 def absent(description, matches):
-    """宿主列表从顶到底再回到顶都没有匹配项。屏幕外不算不存在。"""
-    for down in (None, True, True, True, False, False, False):
-        if down is not None:
-            scroll(down)
-        if find(screen(), matches) is not None:
-            raise TestFailure(description)
+    """先回到列表顶部，再逐屏检查到底部。屏幕外不算不存在。"""
+    deadline = time.monotonic() + TIMEOUT
+    for down in (False, True):
+        previous = None
+        steps = 0
+        while time.monotonic() < deadline:
+            nodes = screen()
+            if time.monotonic() > deadline:
+                break
+            if find(nodes, matches) is not None:
+                raise TestFailure(description)
+            if crashed():
+                raise TestFailure(f"{description}: app crashed")
+            if not nodes:
+                previous = None
+                time.sleep(1)
+                continue
+            current = viewport(nodes)
+            if current == previous:
+                break
+            if steps >= 30 or not scroll(down, nodes):
+                raise TestFailure(f"{description}: could not inspect whole list")
+            previous = current
+            steps += 1
+        else:
+            raise TestFailure(f"{description}: timed out inspecting whole list")
+        if time.monotonic() >= deadline:
+            raise TestFailure(f"{description}: timed out inspecting whole list")
 
 
 def tap(node):

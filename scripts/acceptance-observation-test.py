@@ -388,6 +388,90 @@ class LifecycleSearch(unittest.TestCase):
 
 
 class Observations(unittest.TestCase):
+    def recovery_search(self, *, initial=0, target=True, absent=False):
+        # Model disjoint endpoint views from PR187's failure. The 3x fling gain
+        # is a stress control, not a measured device coefficient.
+        state = {'offset': initial, 'clock': 0, 'views': [], 'swipes': []}
+        top, bottom, end = 550, 2208, 6000
+
+        def screen():
+            state['clock'] += 2
+            offset = state['offset']
+            state['views'].append(offset)
+            root = ET.Element('node', bounds='[0,0][1080,2340]')
+            body = ET.SubElement(root, 'node', bounds=f'[0,{top}][1080,{bottom}]', scrollable='true')
+            for y in range(600, 8200, 100):
+                if top <= y - offset and y + 40 - offset <= bottom:
+                    ET.SubElement(body, 'node', text=f'row {y}', bounds=f'[44,{y-offset}][1036,{y+40-offset}]')
+            if target and top <= 2400 - offset and 2448 - offset <= bottom:
+                ET.SubElement(body, 'node', text='Disable Probe', bounds=f'[44,{2400-offset}][600,{2448-offset}]')
+            return list(root.iter('node'))
+
+        def adb(*args, **kwargs):
+            if args == ('shell', 'wm', 'size'):
+                return 'Physical size: 1080x2340'
+            self.assertEqual(('shell', 'input', 'swipe'), args[:3])
+            x1, y1, x2, y2, duration = map(int, args[3:])
+            state['swipes'].append((x1, y1, x2, y2, duration))
+            gain = 1 if duration >= 800 else 3
+            state['offset'] = max(0, min(end, state['offset'] + gain * (y1 - y2)))
+            state['clock'] += duration / 1000
+            return ''
+
+        def sleep(seconds):
+            state['clock'] += seconds
+
+        with tempfile.TemporaryDirectory() as output, patch.object(em, 'OUTPUT', Path(output)), \
+                patch.object(em, 'screen', side_effect=screen), patch.object(em, 'adb', side_effect=adb), \
+                patch.object(em, 'crashed', return_value=False), \
+                patch.object(em.time, 'monotonic', side_effect=lambda: state['clock']), \
+                patch.object(em.time, 'sleep', side_effect=sleep), patch.object(em, 'TIMEOUT', 180):
+            try:
+                if absent:
+                    em.absent('recovery launched a plugin page', lambda t: t == 'Disable Probe')
+                else:
+                    state['found'] = em.wait_for('recovery controls', lambda t: t == 'Disable Probe', sweep=True).get('text')
+            except em.TestFailure as error:
+                state['error'] = str(error)
+        return state
+
+    def test_recovery_controls_between_endpoint_views_are_observed(self):
+        for initial in (0, 6000):
+            with self.subTest(initial=initial):
+                state = self.recovery_search(initial=initial)
+                self.assertEqual('Disable Probe', state.get('found'))
+                self.assertLess(state['clock'], 180)
+                for x1, y1, x2, y2, duration in state['swipes']:
+                    self.assertTrue(0 < x1 == x2 < 1080)
+                    self.assertTrue(550 < min(y1, y2) < max(y1, y2) < 2208)
+                    self.assertLessEqual(abs(y1 - y2), 400)
+                    self.assertEqual(800, duration)
+
+    def test_missing_recovery_controls_still_fail_at_original_deadline(self):
+        state = self.recovery_search(target=False)
+        self.assertIn('timed out', state.get('error', ''))
+        self.assertNotIn('found', state)
+        self.assertGreaterEqual(state['clock'], 180)
+        self.assertLess(state['clock'], 184)
+
+    def test_absence_cannot_pass_over_a_page_between_endpoint_views(self):
+        state = self.recovery_search(absent=True)
+        self.assertIn('recovery launched a plugin page', state.get('error', ''))
+
+    def test_absence_covers_long_list_from_bottom_back_to_bottom(self):
+        state = self.recovery_search(initial=6000, target=False, absent=True)
+        self.assertNotIn('error', state)
+        self.assertIn(0, state['views'])
+        self.assertEqual(6000, state['offset'])
+        self.assertGreater(len(state['swipes']), 6)
+
+    def test_emulator_scroll_does_not_guess_when_body_is_missing(self):
+        for bounds in ('', '[0,0][0,0]', '[0,-100][1080,100]'):
+            with self.subTest(bounds=bounds), patch.object(em, 'adb') as adb:
+                nodes = [ET.Element('node', bounds=bounds, scrollable='true')]
+                em.scroll(True, nodes)
+                adb.assert_not_called()
+
     def host_readiness(self, *, empty_list_present):
         # The recorded R8 screen ends at the data section; the code list sits below it.
         state = {'clock': 0, 'position': 0, 'swipes': []}
@@ -396,7 +480,8 @@ class Observations(unittest.TestCase):
             labels = ['Theta', 'Device runtime environment', 'No selected data packages']
             if state['position'] > 0 and empty_list_present:
                 labels += ['Code packages', 'No plugins installed']
-            return [ET.Element('node', text=text) for text in labels]
+            return [ET.Element('node', scrollable='true', bounds='[0,268][1080,2208]')] + [
+                ET.Element('node', text=text) for text in labels]
 
         def adb(*args, **kwargs):
             if args == ('shell', 'wm', 'size'):
@@ -438,7 +523,8 @@ class Observations(unittest.TestCase):
         state = self.host_readiness(empty_list_present=False)
         self.assertIn(True, state['swipes'])
         self.assertIn(False, state['swipes'])
-        self.assertEqual(8, state['clock'])
+        self.assertGreaterEqual(state['clock'], 8)
+        self.assertLess(state['clock'], 9)
 
     def test_return_to_hello_sweeps_below_language_controls(self):
         class ReachedReturn(Exception):
