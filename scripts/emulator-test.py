@@ -156,6 +156,35 @@ def install_plugin(apk, name):
     tap_text("Install")
 
 
+def plugin_entry_ready():
+    nodes = screen()
+    entry = [n for n in nodes if n.get("text") == "Plugins and diagnostics"]
+    if len(entry) > 1:
+        raise TestFailure("Ambiguous plugin navigation")
+    if entry:
+        tap(entry[0])
+        return False
+    if any(n.get("text") == "Import code APK" for n in nodes):
+        return True
+    menu = [n for n in nodes if n.get("content-desc") == "Open navigation menu"]
+    if len(menu) > 1:
+        raise TestFailure("Ambiguous navigation menu")
+    if menu:
+        tap(menu[0])
+    return False
+
+
+def open_plugins():
+    deadline = time.monotonic() + TIMEOUT
+    while time.monotonic() < deadline:
+        if plugin_entry_ready():
+            return
+        if crashed():
+            raise TestFailure("Host crashed opening plugin management")
+        time.sleep(1)
+    raise TestFailure("Timed out opening plugin management from chat")
+
+
 def run(host, probe, hello):
     step("prepare the device")
     adb("uninstall", PACKAGE, check=False)
@@ -168,7 +197,7 @@ def run(host, probe, hello):
     step("install the R8 host")
     adb("install", "-r", host, timeout=300)
     adb("shell", "am", "start", "-W", "-n", f"{PACKAGE}/.MainActivity")
-    tap_text("Plugins and diagnostics")
+    open_plugins()
     wait_for("host shows up", lambda t: t == "No plugins installed", sweep=True)
 
     if hello:
@@ -209,7 +238,7 @@ def run(host, probe, hello):
     step("leave and restart: the plugin comes back from disk")
     adb("shell", "am", "force-stop", PACKAGE)
     adb("shell", "am", "start", "-W", "-n", f"{PACKAGE}/.MainActivity")
-    tap_text("Plugins and diagnostics")
+    open_plugins()
     tap_card("Probe")
     wait_for("probe after restart", lambda t: PROBE_PASSED.match(t) is not None, fail=lambda t: t.startswith("FAIL "))
 
@@ -233,7 +262,7 @@ def run(host, probe, hello):
     step("disabled preference survives process restart")
     adb("shell", "am", "force-stop", PACKAGE)
     adb("shell", "am", "start", "-W", "-n", f"{PACKAGE}/.MainActivity")
-    tap_text("Plugins and diagnostics")
+    open_plugins()
     wait_for("disabled after restart", lambda t: t == "Enable Probe", sweep=True)
     absent("disabled Probe loaded after restart", lambda t: t == "Probe")
 
@@ -257,7 +286,7 @@ def run(host, probe, hello):
     step("normal restart restores enabled Probe")
     adb("shell", "am", "force-stop", PACKAGE)
     adb("shell", "am", "start", "-W", "-n", f"{PACKAGE}/.MainActivity", "--ez", "skip_plugins", "false")
-    tap_text("Plugins and diagnostics")
+    open_plugins()
     tap_card("Probe")
     wait_for("Probe after recovery", lambda t: PROBE_PASSED.match(t) is not None, fail=lambda t: t.startswith("FAIL "))
     adb("shell", "input", "keyevent", "KEYCODE_BACK")
@@ -269,7 +298,7 @@ def run(host, probe, hello):
     absent("pending uninstall still exposes its page", lambda t: t == "Probe")
     adb("shell", "am", "force-stop", PACKAGE)
     adb("shell", "am", "start", "-W", "-n", f"{PACKAGE}/.MainActivity")
-    tap_text("Plugins and diagnostics")
+    open_plugins()
     wait_for("host restored after deletion", lambda t: t == ("Hello" if hello else "No plugins installed"), sweep=True)
     absent("Probe still installed after deferred deletion", lambda t: "Probe" in t)
 

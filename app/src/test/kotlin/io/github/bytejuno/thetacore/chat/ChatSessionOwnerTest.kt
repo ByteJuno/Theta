@@ -57,6 +57,25 @@ class ChatSessionOwnerTest {
         } finally { f.close(); root.deleteRecursively() }
     }
 
+    @Test fun staleDrawerDeleteCannotDeleteAnotherSession() = runBlocking {
+        val root = Files.createTempDirectory("chat-drawer-delete-identity").toFile()
+        val f = fixture(root, AtomicInteger(), provider(tool = false))
+        try {
+            f.owner.open().join()
+            val first = requireNotNull(f.owner.state.value.sessionId)
+            f.owner.newSession().join()
+            val second = requireNotNull(f.owner.state.value.sessionId)
+            f.owner.deleteCurrentSession(first).join()
+            assertEquals(second, f.owner.state.value.sessionId)
+            assertTrue(first in f.store.sessionIds())
+            assertTrue(second in f.store.sessionIds())
+            assertEquals(R.string.chat_operation_failed, f.owner.state.value.error)
+            f.owner.deleteCurrentSession(second).join()
+            assertFalse(second in f.store.sessionIds())
+            assertTrue(first in f.store.sessionIds())
+        } finally { f.close(); root.deleteRecursively() }
+    }
+
     @Test fun deletingSessionReleasesCachedDraftAndAttachmentsWhilePreservingOtherSessions() = runBlocking {
         val root = Files.createTempDirectory("chat-draft-delete-lifecycle").toFile()
         val f = fixture(root, AtomicInteger(), provider(tool = false))

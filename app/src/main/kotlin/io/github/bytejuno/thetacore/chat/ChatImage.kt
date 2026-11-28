@@ -1,6 +1,8 @@
 package io.github.bytejuno.thetacore.chat
 
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.clickable
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -19,7 +21,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 @Composable
-internal fun ChatImage(record: InvocationRecord, owner: ChatSessionOwner) {
+internal fun ChatImage(record: InvocationRecord, load: suspend (String, String) -> ByteArray?) {
     val strings = uiStrings()
     var bitmap by remember(record.callId) { mutableStateOf<android.graphics.Bitmap?>(null) }
     var loading by remember(record.callId) { mutableStateOf(true) }
@@ -28,7 +30,7 @@ internal fun ChatImage(record: InvocationRecord, owner: ChatSessionOwner) {
         loading = true
         try {
             val decoded = withContext(Dispatchers.IO) {
-                owner.image(record.input.sessionId, record.callId)?.let(::decodeImage)
+                load(record.input.sessionId, record.callId)?.let(::decodeImage)
             }
             bitmap = decoded
             failed = decoded == null && record.result?.text == IMAGE_COMPLETE
@@ -46,7 +48,7 @@ internal fun ChatImage(record: InvocationRecord, owner: ChatSessionOwner) {
 }
 
 @Composable
-internal fun UserChatImage(blob: BlobRef, sessionId: String?, owner: ChatSessionOwner) {
+internal fun UserChatImage(blob: BlobRef, sessionId: String?, load: suspend (String, String) -> ByteArray?) {
     val strings = uiStrings()
     var bitmap by remember(sessionId, blob.id) { mutableStateOf<android.graphics.Bitmap?>(null) }
     var loading by remember(sessionId, blob.id) { mutableStateOf(true) }
@@ -56,7 +58,7 @@ internal fun UserChatImage(blob: BlobRef, sessionId: String?, owner: ChatSession
         failed = false
         try {
             val decoded = if (sessionId == null) null else withContext(Dispatchers.IO) {
-                owner.userImage(sessionId, blob.id)?.let(::decodeImage)
+                load(sessionId, blob.id)?.let(::decodeImage)
             }
             bitmap = decoded
             failed = decoded == null
@@ -66,13 +68,15 @@ internal fun UserChatImage(blob: BlobRef, sessionId: String?, owner: ChatSession
     }
     if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
     if (failed) Text(strings.get(R.string.chat_image_unavailable), color = MaterialTheme.colorScheme.error)
+    var preview by rememberSaveable(sessionId, blob.id) { mutableStateOf(false) }
     bitmap?.let { image ->
-        Image(
-            image.asImageBitmap(),
-            contentDescription = strings.get(R.string.chat_image_user_description),
-            modifier = Modifier.fillMaxWidth().heightIn(max = 320.dp).aspectRatio(image.width.toFloat() / image.height),
-            contentScale = ContentScale.Fit,
-        )
+        Image(image.asImageBitmap(), strings.get(R.string.chat_image_user_description),
+            modifier = Modifier.sizeIn(maxWidth = 200.dp, maxHeight = 160.dp).aspectRatio(image.width.toFloat() / image.height)
+                .clickable(onClickLabel = strings.get(R.string.chat_preview_image)) { preview = true }, contentScale = ContentScale.Fit)
+        if (preview) AlertDialog(onDismissRequest = { preview = false },
+            text = { Image(image.asImageBitmap(), strings.get(R.string.chat_image_user_description),
+                Modifier.fillMaxWidth().heightIn(max = 480.dp), contentScale = ContentScale.Fit) },
+            confirmButton = { TextButton(onClick = { preview = false }) { Text(strings.get(R.string.chat_close)) } })
     }
 }
 

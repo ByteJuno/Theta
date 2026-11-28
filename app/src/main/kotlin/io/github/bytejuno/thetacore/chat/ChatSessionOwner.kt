@@ -165,7 +165,8 @@ internal class ChatSessionOwner(
             requireNotNull(tools!!.sessionStore).privateImages.readUserImage(sessionId, blobId)
         }
     }
-    fun deleteCurrentSession() = launchOperation {
+    fun deleteCurrentSession(expectedSessionId: String? = null) = launchOperation {
+        check(expectedSessionId == null || mutable.value.sessionId == expectedSessionId)
         check(active == null && !mutable.value.pending)
         val id = requireNotNull(mutable.value.sessionId)
         val host = requireNotNull(tools)
