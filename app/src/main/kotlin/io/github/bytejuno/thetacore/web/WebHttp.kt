@@ -41,6 +41,12 @@ internal fun publicWebAddress(address: InetAddress): Boolean {
 
 internal fun webUrl(raw: String): HttpUrl {
     val url = raw.takeIf { it.length <= 8192 }?.toHttpUrlOrNull() ?: throw WebFailure(WebError.ADDRESS)
+    return webUrl(url)
+}
+
+/** Generated search URLs have separately bounded inputs; percent encoding can exceed
+ * the raw URL input limit. Apply the same scheme and credential checks without truncating them. */
+private fun webUrl(url: HttpUrl): HttpUrl {
     if (url.scheme != "https" || url.username.isNotEmpty() || url.password.isNotEmpty()) throw WebFailure(WebError.ADDRESS)
     return url.newBuilder().fragment(null).build()
 }
@@ -60,7 +66,7 @@ internal class WebHttp(
     suspend fun request(initial: Request, redirects: Boolean = false): WebResponse = withTimeoutOrNull(requestTimeoutMillis) {
         var request = initial
         repeat(6) { hop ->
-            val url = webUrl(request.url.toString())
+            val url = webUrl(request.url)
             val addresses = dns.resolve(url.host)
             if (addresses.isEmpty() || addresses.any { !publicWebAddress(it) }) throw WebFailure(WebError.ADDRESS)
             val attempted = AtomicBoolean()

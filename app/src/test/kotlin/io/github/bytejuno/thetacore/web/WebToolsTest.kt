@@ -212,6 +212,34 @@ class WebToolsTest {
         } finally { root.deleteRecursively() }
     }
 
+    @Test fun searxRequestReplacesReservedQueryParametersAndKeepsFilters() {
+        val settings = WebSearchSettings(SearchBackend.SEARXNG,
+            "https://web.test/search?q=old&q=older&format=html&language=zh", "")
+        val request = searchRequest(settings, "new query", 5)
+        assertEquals(listOf("new query"), request.url.queryParameterValues("q"))
+        assertEquals(listOf("json"), request.url.queryParameterValues("format"))
+        assertEquals("zh", request.url.queryParameter("language"))
+    }
+
+    @Test fun getSearchPreservesMaximumLengthUnicodeQueryThroughHttps() = runBlocking {
+        val query = "中".repeat(2000)
+        LocalHttps().use { local ->
+            for (backend in listOf(SearchBackend.SEARXNG, SearchBackend.BRAVE)) {
+                val settings = if (backend == SearchBackend.SEARXNG)
+                    WebSearchSettings(backend, "https://web.test/search", "")
+                else WebSearchSettings(backend, WebSearchSettings.BRAVE_ENDPOINT, "fixture-key")
+                local.enqueue("{}", "application/json")
+                val response = local.http().request(searchRequest(settings, query, 5))
+                assertEquals("{}", response.bytes.toString(Charsets.UTF_8))
+                val request = local.server.takeRequest(2, TimeUnit.SECONDS)!!
+                assertEquals(listOf(query), request.url!!.queryParameterValues("q"))
+            }
+            // Accepting generated search URLs must not relax the raw fetch/endpoint limit.
+            failure(WebError.ADDRESS) { local.http().get("https://web.test/" + "x".repeat(8192)) }
+            assertEquals(2, local.server.requestCount)
+        }
+    }
+
     @Test fun actualWebToolStoresLargeBodyInSessionBlobAndHonorsDeny() = runBlocking {
         val root = Files.createTempDirectory("web-ledger-test")
         val budget = PluginExecutionBudget()

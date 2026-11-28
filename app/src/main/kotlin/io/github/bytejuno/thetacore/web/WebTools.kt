@@ -56,8 +56,8 @@ internal fun searchRequest(settings: WebSearchSettings, query: String, count: In
     if (query.isBlank() || query.length > 2000 || count !in 1..10) throw WebFailure(WebError.INPUT)
     val url = webUrl(settings.endpoint).newBuilder()
     return when (settings.backend) {
-        SearchBackend.SEARXNG -> Request.Builder().url(url.addQueryParameter("q", query)
-            .addQueryParameter("format", "json").build()).header("Accept", "application/json").get().build()
+        SearchBackend.SEARXNG -> Request.Builder().url(url.setQueryParameter("q", query)
+            .setQueryParameter("format", "json").build()).header("Accept", "application/json").get().build()
         SearchBackend.BRAVE -> Request.Builder().url(url.addQueryParameter("q", query)
             .addQueryParameter("count", count.toString()).build()).header("Accept", "application/json")
             .header("X-Subscription-Token", settings.key).get().build()
