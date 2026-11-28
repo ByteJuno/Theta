@@ -23,6 +23,8 @@ internal fun ChatRouteSurface(host: ThetaApplication, drafts: ChatComposerDrafts
     val persona = rememberChatPersonaSelection(host)
     val settings = rememberSettingsNavigator()
     val pages = rememberSaveableStateHolder()
+    val toolInputDrafts = remember { ToolInputDrafts() }
+    SideEffect { toolInputDrafts.retain(state.toolInputs.values.map { it.id }.toSet()) }
     var operating by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<Int?>(null) }
     fun locked(): Boolean = owner.state.value.let { it.active || it.pending || it.loading } ||
@@ -61,9 +63,11 @@ internal fun ChatRouteSurface(host: ThetaApplication, drafts: ChatComposerDrafts
         input = { call, request, answer -> owner.respondInput(call, request, answer) },
         userImage = owner::userImage, generatedImage = owner::image)
     val destination = settings.navigation.current
-    pages.SaveableStateProvider(destination ?: SettingsDestination.CHAT) {
-        if (destination == null) DefaultChatSurface(snapshot, actions)
-        else SettingsScreen(host, destination, settings::open, ::backSettings, !locked())
+    CompositionLocalProvider(LocalToolInputDrafts provides toolInputDrafts) {
+        pages.SaveableStateProvider(destination ?: SettingsDestination.CHAT) {
+            if (destination == null) DefaultChatSurface(snapshot, actions)
+            else SettingsScreen(host, destination, settings::open, ::backSettings, !locked())
+        }
     }
     val strings = uiStrings()
     error?.let { AlertDialog(onDismissRequest = { error = null }, text = { Text(strings.get(it)) },
