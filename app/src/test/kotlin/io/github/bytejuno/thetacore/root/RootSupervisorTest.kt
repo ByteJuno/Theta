@@ -54,6 +54,18 @@ class RootSupervisorTest {
         assertTrue(result.actualExit)
     }
 
+    @Test fun longQuotedCommandPreservesOutputWithinTheAdvertisedInputLimit() = runBlocking {
+        val expected = "'".repeat(16_000)
+        val command = "printf '%s' \"$expected\""
+        assertTrue(command.length <= 16_384)
+        val result = run(command)
+        assertEquals(RootOutcome.COMPLETED, result.outcome)
+        assertEquals(0, result.exitCode)
+        assertEquals(expected, result.stdout)
+        assertFalse(result.outputTruncated)
+        assertTrue(result.actualExit)
+    }
+
     @Test fun timeoutKillsTheGroupAndWaitsForTheReceipt() = runBlocking {
         val result = run("sleep 30", 200)
         assertEquals(RootOutcome.TIMED_OUT, result.outcome)

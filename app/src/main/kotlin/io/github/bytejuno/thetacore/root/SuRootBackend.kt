@@ -48,7 +48,7 @@ internal fun rootSupervisorScript(command: String, directory: File): String {
             printf 125 > "${'$'}d/code"
             while :; do /system/bin/sleep 1; done
         fi
-        /system/bin/env -i PATH=/system/bin:/system/xbin LANG=C /system/bin/sh -c ${shellQuote(command)}
+        /system/bin/env -i PATH=/system/bin:/system/xbin LANG=C /system/bin/sh -c "${'$'}1"
         printf '%s' "${'$'}?" > "${'$'}d/code"
         while :; do /system/bin/sleep 1; done
     """.trimIndent()
@@ -67,7 +67,7 @@ internal fun rootSupervisorScript(command: String, directory: File): String {
         if [ -e "${'$'}d/stop" ]; then reject cancelled; fi
         if ! command -v setsid >/dev/null 2>&1; then reject unavailable; fi
         printf launching > "${'$'}d/launched" || reject start_failed
-        setsid -w /system/bin/sh -c ${shellQuote(child)} &
+        setsid -w /system/bin/sh -c ${shellQuote(child)} theta-root ${shellQuote(command)} &
         launcher=${'$'}!
         # Explicit fd duplication avoids the shell's /dev/null stdin for asynchronous jobs.
         exec 3<&0
