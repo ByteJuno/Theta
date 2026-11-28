@@ -10,10 +10,13 @@ internal class ThemePreferenceState(private val store: ThemePreferenceStore, pri
     var loading by mutableStateOf(true); private set
     var saving by mutableStateOf(false); private set
     var failed by mutableStateOf(false); private set
+    init {
+        scope.launch { store.updates.collect { preference = it } }
+    }
     fun load() {
         loading = true; failed = false
         scope.launch {
-            try { preference = withContext(Dispatchers.IO) { store.current() } }
+            try { withContext(Dispatchers.IO) { store.current() } }
             catch (cancelled: CancellationException) { throw cancelled }
             catch (_: Exception) { failed = true }
             finally { loading = false }
@@ -25,7 +28,7 @@ internal class ThemePreferenceState(private val store: ThemePreferenceStore, pri
         if (saving || loading) return
         saving = true; failed = false
         scope.launch {
-            try { preference = withContext(Dispatchers.IO) { change(); store.current() } }
+            try { withContext(Dispatchers.IO) { change() } }
             catch (cancelled: CancellationException) { throw cancelled }
             catch (_: Exception) { failed = true }
             finally { saving = false }

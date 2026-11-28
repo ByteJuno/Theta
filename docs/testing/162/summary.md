@@ -19,3 +19,11 @@ Final fetched main: `7df1b70981cc555e5ea529db98a42f4f7f9e701f`
 限制：未生成新 APK（APK SHA 未生成），未操作手机或模拟器，当前构建视觉未验证。49 项 Python 回归是确定性的搜索/滑动逻辑测试，不代表设备验收；真实设备上该次超时是否完全消除仍须审核端使用发布后的最终 head 运行 S1。原始 680d2210 回归失败、截图和日志仅作诊断，不转移为本提交通过证据。当前提交 CI、正式模拟器回归、API33 运行、R8 与签名验收未在本轮执行；原设置页的中英文、横竖屏、大字体、明暗主题与交互仍需审核端验收。
 
 证据目录：`E:\Desktop\AI研究\theta-auto-loop\event-runs\6784498e-a4a5-4d55-b5b2-62b526725809`。提交只包含两个 Python 文件；docs/testing/162/summary.md 由发布器统一登记。
+
+## 第 2 轮审核补充（入口 head `4fd6375c080d8216af78d4e16da08546239d5724`）
+
+- 此前写手累计退回 1 次，上述 `680d2210` 的 S1 失败记录保持有效。已核对 `4df3133` 的树为上文 Tested tree，入口 head 仅增加本摘要，采信已有 preflight 和 Python 结果。
+- GPU 探针复现两个 Activity 各自持有主题状态时，后一页面保存 DARK，磁盘和后一页面已更新，前一页面仍为 SYSTEM，在浅色系统下返回前页会显示浅色。改为按同一文件共享已提交偏好的流，各 Activity 在其协程作用域内订阅；读取结果也通过该流发布，避免旧读取结果覆盖新提交。
+- 新增 `ThemePreferenceStateTest` 覆盖两个页面状态的模式与配色同步、原子替换失败保持旧值及重试。最终 GPU 定向运行 `:app:testDebugUnitTest --tests '*ThemePreferenceStoreTest' --tests '*ThemePreferenceStateTest' --tests '*ThemeStorageReviewProbe'`，10 项通过、0 失败；其中 2 项为不提交的审核探针。未重复完整 preflight。
+- 保留现有原子写入方式的具体理由：实测仓库已用的 AndroidX DataStore 1.1.7 / OkioStorage 在注入 atomicMove 失败后抛出异常，但其可观察缓存已变为 DARK，磁盘仍为 LIGHT，不满足本功能“保存失败保留旧值”的要求。重试能够修复磁盘；不能宣称它无法重试。对照探针先后否定了“失败缓存回滚”和“同值重试跳过写入”的假设，修正断言后全部通过。此处仅记录摘要，探针及原始输出不进入 Git。
+- 本次未生成 APK、未运行设备或模拟器，视觉未验证；最终提交仍须由外层执行原有合并前回归，不能沿用旧提交的 APK 或设备结果。

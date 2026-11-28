@@ -10,6 +10,8 @@ import java.nio.file.LinkOption.NOFOLLOW_LINKS
 import java.nio.file.StandardOpenOption.CREATE_NEW
 import java.nio.file.StandardOpenOption.WRITE
 import java.util.UUID
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import okio.Buffer
@@ -29,15 +31,19 @@ internal data class ThemePreference(val mode: ThemeMode = ThemeMode.SYSTEM, val 
 }
 
 /** Same commit ordering as ChatApprovalSettingsStore: serialize, fsync a temporary file,
- * atomically replace, then let the caller publish the durable preference. No speculative cache. */
+ * atomically replace, then publish the durable preference. No speculative cache.
+ * DataStore 1.1.7 with OkioStorage publishes its cache before atomicMove completes:
+ * a failed move leaves its observed value ahead of disk, violating rollback on failure. */
 internal class ThemePreferenceStore(directory: File, private val legacyDynamic: Boolean = true,
     private val fileSystem: FileSystem = FileSystem.SYSTEM) {
     private val root = directory.toPath().toAbsolutePath().normalize()
     private val file = root.resolve(FILE_NAME)
-    private val lock = synchronized(locks) { locks.getOrPut(file.toString()) { Mutex() } }
+    private val shared = synchronized(states) { states.getOrPut(file.toString()) { SharedState() } }
+    private val lock = shared.lock
     private val serializer = ThemePreferenceSerializer()
+    val updates = shared.committed.filterNotNull()
 
-    suspend fun current(): ThemePreference = lock.withLock { read() }
+    suspend fun current(): ThemePreference = lock.withLock { read().also { shared.committed.value = it } }
     suspend fun setMode(mode: ThemeMode) { lock.withLock { persist(read().copy(mode = mode)) } }
     suspend fun setDynamic(dynamic: Boolean) { lock.withLock { persist(read().copy(dynamic = dynamic)) } }
 
@@ -70,10 +76,15 @@ internal class ThemePreferenceStore(directory: File, private val legacyDynamic: 
             }
             fileSystem.atomicMove(temp.toFile().toOkioPath(), file.toFile().toOkioPath())
         } finally { Files.deleteIfExists(temp) }
+        shared.committed.value = preference
+    }
+    private class SharedState {
+        val lock = Mutex()
+        val committed = MutableStateFlow<ThemePreference?>(null)
     }
     companion object {
         internal const val FILE_NAME = "theme-preferences.json"
-        private val locks = mutableMapOf<String, Mutex>()
+        private val states = mutableMapOf<String, SharedState>()
     }
 }
 
