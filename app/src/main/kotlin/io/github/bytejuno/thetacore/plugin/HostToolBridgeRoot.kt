@@ -31,6 +31,7 @@ internal class HostToolBridgeRoot(
         policy: ApprovalPolicy = ApprovalPolicy(),
         skillReader: (suspend (SelectedPluginData, String, String) -> String)? = null,
         rootTool: Tool? = null,
+        webTools: List<Tool> = emptyList(),
         openStore: () -> InvocationStore,
     ): HostToolExecutionService = withContext(Dispatchers.IO) {
         mutex.withLock {
@@ -50,6 +51,7 @@ internal class HostToolBridgeRoot(
                 val catalog = FrozenToolCatalog(gate, metadataBudget, owner, validator, store.runCatalogStore(), approvalPolicy = policy)
                 catalog.registerHost("host/clock", "1", hostTool)
                 rootTool?.let { catalog.registerHost("host/root_shell", "1", it) }
+                webTools.forEach { catalog.registerHost("host/${it.id}", "1", it) }
                 screenBackend?.let {
                     catalog.registerHost("host/screen_info", "1", io.github.bytejuno.thetacore.plugin.tools.HostScreenTool(it))
                 }
