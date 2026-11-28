@@ -15,11 +15,15 @@ import io.github.bytejuno.thetacore.MainActivity
 import io.github.bytejuno.thetacore.R
 import io.github.bytejuno.thetacore.ThetaApplication
 import io.github.bytejuno.thetacore.chat.AndroidChatTaskPresence
+import io.github.bytejuno.thetacore.chat.ChatSessionOwner
+import io.github.bytejuno.thetacore.chat.ChatState
+import io.github.bytejuno.thetacore.chat.OutputTaskProgress
 import io.github.bytejuno.thetacore.screen.ScreenCaptureVisibilityHook
 import io.github.bytejuno.thetacore.screen.ScreenRuntime
 import io.github.bytejuno.thetacore.sdk.DeviceInfo
 import io.github.bytejuno.thetacore.sdk.OutputSurface
 import io.github.bytejuno.thetacore.sdk.TaskProgress
+import io.github.bytejuno.thetacore.sdk.TaskPhase
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -39,7 +43,9 @@ internal fun openFloatingPermissionSettings(context: Context): Boolean = runCatc
 }.isSuccess
 
 /** Built-in OutputSurface, independent of third-party callbacks and their execution budget. */
-internal class FloatingProgressRuntime(private val host: ThetaApplication) : OutputSurface, ScreenCaptureVisibilityHook {
+internal class FloatingProgressRuntime(private val host: Application,
+    private val chat: () -> ChatSessionOwner = { (host as ThetaApplication).chat },
+) : OutputSurface, ScreenCaptureVisibilityHook {
     override val id = "theta.floating-progress"
     override val displayName get() = host.getString(R.string.floating_progress_title)
     override val priority = Int.MIN_VALUE
@@ -56,7 +62,7 @@ internal class FloatingProgressRuntime(private val host: ThetaApplication) : Out
     })
     private val state = FloatingProgressState(window::render)
     private var sessionId: String? = null
-    private var observing = false
+    private var progress: TaskProgress? = null
     private val started = mutableSetOf<Activity>()
     private var installed = false
 
@@ -65,6 +71,7 @@ internal class FloatingProgressRuntime(private val host: ThetaApplication) : Out
         installed = true
         state.enabled(enabled.value)
         refreshPermission()
+        scope.launch { chat().state.collect(::refreshTask) }
         ScreenRuntime.captureVisibilityHook = this
         // Like AndroidX ProcessLifecycleOwner, count started activities rather than retaining
         // one Activity's resumed flag. No Activity or Compose lifetime owns an active task.
@@ -103,22 +110,25 @@ internal class FloatingProgressRuntime(private val host: ThetaApplication) : Out
     }
 
     fun present(task: TaskProgress?) {
-        sessionId = host.chat.state.value.sessionId
-        state.present(task)
-        if (!observing) {
-            observing = true
-            scope.launch {
-                host.chat.state.collect { chat ->
-                    val current = state.task ?: return@collect
-                    if (sessionId != chat.sessionId || (!chat.active && !chat.pending)) state.clear(current.taskId)
-                }
-            }
-        }
+        sessionId = chat().state.value.sessionId
+        progress = task
+        refreshTask(chat().state.value)
+    }
+
+    private fun refreshTask(chat: ChatState) {
+        if (sessionId != chat.sessionId || progress?.taskId != chat.executionId) progress = null
+        sessionId = chat.sessionId
+        // Runtime events describe an admitted execution. Saved approvals and late exits
+        // are durable chat state and can arrive without any runtime event at all.
+        state.present(if (chat.active) progress ?: chat.executionId?.let {
+            OutputTaskProgress(it, TaskPhase.MODEL, null)
+        } else floatingAttention(chat))
     }
 
     private fun stop(task: FloatingTask) {
+        refreshTask(chat().state.value)
         if (task != state.task) return
-        stopFloatingTask(task, sessionId, host.chat.state.value) { execution, pendingSession -> host.chat.stop(execution, pendingSession) }
+        stopFloatingTask(task, sessionId, chat().state.value) { execution, pendingSession -> chat().stop(execution, pendingSession) }
     }
 
     override suspend fun beforeCapture() = withContext(Dispatchers.Main.immediate) {
