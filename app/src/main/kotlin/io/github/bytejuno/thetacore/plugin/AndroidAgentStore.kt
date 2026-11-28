@@ -23,6 +23,7 @@ import java.io.File
 internal class AndroidAgentStore private constructor(
     private val database: AgentDatabase, private val delegate: InvocationStore,
 ) : InvocationStore by delegate {
+    val memories = io.github.bytejuno.thetacore.agent.memory.MemoryStore(database)
     val privateImages = io.github.bytejuno.thetacore.agent.ledger.PrivateImageStore(database)
     val documentBlobs = io.github.bytejuno.thetacore.agent.ledger.SessionDocumentBlobs(database)
     val composerDrafts = io.github.bytejuno.thetacore.agent.ledger.SessionComposerStore(database)

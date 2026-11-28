@@ -248,7 +248,7 @@ class SessionBlobTest {
                 it.execute("DROP TABLE composer_parts")
                 it.execute("DROP TABLE run_catalog_chunks"); it.execute("DROP TABLE run_catalogs")
                 it.execute("DROP TABLE private_image_chunks"); it.execute("DROP TABLE private_image_attempts")
-                it.execute("DROP TABLE quarantined_contents"); it.execute("PRAGMA user_version=3")
+                it.execute("DROP TABLE quarantined_contents"); it.execute("DROP TABLE memories"); it.execute("DROP TABLE memory_settings"); it.execute("PRAGMA user_version=3")
             }
             val ref = output.stored.raw
             damageContent(f.directory, ref.contentHash, damage)
@@ -272,7 +272,7 @@ class SessionBlobTest {
             it.execute("DROP TABLE composer_parts")
             it.execute("DROP TABLE run_catalog_chunks"); it.execute("DROP TABLE run_catalogs")
             it.execute("DROP TABLE private_image_chunks"); it.execute("DROP TABLE private_image_attempts")
-            it.execute("DROP TABLE quarantined_contents"); it.execute("DROP TABLE deleted_sessions"); it.execute("PRAGMA user_version=2")
+            it.execute("DROP TABLE quarantined_contents"); it.execute("DROP TABLE deleted_sessions"); it.execute("DROP TABLE memories"); it.execute("DROP TABLE memory_settings"); it.execute("PRAGMA user_version=2")
         }
         f.reopen()
         assertEquals(record, f.ledger.get(record.callId))

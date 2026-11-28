@@ -48,7 +48,7 @@ class ThetaApplication : Application() {
             Log.e("ThetaChat", "Chat operation failed: ${error.javaClass.simpleName}")
         }, targetForRun = io.github.bytejuno.thetacore.chat.sharedTargetFactory(modelTransport),
             presence = chatTaskPresence,
-            promptSnapshot = { personaSettings.resolve(plugins.activePromptData()) },
+            promptSnapshot = { io.github.bytejuno.thetacore.memory.memoryPromptSnapshot(this) },
             targetWithMediaForRun = io.github.bytejuno.thetacore.chat.sharedTargetWithMediaFactory(modelTransport),
             userImageValidator = { bytes ->
                 io.github.bytejuno.thetacore.chat.validateAndDecodeAndroidUserImage(bytes)

@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="memory_title">Long-term memory</string>
+    <string name="memory_description">Remember facts across chats. Turning this off stops memory injection and AI memory tools; you can still manage saved facts here. Changes apply to new runs.</string>
+    <string name="memory_enabled">Use long-term memory</string>
+    <string name="memory_usage">%1$d / %2$d memories · %3$d / 512 KiB</string>
+    <string name="memory_search">Search content or category</string>
+    <string name="memory_filter">Exact category (blank for all)</string>
+    <string name="memory_add">Add memory</string>
+    <string name="memory_edit">Edit memory</string>
+    <string name="memory_content">Remembered fact</string>
+    <string name="memory_category">Category</string>
+    <string name="memory_pinned">Pinned for new chats</string>
+    <string name="memory_save">Save</string>
+    <string name="memory_saved">Saved</string>
+    <string name="memory_deleted">Deleted</string>
+    <string name="memory_source">Source: %1$s</string>
+    <string name="memory_manual">Added manually</string>
+    <string name="memory_empty">No matching memories. Add a fact or change your search.</string>
+    <string name="memory_pin">Pin</string>
+    <string name="memory_unpin">Unpin</string>
+    <string name="memory_delete">Delete memory</string>
+    <string name="memory_clear">Clear all memories</string>
+    <string name="memory_clear_confirm">Delete every saved memory, including entries outside this search? This cannot be undone. Chat history is kept.</string>
+    <string name="memory_delete_confirm">Delete this saved memory? This cannot be undone.</string>
+    <string name="memory_confirm">Delete</string>
+    <string name="memory_cancel">Cancel</string>
+    <string name="memory_previous">Previous page</string>
+    <string name="memory_next">Next page</string>
+    <string name="memory_retry">Retry</string>
+    <string name="memory_input_error">Check the content and category limits. An identical memory may already exist or the selected entry may have been deleted.</string>
+    <string name="memory_capacity_error">Memory is full (500 entries or 512 KiB). Delete some entries before saving.</string>
+    <string name="memory_disabled_error">Long-term memory is off. Enable it in Settings to use memory tools.</string>
+    <string name="memory_storage_error">Memory storage is unavailable. A change may have been saved; restart the app and check before retrying.</string>
+    <string name="memory_length">%1$d / %2$d</string>
+</resources>

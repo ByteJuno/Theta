@@ -129,7 +129,7 @@ class RunCatalogPersistenceTest {
             db.connection.execute("DROP TABLE composer_parts")
             db.connection.execute("DROP TABLE run_catalog_chunks")
             db.connection.execute("DROP TABLE run_catalogs")
-            db.connection.execute("PRAGMA user_version=5")
+            db.connection.execute("DROP TABLE memories"); db.connection.execute("DROP TABLE memory_settings"); db.connection.execute("PRAGMA user_version=5")
         }
         openDb(file).use { db ->
             assertEquals(AgentDatabase.SCHEMA_VERSION.toLong(), db.connection.longValue("PRAGMA user_version"))
