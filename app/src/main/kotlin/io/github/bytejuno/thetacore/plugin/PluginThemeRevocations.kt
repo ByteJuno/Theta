@@ -9,7 +9,10 @@ import java.util.Properties
  * Only PluginManager's operation gate owns these records. Retain until preference commit
  * succeeds; a crash on either side of that commit can safely repeat plugin-scoped clearing. */
 internal class PluginThemeRevocations(filesDir: File) {
-    private val root = pluginPath(filesDir, "plugin-theme-revocations")
+    // Resolve only Android's trusted application directory (e.g. /data/user/0).
+    // Journal descendants still pass the no-link guard on every operation.
+    private val files = filesDir.canonicalFile
+    private val root get() = pluginPath(files, "plugin-theme-revocations")
 
     companion object {
         const val ALL_THEMES = "*"

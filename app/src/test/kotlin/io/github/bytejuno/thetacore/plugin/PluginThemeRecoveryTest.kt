@@ -22,10 +22,15 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(application = Application::class, sdk = [33])
 class PluginThemeRecoveryTest {
-    private fun fixture(block: suspend (Context, PluginDataCatalog, ThemePreferenceStore) -> Unit) = runBlocking {
+    private fun fixture(aliasedFiles: Boolean = false,
+        block: suspend (Context, PluginDataCatalog, ThemePreferenceStore) -> Unit) = runBlocking {
         val root = Files.createTempDirectory("theta-theme-recovery").toFile()
+        val alias = root.resolve("system-user-alias").toPath()
+        val application = root.resolve("real-app").apply { mkdirs() }
+        if (aliasedFiles) Files.createSymbolicLink(alias, application.toPath())
         val context = object : ContextWrapper(RuntimeEnvironment.getApplication()) {
-            override fun getFilesDir(): File = root.resolve("files").apply { mkdirs() }
+            override fun getFilesDir(): File = (if (aliasedFiles) alias.toFile() else application)
+                .resolve("files").apply { mkdirs() }
             override fun getNoBackupFilesDir(): File = root.resolve("preferences").apply { mkdirs() }
             override fun getApplicationContext(): Context = this
         }
@@ -36,7 +41,30 @@ class PluginThemeRecoveryTest {
             val preferences = ThemePreferenceStore(context.noBackupFilesDir)
             preferences.setTheme("test.prompts/ocean")
             block(context, catalog, preferences)
-        } finally { root.deleteRecursively() }
+        } finally {
+            Files.deleteIfExists(alias)
+            root.deleteRecursively()
+        }
+    }
+
+    @Test fun aliasedApplicationStorageRestoresThemesAndRecoversPendingRevocations() = fixture(aliasedFiles = true) {
+        context, catalog, preferences ->
+        // Match the Activity startup construction boundary before any Compose frame.
+        PluginManager(context)
+        val lifecycle = PluginThemeLifecycle(context)
+        assertTrue(lifecycle.restore(catalog, {}, emptySet(), false, false).single().selection!!.active(false))
+        assertEquals("test.prompts/ocean", preferences.current().themeKey)
+
+        PluginThemeRevocations(context.filesDir).begin("test.prompts")
+        val recreated = PluginThemeLifecycle(context)
+        assertTrue(recreated.restore(catalog, {}, emptySet(), false, false).single().selection!!.active(false))
+        assertEquals(ThemePreference(dynamic = false), ThemePreferenceStore(context.noBackupFilesDir).current())
+        assertTrue(PluginThemeRevocations(context.filesDir.canonicalFile).pending().isEmpty())
+
+        preferences.setTheme("test.prompts/ocean")
+        assertTrue(recreated.restore(catalog, {}, emptySet(), true, true).isEmpty())
+        assertEquals(ThemePreference(dynamic = false), preferences.current())
+        assertTrue(PluginThemeRevocations(context.filesDir).pending().isEmpty())
     }
 
     @Test fun skippedInventoryReadFailureRetainsRevocationUntilNormalRestore() = failedRecovery(unreadable = true)
