@@ -16,7 +16,8 @@ internal data class ChatUiSnapshot(
     val draft: ChatDraftSnapshot,
     val enabledPlugins: Int,
 )
-internal data class ChatDraftSnapshot(val text: String, val images: List<PendingUserImage>, val error: Int?)
+internal data class ChatDraftSnapshot(val text: String, val images: List<PendingUserImage>, val error: Int?,
+    val documents: List<ComposerDocument> = emptyList(), val importing: Boolean = false)
 internal data class ChatUiActions(
     val newSession: () -> Unit,
     val selectSession: (String) -> Unit,
@@ -46,4 +47,6 @@ internal data class ChatUiActions(
     val input: (String, String, JsonObject?) -> Unit,
     val userImage: suspend (String, String) -> ByteArray?,
     val generatedImage: suspend (String, String) -> ByteArray?,
+    val files: () -> Unit = {},
+    val removeDocument: (String) -> Unit = {},
 )

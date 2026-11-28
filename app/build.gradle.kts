@@ -110,6 +110,7 @@ dependencies {
     // BOM 2026.09.00 selects 1.4.0, where MotionScheme is internal.
     // 1.5.0 exposes the supported expressive API; retain the BOM for other Compose modules.
     implementation("androidx.compose.material3:material3:1.5.0")
+    implementation("com.tom-roush:pdfbox-android:2.0.27.0") // Apache-2.0; document text extraction.
     implementation("org.commonmark:commonmark:0.33.0")
     implementation("org.commonmark:commonmark-ext-gfm-strikethrough:0.33.0")
     implementation(libs.kotlinx.serialization.json)

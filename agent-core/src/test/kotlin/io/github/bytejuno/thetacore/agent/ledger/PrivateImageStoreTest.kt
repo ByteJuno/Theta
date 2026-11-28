@@ -56,6 +56,7 @@ class PrivateImageStoreTest {
         val path = temporary.newFolder().toPath().resolve(AgentDatabase.FILE_NAME)
         database(path).use { owner ->
             SqliteRunHistory.create(owner, "existing").close()
+            owner.connection.execute("DROP TABLE document_blobs")
             owner.connection.execute("DROP TABLE composer_chunks")
             owner.connection.execute("DROP TABLE composer_parts")
             owner.connection.execute("DROP TABLE run_catalog_chunks")

@@ -12,12 +12,13 @@ import io.github.bytejuno.thetacore.agent.ledger.ComposerImage
 import io.github.bytejuno.thetacore.agent.ledger.ComposerSnapshot
 import io.github.bytejuno.thetacore.agent.ledger.SessionComposerStore
 import java.util.UUID
+import io.github.bytejuno.thetacore.agent.ledger.ComposerDocument
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 
-internal data class DraftIdentitySnapshot(val sessionId: String, val textVersion: String, val imageIds: List<String>)
+internal data class DraftIdentitySnapshot(val sessionId: String, val textVersion: String, val imageIds: List<String>, val documentIds: List<String> = emptyList())
 
 internal class ChatComposerDraft(
     text: String = "",
@@ -27,6 +28,8 @@ internal class ChatComposerDraft(
     var input by mutableStateOf(text)
     var textVersion by mutableStateOf(version)
     var images by mutableStateOf(emptyList<PendingUserImage>())
+    var documents by mutableStateOf(emptyList<ComposerDocument>())
+    var importing by mutableStateOf(false)
     var error by mutableStateOf<Int?>(null)
 
     fun edit(text: String) {
@@ -42,16 +45,17 @@ internal class ChatComposerDraft(
         else {
             if (receipt.clearsText(textVersion)) input = ""
             images = receipt.remaining(images)
+            documents = documents.filterNot { receipt.clearsDocument(it.id) }
         }
     }
 }
 
 internal fun ChatComposerDraft.snapshot() = ComposerSnapshot(textVersion, input,
-    images.map { ComposerImage(it.localId, it.mimeType, it.bytes) })
+    images.map { ComposerImage(it.localId, it.mimeType, it.bytes) }, documents)
 
 internal class ChatComposerDrafts(private val store: () -> SessionComposerStore?) {
     private val sessions = mutableMapOf<String?, ChatComposerDraft>()
-    private data class SavedParts(val version: String, val emptyText: Boolean, val imageIds: List<String>)
+    private data class SavedParts(val version: String, val emptyText: Boolean, val imageIds: List<String>, val documentIds: List<String> = emptyList())
     private val saved = mutableMapOf<String?, SavedParts>()
 
     private fun createDraft(id: String?, text: String, version: String) = ChatComposerDraft(
@@ -69,6 +73,7 @@ internal class ChatComposerDrafts(private val store: () -> SessionComposerStore?
         val row = id?.let { requireNotNull(activeStore).read(it) }
         return createDraft(id, row?.text.orEmpty(), row?.version ?: UUID.randomUUID().toString()).apply {
             images = row?.images.orEmpty().map { PendingUserImage(it.id, it.mime, it.bytes) }
+            documents = row?.documents.orEmpty()
             sessions[id] = this
             saved[id] = identity()
         }
@@ -84,6 +89,13 @@ internal class ChatComposerDrafts(private val store: () -> SessionComposerStore?
         return this[id].takeIf { isLiveDraft(id, it) }
     }
 
+    fun refreshDocuments(id: String) {
+        val draft = sessions[id] ?: return
+        checkpoint()
+        draft.documents = store()?.read(id)?.documents.orEmpty()
+        saved[id] = draft.identity()
+    }
+
     fun hasCachedDraft(id: String): Boolean = id in sessions || id in saved
 
     fun cachedSessionIds(): Set<String> = (sessions.keys + saved.keys).filterNotNull().toSet()
@@ -92,6 +104,7 @@ internal class ChatComposerDrafts(private val store: () -> SessionComposerStore?
         sessions.remove(id)?.let { draft ->
             draft.input = ""
             draft.images = emptyList()
+            draft.documents = emptyList()
             draft.error = null
         }
         saved.remove(id)
@@ -113,23 +126,23 @@ internal class ChatComposerDrafts(private val store: () -> SessionComposerStore?
 
     // Empty text after acknowledgment can have the same receipt version as the submitted text.
     private fun ChatComposerDraft.identity() =
-        SavedParts(textVersion, input.isEmpty(), images.map { it.localId })
+        SavedParts(textVersion, input.isEmpty(), images.map { it.localId }, documents.map { it.id })
 
     fun receipt(id: String): ChatDraftReceipt {
         val draft = this[id]
         val baseline = saved[id]
         return ChatDraftReceipt(id, draft.textVersion, draft.images.map { it.localId }.toSet(),
-            baseline?.version, baseline?.imageIds.orEmpty())
+            baseline?.version, baseline?.imageIds.orEmpty(), draft.documents.map { it.id }.toSet(), baseline?.documentIds.orEmpty())
     }
 
     fun identities(ids: Collection<String>): List<DraftIdentitySnapshot> = ids.mapNotNull { id ->
         val draft = sessions[id] ?: return@mapNotNull null
-        DraftIdentitySnapshot(id, draft.textVersion, draft.images.map { it.localId })
+        DraftIdentitySnapshot(id, draft.textVersion, draft.images.map { it.localId }, draft.documents.map { it.id })
     }
 
     fun readConsumed(snapshots: List<DraftIdentitySnapshot>): Map<String, ComposerConsumption> {
         val activeStore = store() ?: return emptyMap()
-        return snapshots.associate { it.sessionId to activeStore.consumed(it.sessionId, it.textVersion, it.imageIds) }
+        return snapshots.associate { it.sessionId to activeStore.consumed(it.sessionId, it.textVersion, it.imageIds, it.documentIds) }
     }
 
     fun applyConsumed(consumed: Map<String, ComposerConsumption>, receipt: ChatDraftReceipt? = null) {
@@ -151,6 +164,11 @@ internal class ChatComposerDrafts(private val store: () -> SessionComposerStore?
                     val baseline = saved[id]
                     saved[id] = baseline?.copy(version = fresh, emptyText = true) ?: SavedParts(fresh, true, emptyList())
                 }
+            }
+            val dbDocuments = dbConsumed?.documentIds.orEmpty()
+            draft.documents = draft.documents.filterNot { it.id in dbDocuments || matchingReceipt?.clearsDocument(it.id) == true }
+            if (dbDocuments.isNotEmpty()) saved[id]?.let { baseline ->
+                saved[id] = baseline.copy(documentIds = baseline.documentIds.filterNot { it in dbDocuments })
             }
             val dbImages = dbConsumed?.imageIds.orEmpty()
             if (dbImages.isNotEmpty() || matchingReceipt != null) {
@@ -184,7 +202,7 @@ internal class ChatComposerDrafts(private val store: () -> SessionComposerStore?
             val baseline = saved[id]
             if (id != null && identity != baseline) {
                 val textChanged = baseline?.version != identity.version || baseline.emptyText != identity.emptyText
-                requireNotNull(store()).save(id, draft.snapshot(), baseline?.imageIds.orEmpty(), textChanged)
+                requireNotNull(store()).save(id, draft.snapshot(), baseline?.imageIds.orEmpty(), textChanged, baseline?.documentIds.orEmpty())
                 saved[id] = identity
             }
         }

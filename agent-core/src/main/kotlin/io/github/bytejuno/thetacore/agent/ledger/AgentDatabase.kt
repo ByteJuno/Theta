@@ -133,7 +133,7 @@ class AgentDatabase private constructor(
 
     companion object {
         const val FILE_NAME = "agent.db"
-        const val SCHEMA_VERSION = 7
+        const val SCHEMA_VERSION = 8
         private const val APPLICATION_ID = 0x54485441
         // On POSIX, closing ANY descriptor of a locked file can drop this process's lock.
         // Reject duplicate instances before even opening a second descriptor.
@@ -161,6 +161,7 @@ class AgentDatabase private constructor(
             createPrivateImageSchema(connection)
             createRunCatalogSchema(connection)
             createComposerSchema(connection)
+            createDocumentBlobSchema(connection)
             connection.execute("PRAGMA application_id=$APPLICATION_ID")
             connection.execute("PRAGMA user_version=$SCHEMA_VERSION")
         }
@@ -195,7 +196,8 @@ class AgentDatabase private constructor(
             if (oldVersion < 4) createQuarantineSchema(connection)
             if (oldVersion < 5) createPrivateImageSchema(connection)
             if (oldVersion < 6) createRunCatalogSchema(connection)
-            createComposerSchema(connection)
+            if (oldVersion < 7) createComposerSchema(connection)
+            createDocumentBlobSchema(connection)
             connection.execute("PRAGMA user_version=$SCHEMA_VERSION")
         }
 

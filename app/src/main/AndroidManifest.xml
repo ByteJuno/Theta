@@ -36,6 +36,7 @@
         android:theme="@style/Theme.ThetaCore"
         android:usesCleartextTraffic="true">
         <provider android:name="io.github.libxposed.service.XposedProvider" tools:node="remove" />
+        <service android:name=".chat.DocumentParserService" android:exported="false" android:process=":document_parser" />
         <service android:name=".chat.ChatTaskService" android:exported="false" android:foregroundServiceType="specialUse">
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="User-started interactive agent inference and local tool execution; stops while awaiting user input" />

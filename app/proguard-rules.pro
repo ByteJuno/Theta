@@ -37,3 +37,7 @@
 -keep,allowoptimization,allowobfuscation public class * extends io.github.libxposed.api.XposedModule {
     public <init>();
 }
+
+# PDFBox optional JPX decoding is guarded by Class.forName. Text extraction does
+# not render JPEG2000 images; retain the explicit missing-reader failure path.
+-dontwarn com.gemalto.jp2.JP2Decoder

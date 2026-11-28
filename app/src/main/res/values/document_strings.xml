@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="document_choose">Choose file</string>
+    <string name="document_remove">Remove</string>
+    <string name="document_size">%1$d bytes · %2$d characters</string>
+    <string name="document_importing">Reading document…</string>
+    <string name="document_limit">Attach up to 4 documents per message.</string>
+    <string name="document_unsupported">Choose a PDF or a UTF-8 text, code, Markdown, JSON or CSV file. Binary files are not supported.</string>
+    <string name="document_too_large">This file exceeds the 5 MiB limit. Choose a smaller file.</string>
+    <string name="document_too_long">The extracted text exceeds 200,000 characters. Split the document and try again.</string>
+    <string name="document_too_many_pages">This PDF exceeds 100 pages. Split it and try again.</string>
+    <string name="document_encrypted">Encrypted PDFs are not supported. Export an unencrypted copy first.</string>
+    <string name="document_empty">No readable text was found. Empty files and scanned PDFs without a text layer are not supported.</string>
+    <string name="document_invalid">Could not read this file. It may be damaged, unavailable or too complex. Choose a simpler copy and try again.</string>
+</resources>

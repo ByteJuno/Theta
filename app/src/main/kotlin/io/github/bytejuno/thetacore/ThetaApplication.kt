@@ -75,6 +75,7 @@ class ThetaApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        if (io.github.bytejuno.thetacore.chat.isDocumentParserProcess()) return
         crashRecovery = PluginCrashRecovery(
             FilePluginRecoveryStorage(File(noBackupFilesDir, "plugin-crash-recovery")),
             object : PluginRecoveryClock {

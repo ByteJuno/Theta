@@ -243,6 +243,7 @@ class SessionBlobTest {
             assertEquals(Decision.ALLOW_ALWAYS, before.receipts.single().decision)
             f.store.close()
             sql(f.directory) {
+                it.execute("DROP TABLE document_blobs")
                 it.execute("DROP TABLE composer_chunks")
                 it.execute("DROP TABLE composer_parts")
                 it.execute("DROP TABLE run_catalog_chunks"); it.execute("DROP TABLE run_catalogs")
@@ -266,6 +267,7 @@ class SessionBlobTest {
         val (record, ref) = publish(f)
         f.store.close()
         sql(f.directory) {
+            it.execute("DROP TABLE document_blobs")
             it.execute("DROP TABLE composer_chunks")
             it.execute("DROP TABLE composer_parts")
             it.execute("DROP TABLE run_catalog_chunks"); it.execute("DROP TABLE run_catalogs")

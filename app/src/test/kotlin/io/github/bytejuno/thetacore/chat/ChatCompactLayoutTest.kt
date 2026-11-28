@@ -34,7 +34,7 @@ class ChatCompactLayoutTest {
         assertFalse(chatComposerAvailability(ready, false, draft).send)
         draft.images = (1..MAX_USER_IMAGES_PER_MESSAGE).map { PendingUserImage("$it", "image/png", byteArrayOf(1)) }
         assertTrue(chatComposerAvailability(ready, false, draft).send)
-        assertFalse(chatComposerAvailability(ready, false, draft).attach)
+        assertTrue(chatComposerAvailability(ready, false, draft).attach) // documents still have capacity
     }
 
     @Test fun draftTextIdentityAndImageBytesSurviveRepeatedActivitySaveRestore() {

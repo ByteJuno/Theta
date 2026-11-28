@@ -3,6 +3,8 @@ package io.github.bytejuno.thetacore.chat
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -15,12 +17,12 @@ import io.github.bytejuno.thetacore.uiStrings
 internal data class ChatComposerAvailability(val edit: Boolean, val attach: Boolean, val send: Boolean, val stop: Boolean)
 
 internal fun chatComposerAvailability(state: ChatState, savingModel: Boolean, draft: ChatComposerDraft): ChatComposerAvailability {
-    return chatComposerAvailability(state, savingModel, ChatDraftSnapshot(draft.input, draft.images, draft.error))
+    return chatComposerAvailability(state, savingModel, ChatDraftSnapshot(draft.input, draft.images, draft.error, draft.documents, draft.importing))
 }
 internal fun chatComposerAvailability(state: ChatState, savingModel: Boolean, draft: ChatDraftSnapshot): ChatComposerAvailability {
-    val edit = !state.loading && !state.active && !state.pending && !savingModel
-    return ChatComposerAvailability(edit, edit && draft.images.size < MAX_USER_IMAGES_PER_MESSAGE,
-        edit && state.sessionId != null && (draft.text.isNotBlank() || draft.images.isNotEmpty()), state.active || state.pending)
+    val edit = !state.loading && !state.active && !state.pending && !savingModel && !draft.importing
+    return ChatComposerAvailability(edit, edit && (draft.images.size < MAX_USER_IMAGES_PER_MESSAGE || draft.documents.size < io.github.bytejuno.thetacore.agent.ledger.DocumentLimits.PER_MESSAGE),
+        edit && state.sessionId != null && (draft.text.isNotBlank() || draft.images.isNotEmpty() || draft.documents.isNotEmpty()), state.active || state.pending)
 }
 
 @Composable
@@ -37,9 +39,16 @@ internal fun ChatComposerSurface(compact: Boolean, snapshot: ChatUiSnapshot, act
     var attachments by remember { mutableStateOf(false) }
     Surface(color = tokens.composerContainer, shape = tokens.capsule, modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(tokens.smallGap)) {
-            if (draft.images.isNotEmpty()) LazyRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(tokens.smallGap)) {
-                items(draft.images, key = { it.localId }) { image ->
-                    PendingImagePreview(image, edit, compact = true, onRemove = { actions.removeImage(image.localId) })
+            if (draft.images.isNotEmpty() || draft.documents.isNotEmpty() || draft.importing) {
+                // Reserve the input row first; attachment previews scroll within the remaining space.
+                Column(Modifier.weight(1f, fill = false).heightIn(max = if (compact) 120.dp else 240.dp)
+                    .verticalScroll(rememberScrollState())) {
+                    if (draft.images.isNotEmpty()) LazyRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(tokens.smallGap)) {
+                        items(draft.images, key = { it.localId }) { image ->
+                            PendingImagePreview(image, edit, compact = true, onRemove = { actions.removeImage(image.localId) })
+                        }
+                    }
+                    DocumentDraftPreview(draft, edit, actions.removeDocument)
                 }
             }
             // One input composition location in portrait, landscape, split screen and with IME.
@@ -50,9 +59,12 @@ internal fun ChatComposerSurface(compact: Boolean, snapshot: ChatUiSnapshot, act
                     }
                     DropdownMenu(expanded = attachments && attach, onDismissRequest = { attachments = false }) {
                         DropdownMenuItem(text = { Text(strings.get(R.string.chat_image_add_photo)) },
-                            onClick = { attachments = false; actions.gallery() })
+                            enabled = draft.images.size < MAX_USER_IMAGES_PER_MESSAGE, onClick = { attachments = false; actions.gallery() })
                         DropdownMenuItem(text = { Text(strings.get(R.string.chat_image_take_photo)) },
-                            onClick = { attachments = false; actions.camera() })
+                            enabled = draft.images.size < MAX_USER_IMAGES_PER_MESSAGE, onClick = { attachments = false; actions.camera() })
+                        DropdownMenuItem(text = { Text(strings.get(R.string.document_choose)) },
+                            enabled = draft.documents.size < io.github.bytejuno.thetacore.agent.ledger.DocumentLimits.PER_MESSAGE,
+                            onClick = { attachments = false; actions.files() })
                     }
                 }
                 TextField(draft.text, actions.edit, Modifier.weight(1f), enabled = edit,

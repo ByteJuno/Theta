@@ -491,7 +491,13 @@ class InvocationLedger(
     fun readSessionBlob(sessionId: String, id: String, offset: Long, limit: Int = 8192): Pair<BlobRef, ByteArray> = gate.withGate {
         // Authorize first: foreign and unknown IDs must have the same response, including bad offsets.
         val matches = if (sessionId in deletedSessions) emptySet() else blobRoots.sessionMatches(sessionId, id)
-        if (matches.isEmpty()) throw BlobReadException("Result content is unavailable in this session.")
+        if (matches.isEmpty()) {
+            if (sessionId !in deletedSessions && !halted) try {
+                store.checkAdmission()
+                store.readDocumentBlob(sessionId, id, offset, limit)?.let { return@withGate it }
+            } catch (_: StoreException) { throw BlobReadException("Result content is unavailable: missing or corrupt.") }
+            throw BlobReadException("Result content is unavailable in this session.")
+        }
         if (matches.size != 1) throw BlobReadException("Result content has an ambiguous legacy reference.")
         val ref = matches.single()
         if (offset !in 0..ref.sizeBytes || limit !in 1..8192)

@@ -8,7 +8,7 @@ import java.util.Base64
 /** Bounded, session-scoped retrieval. Registered before catalog freeze, never injected into old runs. */
 internal class HostBlobReadTool(private val ledger: InvocationLedger) : Tool {
     override val id = "blob_read"
-    override val spec = ToolSpec("blob_read", "Read tool-result blob bytes from this session, including earlier runs, in base64 chunks. Pass id and byte offset; follow nextOffset until null.",
+    override val spec = ToolSpec("blob_read", "Read document attachment or tool-result blob bytes from this session, including earlier runs, in base64 chunks. Pass id and byte offset; follow nextOffset until null.",
         Json.parseToJsonElement("""{"type":"object","properties":{"id":{"type":"string","minLength":64,"maxLength":64},"offset":{"type":"integer","minimum":0}},"required":["id","offset"],"additionalProperties":false}""").jsonObject,
         risk = ToolRisk.READ, idempotent = true, parallelSafe = true)
     override suspend fun call(args: JsonObject, env: ToolEnv): ToolResult {
