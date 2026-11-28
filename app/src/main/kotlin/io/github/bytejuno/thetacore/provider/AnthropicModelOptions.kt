@@ -29,7 +29,7 @@ internal fun AnthropicModelOptions(model: EnabledModel, enabled: Boolean, change
         AnthropicEffort.entries.forEach { choice ->
             val effort = choice.wire; val label = choice.label
             FilterChip(model.parameters.reasoningLevel == effort,
-                { change(model.copy(parameters = anthropicParameters(model.parameters, effort = effort))) },
+                { change(model.withSelectedReasoningLevel(effort)) },
                 enabled = enabled, label = { Text(strings.get(label)) })
         }
         Text(strings.get(R.string.anthropic_effort_hint))

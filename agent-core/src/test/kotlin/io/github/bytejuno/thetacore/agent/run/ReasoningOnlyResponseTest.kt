@@ -160,17 +160,34 @@ class ReasoningOnlyResponseTest {
         }
     }
 
-    @Test fun terminalClassificationPreservesContinuationAndNonReasoningReplay() {
-        for (reason in listOf(FinishReason.STOP, FinishReason.OTHER, FinishReason.TOOL_CALLS, FinishReason.PAUSED, FinishReason.LENGTH)) {
-            for (signedText in listOf(false, true)) {
+    @Test fun terminalClassificationDistinguishesEmptySignedTextFromVisibleReplies() {
+        for (reason in listOf(FinishReason.STOP, FinishReason.OTHER, FinishReason.TOOL_CALLS,
+            FinishReason.PAUSED, FinishReason.LENGTH, FinishReason.CONTEXT_EXCEEDED,
+            FinishReason.REFUSAL, FinishReason.CONTENT_FILTER)) {
+            for (signedText in listOf(false, true)) for (text in listOf("", "visible answer")) {
                 val reducer = ModelEventReducer("provider", "request")
-                val events = reasoning(true, reason).dropLast(1) + listOf(Events.text(1, ""),
-                    Events.end(1, if (signedText) replayData("p", "m", "text signature") else null),
-                    Events.finished(reason))
+                val textReplay = if (signedText) replayData("p", "m", "text signature") else null
+                val events = reasoning(true, reason).dropLast(1) + listOf(Events.text(1, text),
+                    Events.end(1, textReplay), Events.finished(reason))
                 events.forEach(reducer::accept)
-                val discarded = !signedText && reason in setOf(FinishReason.STOP, FinishReason.OTHER, FinishReason.TOOL_CALLS)
-                assertEquals(if (discarded) HistoryDisposition.DISCARD else HistoryDisposition.KEEP, reducer.historyDisposition())
-                assertEquals("opaque signature", reducer.assistantMessage().parts.first().replay?.payload)
+                // Protocol 2.7: replay metadata does not make an empty answer visible.
+                // Explicit continuation and truncation keep the original parts; refusals do not.
+                val expected = when (reason) {
+                    FinishReason.REFUSAL, FinishReason.CONTENT_FILTER -> HistoryDisposition.DISCARD
+                    FinishReason.STOP, FinishReason.OTHER, FinishReason.TOOL_CALLS ->
+                        if (text.isEmpty()) HistoryDisposition.DISCARD else HistoryDisposition.KEEP
+                    else -> HistoryDisposition.KEEP
+                }
+                val scenario = "reason=$reason signedText=$signedText text='$text'"
+                assertEquals(expected, reducer.historyDisposition(), scenario)
+                val parts = reducer.assistantMessage().parts
+                assertEquals(2, parts.size, scenario)
+                val thought = assertIs<ContentPart.Reasoning>(parts[0])
+                assertEquals("private reasoning", thought.summary, scenario)
+                assertEquals(replayData("p", "m", "opaque signature"), thought.replay, scenario)
+                val answer = assertIs<ContentPart.Text>(parts[1])
+                assertEquals(text, answer.text, scenario)
+                assertEquals(textReplay, answer.replay, scenario)
             }
         }
     }

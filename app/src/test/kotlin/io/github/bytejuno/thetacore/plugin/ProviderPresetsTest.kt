@@ -232,7 +232,7 @@ class ProviderPresetsTest {
                 """.trimIndent().toByteArray(Charsets.UTF_8)
                 val parsed = parseProviderTemplate("com.example.pack", "Pack", "1.0", "providers/$wire.json", raw)
                 assertEquals(expected, parsed.protocol)
-                assertEquals(wire == "anthropic", parsed.supported)
+                assertTrue(parsed.supported)
                 assertNull(parsed.compat)
                 assertEquals("api.$wire.example", parsed.host)
 

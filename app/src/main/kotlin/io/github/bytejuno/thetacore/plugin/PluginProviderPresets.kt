@@ -14,7 +14,7 @@ internal enum class ProviderTemplateProtocol(val wire: String, val supported: Bo
     OPENAI_CHAT("openai-chat", true),
     OPENAI_RESPONSES("openai-responses", true),
     ANTHROPIC("anthropic", true),
-    GEMINI("gemini", false);
+    GEMINI("gemini", true);
 
     companion object {
         fun fromWire(value: String): ProviderTemplateProtocol? = entries.firstOrNull { it.wire == value }

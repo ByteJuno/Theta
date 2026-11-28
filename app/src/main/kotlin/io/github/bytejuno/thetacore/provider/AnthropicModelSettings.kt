@@ -5,7 +5,7 @@ import io.github.bytejuno.thetacore.agent.provider.openai.OpenAiParameters
 import io.github.bytejuno.thetacore.plugin.ProviderTemplate
 
 internal fun anthropicTemplateModel(template: ProviderTemplate?, id: String): EnabledModel {
-    val model = template?.takeIf { it.protocol.wire == "anthropic" }?.models?.firstOrNull { it.id == id }
+    val model = template?.takeIf { it.protocol.wire in setOf("anthropic", "gemini") }?.models?.firstOrNull { it.id == id }
     return EnabledModel(id, alias = model?.displayName, parameters = model?.parameters() ?: OpenAiParameters(),
         reasoningLevels = model?.reasoningLevels?.toList())
 }
@@ -13,6 +13,12 @@ internal fun anthropicTemplateModel(template: ProviderTemplate?, id: String): En
 internal fun anthropicParameters(value: OpenAiParameters, maxTokens: Int? = value.maxOutputTokens,
     effort: String? = value.reasoningLevel) = OpenAiParameters(maxTokens, value.temperature, value.topP,
     effort, value.parallelToolCalls, value.stopSequences)
+
+/** An explicit selection can retry a previously rejected parameter on a future run. */
+internal fun EnabledModel.withSelectedReasoningLevel(level: String?) = copy(
+    parameters = anthropicParameters(parameters, effort = level),
+    reasoningLevels = if (level != null && reasoningLevels?.isEmpty() == true) null else reasoningLevels,
+)
 
 internal enum class AnthropicEffort(val wire: String?, val label: Int) {
     DEFAULT(null, R.string.anthropic_effort_default),
