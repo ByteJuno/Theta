@@ -1,5 +1,9 @@
 # Issue 161 validation
 
+The implementation validation below was supplied by the writer. The reviewer found a
+contradictory resource-check failure on that exact implementation; see the correction
+and targeted verification at the end of this summary.
+
 Implementation SHA: `8006c2853cde97a7229f2a4c5a4c256774559be0`
 Tested tree: `fbbff12fd6bbef2733b8fc67c79dac1b92d82280`
 Base/main: `d0b9ea933436e36dd6dac90be2d2a4781f748b0c`
@@ -24,3 +28,12 @@ APK SHA: not generated.
 - Initial commit preparation expected an incorrect fixed path count (31 vs 30); stopped before staging. Exact manifest/path scope checked, no source change or test failure; note preserved.
 
 Evidence directory: `E:\Desktop\AI研究\theta-auto-loop\event-runs\e6473590-27e9-4404-b9ee-e345a63c0c61`. PR184 review cursor and original validation remain separate; trusted reviewer head alignment has no effect on this issue evidence.
+
+## Reviewer correction and verification (2026-11-28)
+
+- Reviewed head: `69582fdf252fd03a93197600442365863e30c261`, round 1, zero previous returns. Its only difference from the writer's implementation SHA was this summary.
+- Original app probe attempts failed before running any tests; diagnostic retry identified `:app:verifyUiResources`. An agent-core probe invoking the real `UiResourceCheck` then failed (1 test, 1 failure) on color literals in `ThetaTheme.kt`, beginning with line 28, `#B3C5FF`. This contradicts the writer's preflight result above. Moved the unchanged color-scheme factories into the non-composable theme helper; no checker, assertion or timeout was relaxed.
+- Material3 `SheetState` plus the real model-selection controller reproduced dismissal during persistence: the sheet became `Hidden` while the route's open flag remained true, and stayed hidden after saving and another open action. The dismiss callback now always removes the sheet; persistence remains owned by the route. The corrected probe reached `Hidden` with the flag false, reopened to `Expanded` after a simulated save failure, and successfully retried (2 attempts, no remaining error). This is a JVM state-transition probe, not a rendered interaction test.
+- Resolved POMs for `androidx.compose.material3:material3:1.5.0` and `material3-android:1.5.0` both declare Apache License 2.0.
+- Final GPU run: `:agent-core:test --tests '*ThemeResourcesProbe*' :app:testDebugUnitTest --tests '*MaterialSheetProbe*' --tests '*ChatSurfacePolicyTest*' --tests '*ProviderConnectionsTest.selectionBlocksUiAdmissionUntilPersistenceAndSurfacesRetryableFailure'`; Gradle exit 0, 7 tests, 0 failures. The real resource verifier passed. Probe files remain untracked and are not included in this PR.
+- Verified tracked source tree before this summary update: `9be060dac66633d3f4dcc0e4bcff780b010ca92d`. No APK generated; visual, device and final emulator regression coverage remain as stated above. No full-suite or lint rerun is claimed for the reviewer changes.

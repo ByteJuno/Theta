@@ -20,7 +20,9 @@ internal fun ChatModelSheet(snapshot: ChatUiSnapshot, actions: ChatUiActions, cl
     val persona = snapshot.persona
     val busy = models.saving || persona.busy
     val enabled = !busy && !snapshot.chat.active && !snapshot.chat.pending && !snapshot.chat.loading
-    ModalBottomSheet(onDismissRequest = { if (!busy) close() }) {
+    // Material has already hidden the sheet when dismissing; always remove it so it can reopen.
+    // Selection is owned by the route and keeps saving after the sheet leaves composition.
+    ModalBottomSheet(onDismissRequest = close) {
         LazyColumn(Modifier.fillMaxWidth(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             item { Text(strings.get(R.string.chat_profile_switch_title), style = MaterialTheme.typography.titleLarge) }
             if (busy) item { LinearProgressIndicator(Modifier.fillMaxWidth()); Text(strings.get(R.string.providers_switching)) }
