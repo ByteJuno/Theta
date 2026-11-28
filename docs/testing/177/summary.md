@@ -1,34 +1,33 @@
 # Issue 177 validation
 
-Implementation commit: `35cca9e66f7e6e579d1229bf90e6d2acb2bd2a66`
-Tested Git tree: `6cd1b7bc6ee3da134bb621363b8cc874d8f5173f`
-Branch: `auto/177-data-themes`
-Base/latest fetched main: `49097146a429dc3a3a5cb245be928b69a37530e8`
-APK SHA-256: not generated.
+Implementation commit: `f4cf0f9a08c24e8f6e0b9ff02f4aa3c767e1a232`
+Tested tree: `26a695bcdaaaedca6b47b0b0c82ba12543e26442`
+PR: #190 · branch `auto/177-data-themes`
+Base main: `49097146a429dc3a3a5cb245be928b69a37530e8`
+Reviewed remote parent: `2ee109731db3d43c7cda616082d5306923072428`
 
-## Implemented
+## Scope and return repair
 
-Data plugin `themes/*.json` parsing with per-entry isolation, bounded metadata/colors/corners/styles, WCAG 4.5:1 checks, protected error roles, actual dynamic-palette validation, exclusive persisted appearance selection, exact-selection lifecycle revocation and brand fallback. Chat saved/streaming/retained text, user bubbles and reasoning/tool chips use theme tokens. Theme reading waits for the host restore decision, including safe mode. New English/Chinese strings are paired in plugin_theme_strings.xml. No protected files changed.
+Data plugins provide validated declarative themes with protected safety colors and immediate brand fallback. This revision fixes the verified OWNER RETURN `IC_kwDOVkrS_s8AAAABr44vdw`: theme revocation is awaited inside PluginManager's serialized lifecycle, independent of a Compose frame. Disable/uninstall, quarantine and cold restore clear the durable preference; re-enable retries an unavailable package's revocation first. Preference IO errors propagate, stale-page quarantine guards remain intact, and newer selections for another plugin are preserved under the preference mutex. Committed unavailable notifications also reach existing appearance owners.
 
-## Checks
+## Actual validation
 
-- Final preflight passed in 140.3s, strict `--configuration-cache --configuration-cache-problems=fail`, cache reused. The committed tree equals the tested tree.
-- App: 924 tests, 0 failures/errors, 7 skips (917 passed). All app suites executed in final preflight.
-- Core: 720 tests in unchanged-input XML, 0 failures/errors, 1 skip (719 passed). Task UP-TO-DATE, not rerun this round.
-- UI resources: 730 English/Chinese pairs. Lint: 0 errors, 109 warnings. Storage fixture source verification and compileDebugKotlin passed.
-- Eight new tests cover valid light/dark themes, malformed JSON and values, forbidden safety overrides, WCAG calculations, runtime palette rejection, durable selection and stale-fallback protection, disable/uninstall/replacement/quarantine, actual corrupt-archive rejection, safe-mode startup, and Compose selection/revocation.
-- Compose semantics/layout cover English 360dp light and Chinese 320dp dark at 2x font scale. This is not pixel or device acceptance.
+- Final `python scripts/preflight.py` passed in 161.22 seconds with `--configuration-cache --configuration-cache-problems=fail`; cache reused. Committed tree matches tested tree; inputs unchanged during validation.
+- app: 928 tests, 921 passed, 7 skipped, 0 failures/errors; 100 suites freshly executed. Includes six real Compose/theme tests and eight preference-store tests, with four added regressions this revision.
+- agent-core: 720 recorded tests, 719 passed, 1 skipped; task UP-TO-DATE because inputs were unchanged, not rerun this round.
+- 730 paired English/Chinese UI keys verified; lint 0 errors and 109 warnings; storage-fixture source verification and Kotlin compilation passed.
+- Focused theme check before final harness synchronization: 20 tests, all passed, 40.11 seconds. Final preflight supersedes this for the committed tree.
+- Frozen-frame regression completes actual disable and enable with no clock advance, checks durable brand preference before another frame, restores a manager, then recreates the appearance owner and checks brand colors/editorial style. Additional tests cover failed preference persistence blocking enable and retry, cold restore/uninstall, and preservation of a newer choice.
 
-## Failures retained and resolved
+## Preserved failures and their resolution
 
-1. Initial targeted run: 13 tests, 1 failed because ZIP destination parsing rejected duplicate JSON keys before per-theme isolation. Theme parsing was deferred to readThemes; subsequent 13-test run passed.
-2. Initial Compose run: two loading timeouts; Robolectric main-loop work was not pumped. Fixed synchronization without increasing timeouts.
-3. First two full preflight attempts: 924 app tests with one quarantine UI timeout each. State diagnostics showed stale rendered choices. The test now isolates preference storage, drives snapshot/frame notifications and exercises actual PluginManager corrupt-archive quarantine rather than directly mutating inventory. Final preflight passed all non-skipped tests. Earlier timeout cause was not conclusively reduced to preference storage alone; all original failures are retained.
+- Reviewer original failure and verdict retained in `E:\Desktop\AI研究\theta-auto-loop\event-runs\33768566-64c9-4d43-b9c9-a198e4611d02\reviewer-verdict.json.log` and `reviewer-verdict.json` (no reviewer probe files committed).
+- Local red reproduction on old production code: `validation-issue11/issue177-33768566-before-fix`, 1/1 failed; persisted theme remained `test.prompts/ocean` after disable/re-enable before a frame.
+- Initial preflight: 928 app tests, 1 failed (old inventory assertion raced uninstall completion after preference revocation moved earlier), 7 skipped. Full log, result and XML retained as `initial-preflight-*` in this round. Test now awaits the real lifecycle Deferred and propagates its failure; original assertions/timeouts are unchanged. Final full preflight passed.
+- Earlier issue177 failures remain in `event-runs/2df61b7e-6141-4798-b976-87e745873c8b` and its referenced validation directories; not overwritten or reclassified.
 
-Local evidence: `E:\Desktop\AI研究\theta-auto-loop\event-runs\2df61b7e-6141-4798-b976-87e745873c8b`; targeted runs under `validation-issue11/issue177-2df61b7e-*`. Raw logs/XML are outside Git.
+## Limits and handoff
 
-## Limits and reviewer handoff
+未生成 APK（APK SHA 未生成），未操作手机或模拟器，视觉未验证。冻结 Compose 帧及重建界面的 Robolectric 检查仅证明布局/语义、主题状态与持久化行为，不证明真实字体像素、触摸或当前 APK 视觉。中英文、小屏/大字体、明暗主题的实际渲染以及 S1/S2 正式回归仍由独立审核端在当前构建验证。未运行新 head CI、R8、签名或 API33 设备验收。core 输入未变，720 项为 Gradle UP-TO-DATE 的既有 XML 结果，不是本轮重跑。
 
-未生成 APK（APK SHA 未生成），未操作手机或模拟器。当前构建视觉未验证：Robolectric 仅证明 Compose 布局、语义、回调和持久化，不证明真实字体像素或触摸。英文 360dp 浅色、中文 320dp 双倍字体深色场景有布局交互覆盖；editorial/bubble/compact 完整聊天视觉、中英文/明暗主题下实际截图、安装确认及 S1/S2 节点契约仍待独立审核端当前构建验收。未执行新提交 CI、正式模拟器回归、R8、签名或 API33 真机测试。core 测试输入未变，Gradle 为 UP-TO-DATE，沿用 720 项 XML 结果，非本轮重新执行。
-
-No docs/testing/177/summary.md was committed by the writer. No push or PR creation was performed. The existing publisher owns summary publication and remote PR verification; the independent reviewer owns merge gates.
+APK SHA256: not generated. No protected file changes, phone operations, push, PR creation/update or merge performed by this writer. Independent reviewer owns current-head CI, prescribed emulator regression and merge. Logs/XML and diagnostics remain outside Git; publisher owns the single summary commit.
