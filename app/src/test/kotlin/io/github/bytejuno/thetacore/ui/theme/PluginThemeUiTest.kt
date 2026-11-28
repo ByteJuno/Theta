@@ -180,6 +180,82 @@ class PluginThemeUiTest {
         }
     }
 
+    private class PausedDispatcher : CoroutineDispatcher() {
+        @Volatile var paused = false
+        private val waiting = java.util.concurrent.ConcurrentLinkedQueue<Runnable>()
+        override fun dispatch(context: kotlin.coroutines.CoroutineContext, block: Runnable) {
+            synchronized(waiting) {
+                if (paused) { waiting.add(block); return }
+            }
+            block.run()
+        }
+        fun resume() {
+            synchronized(waiting) { paused = false }
+            while (true) (waiting.poll() ?: break).run()
+        }
+    }
+
+    @Test fun delayedActivityFallbackPreservesNewChoiceOfReintroducedTheme() {
+        val failCommit = java.util.concurrent.atomic.AtomicBoolean(false)
+        screen(beforeThemeCommit = { if (failCommit.get()) throw java.io.IOException("Theme preference replacement unavailable") }) {
+            select()
+            beforeNextFrame {
+                val dispatcher = PausedDispatcher()
+                val oldScope = CoroutineScope(SupervisorJob() + dispatcher)
+                try {
+                    val oldState = ThemePreferenceState(ThemePreferenceStore(context.noBackupFilesDir), oldScope, manager)
+                    oldState.load()
+                    withContext(Dispatchers.Default) { withTimeout(5000) { while (oldState.loading) delay(1) } }
+                    assertEquals("test.prompts/ocean", oldState.preference.themeKey)
+                    failCommit.set(true)
+                    try { installVersion(2, theme = false); fail("Expected failed fallback write") }
+                    catch (_: java.io.IOException) { }
+                    assertTrue(manager.activeThemes().isEmpty())
+                    assertEquals("test.prompts/ocean", oldState.preference.themeKey)
+                    // This is the same callback ThetaTheme schedules when the key is absent.
+                    // Hold an older Activity's coroutine before it reaches the IO dispatcher.
+                    dispatcher.paused = true
+                    oldState.clearUnavailableTheme("test.prompts/ocean")
+                    assertTrue(oldState.saving)
+                    failCommit.set(false)
+                    installVersion(3)
+                    manager.selectTheme("test.prompts/ocean")
+                    val before = ThemePreferenceStore(context.noBackupFilesDir).current().themeKey
+                    assertEquals("test.prompts/ocean", before)
+                    assertTrue(PluginThemeRevocations(files).pending().isEmpty())
+                    dispatcher.resume()
+                    withContext(Dispatchers.Default) { withTimeout(5000) { while (oldState.saving) delay(1) } }
+                    val after = ThemePreferenceStore(context.noBackupFilesDir).current().themeKey
+                    assertEquals("Delayed fallback must preserve the later successful explicit selection", before, after)
+                    PluginManager(context).restore()
+                    assertEquals(before, ThemePreferenceStore(context.noBackupFilesDir).current().themeKey)
+                    val file = context.noBackupFilesDir.resolve(ThemePreferenceStore.FILE_NAME)
+                    assertEquals(before, ThemePreferenceSerializer().readFrom(okio.Buffer().write(file.readBytes())).themeKey)
+                } finally { dispatcher.resume(); oldScope.cancel() }
+            }
+        }
+    }
+
+    @Test fun invalidPreferencePathReportsStorageFailureAndAllowsRestoreRetry() = screen {
+        select()
+        beforeNextFrame {
+            val file = context.noBackupFilesDir.resolve(ThemePreferenceStore.FILE_NAME)
+            val original = file.readBytes()
+            val restored = PluginManager(context)
+            check(file.delete()); check(file.mkdir())
+            try {
+                try { restored.restore(); fail("Invalid preference path must fail restore") }
+                catch (_: java.io.IOException) { } // Handled by MainActivity's startup boundary.
+                assertFalse(restored.dataThemesReady)
+                assertTrue(restored.dataPlugins.isEmpty())
+            } finally { check(file.delete()); file.writeBytes(original) }
+            restored.restore()
+            assertTrue(restored.dataThemesReady)
+            assertEquals(listOf("test.prompts/ocean"), restored.activeThemes().map { it.key })
+            assertEquals("test.prompts/ocean", ThemePreferenceStore(context.noBackupFilesDir).current().themeKey)
+        }
+    }
+
     @Test fun disableAndReenableBeforeNextFrameClearsSelectionAndRestoresDurableBrand() = screen {
         select()
         beforeNextFrame {
@@ -230,7 +306,7 @@ class PluginThemeUiTest {
             check(file.delete()); check(file.mkdir())
             try {
                 try { manager.readDataPage(page, null); fail("Quarantine must report failed revocation") }
-                catch (_: IllegalStateException) { }
+                catch (_: java.io.IOException) { }
                 assertTrue(manager.dataPlugins.isEmpty())
             } finally { check(file.delete()); file.writeBytes(bytes); archive.writeBytes(originalArchive) }
             installVersion(2)
@@ -252,12 +328,12 @@ class PluginThemeUiTest {
             check(file.delete()); check(file.mkdir())
             try {
                 try { manager.readDataPage(page, null); fail("Quarantine must report failed revocation") }
-                catch (_: IllegalStateException) { }
+                catch (_: java.io.IOException) { }
                 assertTrue(manager.dataPlugins.isEmpty())
                 assertEquals(listOf("test.prompts"), PluginThemeRevocations(files).pending())
                 val blocked = PluginManager(context)
                 try { blocked.restore(); fail("Cold admission must await pending revocation") }
-                catch (_: IllegalStateException) { }
+                catch (_: java.io.IOException) { }
                 assertFalse(blocked.dataThemesReady)
                 assertTrue(blocked.dataPlugins.isEmpty())
             } finally { check(file.delete()); file.writeBytes(preference); archive.writeBytes(original) }
@@ -301,7 +377,7 @@ class PluginThemeUiTest {
             try {
                 try { blocked.restore(); fail("Cold admission must await durable theme revocation") }
                 catch (error: Exception) {
-                    if (unreadablePreference) assertTrue(error is IllegalStateException)
+                    if (unreadablePreference) assertTrue(error is java.io.IOException)
                     else assertTrue(error is java.io.IOException)
                 }
                 assertFalse(blocked.dataThemesReady)
@@ -338,7 +414,7 @@ class PluginThemeUiTest {
             try {
                 val blocked = PluginManager(context)
                 try { blocked.restore(); fail("Cold admission must await preference recovery") }
-                catch (_: IllegalStateException) { }
+                catch (_: java.io.IOException) { }
                 assertFalse(blocked.dataThemesReady)
                 assertTrue(blocked.dataPlugins.isEmpty())
                 assertEquals(listOf("test.prompts"), PluginThemeRevocations(files).pending())
@@ -428,7 +504,7 @@ class PluginThemeUiTest {
             check(file.delete()); check(file.mkdir())
             try {
                 try { manager.readDataPage(page, null); fail("Expected failed preference write") }
-                catch (_: IllegalStateException) { }
+                catch (_: java.io.IOException) { }
             } finally { check(file.delete()); file.writeBytes(bytes); archive.writeBytes(original) }
             val preferences = ThemePreferenceStore(context.noBackupFilesDir)
             preferences.setTheme("other.plugin/ocean")
@@ -572,7 +648,7 @@ class PluginThemeUiTest {
             check(file.delete()); check(file.mkdir())
             try {
                 try { manager.setDataEnabled("test.prompts", true); fail("Enable must await durable revocation") }
-                catch (_: IllegalStateException) { }
+                catch (_: java.io.IOException) { }
                 assertTrue(manager.dataPlugins.none { it.active })
                 assertFalse(PluginDataCatalog(files, 1).managementRecord("test.prompts").state.enabled)
             } finally { check(file.delete()); file.writeBytes(bytes) }

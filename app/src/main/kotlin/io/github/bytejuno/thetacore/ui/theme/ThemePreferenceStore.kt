@@ -3,6 +3,7 @@ package io.github.bytejuno.thetacore.ui.theme
 import androidx.datastore.core.CorruptionException
 import androidx.datastore.core.okio.OkioSerializer
 import java.io.File
+import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.file.Files
@@ -29,7 +30,8 @@ internal data class ThemePreference(val mode: ThemeMode = ThemeMode.SYSTEM, val 
         ThemeMode.DARK -> true
     }
 }
-internal data class ThemePreferenceUpdate(val preference: ThemePreference, val themeUnavailable: Boolean = false)
+internal data class ThemePreferenceUpdate(val preference: ThemePreference, val themeUnavailable: Boolean = false,
+    val revision: Long = 0)
 
 /** Same commit ordering as ChatApprovalSettingsStore: serialize, fsync a temporary file,
  * atomically replace, then publish the durable preference. No speculative cache.
@@ -45,14 +47,17 @@ internal class ThemePreferenceStore(directory: File, private val legacyDynamic: 
     val updates = shared.committed.filterNotNull()
 
     suspend fun current(): ThemePreference = lock.withLock { read().also {
-        if (shared.committed.value?.preference != it) shared.committed.value = ThemePreferenceUpdate(it)
+        if (shared.committed.value?.preference != it) publish(it)
     } }
     suspend fun setMode(mode: ThemeMode) { lock.withLock { persist(read().copy(mode = mode)) } }
     suspend fun setDynamic(dynamic: Boolean) { lock.withLock { persist(read().copy(dynamic = dynamic, themeKey = null)) } }
     suspend fun setTheme(key: String) { lock.withLock { persist(read().copy(themeKey = key, dynamic = false)) } }
-    suspend fun clearUnavailableTheme(expected: String) { lock.withLock {
+    // UI fallbacks carry the observed commit, so a delayed Activity cannot clear a new
+    // explicit choice of the same key. Lifecycle callers already hold the manager gate.
+    suspend fun clearUnavailableTheme(expected: String, revision: Long? = null) { lock.withLock {
         val current = read()
-        if (current.themeKey == expected) persist(current.copy(themeKey = null, dynamic = false), unavailable = true)
+        if (current.themeKey == expected && (revision == null || shared.committed.value?.revision == revision))
+            persist(current.copy(themeKey = null, dynamic = false), unavailable = true)
     } }
     /** Lifecycle callers await this durable commit before disabling/deleting or re-enabling.
      * The same preference mutex protects newer choices: no captured value is written back. */
@@ -69,8 +74,10 @@ internal class ThemePreferenceStore(directory: File, private val legacyDynamic: 
     } }
 
     private fun checkPaths() {
-        check(Files.notExists(root, NOFOLLOW_LINKS) || Files.isDirectory(root, NOFOLLOW_LINKS))
-        check(Files.notExists(file, NOFOLLOW_LINKS) || Files.isRegularFile(file, NOFOLLOW_LINKS))
+        if (!(Files.notExists(root, NOFOLLOW_LINKS) || Files.isDirectory(root, NOFOLLOW_LINKS)))
+            throw IOException("Theme preference directory unavailable")
+        if (!(Files.notExists(file, NOFOLLOW_LINKS) || Files.isRegularFile(file, NOFOLLOW_LINKS)))
+            throw IOException("Theme preference file unavailable")
     }
     private suspend fun read(): ThemePreference {
         checkPaths()
@@ -97,11 +104,17 @@ internal class ThemePreferenceStore(directory: File, private val legacyDynamic: 
             }
             fileSystem.atomicMove(temp.toFile().toOkioPath(), file.toFile().toOkioPath())
         } finally { Files.deleteIfExists(temp) }
-        shared.committed.value = ThemePreferenceUpdate(preference, unavailable)
+        publish(preference, unavailable)
+    }
+    private fun publish(preference: ThemePreference, unavailable: Boolean = false) {
+        // Only live UI callbacks use this generation; process-loss recovery uses the
+        // durable plugin revocation journal. Equal explicit choices still invalidate it.
+        shared.committed.value = ThemePreferenceUpdate(preference, unavailable, ++shared.revision)
     }
     private class SharedState {
         val lock = Mutex()
         val committed = MutableStateFlow<ThemePreferenceUpdate?>(null)
+        var revision = 0L
     }
     companion object {
         internal const val FILE_NAME = "theme-preferences.json"

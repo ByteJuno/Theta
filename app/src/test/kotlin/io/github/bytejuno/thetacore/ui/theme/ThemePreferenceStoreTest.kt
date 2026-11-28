@@ -16,6 +16,29 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ThemePreferenceStoreTest {
+    @Test fun repeatedExplicitChoiceInvalidatesOnlyOlderFallbacksAcrossStoreOwners() = runBlocking {
+        val root = Files.createTempDirectory("theta-theme-fallback-generation").toFile()
+        try {
+            val first = ThemePreferenceStore(root)
+            val second = ThemePreferenceStore(root)
+            val key = "test.prompts/ocean"
+            first.setTheme(key)
+            val old = first.updates.first()
+            assertEquals(old.preference, second.current())
+            assertEquals(old.revision, second.updates.first().revision)
+            second.setTheme(key)
+            val fresh = second.updates.first()
+            assertEquals(old.preference, fresh.preference)
+            assertTrue(fresh.revision > old.revision)
+            first.clearUnavailableTheme(key, old.revision)
+            assertEquals(key, second.current().themeKey)
+            assertEquals(fresh, first.updates.first())
+            first.clearUnavailableTheme(key, fresh.revision)
+            assertEquals(ThemePreference(dynamic = false), second.current())
+            assertTrue(second.updates.first().themeUnavailable)
+        } finally { root.deleteRecursively() }
+    }
+
     @Test fun lifecycleRevocationPreservesNewerChoicesAndPublishesOnlyDurableFallback() = runBlocking {
         val root = Files.createTempDirectory("theta-theme-revocation").toFile()
         var failMove = false
@@ -37,7 +60,8 @@ class ThemePreferenceStoreTest {
             failMove = false
             store.clearPluginTheme("old.plugin")
             val brand = ThemePreference(ThemeMode.DARK, false)
-            assertEquals(ThemePreferenceUpdate(brand, true), store.updates.first())
+            assertEquals(brand, store.updates.first().preference)
+            assertTrue(store.updates.first().themeUnavailable)
             assertEquals(brand, ThemePreferenceSerializer().readFrom(Buffer().write(root.resolve(ThemePreferenceStore.FILE_NAME).readBytes())))
 
             store.setTheme("new.plugin/forest")

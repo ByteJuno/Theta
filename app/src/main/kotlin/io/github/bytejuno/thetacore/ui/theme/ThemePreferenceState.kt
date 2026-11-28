@@ -12,10 +12,12 @@ internal class ThemePreferenceState(private val store: ThemePreferenceStore, pri
     var saving by mutableStateOf(false); private set
     var failed by mutableStateOf(false); private set
     var themeUnavailable by mutableStateOf(false); private set
+    var revision by mutableLongStateOf(0L); private set
     init {
         scope.launch { store.updates.collect {
             preference = it.preference
             themeUnavailable = it.themeUnavailable
+            revision = it.revision
         } }
     }
     fun load() {
@@ -32,9 +34,8 @@ internal class ThemePreferenceState(private val store: ThemePreferenceStore, pri
         if (manager != null) manager.selectThemePalette(dynamic) else store.setDynamic(dynamic)
     } }
     fun setTheme(key: String) { themeUnavailable = false; save { requireNotNull(manager).selectTheme(key) } }
-    fun clearUnavailableTheme(key: String) {
-        themeUnavailable = true
-        save { store.clearUnavailableTheme(key) }
+    fun clearUnavailableTheme(key: String, expectedRevision: Long = revision) {
+        save { store.clearUnavailableTheme(key, expectedRevision) }
     }
     private fun save(change: suspend () -> Unit) {
         if (saving || loading) return

@@ -49,10 +49,11 @@ internal fun ThetaTheme(systemDark: Boolean = isSystemInDarkTheme(), manager: io
     val theme = available.singleOrNull { it.key == state.preference.themeKey }
     val resolved = theme?.let { resolvePluginTheme(it, base(dark, it.useDynamicColor), dark) }
     val colors = resolved?.colors ?: base(dark, state.preference.themeKey == null && state.preference.dynamic)
-    LaunchedEffect(state.preference, state.loading, state.saving, choices.loading, available) {
+    val preferenceRevision = state.revision
+    LaunchedEffect(state.preference, preferenceRevision, state.loading, state.saving, choices.loading, available) {
         val key = state.preference.themeKey
         if (key != null && !state.loading && !state.saving && !state.failed && !choices.loading && available.none { it.key == key })
-            state.clearUnavailableTheme(key)
+            state.clearUnavailableTheme(key, preferenceRevision)
     }
     CompositionLocalProvider(LocalThetaThemeTokens provides (resolved?.tokens ?: thetaTokens(colors)),
         LocalThemePreferenceState provides state, LocalThemeChoices provides choices.copy(themes = available)) {

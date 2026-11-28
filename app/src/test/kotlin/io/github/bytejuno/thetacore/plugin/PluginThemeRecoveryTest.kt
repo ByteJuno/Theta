@@ -91,7 +91,7 @@ class PluginThemeRecoveryTest {
                         skipPlugins = true, skipInventory = true)
                     fail("Recovery must report the preference IO failure")
                 } catch (error: Exception) {
-                    if (unreadable) assertTrue(error is IllegalStateException)
+                    if (unreadable) assertTrue(error is IOException)
                     else assertTrue(error is IOException)
                 }
                 assertEquals(listOf(PluginThemeRevocations.ALL_THEMES), PluginThemeRevocations(context.filesDir).pending())
