@@ -60,6 +60,90 @@ class SessionDocumentBlobsTest {
         } finally { root.toFile().deleteRecursively() }
     }
 
+    @Test fun observedDamageQuarantinesEveryOffsetAndSurvivesRestart() {
+        val root = Files.createTempDirectory("document-quarantine")
+        val file = root.resolve("agent.db")
+        val text = "a".repeat(BLOB_CHUNK_SIZE * 2 + 1)
+        var id = ""
+        try {
+            AgentDatabase.open(file, BundledSQLiteDriver()).use { db ->
+                SqliteRunHistory.create(db, "session").close()
+                val blobs = SessionDocumentBlobs(db)
+                val ref = blobs.put("session", text); id = ref.id
+                db.connection.prepare("UPDATE content_chunks SET bytes=? WHERE hash=? AND ordinal=1").use {
+                    it.bindBlob(1, ByteArray(BLOB_CHUNK_SIZE)); it.bindText(2, ref.contentHash); it.step()
+                }
+                assertFailsWith<StoreException> { blobs.read("session", id, BLOB_CHUNK_SIZE.toLong()) }
+                assertFailsWith<StoreException> { blobs.read("session", id, 0) }
+                assertEquals(1L, db.connection.longValue("SELECT count(*) FROM quarantined_contents"))
+            }
+            AgentDatabase.open(file, BundledSQLiteDriver()).use { db ->
+                val blobs = SessionDocumentBlobs(db)
+                assertFailsWith<StoreException> { blobs.read("session", id, 0) }
+                assertFailsWith<StoreException> { blobs.read("session", id, text.length.toLong()) }
+                assertFailsWith<StoreException> { blobs.put("session", text) }
+                assertNotNull(blobs.put("session", "a different healthy document"))
+            }
+        } finally { root.toFile().deleteRecursively() }
+    }
+
+    @Test fun republicationRejectsDamageWithoutDisablingUnrelatedSessions() {
+        val root = Files.createTempDirectory("document-republish")
+        try {
+            AgentDatabase.open(root.resolve("agent.db"), BundledSQLiteDriver()).use { db ->
+                SqliteRunHistory.create(db, "session").close()
+                SqliteRunHistory.create(db, "other").close()
+                val blobs = SessionDocumentBlobs(db)
+                val ref = blobs.put("session", "shared document")
+                db.connection.execute("UPDATE content_chunks SET bytes=x'00'")
+                repeat(2) {
+                    val error = assertFailsWith<StoreException> { blobs.put("other", "shared document") }
+                    assertFalse(error.uncertain)
+                    SessionComposerStore(db).save("other", ComposerSnapshot("v$it", "still usable", emptyList()), emptyList())
+                    assertEquals("still usable", SessionComposerStore(db).read("other").text)
+                    assertNull(blobs.read("other", ref.id, 0))
+                }
+                assertEquals(1L, db.connection.longValue("SELECT count(*) FROM quarantined_contents"))
+                assertNotNull(blobs.put("other", "healthy"))
+            }
+        } finally { root.toFile().deleteRecursively() }
+    }
+
+    @Test fun uncertainPublicationAndQuarantineStillCloseAdmission() {
+        for (quarantine in listOf(false, true)) {
+            val root = Files.createTempDirectory("document-commit")
+            var failCommit = false
+            val driver = object : androidx.sqlite.SQLiteDriver by BundledSQLiteDriver() {
+                override fun open(fileName: String): androidx.sqlite.SQLiteConnection {
+                    val connection = BundledSQLiteDriver().open(fileName)
+                    return object : androidx.sqlite.SQLiteConnection by connection {
+                        override fun prepare(sql: String): androidx.sqlite.SQLiteStatement {
+                            val statement = connection.prepare(sql)
+                            return object : androidx.sqlite.SQLiteStatement by statement {
+                                override fun step(): Boolean {
+                                    val result = statement.step()
+                                    if (failCommit && sql == "COMMIT") throw IllegalStateException("lost commit acknowledgement")
+                                    return result
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            try {
+                AgentDatabase.open(root.resolve("agent.db"), driver).use { db ->
+                    SqliteRunHistory.create(db, "session").close()
+                    val blobs = SessionDocumentBlobs(db)
+                    val ref = if (quarantine) blobs.put("session", "corrupt me") else null
+                    if (quarantine) db.connection.execute("UPDATE content_chunks SET bytes=x'00'")
+                    failCommit = true
+                    assertFails { if (ref != null) blobs.read("session", ref.id, 0) else blobs.put("session", "new") }
+                    assertTrue(assertFailsWith<StoreException> { db.sessionIds() }.uncertain)
+                }
+            } finally { root.toFile().deleteRecursively() }
+        }
+    }
+
     @Test fun upgradesVersionSevenWithoutChangingComposerDrafts() {
         val root = Files.createTempDirectory("document-upgrade")
         val file = root.resolve("agent.db")

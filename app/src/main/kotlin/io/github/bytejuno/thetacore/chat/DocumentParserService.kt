@@ -2,34 +2,45 @@ package io.github.bytejuno.thetacore.chat
 
 import android.app.Service
 import android.content.Intent
+import android.net.Uri
 import android.os.*
 import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
 import java.io.DataOutputStream
+import java.io.File
+import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
 internal fun isDocumentParserProcess() = android.app.Application.getProcessName().endsWith(":document_parser")
 
-/** Private one-shot parser process: hostile PDF allocation cannot take down the chat process. */
+/** All external I/O is in this one-shot process, including provider metadata and open calls. */
 internal class DocumentParserService : Service() {
     private val started = AtomicBoolean()
-    private val handler = Handler(Looper.getMainLooper())
+    private lateinit var watchdog: DocumentProcessWatchdog
+
+    override fun onCreate() {
+        super.onCreate()
+        // Independent thread: a blocked worker or main looper cannot suppress the deadline.
+        watchdog = DocumentProcessWatchdog(30_000) { Process.killProcess(Process.myPid()) }
+    }
+
     private val messenger = Messenger(Handler(Looper.getMainLooper()) { message ->
         if (!started.compareAndSet(false, true)) return@Handler true
         val data = message.data
-        val source = data.getParcelable("source", ParcelFileDescriptor::class.java)
-        val destination = data.getParcelable("destination", ParcelFileDescriptor::class.java)
-        if (source == null || destination == null) { stopSelf(); return@Handler true }
-        // This process owns only this import. Includes blocked/decompression work and pipe I/O.
-        handler.postDelayed({ Process.killProcess(Process.myPid()) }, 30_000)
+        val uri = data.getParcelable("uri", Uri::class.java)
+        val request = data.getString("request")
+        if (uri == null || request == null || runCatching { UUID.fromString(request).toString() }.getOrNull() != request) {
+            watchdog.finish(); return@Handler true
+        }
         Thread({
             try {
-                val scratch = java.io.File(cacheDir, "document-parser-work")
+                val scratch = File(cacheDir, "document-parser-work")
                 scratch.deleteRecursively(); check(scratch.mkdirs())
+                // Previous host death may leave a bounded result. Never remove other caches.
+                cacheDir.listFiles { _, name -> name.startsWith("document-result-") }?.forEach { it.delete() }
                 PDFBoxResourceLoader.init(applicationContext)
-                DataOutputStream(ParcelFileDescriptor.AutoCloseOutputStream(destination)).use { output ->
+                DataOutputStream(File(cacheDir, "document-result-$request").outputStream().buffered()).use { output ->
                     val document = try {
-                        val bytes = ParcelFileDescriptor.AutoCloseInputStream(source).use { DocumentExtraction.readBounded(it) }
-                        DocumentExtraction.extract(data.getString("name").orEmpty(), data.getString("mime"), bytes, scratch)
+                        readProviderDocument(contentResolver, uri, scratch)
                     } catch (error: Exception) {
                         output.writeUTF((error as? DocumentException)?.reason?.name ?: DocumentFailure.INVALID.name)
                         return@use
@@ -38,10 +49,7 @@ internal class DocumentParserService : Service() {
                     val text = document.text.toByteArray(Charsets.UTF_8)
                     output.writeLong(document.size); output.writeInt(text.size); output.write(text)
                 }
-            } finally {
-                runCatching { source.close() }; runCatching { destination.close() }
-                Process.killProcess(Process.myPid())
-            }
+            } finally { watchdog.finish() }
         }, "document-import").start()
         true
     })

@@ -71,6 +71,16 @@ class DocumentExtractionTest {
         rejected(DocumentFailure.TOO_LONG) { extract("a".repeat(DocumentLimits.CHARACTERS + 1).toByteArray()) }
         assertEquals(DocumentLimits.CHARACTERS, extract("a".repeat(DocumentLimits.CHARACTERS).toByteArray()).text.length)
     }
+    @Test fun filenameLimitNeverSplitsSupplementaryUnicode() {
+        for (prefix in listOf("a".repeat(158), "a".repeat(159), "😀".repeat(80))) {
+            val name = prefix + "😀.txt"
+            val doc = DocumentExtraction.extract(name, "text/plain", "hello".toByteArray(), temp.root)
+            assertTrue(doc.name.length <= 160)
+            assertTrue(Charsets.UTF_8.newEncoder().canEncode(doc.name))
+            assertTrue(name.startsWith(doc.name))
+        }
+    }
+
     @Test fun boundsPdfTextAndRemovesFilenameControlCharacters() {
         rejected(DocumentFailure.TOO_LONG) { extract(pdf(text = "a".repeat(DocumentLimits.CHARACTERS + 1)), "application/pdf") }
         val doc = DocumentExtraction.extract("bad\n\u202Ename.md", "text/markdown", "hello".toByteArray(), temp.root)

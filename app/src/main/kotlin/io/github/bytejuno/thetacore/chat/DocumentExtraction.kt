@@ -57,7 +57,7 @@ internal object DocumentExtraction {
         if (text.length > DocumentLimits.CHARACTERS) throw DocumentException(DocumentFailure.TOO_LONG)
         if (text.any { it.isISOControl() && it !in "\t\r\n" }) throw DocumentException(DocumentFailure.UNSUPPORTED)
         if (text.isBlank()) throw DocumentException(DocumentFailure.EMPTY)
-        val safeName = name.replace(Regex("[\\p{Cntrl}\\p{Cf}]"), "").take(160).ifBlank { "document" }
+        val safeName = documentFilename(name)
         return ComposerDocument(UUID.randomUUID().toString(), safeName, requireNotNull(type), bytes.size.toLong(), text)
     }
 
