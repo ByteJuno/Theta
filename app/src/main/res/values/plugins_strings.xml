@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="plugins_title">Extensions and plugins</string>
+    <string name="plugins_filter_all">All</string>
+    <string name="plugins_filter_code">Code</string>
+    <string name="plugins_filter_data">Data</string>
+    <string name="plugins_filter_environment">Environment &amp; Hook</string>
+    <string name="plugins_expanded">Expanded</string>
+    <string name="plugins_collapsed">Collapsed</string>
+    <string name="plugins_expand">Expand</string>
+    <string name="plugins_collapse">Collapse</string>
+    <string name="plugins_show_hook">Show Hook diagnostics</string>
+    <string name="plugins_hide_hook">Hide Hook diagnostics</string>
+</resources>

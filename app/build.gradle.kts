@@ -122,6 +122,7 @@ dependencies {
     implementation("androidx.datastore:datastore-core:1.1.7")
     implementation("androidx.datastore:datastore-core-okio:1.1.7")
     testImplementation("org.robolectric:robolectric:4.17")
+    testImplementation("androidx.compose.ui:ui-test-junit4")
     testImplementation("junit:junit:4.13.2")
     // Real JSON parser for JVM policy tests, not Android's throwing stub.
     testImplementation("org.json:json:20240303")

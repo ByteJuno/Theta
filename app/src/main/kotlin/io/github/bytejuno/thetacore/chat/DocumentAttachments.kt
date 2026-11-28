@@ -34,7 +34,10 @@ internal fun documentError(error: Exception): Int = when ((error as? DocumentExc
 private val documentImports = mutableStateMapOf<String, Boolean>()
 private val documentImportErrors = mutableStateMapOf<String, Int>()
 private val documentImportUpdates = kotlinx.coroutines.flow.MutableStateFlow<Pair<String, Long>?>(null)
-private val documentImportScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+// Draft helpers do not need Android's main dispatcher; create the scope only for the picker.
+private val documentImportScope by lazy {
+    CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+}
 
 @Composable
 internal fun rememberDocumentPicker(drafts: ChatComposerDrafts, session: String?, owner: ChatSessionOwner): () -> Unit {
