@@ -57,6 +57,7 @@ internal data class ChatState(
     val recovery: ChatRecoveryToken? = null,
     val personaUnavailable: Boolean = false,
     val personaRecovered: Boolean = false,
+    val reasoningAdjustment: io.github.bytejuno.thetacore.agent.provider.openai.ReasoningLevelAdjustment? = null,
 )
 
 internal fun sharedTargetFactory(transport: ModelTransport): (OpenAiRunSnapshot) -> ModelTarget =
@@ -573,6 +574,7 @@ internal class ChatSessionOwner(
         val running = requireNotNull(identity ?: pending?.identity)
         activeRunId = running.runId
         mutable.update { it.copy(active = true, error = null, notice = null, draft = "", executionId = executionId) }
+        mutable.update { it.withReasoningAdjustment(snapshot) }
         active = scope.launch(runDispatcher, start = CoroutineStart.ATOMIC) {
             var notice = R.string.chat_complete
             try {

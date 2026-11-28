@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="reasoning_level_adjusted">This model does not support %1$s thinking effort. This run uses %2$s.</string>
+</resources>

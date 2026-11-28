@@ -277,7 +277,8 @@ class ProviderConnectionsTest {
         }
         assertEquals(ProviderSettingsException.Failure.ENDPOINT_CHANGED, failure.failure)
         assertEquals("openai-responses", c.copy(protocol = "openai-responses").protocol)
-        assertThrows(IllegalArgumentException::class.java) { c.copy(protocol = "anthropic") }
+        assertEquals("anthropic", c.copy(protocol = "anthropic").protocol)
+        assertThrows(IllegalArgumentException::class.java) { c.copy(protocol = "gemini") }
         assertEquals("openai-chat", store.snapshotForNewRun().protocol)
     }
 

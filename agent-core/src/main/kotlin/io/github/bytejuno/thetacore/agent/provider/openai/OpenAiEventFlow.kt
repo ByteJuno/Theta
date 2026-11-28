@@ -30,6 +30,8 @@ internal fun openAiEventFlow(
     encode: () -> String,
     stream: () -> OpenAiEventStream,
     normalizeErrorParameter: (String) -> String = { it },
+    decodeHttpError: (JsonObject?, Int?, Long?) -> ModelError = ::decodeError,
+    requireAuthentication: Boolean = false,
 ): Flow<ModelEvent> = flow {
     val body = try { encode() } catch (error: IllegalArgumentException) {
         emit(Events.failed(modelError(ModelErrorCode.INVALID_REQUEST, "Invalid model request or incompatible history")))
@@ -52,7 +54,7 @@ internal fun openAiEventFlow(
     }
     // Empty credentials select no authentication. ApiKeyCredentials rejects empty keys;
     // other nonempty credentials must still be safe to put in a Bearer header.
-    if (token.isNotEmpty() && !validApiKey(token)) {
+    if (requireAuthentication && token.isEmpty() || token.isNotEmpty() && !validApiKey(token)) {
         emit(Events.failed(modelError(ModelErrorCode.AUTH, "Provider credentials invalid; re-enter the API key")))
         return@flow
     }
@@ -89,7 +91,7 @@ internal fun openAiEventFlow(
     val head = headers ?: throw ProtocolException("Missing HTTP headers")
     if (head.status !in 200..299) {
         val root = runCatching { Json.parseToJsonElement(errorBody.toString("UTF-8")).jsonObject }.getOrNull()
-        pendingTerminal = Events.failed(decodeError(root?.get("error") as? JsonObject, head.status, retryAfter(head.retryAfter)))
+        pendingTerminal = Events.failed(decodeHttpError(root?.get("error") as? JsonObject, head.status, retryAfter(head.retryAfter)))
     } else if (!abandoned) {
         sse.endOfInput(); decoder.endOfInput()
     }

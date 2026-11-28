@@ -33,8 +33,24 @@ object SharedHttpClient {
         .build()
 }
 
-class OkHttpModelTransport : ModelTransport {
+/** Fixed by the adapter, never inferred from a URL or a credential's contents. */
+enum class ModelAuthentication { BEARER, ANTHROPIC }
+
+internal fun Request.Builder.modelAuthentication(token: String, authentication: ModelAuthentication): Request.Builder = apply {
+    when (authentication) {
+        ModelAuthentication.BEARER -> if (token.isNotEmpty()) header("Authorization", "Bearer $token")
+        ModelAuthentication.ANTHROPIC -> {
+            require(token.isNotEmpty())
+            header("x-api-key", token)
+            header("anthropic-version", "2023-06-01")
+        }
+    }
+}
+
+class OkHttpModelTransport(private val authentication: ModelAuthentication = ModelAuthentication.BEARER) : ModelTransport {
     private val client = SharedHttpClient.instance
+    fun withAuthentication(value: ModelAuthentication): OkHttpModelTransport =
+        if (value == authentication) this else OkHttpModelTransport(value)
 
     override fun exchange(url: String, body: String, token: String): Flow<TransportEvent> = callbackFlow {
         val parsed = url.toHttpUrl()
@@ -51,7 +67,7 @@ class OkHttpModelTransport : ModelTransport {
         }
         val request = Request.Builder().url(url)
             .header("Accept", "text/event-stream")
-            .apply { if (token.isNotEmpty()) header("Authorization", "Bearer $token") }
+            .modelAuthentication(token, authentication)
             .post(oneShotBody).build()
         val call = client.newCall(request)
         call.enqueue(object : Callback {
