@@ -1,14 +1,13 @@
 package io.github.bytejuno.thetacore.mcp
 
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import io.github.bytejuno.thetacore.*
+import io.github.bytejuno.thetacore.settings.SettingsPage
 import io.github.bytejuno.thetacore.R
 import io.github.bytejuno.thetacore.plugin.McpPreset
 import kotlinx.coroutines.*
@@ -43,9 +42,9 @@ internal fun McpScreen(host: ThetaApplication, close: () -> Unit) {
         catch (_: Exception) { error = true }
         finally { loading = false }
     }
-    AlertDialog(onDismissRequest = { if (!busy) close() }, title = { Text(strings.get(R.string.mcp_title)) },
-        text = {
-            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    if (!editing) SettingsPage(onBack = close, canGoBack = !busy, title = strings.get(R.string.mcp_title),
+        content = {
+            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(strings.get(R.string.mcp_notice))
                 if (recoveryBlocked) Text(strings.get(R.string.mcp_recovery_blocked))
                 if (loading || busy) LinearProgressIndicator(Modifier.fillMaxWidth())
@@ -92,7 +91,7 @@ internal fun McpScreen(host: ThetaApplication, close: () -> Unit) {
                     }
                 }
             }
-        }, confirmButton = { TextButton(enabled = !busy, onClick = close) { Text(strings.get(R.string.mcp_close)) } })
+        })
     if (editing) McpEditor(host, selected, preset, replacing) { editing = false; replacing = false }
 }
 
@@ -111,8 +110,8 @@ private fun McpEditor(host: ThetaApplication, selected: McpConnectionView?, pres
     val destination = runCatching { URI(url).host }.getOrNull().orEmpty()
     val canReuse = selected?.hasToken == true && url == selected.url &&
         mcpHeader(apiKey) == selected.header
-    AlertDialog(onDismissRequest = { if (!busy) close() }, title = { Text(strings.get(R.string.mcp_edit)) }, text = {
-        Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    SettingsPage(onBack = close, canGoBack = !busy, title = strings.get(R.string.mcp_edit), content = {
+        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             if (replacing) {
                 Text(strings.get(R.string.mcp_replace_notice), color = MaterialTheme.colorScheme.error)
                 Row { Checkbox(confirmed, { confirmed = it }, enabled = !busy); Text(strings.get(R.string.mcp_replace_confirm)) }
@@ -133,7 +132,7 @@ private fun McpEditor(host: ThetaApplication, selected: McpConnectionView?, pres
             if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
             if (error) Text(strings.get(R.string.mcp_error), color = MaterialTheme.colorScheme.error)
         }
-    }, confirmButton = {
+    }, actions = {
         TextButton(enabled = !busy && (!replacing || confirmed) && name.isNotBlank() && destination.isNotBlank() && (noAuth || token.isNotBlank() || canReuse),
             onClick = {
                 busy = true; error = false
@@ -147,5 +146,5 @@ private fun McpEditor(host: ThetaApplication, selected: McpConnectionView?, pres
                     catch (_: Exception) { error = true } finally { busy = false }
                 }
             }) { Text(strings.get(R.string.mcp_save)) }
-    }, dismissButton = { TextButton(enabled = !busy, onClick = close) { Text(strings.get(R.string.mcp_close)) } })
+    })
 }

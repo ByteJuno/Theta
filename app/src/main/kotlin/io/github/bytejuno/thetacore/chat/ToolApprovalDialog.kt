@@ -1,13 +1,12 @@
 package io.github.bytejuno.thetacore.chat
 
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import io.github.bytejuno.thetacore.settings.SettingsPage
 import io.github.bytejuno.thetacore.R
 import io.github.bytejuno.thetacore.ThetaApplication
 import io.github.bytejuno.thetacore.agent.ledger.Risk
@@ -57,11 +56,11 @@ internal fun ToolApprovalDialog(host: ThetaApplication, onClose: () -> Unit) {
     }
 
     LaunchedEffect(store) { update() }
-    AlertDialog(
-        onDismissRequest = { if (!busy) onClose() },
-        title = { Text(strings.get(R.string.tool_rules_title)) },
-        text = {
-            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    SettingsPage(
+        onBack = onClose, canGoBack = !busy,
+        title = strings.get(R.string.tool_rules_title),
+        content = {
+            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(strings.get(R.string.tool_rules_explanation), style = MaterialTheme.typography.bodySmall)
                 if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
                 if (error || saved.rulesUnavailable) Text(strings.get(R.string.tool_rules_failed), color = MaterialTheme.colorScheme.error)
@@ -132,7 +131,6 @@ internal fun ToolApprovalDialog(host: ThetaApplication, onClose: () -> Unit) {
                 }
             }
         },
-        confirmButton = { TextButton(onClick = onClose, enabled = !busy) { Text(strings.get(R.string.chat_close)) } },
     )
 }
 
