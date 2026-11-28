@@ -12,7 +12,10 @@ internal class ThemePreferenceState(private val store: ThemePreferenceStore, pri
     var failed by mutableStateOf(false); private set
     var themeUnavailable by mutableStateOf(false); private set
     init {
-        scope.launch { store.updates.collect { preference = it } }
+        scope.launch { store.updates.collect {
+            preference = it.preference
+            themeUnavailable = it.themeUnavailable
+        } }
     }
     fun load() {
         loading = true; failed = false

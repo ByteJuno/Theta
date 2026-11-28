@@ -46,13 +46,14 @@ class PluginThemeUiTest {
             val context = object : ContextWrapper(activity.applicationContext) {
                 override fun getFilesDir(): File = root.resolve("files").apply { mkdirs() }
                 override fun getCacheDir(): File = root.resolve("cache").apply { mkdirs() }
+                override fun getNoBackupFilesDir(): File = preferenceContext.noBackupFilesDir
                 override fun getApplicationContext(): Context = this
             }
             val catalog = PluginDataCatalog(context.filesDir, 1)
             installPromptBundle(catalog, mapOf("themes/ocean.json" to """{"id":"ocean","displayName":"Ocean 海洋",
                 "light":{"assistantText":"#101030"},"dark":{"assistantText":"#FFFFFF"},"cornerScale":1.5,"messageStyle":"compact"}"""))
             val manager = PluginManager(context)
-            val harness = Harness(manager, context.filesDir)
+            val harness = Harness(manager, context)
             val view = ComposeView(activity)
             activity.setContentView(view)
             view.setContent {
@@ -63,14 +64,14 @@ class PluginThemeUiTest {
                 }
                 CompositionLocalProvider(LocalDensity provides Density(1f, fontScale),
                     androidx.compose.ui.platform.LocalContext provides preferenceContext) {
-                    ThetaTheme(systemDark = dark, manager = manager) {
+                    key(harness.appearanceGeneration) { ThetaTheme(systemDark = dark, manager = manager) {
                         harness.state = LocalThemePreferenceState.current
                         harness.choices = LocalThemeChoices.current
                         harness.colors = MaterialTheme.colorScheme
                         harness.tokens = LocalThetaThemeTokens.current
                         harness.scope = rememberCoroutineScope()
                         AppearanceSettingsScreen {}
-                    }
+                    } }
                 }
             }
             harness.await { !harness.state.loading && !harness.choices.loading && harness.choices.themes.size == if (skipPlugins) 0 else 1 }
@@ -78,7 +79,9 @@ class PluginThemeUiTest {
         } finally { controller.pause().stop().destroy(); root.deleteRecursively() }
     }
 
-    private inner class Harness(val manager: PluginManager, val files: File) {
+    private inner class Harness(val manager: PluginManager, val context: Context) {
+        val files get() = context.filesDir
+        var appearanceGeneration by mutableIntStateOf(0)
         lateinit var state: ThemePreferenceState
         lateinit var choices: ThemeChoices
         lateinit var colors: ColorScheme
@@ -105,8 +108,95 @@ class PluginThemeUiTest {
             await { !state.saving && state.preference.themeKey == "test.prompts/ocean" }
         }
         fun revoke(action: suspend () -> Unit) {
-            rule.runOnIdle { scope.launch { action() } }
-            await { !state.saving && !choices.loading && state.preference.themeKey == null }
+            lateinit var work: Deferred<Unit>
+            rule.runOnIdle { work = scope.async { action() } }
+            // Preference revocation now precedes the package mutation; observe its actual
+            // completion before asserting inventory, and propagate any operation failure.
+            await { work.isCompleted && !state.saving && !choices.loading && state.preference.themeKey == null }
+            runBlocking { work.await() }
+        }
+        fun beforeNextFrame(action: suspend () -> Unit) {
+            rule.mainClock.autoAdvance = false
+            val frameTime = rule.mainClock.currentTime
+            lateinit var work: Deferred<Unit>
+            try {
+                rule.runOnIdle { work = scope.async { action() } }
+                rule.waitUntil(10_000) {
+                    org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+                    work.isCompleted
+                }
+                runBlocking { work.await() }
+                assertEquals("Lifecycle operations must finish without a Compose frame", frameTime, rule.mainClock.currentTime)
+            } finally { rule.mainClock.autoAdvance = true }
+        }
+    }
+
+    @Test fun disableAndReenableBeforeNextFrameClearsSelectionAndRestoresDurableBrand() = screen {
+        select()
+        beforeNextFrame {
+            manager.setDataEnabled("test.prompts", false)
+            manager.setDataEnabled("test.prompts", true)
+            assertEquals("Revocation must be durable before another frame or Activity",
+                ThemePreference(dynamic = false), ThemePreferenceStore(context.noBackupFilesDir).current())
+            val restored = PluginManager(context)
+            restored.restore()
+            assertEquals(1, restored.activeThemes().size)
+        }
+        await { !state.saving && !choices.loading && choices.themes.size == 1 }
+        assertNull(state.preference.themeKey)
+        assertFalse(state.preference.dynamic)
+        assertTrue(state.themeUnavailable)
+        assertEquals(thetaBrandScheme(false).primary, colors.primary)
+        assertEquals(MessageStyle.EDITORIAL, tokens.messageStyle)
+        val previous = state
+        rule.runOnIdle { appearanceGeneration++ }
+        await { state !== previous && !state.loading && !choices.loading }
+        assertEquals(ThemePreference(dynamic = false), state.preference)
+        assertEquals(thetaBrandScheme(false).primary, colors.primary)
+        assertEquals(MessageStyle.EDITORIAL, tokens.messageStyle)
+    }
+
+    @Test fun failedPreferenceCommitBlocksReenableUntilRevocationCanBePersisted() = screen {
+        select()
+        beforeNextFrame {
+            manager.setDataEnabled("test.prompts", false)
+            val preferences = ThemePreferenceStore(context.noBackupFilesDir)
+            // Model an old/interrupted selection, then fail the real preference-file check.
+            preferences.setTheme("test.prompts/ocean")
+            val file = context.noBackupFilesDir.resolve(ThemePreferenceStore.FILE_NAME)
+            val bytes = file.readBytes()
+            check(file.delete()); check(file.mkdir())
+            try {
+                try { manager.setDataEnabled("test.prompts", true); fail("Enable must await durable revocation") }
+                catch (_: IllegalStateException) { }
+                assertTrue(manager.dataPlugins.none { it.active })
+                assertFalse(PluginDataCatalog(files, 1).managementRecord("test.prompts").state.enabled)
+            } finally { check(file.delete()); file.writeBytes(bytes) }
+            manager.setDataEnabled("test.prompts", true)
+            assertEquals(ThemePreference(dynamic = false), preferences.current())
+        }
+        await { !choices.loading && state.preference.themeKey == null }
+        assertEquals(MessageStyle.EDITORIAL, tokens.messageStyle)
+    }
+
+    @Test fun coldRestoreAndUninstallRevokeWithoutCompositionAndKeepNewUserSelection() = screen {
+        select()
+        beforeNextFrame {
+            val preferences = ThemePreferenceStore(context.noBackupFilesDir)
+            // A durable disabled package with an old theme can survive an earlier process.
+            PluginDataCatalog(files, 1).setEnabled("test.prompts", false)
+            val restored = PluginManager(context)
+            restored.restore()
+            assertEquals(ThemePreference(dynamic = false), preferences.current())
+            restored.setDataEnabled("test.prompts", true)
+            assertNull(preferences.current().themeKey)
+            preferences.setTheme("other.plugin/new")
+            restored.setDataEnabled("test.prompts", false)
+            assertEquals("other.plugin/new", preferences.current().themeKey)
+            preferences.setTheme("test.prompts/ocean")
+            restored.uninstallData("test.prompts")
+            assertEquals(ThemePreference(dynamic = false), preferences.current())
+            assertTrue(restored.dataPlugins.isEmpty())
         }
     }
 

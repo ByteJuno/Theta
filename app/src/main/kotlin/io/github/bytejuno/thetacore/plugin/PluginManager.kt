@@ -113,6 +113,7 @@ internal class PluginManager(context: Context) {
     private val store = PluginStore(app.filesDir, app.cacheDir, PlatformPluginSignatureVerifier(app.packageManager), stageCleanup)
     private val states = PluginStateStore(app.filesDir)
     private val dataCatalog = PluginDataCatalog(app.filesDir, THETA_API_LEVEL, cleanup = stageCleanup)
+    private val themeLifecycle = PluginThemeLifecycle(app)
     val dataPlugins = mutableStateListOf<ManagedPluginData>()
     val dataInventory = mutableStateListOf<ManagedDataRecord>()
     private val updates = PluginUpdates(app.filesDir, store)
@@ -169,6 +170,7 @@ internal class PluginManager(context: Context) {
         val restoredData = if (policy?.skipData == true) emptyList() else
             withContext(Dispatchers.IO) { dataCatalog.restoreInventory(messages::add, crashSuspects) }
         restoredData.forEach { replaceDataInventory(dataInventory, dataPlugins, it, skipDataLoading) }
+        themeLifecycle.restore(dataPlugins.toList())
         val installed = withContext(Dispatchers.IO) {
             try { store.cleanupColdStages() }
             catch (e: Exception) { messages += "Code stage cleanup failed: ${e.message}" }
@@ -357,6 +359,9 @@ internal class PluginManager(context: Context) {
         restoreInternal()
         dataRequire(!dataRecoveryBlocked, "Data recovery mode; data selection unavailable", PluginFailureReason.DATA_RECOVERY)
         val previous = dataPlugins.firstOrNull { it.selection.manifest.id == id }?.selection
+        // Finish preference revocation before any later enable can enter this operation mutex.
+        // Retrying enable after quarantine/persistence failure also has to finish the commit.
+        if (!enabled || dataPlugins.none { it.active && it.selection.manifest.id == id }) themeLifecycle.revoke(id)
         withContext(Dispatchers.IO) { dataCatalog.setEnabled(id, enabled, previous) }
         // Durable disable precedes revocation; management survives invalid or missing bytes.
         dataPlugins.removeAll { it.selection.manifest.id == id }
@@ -371,6 +376,7 @@ internal class PluginManager(context: Context) {
     }
 
     suspend fun uninstallData(id: String) = operation {
+        themeLifecycle.revoke(id)
         withContext(Dispatchers.IO) { dataCatalog.beginDelete(id) }
         dataPlugins.removeAll { it.selection.manifest.id == id }
         val pending = withContext(Dispatchers.IO) { dataCatalog.managementRecord(id) }
@@ -390,7 +396,7 @@ internal class PluginManager(context: Context) {
         dataRequire(isDataPageActive(page), "Data page revoked", PluginFailureReason.DATA_PAGE_REVOKED)
         try { withContext(Dispatchers.IO) { dataCatalog.content(page.selection, path) } }
         catch (e: Exception) {
-            quarantineDataPage(dataInventory, dataPlugins, page, e.message ?: "Invalid data content")
+            themeLifecycle.quarantine(dataInventory, dataPlugins, page, e.message ?: "Invalid data content")
             failures += "${page.selection.manifest.id}: data page isolated: ${e.message}"
             throw e
         }
@@ -405,7 +411,7 @@ internal class PluginManager(context: Context) {
                 collected += withContext(Dispatchers.IO) { dataCatalog.promptData(page.selection) }
             } catch (error: Exception) {
                 if (error is CancellationException) throw error
-                quarantineDataPage(dataInventory, dataPlugins, page, "Invalid prompt archive")
+                themeLifecycle.quarantine(dataInventory, dataPlugins, page, "Invalid prompt archive")
                 failures += "${page.selection.manifest.id}: prompt archive isolated"
             }
         }
@@ -445,7 +451,7 @@ internal class PluginManager(context: Context) {
                 result.errors.forEach { if (it !in failures) failures += it }
             } catch (error: Exception) {
                 if (error is CancellationException) throw error
-                quarantineDataPage(dataInventory, dataPlugins, page, "Invalid theme archive")
+                themeLifecycle.quarantine(dataInventory, dataPlugins, page, "Invalid theme archive")
                 failures += "${page.selection.manifest.id}: theme archive isolated"
             }
         }
@@ -463,7 +469,7 @@ internal class PluginManager(context: Context) {
                 collected += result.templates
                 result.errors.forEach { failures += it }
             } catch (error: Exception) {
-                quarantineDataPage(dataInventory, dataPlugins, page, error.message ?: "Invalid data content")
+                themeLifecycle.quarantine(dataInventory, dataPlugins, page, error.message ?: "Invalid data content")
                 failures += "${page.selection.manifest.id}: provider templates isolated: ${error.message}"
             }
         }

@@ -29,6 +29,7 @@ internal data class ThemePreference(val mode: ThemeMode = ThemeMode.SYSTEM, val 
         ThemeMode.DARK -> true
     }
 }
+internal data class ThemePreferenceUpdate(val preference: ThemePreference, val themeUnavailable: Boolean = false)
 
 /** Same commit ordering as ChatApprovalSettingsStore: serialize, fsync a temporary file,
  * atomically replace, then publish the durable preference. No speculative cache.
@@ -43,13 +44,28 @@ internal class ThemePreferenceStore(directory: File, private val legacyDynamic: 
     private val serializer = ThemePreferenceSerializer()
     val updates = shared.committed.filterNotNull()
 
-    suspend fun current(): ThemePreference = lock.withLock { read().also { shared.committed.value = it } }
+    suspend fun current(): ThemePreference = lock.withLock { read().also {
+        if (shared.committed.value?.preference != it) shared.committed.value = ThemePreferenceUpdate(it)
+    } }
     suspend fun setMode(mode: ThemeMode) { lock.withLock { persist(read().copy(mode = mode)) } }
     suspend fun setDynamic(dynamic: Boolean) { lock.withLock { persist(read().copy(dynamic = dynamic, themeKey = null)) } }
     suspend fun setTheme(key: String) { lock.withLock { persist(read().copy(themeKey = key, dynamic = false)) } }
     suspend fun clearUnavailableTheme(expected: String) { lock.withLock {
         val current = read()
-        if (current.themeKey == expected) persist(current.copy(themeKey = null, dynamic = false))
+        if (current.themeKey == expected) persist(current.copy(themeKey = null, dynamic = false), unavailable = true)
+    } }
+    /** Lifecycle callers await this durable commit before disabling/deleting or re-enabling.
+     * The same preference mutex protects newer choices: no captured value is written back. */
+    suspend fun clearPluginTheme(pluginId: String) { lock.withLock {
+        val current = read()
+        if (current.themeKey?.substringBefore('/') == pluginId)
+            persist(current.copy(themeKey = null, dynamic = false), unavailable = true)
+    } }
+    suspend fun retainPluginThemes(activePluginIds: Set<String>) { lock.withLock {
+        val current = read()
+        val owner = current.themeKey?.substringBefore('/')
+        if (owner != null && owner !in activePluginIds)
+            persist(current.copy(themeKey = null, dynamic = false), unavailable = true)
     } }
 
     private fun checkPaths() {
@@ -66,7 +82,7 @@ internal class ThemePreferenceStore(directory: File, private val legacyDynamic: 
             ThemePreference().also { persist(it) }
         }
     }
-    private suspend fun persist(preference: ThemePreference) {
+    private suspend fun persist(preference: ThemePreference, unavailable: Boolean = false) {
         checkPaths()
         Files.createDirectories(root)
         val buffer = Buffer()
@@ -81,11 +97,11 @@ internal class ThemePreferenceStore(directory: File, private val legacyDynamic: 
             }
             fileSystem.atomicMove(temp.toFile().toOkioPath(), file.toFile().toOkioPath())
         } finally { Files.deleteIfExists(temp) }
-        shared.committed.value = preference
+        shared.committed.value = ThemePreferenceUpdate(preference, unavailable)
     }
     private class SharedState {
         val lock = Mutex()
-        val committed = MutableStateFlow<ThemePreference?>(null)
+        val committed = MutableStateFlow<ThemePreferenceUpdate?>(null)
     }
     companion object {
         internal const val FILE_NAME = "theme-preferences.json"
