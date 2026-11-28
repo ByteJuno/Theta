@@ -105,7 +105,9 @@ dependencies {
     implementation("io.github.libxposed:service:102.0.0")
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.activity.compose)
-    implementation(libs.androidx.compose.material3)
+    // BOM 2026.09.00 selects 1.4.0, where MotionScheme is internal.
+    // 1.5.0 exposes the supported expressive API; retain the BOM for other Compose modules.
+    implementation("androidx.compose.material3:material3:1.5.0")
     implementation("org.commonmark:commonmark:0.33.0")
     implementation("org.commonmark:commonmark-ext-gfm-strikethrough:0.33.0")
     implementation(libs.kotlinx.serialization.json)

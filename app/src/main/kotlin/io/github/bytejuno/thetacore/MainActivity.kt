@@ -135,7 +135,6 @@ private fun ThetaCoreApp(
     val application = context.applicationContext as ThetaApplication
     // The plugin route replaces ChatScreen within this same Activity.
     val drafts = io.github.bytejuno.thetacore.chat.rememberChatComposerDrafts(application.chat)
-    val colors = if (isSystemInDarkTheme()) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
     val scope = rememberCoroutineScope()
     var openPage by remember { mutableStateOf<SettingsPage?>(null) }
     val requests = remember(manager) { PluginImportRequests(manager::closeImport) }
@@ -263,7 +262,7 @@ private fun ThetaCoreApp(
     // Activity. A stopped/non-owner host list must never clear the foreground journal.
     val pageAdmitted = resumed && pageLease.beforeRender(selectedOwner)
 
-    MaterialTheme(colorScheme = colors) {
+    io.github.bytejuno.thetacore.ui.theme.ThetaTheme {
         Surface(modifier = Modifier.fillMaxSize()) {
             Column(modifier = Modifier.safeDrawingPadding()) {
                 if ((activeDataPage != null || activePage != null) && !pageAdmitted) {

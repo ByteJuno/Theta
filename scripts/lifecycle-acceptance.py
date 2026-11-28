@@ -257,15 +257,7 @@ def back():
 def start(recovery=False):
     adb("shell", "am", "start", "-W", "-n", f"{PACKAGE}/.MainActivity", "--ez", "skip_plugins", str(recovery).lower())
     if not recovery:
-        def plugin_entry_ready():
-            nodes = em.screen()
-            entry = [n for n in nodes if n.get("text") == "Plugins and diagnostics"]
-            if entry:
-                require(len(entry) == 1, "Ambiguous plugin navigation")
-                em.tap(entry[0])
-                return False
-            return any(n.get("text") == "Import code APK" for n in nodes)
-        wait("plugin management from chat", plugin_entry_ready)
+        wait("plugin management from chat", em.plugin_entry_ready)
 
 
 def restart(recovery=False):

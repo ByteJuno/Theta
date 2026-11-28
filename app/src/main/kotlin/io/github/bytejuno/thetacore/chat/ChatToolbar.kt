@@ -13,52 +13,6 @@ import io.github.bytejuno.thetacore.R
 import io.github.bytejuno.thetacore.uiStrings
 
 @Composable
-internal fun ChatToolbar(
-    compact: Boolean,
-    state: ChatState,
-    modelLabel: String?,
-    onModel: () -> Unit,
-    onPlugins: () -> Unit,
-    onSettings: () -> Unit,
-    onApproval: () -> Unit,
-    onSessions: () -> Unit,
-    onNew: () -> Unit,
-    onDelete: () -> Unit,
-) {
-    val strings = uiStrings()
-    val model: @Composable () -> Unit = {
-        OutlinedButton(onClick = onModel, enabled = !state.active && !state.loading) {
-            Text(modelLabel ?: strings.get(R.string.chat_profile_unconfigured),
-                maxLines = 1, overflow = TextOverflow.Ellipsis)
-        }
-    }
-    val actions: @Composable () -> Unit = {
-        TextButton(onClick = onPlugins) { Text(strings.get(R.string.chat_plugins)) }
-        TextButton(onClick = onSettings) { Text(strings.get(R.string.chat_provider)) }
-        TextButton(onClick = onApproval) { Text(strings.get(R.string.chat_approval_settings)) }
-        TextButton(onClick = onSessions, enabled = !state.active && !state.loading) { Text(strings.get(R.string.chat_sessions)) }
-        TextButton(onClick = onNew, enabled = !state.active && !state.loading) { Text(strings.get(R.string.chat_new)) }
-        TextButton(onClick = onDelete, enabled = !state.active && !state.pending && !state.loading) {
-            Text(strings.get(R.string.chat_delete_session))
-        }
-    }
-    if (compact) {
-        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(strings.get(R.string.chat_title), style = MaterialTheme.typography.titleMedium)
-            Box(Modifier.widthIn(max = 200.dp)) { model() }
-            actions()
-        }
-    } else {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(strings.get(R.string.chat_title), style = MaterialTheme.typography.headlineMedium)
-            Box(Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) { model() }
-        }
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) { actions() }
-    }
-}
-
-@Composable
 internal fun ChatFullAutoBanner(compact: Boolean, onApproval: () -> Unit, onBalanced: () -> Unit) {
     val strings = uiStrings()
     Surface(onClick = onApproval, color = MaterialTheme.colorScheme.errorContainer,
