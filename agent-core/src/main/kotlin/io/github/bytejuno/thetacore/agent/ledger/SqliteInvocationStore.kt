@@ -115,8 +115,8 @@ class SqliteInvocationStore private constructor(
 
     private fun collectUnownedContent(hash: String) {
         for (table in listOf("content_chunks", "content_manifests", "contents", "quarantined_contents")) {
-            db.prepare("DELETE FROM $table WHERE hash=? AND NOT EXISTS(SELECT 1 FROM invocation_contents WHERE hash=?)").use {
-                it.bindText(1, hash); it.bindText(2, hash); it.step()
+            db.prepare("DELETE FROM $table WHERE hash=? AND NOT EXISTS(SELECT 1 FROM invocation_contents WHERE hash=?) AND NOT EXISTS(SELECT 1 FROM document_blobs WHERE hash=?)").use {
+                it.bindText(1, hash); it.bindText(2, hash); it.bindText(3, hash); it.step()
             }
         }
     }
@@ -142,6 +142,9 @@ class SqliteInvocationStore private constructor(
         require(digest.digest().joinToString("") { "%02x".format(it) } == ref.contentHash) { "Result content hash is corrupt" }
         manifests[ref.contentHash] = manifest
     }
+
+    override fun readDocumentBlob(sessionId: String, id: String, offset: Long, limit: Int) =
+        SessionDocumentBlobs(database).read(sessionId, id, offset, limit)
 
     override fun readBlob(ref: BlobRef, offset: Long, limit: Int): ByteArray { synchronized(database) {
         database.ready(); check(!closed && !poisoned) { "Reopen and recover required" }
@@ -312,7 +315,8 @@ class SqliteInvocationStore private constructor(
         require(members.all { it.state.terminal && it.instance?.state != InstanceState.UNCONFIRMED }) {
             "Session has unfinished invocations"
         }
-        val hashes = members.flatMap { it.blobReferences() }.map { it.contentHash }.toSet()
+        val hashes = members.flatMap { it.blobReferences() }.map { it.contentHash }.toSet() +
+            SessionDocumentBlobs(database).hashes(sessionId)
         try {
             database.transaction {
                 fault(SqliteWriteStage.AFTER_BEGIN)
@@ -323,6 +327,7 @@ class SqliteInvocationStore private constructor(
                 db.prepare("DELETE FROM invocation_contents WHERE call_id=?").use { statement ->
                     members.forEach { statement.bindText(1, it.callId); statement.step(); statement.reset() }
                 }
+                db.prepare("DELETE FROM document_blobs WHERE session_id=?").use { it.bindText(1, sessionId); it.step() }
                 hashes.forEach(::collectUnownedContent)
                 if (canHaveHistory) for (table in listOf("history_values", "sessions")) db.prepare("DELETE FROM $table WHERE session_id=?").use {
                     it.bindText(1, sessionId); it.step()

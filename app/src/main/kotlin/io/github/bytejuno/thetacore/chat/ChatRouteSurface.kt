@@ -19,7 +19,7 @@ import kotlinx.coroutines.*
 internal fun ChatRouteSurface(host: ThetaApplication, drafts: ChatComposerDrafts, state: ChatState,
     composer: ChatComposerDraft, stream: String, models: ChatModelSelection, modelState: ModelSelectionState,
     approval: ChatApprovalSettings, launchTask: (() -> Unit) -> Unit, onPlugins: () -> Unit,
-    gallery: () -> Unit, camera: () -> Unit) {
+    gallery: () -> Unit, camera: () -> Unit, files: () -> Unit) {
     val owner = host.chat
     val scope = rememberCoroutineScope()
     val persona = rememberChatPersonaSelection(host)
@@ -30,10 +30,10 @@ internal fun ChatRouteSurface(host: ThetaApplication, drafts: ChatComposerDrafts
     var operating by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<Int?>(null) }
     fun locked(): Boolean = owner.state.value.let { it.active || it.pending || it.loading } ||
-        operating || models.state.value.saving || persona.state.busy
+        operating || composer.importing || models.state.value.saving || persona.state.busy
     fun closeSettings() { settings = false; persona.load() }
     val snapshot = ChatUiSnapshot(state.copy(loading = state.loading || operating), modelState, approval,
-        persona.state, stream, ChatDraftSnapshot(composer.input, composer.images.toList(), composer.error),
+        persona.state, stream, ChatDraftSnapshot(composer.input, composer.images.toList(), composer.error, composer.documents.toList(), composer.importing),
         host.plugins.plugins.count { it.enabled } + host.plugins.dataInventory.count { it.state.enabled })
     fun operation(block: suspend () -> Unit) {
         if (locked()) return
@@ -50,7 +50,7 @@ internal fun ChatRouteSurface(host: ThetaApplication, drafts: ChatComposerDrafts
         gallery = { if (!locked()) gallery() }, camera = { if (!locked()) camera() },
         send = { if (!locked() && state.sessionId != null) {
             val text = composer.input; val images = composer.images; val receipt = drafts.receipt(state.sessionId)
-            composer.error = null; launchTask { owner.send(text, images, receipt) }
+            composer.error = null; launchTask { owner.send(text, images, receipt, composer.documents.toList()) }
         } }, stop = { owner.stop() }, plugins = onPlugins,
         settings = { settings = true }, providers = { providers = true }, approvalSettings = { approvals = true },
         balanced = { scope.launch { try { withContext(Dispatchers.IO) { host.approvalSettings.setMode(ApprovalMode.BALANCED) } }
@@ -62,7 +62,8 @@ internal fun ChatRouteSurface(host: ThetaApplication, drafts: ChatComposerDrafts
         resolve = { call, request, choice -> owner.recover(call, request, choice) },
         recover = { token, action, window, confirmed -> launchTask { owner.recover(token, action, window, confirmed) } },
         input = { call, request, answer -> owner.respondInput(call, request, answer) },
-        userImage = owner::userImage, generatedImage = owner::image)
+        userImage = owner::userImage, generatedImage = owner::image,
+        files = { if (!locked()) files() }, removeDocument = { id -> if (!locked()) { composer.removeDocument(id) } })
     DefaultChatSurface(snapshot, actions)
     val strings = uiStrings()
     error?.let { AlertDialog(onDismissRequest = { error = null }, text = { Text(strings.get(it)) },

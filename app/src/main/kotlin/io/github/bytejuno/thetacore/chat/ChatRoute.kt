@@ -93,9 +93,10 @@ internal fun ChatRoute(host: ThetaApplication, drafts: ChatComposerDrafts, resum
     LaunchedEffect(drafts, state.sessionId, state.acceptedMessages, state.acceptedDraft, state.draftSync, resumed) {
         reconcileDraftsAsync(drafts, state.sessionId, state.acceptedDraft)
     }
+    val files = rememberDocumentPicker(drafts, state.sessionId, owner)
     ChatRouteSurface(host, drafts, state, composer, stream, modelSelection, modelState, approvalSettings,
         launchTask, onPlugins,
         gallery = { composer.error = null; pickerSession = state.sessionId
             photoPickerLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
-        camera = { composer.error = null; pickerSession = state.sessionId; cameraLauncher.launch(null) })
+        camera = { composer.error = null; pickerSession = state.sessionId; cameraLauncher.launch(null) }, files = files)
 }

@@ -21,6 +21,56 @@ import java.nio.file.Files
 import java.util.concurrent.atomic.AtomicInteger
 
 class ChatSessionOwnerTest {
+    @Test fun documentsSurviveRestoreAndOnlySuccessfulAdmissionConsumesThem() = runBlocking {
+        val root = Files.createTempDirectory("chat-documents").toFile()
+        var configured = false
+        val f = fixture(root, AtomicInteger(), provider(false), snapshot = {
+            check(configured)
+            OpenAiRunSnapshot(OpenAiProviderSettings("test", "https://example.invalid/v1", "model"), ApiKeyCredentials("test-key"))
+        })
+        try {
+            f.owner.open().join()
+            val session = requireNotNull(f.owner.state.value.sessionId)
+            var drafts = ChatComposerDrafts { f.store.composerDrafts }
+            val text = "long document tail\n".repeat(9000)
+            val document = ComposerDocument("document-id", "report.md", "text/markdown", text.length.toLong(), text)
+            drafts[session].documents = listOf(document, ComposerDocument("remove", "discard.txt", "text/plain", 4, "drop"))
+            drafts[session].removeDocument("remove")
+            drafts.checkpoint()
+            drafts = ChatComposerDrafts { f.store.composerDrafts }
+            val restored = drafts[session]
+            assertEquals(listOf("document-id"), restored.documents.map { it.id })
+            assertEquals(text, restored.documents.single().text)
+            assertTrue(chatComposerAvailability(f.owner.state.value, false, restored).send)
+            f.owner.send("", draft = drafts.receipt(session), documents = restored.documents).join()
+            assertEquals(0L, f.owner.state.value.acceptedMessages)
+            assertEquals(1, f.store.composerDrafts.read(session).documents.size)
+            configured = true
+            f.owner.send("", draft = drafts.receipt(session), documents = restored.documents).join()
+            await { !f.owner.state.value.active }
+            drafts.reconcile(session, f.owner.state.value.acceptedDraft)
+            assertTrue(restored.documents.isEmpty())
+            assertTrue(f.store.composerDrafts.read(session).documents.isEmpty())
+            val input = f.owner.state.value.messages.first { it.role == Role.USER }.parts.filterIsInstance<ContentPart.Text>().joinToString { it.text }
+            assertTrue(input.length < 6000)
+            assertTrue(input.contains("report.md")); assertTrue(input.contains("blob_read"))
+            val presentation = documentMessagePresentation(input)
+            assertEquals("", presentation.text)
+            assertEquals("report.md", presentation.documents.single().name)
+            assertEquals(text.length, presentation.documents.single().characters)
+            val id = Regex("\"blobId\":\"([a-f0-9]{64})\"").find(input)!!.groupValues[1]
+            val bytes = java.io.ByteArrayOutputStream()
+            while (bytes.size() < text.toByteArray().size) bytes.write(f.host.ledger.readSessionBlob(session, id, bytes.size().toLong()).second)
+            assertEquals(text, bytes.toString(Charsets.UTF_8.name()))
+            assertEquals(1L, f.owner.state.value.acceptedMessages)
+            // A stale page cannot submit or resurrect the already-consumed attachment.
+            f.owner.send("", draft = ChatDraftReceipt(session, "stale", emptySet(), documentIds = setOf(document.id)), documents = listOf(document)).join()
+            assertEquals(1L, f.owner.state.value.acceptedMessages)
+            drafts.checkpoint()
+            assertTrue(ChatComposerDrafts { f.store.composerDrafts }[session].documents.isEmpty())
+        } finally { f.close(); root.deleteRecursively() }
+    }
+
     @Test fun loweredEffortNoticeSurvivesToolLoopAndSavedEditsOnlyAffectNextRun() = runBlocking {
         val root = Files.createTempDirectory("chat-reasoning-selection").toFile()
         val delegate = provider()

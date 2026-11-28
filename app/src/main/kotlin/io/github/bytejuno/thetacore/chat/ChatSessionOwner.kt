@@ -326,8 +326,8 @@ internal class ChatSessionOwner(
         require(!pending.identity.unattended)
         start(null, pending)
     }
-    fun send(text: String, images: List<PendingUserImage> = emptyList(), draft: ChatDraftReceipt? = null) =
-        launchOperation { sendInternal(text, images, draft) }
+    fun send(text: String, images: List<PendingUserImage> = emptyList(), draft: ChatDraftReceipt? = null, documents: List<ComposerDocument> = emptyList()) =
+        launchOperation { sendInternal(text, images, draft, documents) }
 
     private suspend fun bindEntry(id: String?, text: String, admit: (String) -> Unit) {
         val host = tools ?: service().also { tools = it }
@@ -343,8 +343,8 @@ internal class ChatSessionOwner(
         if (snapshot != null) startAccepted(snapshot, requireNotNull(identity), null)
     }
 
-    private suspend fun sendInternal(text: String, images: List<PendingUserImage>, draft: ChatDraftReceipt? = null) {
-        check(active == null && (text.isNotBlank() || images.isNotEmpty()) && text.length <= 32_000)
+    private suspend fun sendInternal(text: String, images: List<PendingUserImage>, draft: ChatDraftReceipt? = null, documents: List<ComposerDocument> = emptyList()) {
+        check(active == null && (text.isNotBlank() || images.isNotEmpty() || documents.isNotEmpty()) && text.length <= 32_000)
         require(images.size <= MAX_USER_IMAGES_PER_MESSAGE) { "Too many attached images" }
         val disk = requireNotNull(history)
         check(draft == null || draft.sessionId == disk.sessionId)
@@ -357,6 +357,7 @@ internal class ChatSessionOwner(
                 submitted.imageIds,
                 submitted.submittedVersions,
                 submitted.submittedImageIds + images.map { it.localId },
+                submitted.documentIds, submitted.submittedDocumentIds + documents.map { it.id },
             )
             if (store.composerDrafts.isSubmittedConsumed(disk.sessionId, guard)) {
                 mutable.update { it.copy(loading = false, draftSync = it.draftSync + 1) }
@@ -379,7 +380,7 @@ internal class ChatSessionOwner(
             store.privateImages.putUserImage(disk.sessionId, blobId, valid.bytes)
             mediaPart(ProtocolMediaKind.IMAGE, blobRef(blobId, valid.mimeType, valid.bytes.size.toLong()))
         }
-        startAccepted(snapshot, disk.appendUserInput(text, mediaParts, draft), draft)
+        startAccepted(snapshot, disk.appendUserInput(documentMessage(text, documents, store.documentBlobs, disk.sessionId), mediaParts, draft), draft)
     }
 
     private fun startAccepted(snapshot: OpenAiRunSnapshot, identity: RunIdentity, draft: ChatDraftReceipt?) {

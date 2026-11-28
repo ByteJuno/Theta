@@ -24,6 +24,7 @@ internal class AndroidAgentStore private constructor(
     private val database: AgentDatabase, private val delegate: InvocationStore,
 ) : InvocationStore by delegate {
     val privateImages = io.github.bytejuno.thetacore.agent.ledger.PrivateImageStore(database)
+    val documentBlobs = io.github.bytejuno.thetacore.agent.ledger.SessionDocumentBlobs(database)
     val composerDrafts = io.github.bytejuno.thetacore.agent.ledger.SessionComposerStore(database)
     fun sessionIds(before: String? = null) = database.sessionIds(before)
     fun sessionPreviews(before: String? = null) = database.sessionPreviews(before)
