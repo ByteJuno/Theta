@@ -756,7 +756,7 @@ internal class ChatSessionOwner(
         definitions: List<FrozenDefinition>, window: Long?): ChatRequest {
         val reader = definitions.firstOrNull { it.toolKey == "host/skill_read" }?.modelName
         val configured = config.request {
-            system = prompts.data.system(system, prompts.persona, reader)
+            system = io.github.bytejuno.thetacore.memory.systemWithMemory(prompts, system, reader)
             tools = definitions.map {
                 modelTool(it.modelName, it.description, Json.parseToJsonElement(it.inputSchema).jsonObject)
             }

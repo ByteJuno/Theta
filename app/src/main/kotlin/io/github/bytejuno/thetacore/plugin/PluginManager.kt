@@ -106,7 +106,8 @@ internal class PluginManager(context: Context,
                 io.github.bytejuno.thetacore.chat.ImageAttachments((store as AndroidAgentStore).privateImages)) },
             policy = policy, skillReader = ::readSkill, rootTool = io.github.bytejuno.thetacore.root.RootRuntime.tool(app),
             webTools = io.github.bytejuno.thetacore.web.WebRuntime.tools(app),
-            screenTools = io.github.bytejuno.thetacore.screen.ScreenRuntime.tools(app)) {
+            screenTools = io.github.bytejuno.thetacore.screen.ScreenRuntime.tools(app),
+            memoryTools = { io.github.bytejuno.thetacore.memory.memoryTools(app, it) }) {
             AndroidAgentStore.open(app)
         }.also { service ->
             pluginToolBridge.attachCatalog(service.catalog)

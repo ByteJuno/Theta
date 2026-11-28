@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="memory_title">长期记忆</string>
+    <string name="memory_description">跨会话保存事实。关闭后停止向新运行注入记忆，并停用 AI 记忆工具；仍可在此管理已保存的内容。更改从新运行起生效。</string>
+    <string name="memory_enabled">启用长期记忆</string>
+    <string name="memory_usage">%1$d / %2$d 条记忆 · %3$d / 512 KiB</string>
+    <string name="memory_search">搜索内容或分类</string>
+    <string name="memory_filter">分类筛选（留空显示全部）</string>
+    <string name="memory_add">新增记忆</string>
+    <string name="memory_edit">编辑记忆</string>
+    <string name="memory_content">记忆内容</string>
+    <string name="memory_category">分类</string>
+    <string name="memory_pinned">优先用于新对话</string>
+    <string name="memory_save">保存</string>
+    <string name="memory_saved">已保存</string>
+    <string name="memory_deleted">已删除</string>
+    <string name="memory_source">来源：%1$s</string>
+    <string name="memory_manual">手动添加</string>
+    <string name="memory_empty">没有匹配的记忆。可新增内容或调整搜索条件。</string>
+    <string name="memory_pin">置顶</string>
+    <string name="memory_unpin">取消置顶</string>
+    <string name="memory_delete">删除记忆</string>
+    <string name="memory_clear">清空全部记忆</string>
+    <string name="memory_clear_confirm">删除所有记忆（包括当前搜索未显示的内容）？此操作无法撤销，会话历史将保留。</string>
+    <string name="memory_delete_confirm">删除这条记忆？此操作无法撤销。</string>
+    <string name="memory_confirm">删除</string>
+    <string name="memory_cancel">取消</string>
+    <string name="memory_previous">上一页</string>
+    <string name="memory_next">下一页</string>
+    <string name="memory_retry">重试</string>
+    <string name="memory_input_error">请检查内容和分类长度。相同记忆可能已存在，或所选条目已被删除。</string>
+    <string name="memory_capacity_error">记忆容量已满（500 条或 512 KiB）。请删除部分内容后再保存。</string>
+    <string name="memory_disabled_error">长期记忆已关闭。请在设置中开启后使用记忆工具。</string>
+    <string name="memory_storage_error">记忆存储暂不可用。更改可能已保存，请重启应用并检查结果后再重试。</string>
+    <string name="memory_length">%1$d / %2$d</string>
+</resources>

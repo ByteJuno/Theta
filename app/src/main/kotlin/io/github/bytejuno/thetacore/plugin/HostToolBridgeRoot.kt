@@ -33,6 +33,7 @@ internal class HostToolBridgeRoot(
         rootTool: Tool? = null,
         webTools: List<Tool> = emptyList(),
         screenTools: List<Tool> = emptyList(),
+        memoryTools: (InvocationStore) -> List<Tool> = { emptyList() },
         openStore: () -> InvocationStore,
     ): HostToolExecutionService = withContext(Dispatchers.IO) {
         mutex.withLock {
@@ -54,6 +55,7 @@ internal class HostToolBridgeRoot(
                 rootTool?.let { catalog.registerHost("host/root_shell", "1", it) }
                 webTools.forEach { catalog.registerHost("host/${it.id}", "1", it) }
                 screenTools.forEach { catalog.registerHost("host/${it.id}", "1", it) }
+                memoryTools(store).forEach { catalog.registerHost("host/${it.id}", "1", it) }
                 screenBackend?.let {
                     catalog.registerHost("host/screen_info", "1", io.github.bytejuno.thetacore.plugin.tools.HostScreenTool(it))
                 }

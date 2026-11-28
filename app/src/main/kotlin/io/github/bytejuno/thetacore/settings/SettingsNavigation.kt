@@ -1,7 +1,7 @@
 package io.github.bytejuno.thetacore.settings
 
 /** A shortcut starts at its destination; the hub adds a parent only when actually visited. */
-internal enum class SettingsDestination { CHAT, HOME, PROVIDERS, PERSONAS, MCP, SAFETY, TOOLS, APPEARANCE, LANGUAGE, BACKGROUND }
+internal enum class SettingsDestination { CHAT, HOME, PROVIDERS, PERSONAS, MEMORY, MCP, SAFETY, TOOLS, APPEARANCE, LANGUAGE, BACKGROUND }
 
 internal data class SettingsNavigation(val stack: List<SettingsDestination> = emptyList()) {
     val current: SettingsDestination? get() = stack.lastOrNull()

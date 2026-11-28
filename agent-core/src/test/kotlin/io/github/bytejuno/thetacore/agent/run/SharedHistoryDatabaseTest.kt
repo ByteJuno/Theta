@@ -177,7 +177,7 @@ class SharedHistoryDatabaseTest {
             sql.execute("DROP TABLE sessions")
             sql.execute("DROP TABLE quarantined_contents")
             sql.execute("DROP TABLE deleted_sessions")
-            sql.execute("PRAGMA user_version=1")
+            sql.execute("DROP TABLE memories"); sql.execute("DROP TABLE memory_settings"); sql.execute("PRAGMA user_version=1")
         }
         Files.write(root.resolve("head.json"), "obsolete file is not a session".toByteArray())
         AgentDatabase.open(file, BundledSQLiteDriver()).use { db ->
