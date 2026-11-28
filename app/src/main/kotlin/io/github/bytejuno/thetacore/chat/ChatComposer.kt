@@ -3,6 +3,8 @@ package io.github.bytejuno.thetacore.chat
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -37,12 +39,18 @@ internal fun ChatComposerSurface(compact: Boolean, snapshot: ChatUiSnapshot, act
     var attachments by remember { mutableStateOf(false) }
     Surface(color = tokens.composerContainer, shape = tokens.capsule, modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(tokens.smallGap)) {
-            if (draft.images.isNotEmpty()) LazyRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(tokens.smallGap)) {
-                items(draft.images, key = { it.localId }) { image ->
-                    PendingImagePreview(image, edit, compact = true, onRemove = { actions.removeImage(image.localId) })
+            if (draft.images.isNotEmpty() || draft.documents.isNotEmpty() || draft.importing) {
+                // Reserve the input row first; attachment previews scroll within the remaining space.
+                Column(Modifier.weight(1f, fill = false).heightIn(max = if (compact) 120.dp else 240.dp)
+                    .verticalScroll(rememberScrollState())) {
+                    if (draft.images.isNotEmpty()) LazyRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(tokens.smallGap)) {
+                        items(draft.images, key = { it.localId }) { image ->
+                            PendingImagePreview(image, edit, compact = true, onRemove = { actions.removeImage(image.localId) })
+                        }
+                    }
+                    DocumentDraftPreview(draft, edit, actions.removeDocument)
                 }
             }
-            DocumentDraftPreview(draft, edit, actions.removeDocument)
             // One input composition location in portrait, landscape, split screen and with IME.
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Box {

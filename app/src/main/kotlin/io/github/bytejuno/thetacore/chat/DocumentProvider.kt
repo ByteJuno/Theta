@@ -17,7 +17,8 @@ internal fun readProviderDocument(resolver: ContentResolver, uri: Uri, scratch: 
             if (size >= 0 && !it.isNull(size) && it.getLong(size) > DocumentLimits.BYTES)
                 throw DocumentException(DocumentFailure.TOO_LARGE)
             val label = it.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-            if (label >= 0 && !it.isNull(label)) name = documentFilename(it.getString(label))
+            // Extraction uses the original extension before bounding the stored/displayed name.
+            if (label >= 0 && !it.isNull(label)) name = it.getString(label)
         }
     }
     val mime = resolver.getType(uri)

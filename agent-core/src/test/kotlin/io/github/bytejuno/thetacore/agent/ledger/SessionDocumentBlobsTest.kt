@@ -1,6 +1,7 @@
 package io.github.bytejuno.thetacore.agent.ledger
 
 import androidx.sqlite.driver.bundled.BundledSQLiteDriver
+import io.github.bytejuno.thetacore.agent.protocol.callBinding
 import io.github.bytejuno.thetacore.agent.run.SqliteRunHistory
 import org.junit.Test
 import java.nio.file.Files
@@ -142,6 +143,53 @@ class SessionDocumentBlobsTest {
                 }
             } finally { root.toFile().deleteRecursively() }
         }
+    }
+
+    @Test fun toolPublicationQuarantinesDocumentOwnedDamageBeforeItsTransaction() {
+        val root = Files.createTempDirectory("document-tool-quarantine")
+        val file = root.resolve("agent.db")
+        var id = ""
+        try {
+            AgentDatabase.open(file, BundledSQLiteDriver()).use { db ->
+                SqliteRunHistory.create(db, "document-session").close()
+                SqliteRunHistory.create(db, "other").close()
+                val text = "a".repeat(BLOB_CHUNK_SIZE * 2 + 1)
+                val documents = SessionDocumentBlobs(db)
+                val ref = documents.put("document-session", text)
+                id = ref.id
+                SqliteInvocationStore.open(db).use { store ->
+                    val gate = DefinitionGate()
+                    val ledger = InvocationLedger(store, gate, ArgumentsValidator { _, _ -> true })
+                    ledger.recoverColdStart("epoch")
+                    val def = definition()
+                    gate.install(def); gate.freezeRun("run", listOf(def))
+                    val input = InvocationInput(BindingValue.copyOf(callBinding("provider", "request", "response", 0, "wire")),
+                        "chain", "other", "run", "step", 0, "{}", def, false, Risk.READ, false)
+                    val created = assertIs<Mutation.Applied>(ledger.recordInvocation(input)).record
+                    var ready = assertIs<Mutation.Applied>(ledger.validateAndPrepare(created.callId)).record
+                    if (ready.pending != null) ready = assertIs<Mutation.Applied>(
+                        ledger.resolveApproval(ready.callId, ready.pending!!, Decision.ALLOW_ONCE)).record
+                    val claim = assertIs<Mutation.Applied>(ledger.claimExecution(ready.callId, ready.revision))
+                    db.connection.prepare("UPDATE content_chunks SET bytes=? WHERE hash=? AND ordinal=1").use {
+                        it.bindBlob(1, ByteArray(BLOB_CHUNK_SIZE)); it.bindText(2, ref.contentHash); it.step()
+                    }
+                    val output = ToolOutputNormalizer.normalize(listOf(OutputPart.Media(MediaKind.DOCUMENT,
+                        ref.mimeType, text.toByteArray())), null, false, Effect.NONE, null,
+                        ArgumentsValidator { _, _ -> true }, "host_blob_read")
+                    assertIs<Mutation.Applied>(ledger.recordToolOutput(ready.callId, claim.ticket!!.attemptId,
+                        Status.SUCCEEDED, output, Effect.NONE))
+                    assertEquals(1L, db.connection.longValue("SELECT count(*) FROM quarantined_contents"))
+                    assertFailsWith<StoreException> { documents.read("document-session", id, 0) }
+                    assertFailsWith<BlobReadException> { ledger.readSessionBlob("other", output.stored.media.single().id, 0) }
+                    assertNull(ledger.executionAdmissionFailure())
+                    SessionComposerStore(db).save("other", ComposerSnapshot("v", "still usable", emptyList()), emptyList())
+                    assertEquals("still usable", SessionComposerStore(db).read("other").text)
+                }
+            }
+            AgentDatabase.open(file, BundledSQLiteDriver()).use { db ->
+                assertFailsWith<StoreException> { SessionDocumentBlobs(db).read("document-session", id, 0) }
+            }
+        } finally { root.toFile().deleteRecursively() }
     }
 
     @Test fun upgradesVersionSevenWithoutChangingComposerDrafts() {

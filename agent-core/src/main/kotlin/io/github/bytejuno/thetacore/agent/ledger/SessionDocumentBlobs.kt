@@ -118,6 +118,13 @@ class SessionDocumentBlobs(private val database: AgentDatabase) {
     internal fun hashes(session: String): Set<String> = db.prepare("SELECT hash FROM document_blobs WHERE session_id=?").use {
         it.bindText(1, session); buildSet { while (it.step()) add(it.getText(0)) }
     }
+
+    internal fun referenceForHash(hash: String): BlobRef? = database.access {
+        db.prepare("SELECT id,mime,size,chunks_hash FROM document_blobs WHERE hash=? LIMIT 1").use {
+            it.bindText(1, hash)
+            if (it.step()) BlobRef(it.getText(0), it.getText(1), it.getLong(2), hash, it.getText(3)) else null
+        }
+    }
 }
 
 object DocumentLimits {

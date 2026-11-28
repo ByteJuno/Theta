@@ -219,7 +219,7 @@ class SqliteInvocationStore private constructor(
                 if (roots.ownsFile("${ref.contentHash}.blob")) {
                     val owned = if (roots.contains(ref)) ref else roots.liveReferences().first { it.contentHash == ref.contentHash }
                     verifyOwnedContent(owned)
-                }
+                } else SessionDocumentBlobs(database).referenceForHash(ref.contentHash)?.let(::verifyOwnedContent)
             }
             db.execute("BEGIN IMMEDIATE"); begun = true
             db.verifyWriteConfiguration()

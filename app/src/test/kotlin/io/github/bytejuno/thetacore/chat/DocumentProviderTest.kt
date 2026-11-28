@@ -27,13 +27,14 @@ class DocumentProviderTest {
 
     private open class Provider(private val file: java.io.File) : ContentProvider() {
         var name = "sample.txt"
+        var mime = "text/plain"
         open fun enter(stage: String) {}
         override fun onCreate() = true
         override fun query(uri: Uri, projection: Array<out String>?, selection: String?, args: Array<out String>?, order: String?): Cursor {
             enter("query")
             return MatrixCursor(arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE)).apply { addRow(arrayOf<Any>(name, file.length())) }
         }
-        override fun getType(uri: Uri): String { enter("type"); return "text/plain" }
+        override fun getType(uri: Uri): String { enter("type"); return mime }
         override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor {
             enter("open"); return ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
         }
@@ -50,6 +51,21 @@ class DocumentProviderTest {
         val result = readProviderDocument(RuntimeEnvironment.getApplication().contentResolver, uri, temp.root)
         assertEquals("a".repeat(159), result.name)
         assertEquals("hello 文档", result.text)
+        assertTrue(Charsets.UTF_8.newEncoder().canEncode(result.name))
+    }
+
+    @Test fun recognizesCodeExtensionBeforeBoundingLongFilename() {
+        val file = temp.newFile().apply { writeText("val answer = 42") }
+        val provider = Provider(file).apply {
+            name = "a".repeat(159) + "😀.kt"
+            mime = "application/octet-stream"
+        }
+        provider.attachInfo(RuntimeEnvironment.getApplication(), android.content.pm.ProviderInfo().apply { authority = "document-test"; exported = true })
+        ShadowContentResolver.registerProviderInternal("document-test", provider)
+        val result = readProviderDocument(RuntimeEnvironment.getApplication().contentResolver, uri, temp.root)
+        assertEquals("val answer = 42", result.text)
+        assertEquals("text/plain", result.mime)
+        assertEquals("a".repeat(159), result.name)
         assertTrue(Charsets.UTF_8.newEncoder().canEncode(result.name))
     }
 
