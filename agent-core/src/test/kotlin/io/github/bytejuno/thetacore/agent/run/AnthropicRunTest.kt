@@ -88,6 +88,38 @@ class AnthropicRunTest {
         }
     }
 
+    @Test fun `pause response makes disconnected continuation uncertain without retry and survives cold reopen`() = runTest {
+        val f = RunFixture(); var sends = 0; var recoveries = 0
+        val provider = AnthropicProvider(config, ModelTransport { _, _, _ -> flow {
+            sends++
+            emit(TransportEvent.Headers(200, "text/event-stream", null))
+            if (sends == 2) throw java.io.IOException("Continuation disconnected")
+            val reason = if (sends == 1) "pause_turn" else "end_turn"
+            emit(TransportEvent.Bytes(nativeWire(listOf(thought, hidden, answer), reason).toByteArray()))
+        } })
+        val recovery = RecoveryStrategy { _, _, _, _ -> recoveries++; null }
+        val dir = temp.newFolder("uncertain-continuation").toPath()
+        TestRunHistory.create(dir, "session", Durability.PROCESS_CRASH_ONLY).use { history ->
+            history.append(0, listOf(message(Role.USER, textPart("goal"))))
+            val result = f.loop(provider, recovery, history = history).run()
+            assertEquals(2, sends)
+            assertEquals(0, result.retries); assertEquals(0, recoveries)
+            assertEquals(RunState.PAUSED, result.state); assertTrue(result.serverExecutionUnknown)
+            assertNotNull(history.loadBarrier())
+            assertEquals(listOf(ModelExecutionMode.GENERATION_ONLY, ModelExecutionMode.MAY_EXECUTE_SERVER_TOOLS),
+                f.journal.attempts().map { it.mode })
+            val saved = history.snapshot().messages.last()
+            assertEquals(thought, json(saved.parts[0].replay!!.payload)["block"])
+            assertEquals(hidden, json(saved.parts[1].replay!!.payload)["block"])
+        }
+        TestRunHistory.open(dir, Durability.PROCESS_CRASH_ONLY).use { history ->
+            val result = f.loop(provider, recovery, history = history).run()
+            assertEquals(RunState.PAUSED, result.state); assertTrue(result.serverExecutionUnknown)
+            assertEquals(2, sends); assertEquals(0, recoveries)
+            assertNotNull(history.loadBarrier())
+        }
+    }
+
     @Test fun `unencodable arguments checkpoint before wire estimation and explicitly resume without rewriting history`() = runTest {
         for ((i, args) in listOf("[]", "null", "42", "{broken").withIndex()) {
             val f = RunFixture(listOf(testDefinition("read")))

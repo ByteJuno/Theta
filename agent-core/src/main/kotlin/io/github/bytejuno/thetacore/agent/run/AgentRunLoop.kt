@@ -490,7 +490,10 @@ class AgentRunLoop(
                 return pauseContext(view, "Request budget exceeded; checkpoint required")
             }
             if (!mediaSupported(target, request)) return result(RunState.FAILED, "Image input disabled for active model")
-            val mode = target.provider.executionMode(request) // freeze BEFORE submission, including extraBody
+            // PAUSED confirms an open server loop even if the request was initially
+            // classified as generation-only. Its continuation must not be retried blindly.
+            val mode = if (serverLoopOpen) ModelExecutionMode.MAY_EXECUTE_SERVER_TOOLS
+                else target.provider.executionMode(request) // freeze BEFORE submission, including extraBody
             val admittedToolNames = target.provider.toolNamesForExecution(request).toSet()
             val reducer = ModelEventReducer(target.id, request.requestId)
             beforeModelSubmit()
