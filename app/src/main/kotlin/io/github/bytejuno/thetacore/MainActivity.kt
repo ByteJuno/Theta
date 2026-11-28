@@ -531,6 +531,7 @@ private fun PluginList(
         Text(stringResource(R.string.app_name), style = MaterialTheme.typography.headlineMedium)
         Text(stringResource(R.string.api_level, THETA_API_LEVEL))
         AppLanguageSetting()
+        io.github.bytejuno.thetacore.web.WebSearchSettingsEntry()
         HostEnvironmentSummaryBar(hostEnvironment, onRefreshEnvironment, onOpenAccessibility)
         if (recovery) Text(strings.get(R.string.recovery_requested))
         Button(onClick = onPick, enabled = !staging) { Text(strings.get(R.string.import_code)) }

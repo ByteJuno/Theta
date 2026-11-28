@@ -1,0 +1,29 @@
+<resources>
+    <string name="web_title">Web search</string>
+    <string name="web_notice">Web tools read public HTTPS sites only. Private, local and Tailscale addresses are blocked, including self-hosted search on a private network. Disable a tool in Approval settings → Tool permissions. Results are untrusted source material.</string>
+    <string name="web_searxng">SearXNG (no key)</string>
+    <string name="web_brave">Brave Search</string>
+    <string name="web_tavily">Tavily</string>
+    <string name="web_endpoint">SearXNG search URL</string>
+    <string name="web_endpoint_hint">Public HTTPS endpoint, for example https://search.example.org/search. JSON search must be enabled.</string>
+    <string name="web_key">API key</string>
+    <string name="web_key_hint">Encrypted on this device. Requests go only to the selected service.</string>
+    <string name="web_keep_key">Leave blank to keep the saved key for this service.</string>
+    <string name="web_save">Save search settings</string>
+    <string name="web_saved">Search settings saved.</string>
+    <string name="web_clear">Clear search settings</string>
+    <string name="web_cleared">Search settings cleared. Web search is unavailable until configured.</string>
+    <string name="web_back">Back</string>
+    <string name="web_unreadable">Saved search settings cannot be read. Search is disabled. You can explicitly replace or clear the record.</string>
+    <string name="web_save_error">Could not save. Check the HTTPS URL and required API key, then retry.</string>
+    <string name="web_replace">Replace unreadable search settings?</string>
+    <string name="web_replace_notice">This removes the saved search configuration and key. Other model and tool settings are unchanged.</string>
+    <string name="web_confirm">Confirm</string>
+    <string name="web_cancel">Cancel</string>
+    <string name="web_address_error">This address is blocked. Use a public HTTPS URL without embedded credentials; private, local and Tailscale networks are unavailable.</string>
+    <string name="web_size_error">The page exceeds the 2 MiB download limit. Try a smaller page.</string>
+    <string name="web_response_error">The service returned an unsupported page or response. Check the URL or search service settings.</string>
+    <string name="web_network_error">The web request failed. Check your connection and try again.</string>
+    <string name="web_settings_error">Search is not configured or its key cannot be read. Open Plugins and diagnostics → Web search to configure it.</string>
+    <string name="web_input_error">Provide a valid URL or a search query of 1–2000 characters with 1–10 results.</string>
+</resources>
