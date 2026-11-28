@@ -380,7 +380,9 @@ internal class ChatSessionOwner(
             store.privateImages.putUserImage(disk.sessionId, blobId, valid.bytes)
             mediaPart(ProtocolMediaKind.IMAGE, blobRef(blobId, valid.mimeType, valid.bytes.size.toLong()))
         }
-        startAccepted(snapshot, disk.appendUserInput(documentMessage(text, documents, store.documentBlobs, disk.sessionId), mediaParts, draft), draft)
+        // Attachment metadata is model input, but must not submit an empty composer's text identity.
+        startAccepted(snapshot, disk.appendUserInput(documentMessage(text, documents, store.documentBlobs, disk.sessionId),
+            mediaParts, draft, hasTypedText = text.isNotBlank()), draft)
     }
 
     private fun startAccepted(snapshot: OpenAiRunSnapshot, identity: RunIdentity, draft: ChatDraftReceipt?) {

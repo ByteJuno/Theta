@@ -21,6 +21,35 @@ import java.nio.file.Files
 import java.util.concurrent.atomic.AtomicInteger
 
 class ChatSessionOwnerTest {
+    @Test fun freshDocumentOnlySendIgnoresPreviouslyConsumedEmptyTextIdentity() = runBlocking {
+        val root = Files.createTempDirectory("chat-document-empty-receipt").toFile()
+        val f = fixture(root, AtomicInteger(), provider(false))
+        try {
+            f.owner.open().join()
+            val session = requireNotNull(f.owner.state.value.sessionId)
+            val documents = listOf(
+                ComposerDocument("first", "one.txt", "text/plain", 3, "one"),
+                ComposerDocument("second", "two.txt", "text/plain", 3, "two"),
+            )
+            // Two pages can share an empty text version while adding independent attachments.
+            for ((index, document) in documents.withIndex()) {
+                val receipt = ChatDraftReceipt(session, "shared-empty-text", emptySet(), documentIds = setOf(document.id))
+                f.owner.send("", draft = receipt, documents = listOf(document)).join()
+                await { !f.owner.state.value.active }
+                assertEquals((index + 1).toLong(), f.owner.state.value.acceptedMessages)
+            }
+            val inputs = f.owner.state.value.messages.filter { it.role == Role.USER }
+            assertEquals(listOf("one.txt", "two.txt"), inputs.map {
+                documentMessagePresentation((it.parts.single() as ContentPart.Text).text).documents.single().name
+            })
+            // Ignoring empty text must still reject reuse of a consumed document identity.
+            f.owner.send("", draft = ChatDraftReceipt(session, "fresh-text", emptySet(),
+                documentIds = setOf(documents.last().id)), documents = listOf(documents.last())).join()
+            assertEquals(2L, f.owner.state.value.acceptedMessages)
+            assertTrue(f.failures.toString(), f.failures.isEmpty())
+        } finally { f.close(); root.deleteRecursively() }
+    }
+
     @Test fun documentsSurviveRestoreAndOnlySuccessfulAdmissionConsumesThem() = runBlocking {
         val root = Files.createTempDirectory("chat-documents").toFile()
         var configured = false
