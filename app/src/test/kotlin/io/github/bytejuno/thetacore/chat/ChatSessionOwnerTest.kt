@@ -1765,7 +1765,7 @@ class ChatSessionOwnerTest {
             val current = fixture.owner.state.value
             io.github.bytejuno.thetacore.overlay.stopFloatingTask(
                 io.github.bytejuno.thetacore.overlay.FloatingTask(current.executionId!!, TaskPhase.MODEL, null),
-                current.sessionId, current) { execution, pendingSession -> fixture.owner.stop(execution, pendingSession) }
+                current.sessionId, current) { execution, pendingSession, request -> fixture.owner.stop(execution, pendingSession, request) }
             await { !fixture.owner.state.value.active }
             assertEquals(R.string.chat_stopped, fixture.owner.state.value.notice)
             assertNull(presence.events.last().second)

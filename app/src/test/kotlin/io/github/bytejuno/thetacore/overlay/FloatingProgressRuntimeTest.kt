@@ -164,6 +164,54 @@ class FloatingProgressRuntimeTest {
         } finally { release.complete(Unit); f.close(); root.deleteRecursively() }
     }
 
+    @Test fun queuedSavedStopMustNotCancelReplacementRequest() = scenario {
+        val root = Files.createTempDirectory("floating-queued-stop").toFile()
+        val calls = AtomicInteger()
+        val f = fixture(root, writeTool(calls))
+        try {
+            val session = "saved"
+            f.store.createHistory(session).close()
+            suspend fun prepare(run: String): String {
+                val definition = f.host.catalog.freeze(run).getValue("host_clock")
+                val binding = callBinding("test", run, run, 0, run)
+                f.store.openHistory(session).use { history ->
+                    history.prepareStep(history.revision(), RunIdentity("chain", session, run), run,
+                        message(Role.ASSISTANT, toolCallPart(binding, definition.modelName, "{}")))
+                    assertTrue(f.host.prepare(InvocationInput(BindingValue.copyOf(binding), "chain", session,
+                        run, run, 0, "{}", definition, false, Risk.WRITE)) is Mutation.Applied)
+                }
+                return binding.callId
+            }
+            prepare("first")
+            f.owner.open().join()
+            attention(R.string.floating_progress_approval)
+            // Capture the exact asynchronous owner callback arguments sent by a valid click.
+            // Delay its execution to model IO scheduling after the main-thread identity check.
+            val oldState = f.owner.state.value
+            val entry = floatingAttention(oldState)!!
+            var queued: Triple<String?, String?, String?>? = null
+            stopFloatingTask(FloatingTask(entry.taskId, entry.phase, entry.toolName), session, oldState) { execution, saved, request ->
+                queued = Triple(execution, saved, request)
+            }
+            assertNotNull(queued)
+            f.owner.stop(expectedPendingSessionId = session).join()
+            f.owner.newSession().join()
+            val next = prepare("second")
+            f.owner.select(session).join()
+            val newRequest = f.host.ledger.get(next)!!.pending!!.id
+            attention(R.string.floating_progress_approval)
+            f.owner.stop(queued!!.first, queued!!.second, queued!!.third).join()
+            val current = f.host.ledger.get(next)!!
+            assertEquals("A stop admitted for the previous saved request must preserve its replacement", newRequest, current.pending?.id)
+            assertEquals(Status.WAITING_APPROVAL, current.state)
+            withContext(Dispatchers.Main) { attention(R.string.floating_progress_approval).stopButton.performClick() }
+            await { !f.owner.state.value.pending }; emptyWindow()
+            assertEquals(Status.CANCELLED, f.host.ledger.get(next)!!.state)
+            assertEquals(0, calls.get()); assertEquals(0, f.models.get())
+            assertTrue(f.failures.toString(), f.failures.isEmpty())
+        } finally { f.close(); root.deleteRecursively() }
+    }
+
     private fun writeTool(calls: AtomicInteger) = object : Tool {
         override val id = "write"
         override val spec = ToolSpec(id, "test write", schema, risk = ToolRisk.WRITE)

@@ -27,3 +27,12 @@ Base main: `ff36db923493a523ce5f3936b4846af99fea783e`. Remote PR head before pub
 未生成 APK（APK SHA 未生成），未操作手机或模拟器，视觉未验证。本轮未改变布局或文案。真实 ChatSessionOwner、SQLite、工具执行器和 Robolectric WindowManager 联动测试验证状态、点击与窗口注册/移除；Linux GPU 测试入口不是当前 APK 的像素、触摸或系统合成器验收。当前实现的 GitHub CI、规定 S1/S2、实际中英文/小屏/大字体/明暗主题、悬浮权限、截屏避让、停止延迟、签名及 R8/API33 设备验收仍由独立审核端完成。agent-core 输入未变，734 项为 UP-TO-DATE 既有 XML，非本轮重跑。
 
 Evidence directory: `E:\Desktop\AI研究\theta-auto-loop\event-runs\ef6c422d-82a8-43d8-8152-aaaabc37dbab`. Original reviewer diagnosis and all failed test attempts are retained locally. Initial harness compilation/session-binding errors and recovery-contract counterexamples were corrected without increasing timeouts or weakening assertions. Prior APK, CI or device evidence is not rebound to this implementation. No testing summary is committed by the writer; the publisher owns the single issue summary and remote publication.
+
+## Reviewer correction (2026-11-28, round 2)
+
+- 本轮基于 `e2e489833e609347fda98522c90d31e412aff872`；此前退回 1 次，历史记录不变。原实现摘要的源码树已与 Git 核对，原有结果只用于原输入。
+- GPU 探针复现：旧等待窗口通过主线程检查后延迟处理停止请求，同一会话的新审批被错误改为 CANCELLED；工具和模型执行次数均为 0。根因是后台队列只重新校验会话 ID，未携带请求 ID。
+- 修复将请求 ID 传入会话操作队列，并对当前待处理步骤的账本请求重新校验。新增正式回归用例验证旧停止请求被拒绝、当前停止仍生效且无重放；既有断言保留，未放宽超时。
+- 首次探针夹具因重复打开会话而两项失败；修正夹具后，两项中停止竞态失败、截屏取消恢复通过。失败原因及结论保留于此，未将夹具错误当作生产证据。
+- 最终 GPU：`:app:testDebugUnitTest --tests '*FloatingProgress*' --tests '*ChatSessionOwnerTest.staleNotificationCannotCancelLaterExecutionAndCurrentStopSettles'`，`GRADLE_EXIT=0`，16 项、0 失败。停止探针显示新请求仍为 WAITING_APPROVAL 且请求 ID 不变，工具和模型均 0 次；截屏取消探针显示恢复 1 个窗口。
+- 验证的已跟踪源码树（加入本节前）为 `d3b6a857d7ddfc58fd7de57d40cd9e7102349e43`；GPU 另外运行了未跟踪的 `FloatingProgressReviewProbe.kt` 中两项探针，探针文件不提交。未新增依赖，未改受保护文件；本次未构建 APK，视觉仍未验证。

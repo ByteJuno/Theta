@@ -128,7 +128,9 @@ internal class FloatingProgressRuntime(private val host: Application,
     private fun stop(task: FloatingTask) {
         refreshTask(chat().state.value)
         if (task != state.task) return
-        stopFloatingTask(task, sessionId, chat().state.value) { execution, pendingSession -> chat().stop(execution, pendingSession) }
+        stopFloatingTask(task, sessionId, chat().state.value) { execution, pendingSession, request ->
+            chat().stop(execution, pendingSession, request)
+        }
     }
 
     override suspend fun beforeCapture() = withContext(Dispatchers.Main.immediate) {

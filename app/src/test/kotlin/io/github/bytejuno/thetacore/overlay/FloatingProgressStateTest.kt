@@ -2,6 +2,8 @@ package io.github.bytejuno.thetacore.overlay
 
 import io.github.bytejuno.thetacore.chat.ChatState
 import io.github.bytejuno.thetacore.chat.OutputTaskProgress
+import io.github.bytejuno.thetacore.agent.ledger.*
+import io.github.bytejuno.thetacore.agent.protocol.callBinding
 import io.github.bytejuno.thetacore.screen.*
 import io.github.bytejuno.thetacore.sdk.*
 import kotlinx.coroutines.*
@@ -78,20 +80,32 @@ class FloatingProgressStateTest {
     }
 
     @Test fun stopTargetsCurrentExecutionOrItsSavedPendingStepAndRejectsStaleWindow() {
-        val calls = mutableListOf<Pair<String?, String?>>()
-        val stop: (String?, String?) -> Unit = { execution, session -> calls.add(execution to session) }
+        val calls = mutableListOf<Triple<String?, String?, String?>>()
+        val stop: (String?, String?, String?) -> Unit = { execution, session, request -> calls.add(Triple(execution, session, request)) }
         val current = FloatingTask("run", TaskPhase.TOOL, "screen_tap")
         val active = ChatState(sessionId = "session", active = true, executionId = "run")
         stopFloatingTask(current, "session", active, stop)
-        assertEquals(listOf("run" to null), calls)
+        assertEquals(listOf(Triple("run", null, null)), calls)
         stopFloatingTask(current, "session", active.copy(executionId = "new"), stop)
         assertEquals(1, calls.size)
-        val waiting = current.copy(phase = TaskPhase.RECOVERY)
-        val pending = active.copy(active = false, executionId = null, pending = true)
+        val definition = FrozenDefinition("host/write", "write", "write", "test", "{}", Risk.WRITE,
+            Source.FIRST_PARTY, "host", "1", 1L, false, null, false, null)
+        val input = InvocationInput(BindingValue.copyOf(callBinding("test", "request", null, 0, "wire")),
+            "chain", "session", "run", "step", 0, "{}", definition, false, Risk.WRITE)
+        val record = InvocationRecord(2, 1L, input, definition.digest, Status.CANCELLED, Risk.WRITE, "{}",
+            null, emptyList(), ExecutionInstance(java.util.UUID.randomUUID().toString(), "epoch", InstanceState.EXIT_CONFIRMED),
+            LogicalResult(Status.CANCELLED, Effect.UNKNOWN, "cancelled", false), emptyList(),
+            Isolation("unknown", null, null), false, false).also { it.validate() }
+        val recovery = RecoveryRequest("recovery:${record.callId}:1", record.callId, 1L)
+        val waiting = current.copy(taskId = "recovery:session:${recovery.id}", phase = TaskPhase.RECOVERY)
+        val pending = active.copy(active = false, executionId = null, pending = true,
+            records = mapOf(record.callId to record), recoveries = mapOf(record.callId to recovery))
         stopFloatingTask(waiting, "session", pending, stop)
-        assertEquals(listOf("run" to null, null to "session"), calls)
+        assertEquals(listOf(Triple("run", null, null), Triple(null, "session", recovery.id)), calls)
         stopFloatingTask(waiting, "old-session", pending, stop)
         stopFloatingTask(waiting, "session", pending.copy(pending = false), stop)
+        assertEquals(2, calls.size)
+        stopFloatingTask(waiting, "session", pending.copy(recoveries = mapOf(record.callId to recovery.copy(id = "replacement"))), stop)
         assertEquals(2, calls.size)
     }
 

@@ -491,13 +491,22 @@ internal class ChatSessionOwner(
         }
         refresh()
     }
-    fun stop(expectedExecutionId: String? = null, expectedPendingSessionId: String? = null) = launchOperation {
+    fun stop(expectedExecutionId: String? = null, expectedPendingSessionId: String? = null,
+        expectedPendingRequestId: String? = null) = launchOperation {
         if (expectedExecutionId != null && expectedExecutionId != mutable.value.executionId) return@launchOperation
         if (expectedPendingSessionId != null && (active != null || history?.sessionId != expectedPendingSessionId)) return@launchOperation
         active?.cancel()
         if (active == null) {
             val pending = history?.pendingStep(tools!!.ledger)
             if (pending != null) {
+                // The main-thread window check precedes this queued operation. Resolve the
+                // request again from the ledger so a delayed click cannot cancel its successor.
+                if (expectedPendingRequestId != null) {
+                    val recoveries = tools!!.ledger.pendingRecoveries()
+                    if (pending.records.none { record -> record.pending?.id == expectedPendingRequestId ||
+                        recoveries.any { it.callId == record.callId && it.id == expectedPendingRequestId }
+                    }) return@launchOperation
+                }
                 stopPendingStep(pending)
                 refresh()
                 observeLateExits(requireNotNull(tools), pending.identity.runId)
