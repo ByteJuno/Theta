@@ -642,3 +642,13 @@ OpenAI Chat Completions 的字段、`openai-responses` 的 `reasoning.effort` �
 ## 有人值守聊天审批模式（2026-11-24 机主确认，#137）
 
 本段细化并优先于第 3.6 节有人值守（`unattended=false`）时的默认询问矩阵：宿主提供三档可选审批模式——`BALANCED`（省心模式，宿主默认）、`FULL_AUTO`（全自动模式，须用户显式开启并在聊天界面持续展示醒目标记）与 `STRICT`（严格模式，沿用第 3.6 节原表）。在无用户拒绝规则命中且同一任务链无未核对 `UNKNOWN` 副作用时，有人值守聊天按当前模式判定：`BALANCED` 下所有来源的有效风险 `READ` 与 `WRITE` 调用直接放行，`DEVICE_CONTROL` 与 `ROOT` 调用询问（除非已有匹配的有效授权且 `permitsLongTerm` 允许）；`FULL_AUTO` 下有人值守聊天的四类风险调用均直接放行。弹窗询问完整提供 `ALLOW_ONCE`、`ALLOW_SESSION`、`ALLOW_ALWAYS`（`ROOT` 仍受长期授权独立开关约束）与 `DENY`。以下安全边界在所有模式下均不减免：用户显式拒绝规则最优先；存在未核对 `UNKNOWN` 副作用时高于 `READ` 的重试与后续写操作仍须人工确认；无人值守（`unattended=true`）不继承省心或全自动放宽，仍仅放行第一方 `READ` 或具备有效 `ALLOW_ALWAYS` 授权的调用；定义摘要绑定、刷新门控、独占资源租约以及 `env.requestApproval` 动态提权后的目标有效风险重判保持不变。
+
+
+## 思考档位首步降级边界（2026-11-28 机主确认，#173）
+
+本段细化并优先于第 1 节“运行内冻结”与第 2.8 节 `UNSUPPORTED_PARAMETER` 在思考档位参数（`reasoning_effort`、`reasoning`、`thinking_level`、`thinkingConfig` 等）上的衔接边界：
+
+1. 启动前仍按第 2.3 节根据已知 `reasoningLevels` 选取最接近的较低档（无更低档时回退模型默认）并提示用户；
+2. 适配器仍严格只做翻译，收到思考档位不支持的 400 错误时统一发 `ModelError(UNSUPPORTED_PARAMETER, param = ...)`，不得在适配器内部吞错重试；
+3. 仅当本次运行尚未产出任何已提交助手消息或工具循环（即首步 `0` 条新助手消息，且本次请求满足第 2.8 节恢复门槛的 `GENERATION_ONLY` 要求）时，内核 `AgentRunLoop` 允许对该思考参数执行一次 `REMOVE_PARAMETER`：将 `reasoningLevel` 降级为模型默认（`null`）重试一次，把“该模型不支持该思考参数”记入模型能力信息供后续运行复用，并向用户发出温和降级提示；
+4. 一旦本次运行已产生助手消息、思考块回放数据或进入工具循环，或请求属于 `MAY_EXECUTE_SERVER_TOOLS`，仍严格执行第 1 节运行内冻结，绝不在循环中途修改或移除思考档位。
