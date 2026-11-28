@@ -1,6 +1,5 @@
 package io.github.bytejuno.thetacore.ui.theme
 
-import android.content.Context
 import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -25,22 +24,18 @@ internal data class ThetaThemeTokens(
 )
 
 internal val LocalThetaThemeTokens = staticCompositionLocalOf { thetaTokens(thetaBrandScheme(false)) }
-internal data class ThemeChoice(val dynamic: Boolean, val setDynamic: (Boolean) -> Unit)
-internal val LocalThetaThemeChoice = staticCompositionLocalOf { ThemeChoice(true, {}) }
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-internal fun ThetaTheme(dark: Boolean = isSystemInDarkTheme(), content: @Composable () -> Unit) {
+internal fun ThetaTheme(systemDark: Boolean = isSystemInDarkTheme(), content: @Composable () -> Unit) {
     val context = LocalContext.current
-    val preferences = remember(context) { context.getSharedPreferences(APPEARANCE_STORE, Context.MODE_PRIVATE) }
-    var dynamic by remember(preferences) { mutableStateOf(preferences.getBoolean(DYNAMIC_KEY, true)) }
-    val colors = if (dynamic && Build.VERSION.SDK_INT >= 31) {
+    val state = rememberThemePreferenceState()
+    val dark = state.preference.isDark(systemDark)
+    val colors = if (state.preference.dynamic && Build.VERSION.SDK_INT >= 31) {
         if (dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
     } else thetaBrandScheme(dark)
     CompositionLocalProvider(LocalThetaThemeTokens provides thetaTokens(colors),
-        LocalThetaThemeChoice provides ThemeChoice(dynamic) { value ->
-            preferences.edit().putBoolean(DYNAMIC_KEY, value).apply(); dynamic = value
-        }) {
+        LocalThemePreferenceState provides state) {
         // Compose's platform MotionDurationScale remains in charge (including system scale 0).
         MaterialTheme(colorScheme = colors, motionScheme = MotionScheme.expressive(), content = content)
     }

@@ -1,18 +1,16 @@
 package io.github.bytejuno.thetacore.chat
 
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import io.github.bytejuno.thetacore.*
 import io.github.bytejuno.thetacore.R
 import io.github.bytejuno.thetacore.agent.ledger.ApprovalMode
 import io.github.bytejuno.thetacore.provider.*
-import io.github.bytejuno.thetacore.ui.theme.LocalThetaThemeChoice
+import io.github.bytejuno.thetacore.settings.*
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import kotlinx.coroutines.*
 
 @Composable
@@ -23,15 +21,15 @@ internal fun ChatRouteSurface(host: ThetaApplication, drafts: ChatComposerDrafts
     val owner = host.chat
     val scope = rememberCoroutineScope()
     val persona = rememberChatPersonaSelection(host)
-    var settings by rememberSaveable { mutableStateOf(false) }
-    var providers by rememberSaveable { mutableStateOf(false) }
-    var approvals by rememberSaveable { mutableStateOf(false) }
-    var mcp by rememberSaveable { mutableStateOf(false) }
+    val settings = rememberSettingsNavigator()
+    val pages = rememberSaveableStateHolder()
+    val toolInputDrafts = remember { ToolInputDrafts() }
+    SideEffect { toolInputDrafts.retain(state.toolInputs.values.map { it.id }.toSet()) }
     var operating by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<Int?>(null) }
     fun locked(): Boolean = owner.state.value.let { it.active || it.pending || it.loading } ||
         operating || models.state.value.saving || persona.state.busy
-    fun closeSettings() { settings = false; persona.load() }
+    fun backSettings() = backFromSettings(settings, { owner.latest() }, persona::load)
     val snapshot = ChatUiSnapshot(state.copy(loading = state.loading || operating), modelState, approval,
         persona.state, stream, ChatDraftSnapshot(composer.input, composer.images.toList(), composer.error),
         host.plugins.plugins.count { it.enabled } + host.plugins.dataInventory.count { it.state.enabled })
@@ -52,7 +50,8 @@ internal fun ChatRouteSurface(host: ThetaApplication, drafts: ChatComposerDrafts
             val text = composer.input; val images = composer.images; val receipt = drafts.receipt(state.sessionId)
             composer.error = null; launchTask { owner.send(text, images, receipt) }
         } }, stop = { owner.stop() }, plugins = onPlugins,
-        settings = { settings = true }, providers = { providers = true }, approvalSettings = { approvals = true },
+        settings = { settings.open(SettingsDestination.HOME) }, providers = { settings.open(SettingsDestination.PROVIDERS) },
+        approvalSettings = { settings.open(SettingsDestination.SAFETY) },
         balanced = { scope.launch { try { withContext(Dispatchers.IO) { host.approvalSettings.setMode(ApprovalMode.BALANCED) } }
             catch (cancelled: CancellationException) { throw cancelled }
             catch (_: Exception) { error = R.string.chat_operation_failed } } },
@@ -63,22 +62,26 @@ internal fun ChatRouteSurface(host: ThetaApplication, drafts: ChatComposerDrafts
         recover = { token, action, window, confirmed -> launchTask { owner.recover(token, action, window, confirmed) } },
         input = { call, request, answer -> owner.respondInput(call, request, answer) },
         userImage = owner::userImage, generatedImage = owner::image)
-    DefaultChatSurface(snapshot, actions)
+    val destination = settings.navigation.current
+    CompositionLocalProvider(LocalToolInputDrafts provides toolInputDrafts) {
+        pages.SaveableStateProvider(destination ?: SettingsDestination.CHAT) {
+            if (destination == null) DefaultChatSurface(snapshot, actions)
+            else SettingsScreen(host, destination, settings::open, ::backSettings, !locked())
+        }
+    }
     val strings = uiStrings()
     error?.let { AlertDialog(onDismissRequest = { error = null }, text = { Text(strings.get(it)) },
         confirmButton = { TextButton(onClick = { error = null }) { Text(strings.get(R.string.chat_close)) } }) }
-    if (settings) AlertDialog(onDismissRequest = { closeSettings() }, title = { Text(strings.get(R.string.chat_settings)) },
-        text = { Column(Modifier.verticalScroll(rememberScrollState())) {
-            TextButton(onClick = { closeSettings(); providers = true }) { Text(strings.get(R.string.chat_provider)) }
-            TextButton(onClick = { closeSettings(); approvals = true }) { Text(strings.get(R.string.chat_approval_settings)) }
-            TextButton(onClick = { closeSettings(); mcp = true }) { Text(strings.get(R.string.mcp_title)) }
-            PersonaPicker(host, !locked())
-            val theme = LocalThetaThemeChoice.current
-            Row { Checkbox(theme.dynamic, theme.setDynamic); Text(strings.get(R.string.chat_dynamic_color)) }
-            AppLanguageSetting()
-            BackgroundDiagnostics()
-        } }, confirmButton = { TextButton(onClick = { closeSettings() }) { Text(strings.get(R.string.chat_close)) } })
-    if (providers) ProviderScreen(host) { providers = false; owner.latest(); persona.load() }
-    if (approvals) ChatApprovalDialog(host) { approvals = false }
-    if (mcp) io.github.bytejuno.thetacore.mcp.McpScreen(host) { mcp = false }
+}
+
+internal fun backFromSettings(
+    settings: SettingsNavigator,
+    onProvidersClosed: () -> Unit,
+    onChatReturned: () -> Unit,
+) {
+    val previous = settings.navigation.current
+    settings.back()
+    // Provider edits can invalidate checkpoint settings; other pages must not replace the reading page.
+    if (previous == SettingsDestination.PROVIDERS) onProvidersClosed()
+    if (settings.navigation.current == null) onChatReturned()
 }

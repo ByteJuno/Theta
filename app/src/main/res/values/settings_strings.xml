@@ -1,0 +1,25 @@
+<resources>
+    <string name="settings_back">Back</string>
+    <string name="settings_models_agent">Models &amp; agent</string>
+    <string name="settings_personas_skills">Personas &amp; skills</string>
+    <string name="settings_safety">Safety &amp; permissions</string>
+    <string name="settings_customization">Appearance &amp; customization</string>
+    <string name="settings_system">System &amp; diagnostics</string>
+    <string name="settings_appearance">Appearance &amp; theme</string>
+    <string name="settings_theme_mode">Color mode</string>
+    <string name="settings_theme_system">Follow system</string>
+    <string name="settings_theme_light">Light</string>
+    <string name="settings_theme_dark">Dark</string>
+    <string name="settings_theme_palette">Color palette</string>
+    <string name="settings_theme_brand">Theta brand colors · cobalt blue &amp; warm gold</string>
+    <string name="settings_theme_failed">Could not read or save the theme. Your last saved choice is kept. Reload or try again.</string>
+    <string name="settings_future_themes">Theme packs</string>
+    <string name="settings_future_themes_detail">Data plugin theme packs will be available in a future update. Choose system or Theta colors above for now.</string>
+    <string name="settings_future_chat">Chat interface plugins</string>
+    <string name="settings_future_chat_detail">Custom chat interfaces are planned for a future update. Theta currently uses its built-in chat interface and safety controls.</string>
+    <string name="settings_persona_busy">Finish or stop the current task before changing the persona.</string>
+    <string name="settings_skills">Available skills</string>
+    <string name="settings_skills_detail">Skills come from enabled data plugins. The agent reads their documents when needed. Manage their packages in Plugins and diagnostics.</string>
+    <string name="settings_skills_empty">No skills from enabled data plugins.</string>
+    <string name="settings_provider_saved">Provider saved.</string>
+</resources>

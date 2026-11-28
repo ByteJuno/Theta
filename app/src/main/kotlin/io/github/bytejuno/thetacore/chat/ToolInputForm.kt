@@ -14,8 +14,9 @@ import kotlinx.serialization.json.*
 internal fun ToolInputForm(request: ToolInputRequest, respond: (JsonObject?) -> Unit) {
     val strings = uiStrings()
     val definitions = remember(request.id) { toolInputFields(request.schema) }
-    var values by remember(request.id) { mutableStateOf<Map<String, String>>(emptyMap()) }
-    var submitted by remember(request.id) { mutableStateOf(false) }
+    val draft = LocalToolInputDrafts.current[request.id]
+    var values by draft::values
+    var submitted by draft::submitted
     val answer = remember(request.id, values) { toolInputAnswer(request.schema, values) }
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(strings.get(R.string.tool_input_title), style = MaterialTheme.typography.titleSmall)
