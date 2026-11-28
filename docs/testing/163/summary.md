@@ -1,5 +1,36 @@
 # Issue 163 validation summary
 
+Implementation commit: `15a1d5a70632dbc7b78e7c62c536aadaf649eebe`
+Tested source tree: `845fa5916b1621a7823e992ae3ee06273a4f964a`; verified equal to committed tree.
+Branch: `auto/163-plugins-surface`. Both fetched main `53014eeb84210e74ed472a7210256f390e6a64fe` and remote review head `8f9779f6421ebe40fc622c640403ee43af720c0e` are ancestors. APK / SHA-256: 未生成。
+
+## Current RETURN and repair
+
+Verified OWNER RETURN `IC_kwDOVkrS_s8AAAABr3qiEw` at https://github.com/ByteJuno/Theta/pull/189#issuecomment-7239016979 . Complete comments/reviews/inline comments fetched; one RETURN, no other review requests. One open PR; no new issue selected. Fetched before merging and before final validation. Only merge conflict was app/build.gradle.kts; retained ui-test-junit4 plus main's document support.
+
+Initial full preflight reproduced a combination regression: app 916 tests / 1 failure / 7 skips in 242.77 seconds. Calling removeDocument initialized DocumentAttachmentsKt's eager documentImportScope; kotlinx-coroutines-test brought by ui-test-junit4 exposed missing Android Main dispatcher in a plain JVM test. Made the same singleton SupervisorJob + Main.immediate scope lazy, initialized at picker composition. Existing test remains unchanged; no mock dispatcher, relaxed assertion or timeout. All other imported document sources and plugin feature sources match their parents.
+
+## Current checks
+
+- Full `python scripts/preflight.py`: passed in 143.13s; strict configuration cache reused.
+- App: 916 tests, 0 failures/errors, 7 skipped; 98 fresh suites, executed final preflight.
+- Core: 720 tests, 0 failures/errors, 1 skipped; 73 suites executed during initial preflight this round. Final preflight UP-TO-DATE for unchanged core inputs; not claimed rerun.
+- Targeted post-fix: 86 tests, 0 failures/errors/skips in 67.08s with no build cache. ChatSessionOwnerTest 73, DocumentComposerLayoutTest 3, PluginsScreenTest 10.
+- 724 paired English/Chinese keys; lint 0 errors/107 warnings; storage fixture source verification/compile passed (final compile UP-TO-DATE).
+- Source index matches committed tree; no unmerged entries or feature whitespace errors; protected files unchanged relative to current main. Issue163 summary untouched by writer; issue176 summary inherited verbatim from main.
+
+## Evidence and limits
+
+Evidence: `E:\Desktop\AI研究\theta-auto-loop\event-runs\0a9f0b30-f009-404e-81a8-221327527362`; targeted: `validation-issue11/issue163-0a9f0b30-merge-regression`. Initial failure log/JSON/XML preserved. merge-main.log records original conflict; exact-byte edit initially stopped before writing due to CRLF (resolution-initial-failure.log). Diff-check against old head flagged a trailing blank line already in main's DocumentMessage.kt; feature check against current main passed, original warning retained in resolved-diff-check.log. No unrelated formatting repair was made.
+
+未生成 APK（APK SHA 未生成），未操作手机或模拟器；当前构建完整视觉未验证。通过的是 JVM/Robolectric 语义、布局与回调测试，不代表真实字体像素、触摸或设备验收。小屏/大字体/中英文/明暗主题、安装/卸载/回滚弹窗、skip_plugins 冷启动和 S1/S2 节点契约仍需独立审核端当前构建验收。本轮未运行新 head CI、正式模拟器回归、R8、签名或 API33 设备验收；旧 head CI/设备结果不迁移。
+
+Publisher owns summary commit, push and PR update. Writer performed no push, PR creation/update or merge. Independent reviewer owns final-head review, CI, prescribed device regression and merge.
+
+## Historical implementation evidence (bound to old SHA only)
+
+# Issue 163 validation summary
+
 Implementation source commit: `20a9c54765d945a1cc70225722145e428ac6f648`
 Tested tree: `47ada37d24d35e09d0cbd4ec2e5a1c037334e6c6`
 Base/final fetched main: `92e241a14f43666ffb14007d35e07c339594241b`
