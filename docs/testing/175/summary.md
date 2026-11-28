@@ -1,21 +1,19 @@
-# Issue 175 — web tools validation
+# Issue 175 validation
 
-Implementation commit: `8c81ac814e5d8130cc57f3748b08216f812e2b72`
-Base: `baa65b8c7bd6d8bc392d1ddc79c373d7e33d12c3`
-Tested tree: `b3e231cc3c6e85e5194888b0173aaa8925d502a2`
-APK: not generated; SHA-256: not applicable.
+- Implementation commit: `bcdd7a25f14100fd489a7bbd3727409fc147b73d`; tested tree `591ef53c4016d71601c8b44d7f7730b27a96c421`.
+- Branch: `auto/175-web-tools`; incorporates main `a89fa03f69c3ac45c347d179072419f5f01164d3` and existing remote PR head `82828e14bd464d1c3c3c104229fcd394f710872d` without overwriting reviewer work.
+- RETURN comment: https://github.com/ByteJuno/Theta/pull/184#issuecomment-7232371379 . Four confirmed findings addressed: DataStore storage, invalid-key clear/refill cold recovery, accurate IPv4 subnets, cancellable bounded DNS.
+- Final strict preflight passed in 190.53 seconds. App: 860 tests / 853 passed / 7 skipped / 0 failures, fresh execution. Agent-core: 688 / 687 passed / 1 skipped / 0 failures, FROM-CACHE, not a fresh run. Lint, paired resources and storage-fixture passed. 17 web tests included and passed; targeted run also passed before final boundary refinements and main merge.
+- Test worktree hash manifest unchanged during final validation and verified immediately before commit. No raw logs, XML, APK or diagnostic trial files committed.
+- DataStore release POM confirms Apache-2.0; uses already pinned 1.1.7. Legacy encrypted file, zero-byte/oversize damage, failed-write preservation, explicit clear/replacement, invalidated and transient key cases exercised across closed/reopened DataStore scopes.
+- DNS timeout/cancel uses unresolved asynchronous test resolver; native Android query/FD cancellation source reviewed at fixed AOSP commit and compiles, not device-run. HTTPS, peer/DNS checks, redirects, 2 MiB limits and output BlobStore verified by JVM loopback tests.
+- APK: not generated; SHA-256: not applicable. 未生成 APK；未操作手机或模拟器；视觉未验证。本轮未改界面布局，原搜索设置的中英文、小屏、大字体、明暗主题、保存/返回/损坏替换/清除仍待实际渲染验收。Android DnsResolver 取消及数值地址路径已核对平台源码并通过编译，但未在 Android 设备上运行；DNS 取消/超时测试使用不返回结果的异步解析器契约，不能替代原生网络验收。Keystore 恢复使用实际 SecretCipher/AES-GCM 与合成密钥源，未进行 Android Keystore 真机测试。真实 Brave/Tavily/SearXNG、API33 运行、R8、最终 CI 和审核端正式模拟器回归尚未验证。
 
-Implemented public HTTPS web_fetch, per-hop DNS validation and address pinning, credential-free redirects, 2 MiB bounded downloads, jsoup text extraction, existing session BlobStore retrieval, SearXNG/Brave/Tavily search, encrypted atomic settings and bilingual full-screen settings entry under Plugins and diagnostics. Existing tool approval and deny rules remain the authorization owner.
+## Preserved failure history
 
-Validation:
-- `python scripts/preflight.py` with strict `--configuration-cache --configuration-cache-problems=fail`: passed in 149.3s. Source manifest unchanged during validation.
-- `:app:testDebugUnitTest`: 845 tests, 0 failures/errors, 7 skipped; fresh execution. `:agent-core:test`: 663 tests, 0 failures/errors, 1 skipped, restored FROM-CACHE (not a fresh rerun).
-- `:app:lintDebug`, `:app:verifyUiResources` (637 paired keys), `:samples:storage-fixture:verifyStorageFixtureSources` and `:samples:storage-fixture:compileDebugKotlin`: passed.
-- 10 web regression tests freshly passed in the targeted task (21.1s), then included in full app suite. Real local TLS with certificate/hostname verification and test-only socket routing; production address policy remains enabled. Covers private/mixed DNS and rebinding rejection, redirect validation, separate pooled connections, TLS hostname rejection, declared/chunked/gzip size limits, no 503 follow-up request, cancellation, all three backend wire formats, encrypted settings/corruption preservation/failed write retention, large body archive/readback and cross-session denial.
-- New jsoup dependency `org.jsoup:jsoup:1.21.2`: MIT, verified official Maven POM and https://jsoup.org/license .
+- 上一轮四次编译/HTTPS fixture 失败和本次审核四项复现保留在原 event-runs、state-before.json 及 review-verdict.json；未改写原始证据。
+- targeted 首次 JUnit 初始化失败：测试表达式推断出非 void 返回类型；明确 runBlocking<Unit> 修正，保留断言与失败 XML。
+- 两次 Android DNS 源码地址 404 已保留；随后成功取得固定源码提交 4416f38e4f624ed9562eb9ce7d33c4c0d5dc9bcf。
+- 最终同步 main 前进触发祖先检查失败；首次 preflight 意外继续运行但源代码未变且通过，保留为 pre-merge 证据。随后 git merge --no-commit --no-edit origin/main 无冲突，合并树重新通过完整 preflight 后才提交。
 
-Preserved original failed runs in this event directory: targeted (OkHttp non-null ProxySelector compile error), targeted2 (MockWebServer ByteString API compile error), targeted3 (missing whitespace in HTML fixture), targeted4 (pool fixture incorrectly expected rejection; OkHttp separates DNS policies, corrected fixture asserts distinct actual connection indexes and unchanged request count). No production assertion was removed, no deadline increased.
-
-Limits: 未生成 APK，未操作手机或模拟器，视觉未验证。设置页正常保存、返回、损坏替换/清除，以及中英文、小屏、大字体、明暗主题与键盘遮挡仍待审核端实际渲染验收。未调用真实 Brave/Tavily/SearXNG 服务；本轮使用本地 HTTPS 和合成响应。Android API33 运行、Android Keystore 实机、R8、CI 与正式模拟器回归未验证。私网自建 SearXNG 暂不开放：所有网络目标统一要求公网 HTTPS。
-
-Raw logs, XML and source hashes remain outside Git in `event-runs/e347eedb-d5ab-4972-bf72-32208ccb4961`. This summary binds only the implementation commit above; independent review, published-head CI and formal regression remain required.
+Evidence directory: `E:\Desktop\AI研究\theta-auto-loop\event-runs\f9e55450-3ed5-4531-afc5-cc650c5209f8`. PR #172 merge independently verified at `a89fa03f69c3ac45c347d179072419f5f01164d3` and recorded completed; its evidence is not reassigned to PR #184.
