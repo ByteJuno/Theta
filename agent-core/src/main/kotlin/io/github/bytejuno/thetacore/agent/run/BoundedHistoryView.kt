@@ -23,7 +23,13 @@ data class RequestViewLimit(val maxMessages: Int = 4096, val maxChars: Long = 2L
                     is ContentPart.Text -> p.text.length.toLong()
                     is ContentPart.Media -> p.blob.id.length.toLong() + p.blob.mimeType.length
                     is ContentPart.Reasoning -> (p.summary?.length ?: 0).toLong()
-                    is ContentPart.ToolResult -> p.text.length.toLong() + p.callId.length
+                    is ContentPart.ToolResult -> p.callId.length.toLong() + p.content.sumOf { child ->
+                        64L + when (child) {
+                            is ContentPart.Text -> child.text.length.toLong()
+                            is ContentPart.Media -> child.blob.id.length.toLong() + child.blob.mimeType.length
+                            else -> throw IllegalArgumentException("Invalid tool result content")
+                        }
+                    }
                     is ContentPart.ToolCall -> with(p.binding) { p.name.length.toLong() + p.argsJson.length +
                         provider.length + requestId.length + (responseId?.length ?: 0) + (wireId?.length ?: 0) + callId.length }
                 }

@@ -77,14 +77,18 @@ class GeminiCodec(private val config: GeminiConfig, private val mediaReader: Med
             geminiCallIds(messages, config.providerId)
         }.isSuccess
 
-    fun encode(request: ChatRequest, diagnostics: (ToolSchemaPreparation) -> Unit = {}): String {
+    fun encode(source: ChatRequest, diagnostics: (ToolSchemaPreparation) -> Unit = {}): String {
+        val request = toolMediaRequest(source) { false }
         require(ImagePayloadBudget.admitsMessages(request.messages))
         return encodeInternal(request, true, diagnostics)
     }
-    fun estimateRequestBytes(request: ChatRequest): Long = encodeInternal(request, false).toByteArray(Charsets.UTF_8).size.toLong() +
+    fun estimateRequestBytes(source: ChatRequest): Long {
+        val request = toolMediaRequest(source) { false }
+        return encodeInternal(request, false).toByteArray(Charsets.UTF_8).size.toLong() +
         request.messages.sumOf { m -> m.parts.filterIsInstance<ContentPart.Media>().sumOf {
             OpenAiChatCodec.IMAGE_BUDGET_BASE_BYTES + it.blob.sizeBytes / OpenAiChatCodec.IMAGE_BUDGET_SIZE_DIVISOR
         } }
+    }
 
     private fun encodeInternal(request: ChatRequest, readMedia: Boolean, diagnostics: (ToolSchemaPreparation) -> Unit = {}): String {
         require(config.models.isEmpty() || request.model in config.models)
@@ -121,7 +125,8 @@ class GeminiCodec(private val config: GeminiConfig, private val mediaReader: Med
         }.toString()
     }
 
-    private fun history(request: ChatRequest, readMedia: Boolean): JsonArray {
+    private fun history(source: ChatRequest, readMedia: Boolean): JsonArray {
+        val request = toolMediaRequest(source) { false }
         var pending = emptyList<ContentPart.ToolCall>()
         val used = mutableSetOf<String>()
         val ids = geminiCallIds(request.messages, config.providerId)

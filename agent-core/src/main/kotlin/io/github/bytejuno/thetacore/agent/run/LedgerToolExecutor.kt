@@ -56,8 +56,8 @@ class LedgerToolExecutor(
                 val first = ledger.get(calls.first().binding.callId) ?: throw ToolStepBlocked("Checkpoint missing ledger record")
                 val expected = ledger.resultsForStep(first.input.sessionId, first.input.runId, first.input.stepId,
                     calls.map { it.binding.callId }) ?: throw ToolStepBlocked("Incomplete checkpoint step")
-                require(HistoryCodec.atLedgerPrecision(HistoryCodec.encodeMessage(expected)) ==
-                    HistoryCodec.atLedgerPrecision(HistoryCodec.encodeMessage(messages[index + 1]))) { "Checkpoint result disagrees with ledger" }
+                require(HistoryCodec.agreesWithLedger(HistoryCodec.encodeMessage(messages[index + 1]),
+                    HistoryCodec.encodeMessage(expected))) { "Checkpoint result disagrees with ledger" }
             }
             for (call in calls) {
                 val r = ledger.get(call.binding.callId) ?: throw ToolStepBlocked("Checkpoint missing ledger record")

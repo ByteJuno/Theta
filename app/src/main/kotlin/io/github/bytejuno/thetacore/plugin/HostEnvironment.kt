@@ -205,7 +205,10 @@ private fun readAccessibilitySnapshot(context: Context): Pair<Boolean, List<Stri
     val manager = context.getSystemService(AccessibilityManager::class.java) ?: return false to emptyList()
     if (!manager.isEnabled) return false to emptyList()
     val packages = manager.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK)
-        .mapNotNull { it.resolveInfo?.serviceInfo?.packageName }
+        .mapNotNull { it.resolveInfo?.serviceInfo }
+        .filter { it.name == io.github.bytejuno.thetacore.screen.ThetaAccessibilityService::class.java.name &&
+            io.github.bytejuno.thetacore.screen.ThetaAccessibilityService.connected != null }
+        .map { it.packageName }
     return true to packages
 }
 

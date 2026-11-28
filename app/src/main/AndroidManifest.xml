@@ -10,6 +10,7 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <queries>
+        <intent><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent>
         <intent>
             <action android:name="android.intent.action.OPEN_DOCUMENT" />
             <category android:name="android.intent.category.OPENABLE" />
@@ -36,6 +37,12 @@
         android:theme="@style/Theme.ThetaCore"
         android:usesCleartextTraffic="true">
         <provider android:name="io.github.libxposed.service.XposedProvider" tools:node="remove" />
+        <service android:name=".screen.ThetaAccessibilityService" android:exported="true"
+            android:label="@string/screen_accessibility_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter><action android:name="android.accessibilityservice.AccessibilityService" /></intent-filter>
+            <meta-data android:name="android.accessibilityservice" android:resource="@xml/screen_accessibility" />
+        </service>
         <service android:name=".chat.DocumentParserService" android:exported="false" android:process=":document_parser" />
         <service android:name=".chat.ChatTaskService" android:exported="false" android:foregroundServiceType="specialUse">
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
