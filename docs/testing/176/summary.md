@@ -31,3 +31,18 @@ Earlier evidence: event-runs/3f2a0db6-ab6c-4ca5-9f62-cd47e4c5fa8a and the review
 未生成 APK（APK SHA 未生成），未操作手机或模拟器。Robolectric 的实际 Compose 控件布局测量通过，但当前构建完整视觉未验证；设置与聊天往返、SAF 文档选择/阻塞提供方/解析进程终止及恢复、旋转草稿、混合附件、小屏/大字体/中英文/明暗主题仍需审核端当前构建验收。本轮未运行新 head CI、正式 S1、R8/paired-keep-size、签名或 API33 设备运行；旧 head 的 CI/R8/设备结果不迁移为本提交通过。
 
 Publisher owns the unique test summary, push and PR update. Independent reviewer owns final-head review, required emulator regression, CI and merge. This writer neither publishes nor merges the PR.
+
+## 本次第 2 轮审核补充
+
+- 审核输入：`b565a68aae5b5898c78732f810e2f7034443df75`，基线 `92e241a14f43666ffb14007d35e07c339594241b`；此前累计退回 1 次。上文历史失败及先前审核证据继续保留，本次不重置次数。
+- 已读全部生产差异及测试用例、脚手架，并对照 PROTOCOL 第 3.8 节和 DESIGN 第 10 节。实现提交 `8d84df33a5e73e6176fce09a1579b3a4b0835eb0` 的树确为 `93617d3ef337d14bd519f029201d425de7c3ab6c`，与审核输入仅摘要不同，复用其全量检查。依赖与前次审核一致，复用已通过的许可证核对；固定 API 扫描通过，minSdk=33、hits=0。
+- 本轮发现并修复：纯文档消息生成非空模型文本后，持久化层误将空输入框版本视为已提交正文。另一页面持有相同空正文版本、仅发送全新文档时，前置检查允许，最终提交却报“Composer draft already consumed”。提交阶段现按原始输入框判断正文是否参与去重，附件身份去重保持有效。
+- 修复提交：`1eda9c41b214e50434e069ddb65b1c7dab936723`；测试对应受跟踪源码树 `8fd80432e60c164de80726427782444814a2363d`。后续提交仅追加本摘要。
+
+### 本次探针与修复验证
+
+- 修复前指定 GPU 入口 `:app:testDebugUnitTest`，`DocumentDraftAdmissionProbe` 和 `DocumentImportCancellationProbe` 共 2 项、失败 1 项，构建报告 41 秒。回执探针输出 `guardRejected=false appendSucceeded=false error=Composer draft already consumed`。
+- 取消导入探针通过：退出通知前 `firstCompleted=false binds=1 unbinds=0`；退出通知后下一次导入成功，`requests=2 binds=2 unbinds=2 remainingFiles=0`。使用模拟 Binder 退出通知，不能外推为实际 Android 进程验收。
+- 修复后指定 GPU 入口 `:app:testDebugUnitTest --tests '*DocumentDraftAdmissionProbe*' --tests '*ChatSessionOwnerTest*'`，共 74 项、失败 0 项、退出码 0。探针输出 `guardRejected=false appendSucceeded=true error=null`。新增永久用例通过实际 ChatSessionOwner 发送两份共享空正文版本的新文档，并确认已发送附件仍不能重复提交。
+- 探针文件均未跟踪、不提交。没有新增原始日志、XML、APK、录屏或第二份测试摘要；未修改受保护文件。本次修复差异空白检查通过。
+- 未重跑全量检查，旧全量结果不归于修复提交；未生成 APK，完整视觉未验证，未操作模拟器或手机。最终提交的 CI/模拟器回归与发布由外层脚本负责。
