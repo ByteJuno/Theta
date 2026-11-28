@@ -16,6 +16,7 @@ import io.github.bytejuno.thetacore.R
 import io.github.bytejuno.thetacore.plugin.*
 import io.github.bytejuno.thetacore.settings.AppearanceSettingsScreen
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.first
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
@@ -233,6 +234,118 @@ class PluginThemeUiTest {
             assertEquals(1, manager.activeThemes().size)
         }
         assertLiveAndRecreatedBrand()
+    }
+
+    @Test fun failedQuarantineRevocationSurvivesColdRestoreEvenWhenArchiveRecovers() = screen {
+        select()
+        beforeNextFrame {
+            val page = manager.dataPlugins.single()
+            val archive = files.resolve("plugins/test.prompts/1/plugin.zip")
+            val original = archive.readBytes()
+            archive.writeBytes(byteArrayOf(1, 2, 3))
+            val file = context.noBackupFilesDir.resolve(ThemePreferenceStore.FILE_NAME)
+            val preference = file.readBytes()
+            check(file.delete()); check(file.mkdir())
+            try {
+                try { manager.readDataPage(page, null); fail("Quarantine must report failed revocation") }
+                catch (_: IllegalStateException) { }
+                assertTrue(manager.dataPlugins.isEmpty())
+                assertEquals(listOf("test.prompts"), PluginThemeRevocations(files).pending())
+                val blocked = PluginManager(context)
+                try { blocked.restore(); fail("Cold admission must await pending revocation") }
+                catch (_: IllegalStateException) { }
+                assertFalse(blocked.dataThemesReady)
+                assertTrue(blocked.dataPlugins.isEmpty())
+            } finally { check(file.delete()); file.writeBytes(preference); archive.writeBytes(original) }
+            val restored = PluginManager(context)
+            restored.restore()
+            assertTrue(restored.dataThemesReady)
+            assertEquals(1, restored.activeThemes().size)
+            assertDiskBrand()
+            assertTrue(PluginThemeRevocations(files).pending().isEmpty())
+        }
+        assertLiveAndRecreatedBrand()
+    }
+
+    @Test fun digestMismatchedOldArchiveIsIsolatedBeforeConfirmedReplacement() = screen {
+        select()
+        beforeNextFrame {
+            val archive = files.resolve("plugins/test.prompts/1/plugin.zip")
+            // Keep a fully valid ZIP and manifest so staging reaches the old-selection digest
+            // check. Truncated archives are correctly rejected by namespace validation first.
+            ZipOutputStream(archive.outputStream()).use { zip ->
+                mapOf("theta-plugin.json" to """{"schema":1,"type":"data","id":"test.prompts","name":"Changed","version":"1","versionCode":1,"apiLevel":1}""",
+                    "themes/ocean.json" to """{"id":"ocean","displayName":"Changed","messageStyle":"bubble"}""")
+                    .forEach { (path, text) ->
+                        zip.putNextEntry(ZipEntry(path)); zip.write(text.toByteArray()); zip.closeEntry()
+                    }
+            }
+            assertNotNull(PluginDataCatalog(files, 1).managementRecord("test.prompts").error)
+            installVersion(2)
+            assertEquals(2L, manager.dataPlugins.single().selection.state.version)
+            assertEquals(2L, PluginDataCatalog(files, 1).managementRecord("test.prompts").state.version)
+            assertEquals(1, manager.activeThemes().size)
+            assertDiskBrand()
+            PluginManager(context).restore()
+            assertDiskBrand()
+        }
+        assertLiveAndRecreatedBrand()
+    }
+
+    @Test fun lifecycleRestorePreservesLoadedLegacyBrandChoiceWithoutANewPreferenceFile() = screen {
+        val legacy = context.getSharedPreferences(APPEARANCE_STORE, Context.MODE_PRIVATE)
+        assertTrue(legacy.edit().putBoolean(DYNAMIC_KEY, false).commit())
+        try {
+            beforeNextFrame {
+                val preferences = ThemePreferenceStore(context.noBackupFilesDir, legacyDynamic = false)
+                assertFalse(preferences.current().dynamic)
+                assertFalse(context.noBackupFilesDir.resolve(ThemePreferenceStore.FILE_NAME).exists())
+                PluginManager(context).restore()
+                assertFalse(preferences.updates.first().preference.dynamic)
+                assertFalse(context.noBackupFilesDir.resolve(ThemePreferenceStore.FILE_NAME).exists())
+            }
+            await { !state.preference.dynamic }
+            assertLiveAndRecreatedBrand()
+            beforeNextFrame {
+                themePreferenceStore(context).setMode(ThemeMode.DARK)
+                assertEquals(ThemePreference(ThemeMode.DARK, false),
+                    ThemePreferenceSerializer().readFrom(okio.Buffer().write(context.noBackupFilesDir.resolve(ThemePreferenceStore.FILE_NAME).readBytes())))
+                assertEquals(ThemePreference(ThemeMode.DARK, false), themePreferenceStore(context).current())
+            }
+        } finally { assertTrue(legacy.edit().clear().commit()) }
+    }
+
+    @Test fun pendingRevocationPreservesAnotherPluginAndFinishesBeforeChoosingReplacementTheme() = screen {
+        select()
+        beforeNextFrame {
+            installVersion(1, id = "other.plugin")
+            val archive = files.resolve("plugins/test.prompts/1/plugin.zip")
+            val original = archive.readBytes()
+            val page = manager.dataPlugins.single { it.selection.manifest.id == "test.prompts" }
+            archive.writeBytes(byteArrayOf(1, 2, 3))
+            val file = context.noBackupFilesDir.resolve(ThemePreferenceStore.FILE_NAME)
+            val bytes = file.readBytes()
+            check(file.delete()); check(file.mkdir())
+            try {
+                try { manager.readDataPage(page, null); fail("Expected failed preference write") }
+                catch (_: IllegalStateException) { }
+            } finally { check(file.delete()); file.writeBytes(bytes); archive.writeBytes(original) }
+            val preferences = ThemePreferenceStore(context.noBackupFilesDir)
+            preferences.setTheme("other.plugin/ocean")
+            installVersion(2)
+            assertTrue(PluginThemeRevocations(files).pending().isEmpty())
+            assertEquals("other.plugin/ocean", preferences.current().themeKey)
+            PluginManager(context).restore()
+            assertEquals("other.plugin/ocean", preferences.current().themeKey)
+            // Once a retry completes the pending intent, a fresh choice of the replacement
+            // must survive a later restart rather than being mistaken for the revoked one.
+            preferences.setTheme("test.prompts/ocean")
+            PluginManager(context).restore()
+            assertEquals("test.prompts/ocean", preferences.current().themeKey)
+            assertEquals("test.prompts/ocean", ThemePreferenceSerializer().readFrom(okio.Buffer().write(file.readBytes())).themeKey)
+        }
+        await { !choices.loading && state.preference.themeKey == "test.prompts/ocean" }
+        assertEquals(MessageStyle.COMPACT, tokens.messageStyle)
     }
 
     @Test fun committedInstallWithFailedThemeWriteBlocksReplacementAndColdRestoreClearsExactMissingKey() = screen(

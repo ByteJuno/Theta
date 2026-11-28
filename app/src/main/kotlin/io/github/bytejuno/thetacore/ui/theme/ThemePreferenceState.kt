@@ -1,6 +1,5 @@
 package io.github.bytejuno.thetacore.ui.theme
 
-import android.content.Context
 import androidx.compose.runtime.*
 import androidx.compose.ui.platform.LocalContext
 import kotlinx.coroutines.*
@@ -52,9 +51,7 @@ internal fun rememberThemePreferenceState(): ThemePreferenceState {
     val context = LocalContext.current.applicationContext
     val scope = rememberCoroutineScope()
     val state = remember(context, scope) {
-        val legacy = runCatching { context.getSharedPreferences(APPEARANCE_STORE, Context.MODE_PRIVATE)
-            .getBoolean(DYNAMIC_KEY, true) }.getOrDefault(true)
-        ThemePreferenceState(ThemePreferenceStore(context.noBackupFilesDir, legacy), scope)
+        ThemePreferenceState(themePreferenceStore(context), scope)
     }
     LaunchedEffect(state) { state.load() }
     return state

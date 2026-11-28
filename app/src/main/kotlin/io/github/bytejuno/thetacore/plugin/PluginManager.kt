@@ -167,10 +167,11 @@ internal class PluginManager(context: Context,
         val interrupted = mutableSetOf<String>()
         val messages = mutableListOf<String>()
         val rejected = mutableSetOf<String>()
+        themeLifecycle.recover()
         val restoredData = if (policy?.skipData == true) emptyList() else
             withContext(Dispatchers.IO) { dataCatalog.restoreInventory(messages::add, crashSuspects) }
         restoredData.forEach { replaceDataInventory(dataInventory, dataPlugins, it, skipDataLoading) }
-        themeLifecycle.reconcile(dataCatalog, dataPlugins.toList())
+        themeLifecycle.reconcile(dataCatalog, dataInventory, dataPlugins)
         val installed = withContext(Dispatchers.IO) {
             try { store.cleanupColdStages() }
             catch (e: Exception) { messages += "Code stage cleanup failed: ${e.message}" }
@@ -348,7 +349,7 @@ internal class PluginManager(context: Context,
         dataRequire(!session.closed && session.source == null && session.data === staged, "Unknown data confirmation", PluginFailureReason.CONFIRMATION_EXPIRED)
         // Repair a failed revocation against the OLD inventory before replacement can make
         // its theme available again. A failed commit leaves the confirmation owned by session.
-        themeLifecycle.reconcile(dataCatalog, dataPlugins.toList(), staged.manifest.id)
+        themeLifecycle.reconcile(dataCatalog, dataInventory, dataPlugins, staged.manifest.id)
         session.data = null // ownership transfers to install, disposal cannot delete it.
         val selected = withContext(Dispatchers.IO) { dataCatalog.install(staged, digest, acknowledged) }
         if (stageCleanup.hasPending) failures += "Data installed; import cleanup pending; use Retry import cleanup"
@@ -358,7 +359,7 @@ internal class PluginManager(context: Context,
         replaceDataInventory(dataInventory, dataPlugins, record, skipDataLoading)
         // Installation is already durable: publish its actual inventory even if preferences
         // cannot commit. Cold restore and the next install retry this exact-theme check.
-        themeLifecycle.reconcile(dataCatalog, dataPlugins.toList(), selected.manifest.id)
+        themeLifecycle.reconcile(dataCatalog, dataInventory, dataPlugins, selected.manifest.id)
     }
 
     suspend fun setDataEnabled(id: String, enabled: Boolean) = operation {
