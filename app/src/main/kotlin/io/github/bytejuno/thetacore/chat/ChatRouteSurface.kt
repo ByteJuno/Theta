@@ -27,7 +27,7 @@ internal fun ChatRouteSurface(host: ThetaApplication, drafts: ChatComposerDrafts
     var error by remember { mutableStateOf<Int?>(null) }
     fun locked(): Boolean = owner.state.value.let { it.active || it.pending || it.loading } ||
         operating || models.state.value.saving || persona.state.busy
-    fun backSettings() { settings.back(); if (settings.navigation.current == null) { owner.latest(); persona.load() } }
+    fun backSettings() = backFromSettings(settings, { owner.latest() }, persona::load)
     val snapshot = ChatUiSnapshot(state.copy(loading = state.loading || operating), modelState, approval,
         persona.state, stream, ChatDraftSnapshot(composer.input, composer.images.toList(), composer.error),
         host.plugins.plugins.count { it.enabled } + host.plugins.dataInventory.count { it.state.enabled })
@@ -68,4 +68,16 @@ internal fun ChatRouteSurface(host: ThetaApplication, drafts: ChatComposerDrafts
     val strings = uiStrings()
     error?.let { AlertDialog(onDismissRequest = { error = null }, text = { Text(strings.get(it)) },
         confirmButton = { TextButton(onClick = { error = null }) { Text(strings.get(R.string.chat_close)) } }) }
+}
+
+internal fun backFromSettings(
+    settings: SettingsNavigator,
+    onProvidersClosed: () -> Unit,
+    onChatReturned: () -> Unit,
+) {
+    val previous = settings.navigation.current
+    settings.back()
+    // Provider edits can invalidate checkpoint settings; other pages must not replace the reading page.
+    if (previous == SettingsDestination.PROVIDERS) onProvidersClosed()
+    if (settings.navigation.current == null) onChatReturned()
 }
