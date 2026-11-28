@@ -21,7 +21,7 @@ internal fun ChatMessage(message: Message, snapshot: ChatUiSnapshot, actions: Ch
     val tokens = LocalThetaThemeTokens.current
     val state = snapshot.chat
     val body: @Composable () -> Unit = {
-        Column(verticalArrangement = Arrangement.spacedBy(tokens.smallGap)) {
+        Column(verticalArrangement = Arrangement.spacedBy(tokens.messageGap)) {
             message.parts.forEach { part -> when (part) {
                 is ContentPart.Text -> if (message.role == Role.USER) SentDocumentText(part.text) else MarkdownText(part.text)
                 is ContentPart.Media -> UserChatImage(part.blob, state.sessionId, actions.userImage)
@@ -37,14 +37,14 @@ internal fun ChatMessage(message: Message, snapshot: ChatUiSnapshot, actions: Ch
             modifier = Modifier.widthIn(max = 560.dp).padding(start = 24.dp)) {
             Box(Modifier.padding(tokens.contentGap)) { body() }
         }
-    } else Box(Modifier.fillMaxWidth()) { body() }
+    } else ChatAssistantBody { body() }
 }
 @Composable
 internal fun ChatReasoning(summary: String) {
     val strings = uiStrings()
     var expanded by rememberSaveable { mutableStateOf(false) }
     Column {
-        SuggestionChip(onClick = { expanded = !expanded }, label = { Text(strings.get(
+        ChatThemeChip(onClick = { expanded = !expanded }, label = { Text(strings.get(
             if (expanded) R.string.chat_hide_reasoning else R.string.chat_show_reasoning)) })
         if (expanded) SelectionContainer { Text(summary, style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant) }

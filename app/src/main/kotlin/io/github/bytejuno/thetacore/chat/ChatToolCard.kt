@@ -47,7 +47,7 @@ internal fun ToolCard(
     val forced = forceToolExpanded(record, inputRequest != null) || recovery != null
     val visible = expanded || forced
     if (!visible) {
-        SuggestionChip(onClick = { expanded = true }, label = {
+        ChatThemeChip(onClick = { expanded = true }, label = {
             Text(strings.get(R.string.chat_tool_capsule, call.name, strings.get(toolState(record))), maxLines = 1, overflow = TextOverflow.Ellipsis)
         }, modifier = Modifier.fillMaxWidth())
         return

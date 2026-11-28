@@ -22,7 +22,7 @@ import okio.FileSystem
 import okio.Path.Companion.toOkioPath
 
 internal enum class ThemeMode { SYSTEM, LIGHT, DARK }
-internal data class ThemePreference(val mode: ThemeMode = ThemeMode.SYSTEM, val dynamic: Boolean = true) {
+internal data class ThemePreference(val mode: ThemeMode = ThemeMode.SYSTEM, val dynamic: Boolean = true, val themeKey: String? = null) {
     fun isDark(systemDark: Boolean) = when (mode) {
         ThemeMode.SYSTEM -> systemDark
         ThemeMode.LIGHT -> false
@@ -45,7 +45,12 @@ internal class ThemePreferenceStore(directory: File, private val legacyDynamic: 
 
     suspend fun current(): ThemePreference = lock.withLock { read().also { shared.committed.value = it } }
     suspend fun setMode(mode: ThemeMode) { lock.withLock { persist(read().copy(mode = mode)) } }
-    suspend fun setDynamic(dynamic: Boolean) { lock.withLock { persist(read().copy(dynamic = dynamic)) } }
+    suspend fun setDynamic(dynamic: Boolean) { lock.withLock { persist(read().copy(dynamic = dynamic, themeKey = null)) } }
+    suspend fun setTheme(key: String) { lock.withLock { persist(read().copy(themeKey = key, dynamic = false)) } }
+    suspend fun clearUnavailableTheme(expected: String) { lock.withLock {
+        val current = read()
+        if (current.themeKey == expected) persist(current.copy(themeKey = null, dynamic = false))
+    } }
 
     private fun checkPaths() {
         check(Files.notExists(root, NOFOLLOW_LINKS) || Files.isDirectory(root, NOFOLLOW_LINKS))
@@ -96,16 +101,21 @@ internal class ThemePreferenceSerializer(legacyDynamic: Boolean = true) : OkioSe
         try {
             require(bytes.size <= 4096)
             val value = Json.parseToJsonElement(bytes.toString(Charsets.UTF_8)).jsonObject
-            require(value.keys == setOf("mode", "dynamic"))
+            require(value.keys == setOf("mode", "dynamic") || value.keys == setOf("mode", "dynamic", "themeKey"))
             val mode = value.getValue("mode").jsonPrimitive
             val dynamic = value.getValue("dynamic").jsonPrimitive
             require(mode.isString && !dynamic.isString)
-            return ThemePreference(ThemeMode.valueOf(mode.content), requireNotNull(dynamic.booleanOrNull))
+            val themeKey = value["themeKey"]?.let {
+                if (it == JsonNull) null else it.jsonPrimitive.also { key -> require(key.isString) }.content.also { key ->
+                    require(key.length <= 265 && Regex("[a-zA-Z0-9_.-]+/[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}").matches(key))
+                }
+            }
+            return ThemePreference(ThemeMode.valueOf(mode.content), requireNotNull(dynamic.booleanOrNull), themeKey)
         } catch (error: Exception) {
             throw CorruptionException("Invalid theme preference", error)
         }
     }
     override suspend fun writeTo(t: ThemePreference, sink: BufferedSink) {
-        sink.writeUtf8(buildJsonObject { put("mode", t.mode.name); put("dynamic", t.dynamic) }.toString())
+        sink.writeUtf8(buildJsonObject { put("mode", t.mode.name); put("dynamic", t.dynamic); put("themeKey", t.themeKey) }.toString())
     }
 }

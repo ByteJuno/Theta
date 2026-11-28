@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="plugin_theme_heading">Plugin themes</string>
+    <string name="plugin_theme_empty">Import and enable a data ZIP containing themes to add a skin here.</string>
+    <string name="plugin_theme_label">%1$s · %2$s (%3$s)</string>
+    <string name="plugin_theme_safety">Only readable themes from enabled data plugins are listed. Safety warnings keep host colors. Rejected themes are reported in Plugins and diagnostics.</string>
+    <string name="plugin_theme_fallback">The selected theme is unavailable. Theta brand colors have been restored.</string>
+    <string name="plugin_theme_load_failed">Themes could not be loaded. Theta brand colors remain available. Check Plugins and diagnostics, then retry.</string>
+</resources>

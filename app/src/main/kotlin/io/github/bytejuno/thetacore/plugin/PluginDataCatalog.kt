@@ -176,7 +176,11 @@ internal class PluginDataCatalog(
         var text: String? = null
         validateSelection(selection.manifest.id, current) { name, bytes ->
             paths += name
-            if (name == path) text = dataUtf8(bytes)
+            if (name == path) text = if (name.startsWith("themes/")) {
+                // Invalid theme bytes are isolated by readThemes, not a package failure.
+                // The management preview stays inert and readable even for invalid UTF-8.
+                bytes.toString(Charsets.UTF_8).map { if (it.isISOControl() && it !in "\n\r\t") '\uFFFD' else it }.joinToString("")
+            } else dataUtf8(bytes)
         }.also { dataRequire(it == selection.manifest, "Selected manifest changed") }
         dataRequire(path == null || text != null, "Unknown data resource")
         return PluginDataContent(paths.toList(), text)

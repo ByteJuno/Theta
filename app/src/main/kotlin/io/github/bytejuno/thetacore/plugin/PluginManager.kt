@@ -125,7 +125,8 @@ internal class PluginManager(context: Context) {
     private val recoveryBlocked = mutableSetOf<String>()
     // 已安排更新或回滚的 ID：这个进程里不能再加载，等冷启动切换。
     private val deferred = mutableSetOf<String>()
-    private var restored = false
+    private var restored by mutableStateOf(false)
+    val dataThemesReady get() = restored
     private var skipLoading = false
     private var skipDataLoading = false
     var dataRecoveryBlocked by mutableStateOf(false)
@@ -431,6 +432,24 @@ internal class PluginManager(context: Context) {
             if (isDataPageActive(page)) result += withContext(Dispatchers.IO) { dataCatalog.readMcpPresets(page.selection) }
         }
         result.sortedBy { it.key }
+    }
+
+    suspend fun activeThemes(): List<io.github.bytejuno.thetacore.ui.theme.PluginTheme> = operation {
+        // Theme observers must not race the Activity's skip_plugins restore decision.
+        if (!restored) return@operation emptyList()
+        val collected = mutableListOf<io.github.bytejuno.thetacore.ui.theme.PluginTheme>()
+        for (page in dataPlugins.filter { it.active }) {
+            try {
+                val result = withContext(Dispatchers.IO) { dataCatalog.readThemes(page.selection) }
+                collected += result.themes
+                result.errors.forEach { if (it !in failures) failures += it }
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+                quarantineDataPage(dataInventory, dataPlugins, page, "Invalid theme archive")
+                failures += "${page.selection.manifest.id}: theme archive isolated"
+            }
+        }
+        collected.sortedBy { it.key }
     }
 
     suspend fun activeProviderTemplates(): List<ProviderTemplate> = operation {

@@ -20,12 +20,13 @@ internal fun ColumnScope.ChatReadingFlow(snapshot: ChatUiSnapshot, actions: Chat
     val state = snapshot.chat
     val stream = snapshot.stream
     val listState = rememberLazyListState()
+    val tokens = io.github.bytejuno.thetacore.ui.theme.LocalThetaThemeTokens.current
     LaunchedEffect(state.messages.size, stream.isNotEmpty(), state.active, state.error, snapshot.draft.error, state.pending) {
         if (!state.showingOlder && listState.layoutInfo.totalItemsCount > 0)
             listState.animateScrollToItem(listState.layoutInfo.totalItemsCount - 1)
     }
     if (state.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
-    LazyColumn(Modifier.weight(1f).fillMaxWidth(), state = listState, verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    LazyColumn(Modifier.weight(1f).fillMaxWidth(), state = listState, verticalArrangement = Arrangement.spacedBy(tokens.messageGap)) {
         if (state.personaUnavailable) item { Text(strings.get(R.string.chat_persona_unavailable)) }
         if (state.personaRecovered) item { Text(strings.get(R.string.chat_persona_recovered)) }
         if (state.older != null && !state.active && !state.pending) item {
@@ -52,7 +53,7 @@ internal fun ColumnScope.ChatReadingFlow(snapshot: ChatUiSnapshot, actions: Chat
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(strings.get(replyReason(reply.reason)), style = MaterialTheme.typography.labelLarge)
                 reply.partial.parts.forEach { part -> when (part) {
-                    is ContentPart.Text -> MarkdownText(part.text)
+                    is ContentPart.Text -> ChatAssistantBody { MarkdownText(part.text) }
                     is ContentPart.Reasoning -> part.summary?.let { ChatReasoning(it) }
                     else -> Unit
                 } }
@@ -66,7 +67,7 @@ internal fun ColumnScope.ChatReadingFlow(snapshot: ChatUiSnapshot, actions: Chat
         }
         if (stream.isNotEmpty()) item {
             Text(strings.get(R.string.chat_assistant), style = MaterialTheme.typography.labelLarge)
-            MarkdownText(stream)
+            ChatAssistantBody { MarkdownText(stream) }
         }
         state.reasoningAdjustment?.let { adjustment -> item { ChatReasoningNotice(adjustment) } }
         if (state.notice != null || chatDiagnostic(state) != null) item {

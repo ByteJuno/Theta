@@ -16,6 +16,7 @@ import io.github.bytejuno.thetacore.uiStrings
 internal fun AppearanceSettingsScreen(back: () -> Unit) {
     val strings = uiStrings()
     val state = LocalThemePreferenceState.current
+    val choices = LocalThemeChoices.current
     val enabled = !state.loading && !state.saving
     SettingsPage(strings.get(R.string.settings_appearance), back, canGoBack = !state.saving) {
         if (state.loading || state.saving) LinearProgressIndicator(Modifier.fillMaxWidth())
@@ -29,11 +30,23 @@ internal fun AppearanceSettingsScreen(back: () -> Unit) {
             ThemeOption(strings.get(label), state.preference.mode == mode, enabled) { state.setMode(mode) }
         }
         Text(strings.get(R.string.settings_theme_palette), style = MaterialTheme.typography.titleMedium)
-        ThemeOption(strings.get(R.string.chat_dynamic_color), state.preference.dynamic, enabled) { state.setDynamic(true) }
-        ThemeOption(strings.get(R.string.settings_theme_brand), !state.preference.dynamic, enabled) { state.setDynamic(false) }
+        val selected = choices.themes.any { it.key == state.preference.themeKey }
+        ThemeOption(strings.get(R.string.chat_dynamic_color), state.preference.themeKey == null && state.preference.dynamic, enabled) { state.setDynamic(true) }
+        ThemeOption(strings.get(R.string.settings_theme_brand), !selected && (state.preference.themeKey != null || !state.preference.dynamic), enabled) { state.setDynamic(false) }
+        if (state.themeUnavailable) Text(strings.get(R.string.plugin_theme_fallback))
+        Text(strings.get(R.string.plugin_theme_heading), style = MaterialTheme.typography.titleMedium)
+        if (choices.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
+        if (choices.failed) {
+            Text(strings.get(R.string.plugin_theme_load_failed), color = MaterialTheme.colorScheme.error)
+            TextButton(onClick = choices.reload, enabled = enabled && !choices.loading) { Text(strings.get(R.string.chat_provider_reload)) }
+        }
+        if (!choices.loading && choices.themes.isEmpty()) Text(strings.get(R.string.plugin_theme_empty))
+        choices.themes.forEach { theme ->
+            ThemeOption(strings.get(R.string.plugin_theme_label, theme.displayName, theme.selection.manifest.name, theme.selection.manifest.id),
+                state.preference.themeKey == theme.key, enabled && !choices.loading) { state.setTheme(theme.key) }
+        }
+        Text(strings.get(R.string.plugin_theme_safety), style = MaterialTheme.typography.bodyMedium)
         HorizontalDivider()
-        Text(strings.get(R.string.settings_future_themes), style = MaterialTheme.typography.titleMedium)
-        Text(strings.get(R.string.settings_future_themes_detail), style = MaterialTheme.typography.bodyMedium)
         Text(strings.get(R.string.settings_future_chat), style = MaterialTheme.typography.titleMedium)
         Text(strings.get(R.string.settings_future_chat_detail), style = MaterialTheme.typography.bodyMedium)
     }
