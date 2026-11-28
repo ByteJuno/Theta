@@ -172,7 +172,7 @@ internal class AndroidHostEnvironmentDetector(
             shizukuManagerInstalled = shizukuInstalled,
             shizukuServiceConfirmed = false,
             suBinaryDetected = suDetected,
-            rootGrantConfirmed = false,
+            rootGrantConfirmed = io.github.bytejuno.thetacore.root.RootRuntime.rootReady,
             lsposedConnected = lsposed,
         )
     }
