@@ -85,7 +85,8 @@ internal class PluginRuntime(val context: HostPluginContext, val version: Long) 
     var closeFailed = false
 }
 
-internal class PluginManager(context: Context) {
+internal class PluginManager(context: Context,
+    private val themeLifecycle: PluginThemeLifecycle = PluginThemeLifecycle(context.applicationContext)) {
     private val app = context.applicationContext
     val outputSurfaces = PluginOutputSurfaces.android(executionBudget)
     private companion object {
@@ -113,7 +114,6 @@ internal class PluginManager(context: Context) {
     private val store = PluginStore(app.filesDir, app.cacheDir, PlatformPluginSignatureVerifier(app.packageManager), stageCleanup)
     private val states = PluginStateStore(app.filesDir)
     private val dataCatalog = PluginDataCatalog(app.filesDir, THETA_API_LEVEL, cleanup = stageCleanup)
-    private val themeLifecycle = PluginThemeLifecycle(app)
     val dataPlugins = mutableStateListOf<ManagedPluginData>()
     val dataInventory = mutableStateListOf<ManagedDataRecord>()
     private val updates = PluginUpdates(app.filesDir, store)
@@ -170,7 +170,7 @@ internal class PluginManager(context: Context) {
         val restoredData = if (policy?.skipData == true) emptyList() else
             withContext(Dispatchers.IO) { dataCatalog.restoreInventory(messages::add, crashSuspects) }
         restoredData.forEach { replaceDataInventory(dataInventory, dataPlugins, it, skipDataLoading) }
-        themeLifecycle.restore(dataPlugins.toList())
+        themeLifecycle.reconcile(dataCatalog, dataPlugins.toList())
         val installed = withContext(Dispatchers.IO) {
             try { store.cleanupColdStages() }
             catch (e: Exception) { messages += "Code stage cleanup failed: ${e.message}" }
@@ -346,6 +346,9 @@ internal class PluginManager(context: Context) {
         restoreInternal()
         dataRequire(!dataRecoveryBlocked, "Data recovery mode; importing unavailable", PluginFailureReason.DATA_RECOVERY)
         dataRequire(!session.closed && session.source == null && session.data === staged, "Unknown data confirmation", PluginFailureReason.CONFIRMATION_EXPIRED)
+        // Repair a failed revocation against the OLD inventory before replacement can make
+        // its theme available again. A failed commit leaves the confirmation owned by session.
+        themeLifecycle.reconcile(dataCatalog, dataPlugins.toList(), staged.manifest.id)
         session.data = null // ownership transfers to install, disposal cannot delete it.
         val selected = withContext(Dispatchers.IO) { dataCatalog.install(staged, digest, acknowledged) }
         if (stageCleanup.hasPending) failures += "Data installed; import cleanup pending; use Retry import cleanup"
@@ -353,6 +356,9 @@ internal class PluginManager(context: Context) {
             dataCatalog.managementRecord(selected.manifest.id, crashQuarantined = true)
         } else PluginDataRecord(selected.manifest.id, selected.state, selected)
         replaceDataInventory(dataInventory, dataPlugins, record, skipDataLoading)
+        // Installation is already durable: publish its actual inventory even if preferences
+        // cannot commit. Cold restore and the next install retry this exact-theme check.
+        themeLifecycle.reconcile(dataCatalog, dataPlugins.toList(), selected.manifest.id)
     }
 
     suspend fun setDataEnabled(id: String, enabled: Boolean) = operation {

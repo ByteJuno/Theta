@@ -6,13 +6,20 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 /** Invoked under PluginManager.operations, independently of Activity/Compose observation. */
-internal class PluginThemeLifecycle(context: Context) {
-    private val preferences = ThemePreferenceStore(context.noBackupFilesDir)
+internal class PluginThemeLifecycle(context: Context,
+    private val preferences: ThemePreferenceStore = ThemePreferenceStore(context.noBackupFilesDir)) {
 
     suspend fun revoke(id: String) = withContext(Dispatchers.IO) { preferences.clearPluginTheme(id) }
 
-    suspend fun restore(pages: List<ManagedPluginData>) = withContext(Dispatchers.IO) {
-        preferences.retainPluginThemes(pages.filter { it.active }.map { it.selection.manifest.id }.toSet())
+    suspend fun reconcile(catalog: PluginDataCatalog, pages: List<ManagedPluginData>, pluginId: String? = null) = withContext(Dispatchers.IO) {
+        val key = preferences.current().themeKey ?: return@withContext
+        val owner = key.substringBefore('/')
+        if (pluginId != null && owner != pluginId) return@withContext
+        val page = pages.singleOrNull { it.active && it.selection.manifest.id == owner }
+        val available = page != null && catalog.readThemes(page.selection).themes.any { it.key == key }
+        // An active package may have removed or invalidated this particular theme. Comparing
+        // the exact key again under the preference mutex preserves a newer user selection.
+        if (!available) preferences.clearUnavailableTheme(key)
     }
 
     suspend fun quarantine(inventory: MutableList<ManagedDataRecord>, pages: MutableList<ManagedPluginData>,

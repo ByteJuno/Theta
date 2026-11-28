@@ -24,6 +24,9 @@ import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import java.io.File
+import android.net.Uri
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 import java.nio.file.Files
 
 /** Real Compose layout/semantics and persistence, not a device pixel-rendering claim. */
@@ -32,7 +35,8 @@ import java.nio.file.Files
 class PluginThemeUiTest {
     @get:Rule val rule = createEmptyComposeRule()
 
-    private fun screen(fontScale: Float = 1f, dark: Boolean = false, skipPlugins: Boolean = false, block: Harness.() -> Unit) {
+    private fun screen(fontScale: Float = 1f, dark: Boolean = false, skipPlugins: Boolean = false,
+        beforeThemeCommit: (Context) -> Unit = {}, block: Harness.() -> Unit) {
         val controller = Robolectric.buildActivity(ComponentActivity::class.java).setup().visible()
         val root = Files.createTempDirectory("theta-theme-ui").toFile()
         try {
@@ -52,7 +56,14 @@ class PluginThemeUiTest {
             val catalog = PluginDataCatalog(context.filesDir, 1)
             installPromptBundle(catalog, mapOf("themes/ocean.json" to """{"id":"ocean","displayName":"Ocean 海洋",
                 "light":{"assistantText":"#101030"},"dark":{"assistantText":"#FFFFFF"},"cornerScale":1.5,"messageStyle":"compact"}"""))
-            val manager = PluginManager(context)
+            val fileSystem = object : okio.ForwardingFileSystem(okio.FileSystem.SYSTEM) {
+                override fun atomicMove(source: okio.Path, target: okio.Path) {
+                    beforeThemeCommit(context)
+                    super.atomicMove(source, target)
+                }
+            }
+            val manager = PluginManager(context, PluginThemeLifecycle(context,
+                ThemePreferenceStore(context.noBackupFilesDir, fileSystem = fileSystem)))
             val harness = Harness(manager, context)
             val view = ComposeView(activity)
             activity.setContentView(view)
@@ -107,6 +118,39 @@ class PluginThemeUiTest {
             rule.onNodeWithText("Ocean 海洋", substring = true).performScrollTo().performClick()
             await { !state.saving && state.preference.themeKey == "test.prompts/ocean" }
         }
+        suspend fun installVersion(version: Int, theme: Boolean = true, id: String = "test.prompts") {
+            val archive = context.cacheDir.resolve("$id-$version.zip")
+            ZipOutputStream(archive.outputStream()).use { zip ->
+                val entries = linkedMapOf("theta-plugin.json" to
+                    """{"schema":1,"type":"data","id":"$id","name":"Themes","version":"$version","versionCode":$version,"apiLevel":1}""")
+                if (theme) entries["themes/ocean.json"] = """{"id":"ocean","displayName":"Ocean 海洋","messageStyle":"compact"}"""
+                else entries["skills/read/SKILL.md"] = "# Read"
+                entries.forEach { (path, text) ->
+                    zip.putNextEntry(ZipEntry(path)); zip.write(text.toByteArray()); zip.closeEntry()
+                }
+            }
+            val session = PluginImportSession()
+            try {
+                val staged = requireNotNull(manager.stageData(Uri.fromFile(archive), session))
+                manager.installData(session, staged, staged.sha256, true)
+            } finally { manager.discardImport(session) }
+        }
+        suspend fun assertDiskBrand() {
+            val file = context.noBackupFilesDir.resolve(ThemePreferenceStore.FILE_NAME)
+            assertEquals(ThemePreference(dynamic = false), ThemePreferenceSerializer().readFrom(okio.Buffer().write(file.readBytes())))
+        }
+        fun assertLiveAndRecreatedBrand() {
+            await { !state.loading && !state.saving && !choices.loading }
+            assertEquals(ThemePreference(dynamic = false), state.preference)
+            assertEquals(thetaBrandScheme(false).primary, colors.primary)
+            assertEquals(MessageStyle.EDITORIAL, tokens.messageStyle)
+            val previous = state
+            rule.runOnIdle { appearanceGeneration++ }
+            await { state !== previous && !state.loading && !choices.loading }
+            assertEquals(ThemePreference(dynamic = false), state.preference)
+            assertEquals(thetaBrandScheme(false).primary, colors.primary)
+            assertEquals(MessageStyle.EDITORIAL, tokens.messageStyle)
+        }
         fun revoke(action: suspend () -> Unit) {
             lateinit var work: Deferred<Unit>
             rule.runOnIdle { work = scope.async { action() } }
@@ -154,6 +198,88 @@ class PluginThemeUiTest {
         assertEquals(ThemePreference(dynamic = false), state.preference)
         assertEquals(thetaBrandScheme(false).primary, colors.primary)
         assertEquals(MessageStyle.EDITORIAL, tokens.messageStyle)
+    }
+
+    @Test fun updateRemovingSelectedThemeCannotReselectItBeforeNextFrame() = screen {
+        select()
+        beforeNextFrame {
+            installVersion(2, theme = false)
+            assertTrue(manager.activeThemes().isEmpty())
+            assertDiskBrand()
+            installVersion(3)
+            assertDiskBrand()
+            assertEquals(1, manager.activeThemes().size)
+        }
+        assertLiveAndRecreatedBrand()
+    }
+
+    @Test fun replacementAfterFailedQuarantineRevocationCannotReselectBeforeNextFrame() = screen {
+        select()
+        beforeNextFrame {
+            val page = manager.dataPlugins.single()
+            val archive = files.resolve("plugins/test.prompts/1/plugin.zip")
+            val originalArchive = archive.readBytes()
+            archive.writeBytes(byteArrayOf(1, 2, 3))
+            val file = context.noBackupFilesDir.resolve(ThemePreferenceStore.FILE_NAME)
+            val bytes = file.readBytes()
+            check(file.delete()); check(file.mkdir())
+            try {
+                try { manager.readDataPage(page, null); fail("Quarantine must report failed revocation") }
+                catch (_: IllegalStateException) { }
+                assertTrue(manager.dataPlugins.isEmpty())
+            } finally { check(file.delete()); file.writeBytes(bytes); archive.writeBytes(originalArchive) }
+            installVersion(2)
+            assertDiskBrand()
+            assertEquals(1, manager.activeThemes().size)
+        }
+        assertLiveAndRecreatedBrand()
+    }
+
+    @Test fun committedInstallWithFailedThemeWriteBlocksReplacementAndColdRestoreClearsExactMissingKey() = screen(
+        beforeThemeCommit = { context ->
+            if (PluginDataCatalog(context.filesDir, 1).managementRecord("test.prompts").state.version == 2L)
+                throw java.io.IOException("Theme preference replacement unavailable after install commit")
+        }
+    ) {
+        select()
+        beforeNextFrame {
+            try { installVersion(2, theme = false); fail("Installed update must report failed preference commit") }
+            catch (_: java.io.IOException) { }
+            assertEquals(2L, manager.dataPlugins.single().selection.state.version)
+            assertEquals(2L, PluginDataCatalog(files, 1).managementRecord("test.prompts").state.version)
+            assertTrue(manager.activeThemes().isEmpty())
+            val preferences = ThemePreferenceStore(context.noBackupFilesDir)
+            assertEquals("test.prompts/ocean", preferences.current().themeKey)
+            try { installVersion(3); fail("Replacement must finish pending revocation first") }
+            catch (_: java.io.IOException) { }
+            assertEquals(2L, PluginDataCatalog(files, 1).managementRecord("test.prompts").state.version)
+            assertEquals(2L, manager.dataPlugins.single().selection.state.version)
+            val restored = PluginManager(context)
+            restored.restore()
+            assertTrue(restored.activeThemes().isEmpty())
+            assertDiskBrand()
+            installVersion(3)
+            assertEquals(1, manager.activeThemes().size)
+            assertDiskBrand()
+        }
+        assertLiveAndRecreatedBrand()
+    }
+
+    @Test fun updatesKeepExistingThemeAndNeverRevokeAnotherPluginsNewSelection() = screen {
+        select()
+        beforeNextFrame {
+            val preferences = ThemePreferenceStore(context.noBackupFilesDir)
+            installVersion(2)
+            assertEquals("test.prompts/ocean", preferences.current().themeKey)
+            installVersion(1, id = "other.plugin")
+            preferences.setTheme("other.plugin/ocean")
+            installVersion(3, theme = false)
+            assertEquals("other.plugin/ocean", preferences.current().themeKey)
+            PluginManager(context).restore()
+            assertEquals("other.plugin/ocean", preferences.current().themeKey)
+        }
+        await { !choices.loading && state.preference.themeKey == "other.plugin/ocean" }
+        assertEquals(MessageStyle.COMPACT, tokens.messageStyle)
     }
 
     @Test fun failedPreferenceCommitBlocksReenableUntilRevocationCanBePersisted() = screen {
