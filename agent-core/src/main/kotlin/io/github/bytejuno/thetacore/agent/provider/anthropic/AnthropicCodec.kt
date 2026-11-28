@@ -31,14 +31,20 @@ class AnthropicCodec(private val config: AnthropicConfig, private val mediaReade
         }.toString())
     }
 
+    fun prepareToolMedia(source: ChatRequest, checkAvailability: Boolean = true): ChatRequest =
+        availableToolMediaRequest(source, mediaReader, checkAvailability) {
+            it.kind == MediaKind.IMAGE && it.blob.mimeType in setOf("image/jpeg", "image/png", "image/webp", "image/gif") &&
+                it.blob.sizeBytes in 1L..ImageLimits.BYTES.toLong()
+        }
+
     fun encode(source: ChatRequest, diagnostics: (ToolSchemaPreparation) -> Unit = {}): String {
-        val request = toolMediaRequest(source) { it == MediaKind.IMAGE }
+        val request = prepareToolMedia(source)
         require(ImagePayloadBudget.admitsMessages(request.messages))
         return encodeInternal(request, true, diagnostics)
     }
 
     fun estimateRequestBytes(source: ChatRequest): Long {
-        val request = toolMediaRequest(source) { it == MediaKind.IMAGE }
+        val request = prepareToolMedia(source, checkAvailability = mediaReader != null)
         return encodeInternal(request, false).toByteArray(Charsets.UTF_8).size.toLong() +
         request.messages.sumOf { m -> m.mediaParts().sumOf {
             OpenAiChatCodec.IMAGE_BUDGET_BASE_BYTES + it.blob.sizeBytes / OpenAiChatCodec.IMAGE_BUDGET_SIZE_DIVISOR

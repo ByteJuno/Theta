@@ -26,6 +26,67 @@ class ScreenToolIntegrationTest {
         BindingValue.copyOf(callBinding("test", name, null, 0, "wire")), "chain-$name", session, "run", name,
         0, args, definition, false, definition.initialRisk)
 
+    @Test fun missingScreenshotRetainsStorageReasonAcrossReopenWithoutChangingUnknownEvidence() {
+        val directory = Files.createTempDirectory("screen-media-recovery")
+        val file = directory.resolve(AgentDatabase.FILE_NAME)
+        val driver = androidx.sqlite.driver.bundled.BundledSQLiteDriver()
+        val gate = DefinitionGate()
+        val d = FrozenDefinition("host/capture", "capture", "capture", "capture", "{\"type\":\"object\"}",
+            Risk.READ, Source.FIRST_PARTY, "host", "1", 1, false, "screen", false, null)
+        val i = input(d, "capture", "{}")
+        gate.install(d); gate.freezeRun("run", listOf(d))
+        val bytes = java.util.Base64.getDecoder().decode("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7")
+        var original: InvocationRecord? = null
+        var ref: io.github.bytejuno.thetacore.agent.ledger.BlobRef? = null
+        var request: ChatRequest? = null
+        try {
+            SqliteInvocationStore.open(file, driver).use { store ->
+                val ledger = InvocationLedger(store, gate, ArgumentsValidator { _, _ -> true })
+                ledger.recoverColdStart("initial")
+                ledger.recordInvocation(i)
+                val ready = ledger.validateAndPrepare(i.binding.callId) as Mutation.Applied
+                val ticket = (ledger.claimExecution(ready.record.callId, ready.record.revision) as Mutation.Applied).ticket!!
+                val output = ToolOutputNormalizer.normalize(listOf(OutputPart.Media(
+                    io.github.bytejuno.thetacore.agent.ledger.MediaKind.IMAGE, "image/gif", bytes)), null, false,
+                    Effect.UNKNOWN, null, ArgumentsValidator { _, _ -> true }, null)
+                ledger.recordToolOutput(ticket.callId, ticket.attemptId, Status.SUCCEEDED, output, Effect.UNKNOWN)
+                ledger.recordActualExit(ticket.callId, ticket.attemptId, "complete")
+                original = ledger.get(ticket.callId)
+                ref = output.stored.media.single()
+                request = chatRequest("vision") { messages = listOf(message(Role.USER, textPart("Look")),
+                    message(Role.ASSISTANT, toolCallPart(i.binding, d.modelName, "{}")),
+                    ledger.resultsForStep("session", "run", "capture", listOf(ticket.callId))!!) }
+                assertArrayEquals(bytes, ScreenModelMedia(ledger, "session", MediaContentReader { null }).reader
+                    .read(request!!.messages.last().mediaParts().single().blob))
+            }
+            driver.open(file.toString()).use { db ->
+                db.prepare("DELETE FROM content_chunks WHERE hash=?").use { statement ->
+                    statement.bindText(1, ref!!.contentHash); statement.step()
+                }
+            }
+            repeat(2) { pass ->
+                SqliteInvocationStore.open(file, driver).use { store ->
+                    val ledger = InvocationLedger(store, gate, ArgumentsValidator { _, _ -> true })
+                    ledger.recoverColdStart("reopen-$pass")
+                    val reader = ScreenModelMedia(ledger, "session", MediaContentReader { null }).reader
+                    val codec = io.github.bytejuno.thetacore.agent.provider.anthropic.AnthropicCodec(
+                        io.github.bytejuno.thetacore.agent.provider.anthropic.AnthropicConfig("test", "https://example.invalid/v1"), reader)
+                    val prepared = codec.prepareToolMedia(request!!)
+                    val result = prepared.messages.last().parts.single() as ContentPart.ToolResult
+                    assertTrue(result.text.contains("Result content is unavailable: missing or corrupt."))
+                    assertTrue(result.text.contains(ref!!.id))
+                    assertEquals(i.binding.callId, result.callId)
+                    assertTrue(prepared.messages.last().mediaParts().isEmpty())
+                    assertEquals(1, request!!.messages.last().mediaParts().size)
+                    assertTrue(codec.encode(request!!).contains("missing or corrupt"))
+                    assertEquals(original, ledger.get(i.binding.callId))
+                    assertEquals(Effect.UNKNOWN, ledger.get(i.binding.callId)!!.result!!.effect)
+                    assertEquals("screen", ledger.get(i.binding.callId)!!.isolation!!.resource)
+                }
+            }
+        } finally { directory.toFile().deleteRecursively() }
+    }
+
     @Test fun cancelledAndTimedOutWritesStayUnknownAndRetainScreenUntilActualExit() = runBlocking {
         for (timeout in listOf(false, true)) {
             val entered = CompletableDeferred<Unit>(); val cancelled = CompletableDeferred<Unit>(); val exit = CompletableDeferred<Unit>()

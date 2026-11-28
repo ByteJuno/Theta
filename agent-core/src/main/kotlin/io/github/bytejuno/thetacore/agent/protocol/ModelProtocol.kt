@@ -21,6 +21,9 @@ interface ModelProvider {
     fun supportsMediaInput(kind: MediaKind, model: String): Boolean = true
     /** Tool-result media is independent of user image input; unknown adapters use text placeholders. */
     fun supportsToolResultMedia(kind: MediaKind, model: String): Boolean = false
+    /** Project tool attachments before admission, replay or summary; original history is retained. */
+    fun prepareToolMedia(request: ChatRequest): ChatRequest =
+        toolMediaRequest(request) { supportsToolResultMedia(it, request.model) }
     /** Pure request-local admission view matching the adapter's outgoing tool catalog. The host
      * snapshots it before submission and persists rejected calls with their original definitions. */
     fun toolNamesForExecution(request: ChatRequest): Set<String> = request.tools.map { it.name }.toSet()
@@ -108,6 +111,11 @@ private data class MediaBlobValue(
 /** Read-only session-scoped media reader used on demand when encoding outbound multimodal requests. */
 fun interface MediaContentReader {
     fun read(blob: BlobRef): ByteArray?
+    /** Null means readable. Implementations may return a bounded, non-secret storage reason. */
+    fun unavailableReason(blob: BlobRef): String? {
+        val bytes = read(blob) ?: return "unavailable: missing or quarantined"
+        return if (bytes.size.toLong() == blob.sizeBytes) null else "unavailable: size mismatch"
+    }
 }
 
 sealed interface ContentPart {

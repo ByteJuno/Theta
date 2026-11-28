@@ -58,6 +58,13 @@ android {
     }
 }
 
+// Robolectric native assets share a JVM zipfs with other sandboxes. A cold Linux run
+// can close that filesystem while Bitmap initializes; keep every test and assertion,
+// but give each test class its own process (Windows native graphics is unsupported).
+tasks.withType<Test>().configureEach {
+    if (!System.getProperty("os.name").startsWith("Windows")) forkEvery = 1
+}
+
 // Both lintDebug (PR CI) and preBuild enforce host-owned bilingual text.
 val uiResourceParser by configurations.creating
  dependencies { uiResourceParser("org.jetbrains.kotlin:kotlin-compiler-embeddable:2.2.21") }

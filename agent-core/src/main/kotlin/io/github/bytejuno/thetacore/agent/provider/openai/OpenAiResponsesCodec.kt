@@ -39,14 +39,20 @@ class OpenAiResponsesCodec(
                 item.string("encrypted_content") != null) &&
             (item["status"] == null || item.string("status") in setOf("completed", "incomplete"))
 
+    fun prepareToolMedia(source: ChatRequest, checkAvailability: Boolean = true): ChatRequest =
+        availableToolMediaRequest(source, mediaReader, checkAvailability) {
+            config.supportsImageInput && it.kind == MediaKind.IMAGE && it.blob.mimeType in setOf("image/jpeg", "image/png", "image/webp") &&
+                it.blob.sizeBytes in 1L..ImageLimits.BYTES.toLong()
+        }
+
     fun encode(source: ChatRequest, onSchemaDiagnostics: (ToolSchemaPreparation) -> Unit = {}): String {
-        val request = toolMediaRequest(source) { config.supportsImageInput && it == MediaKind.IMAGE }
+        val request = prepareToolMedia(source)
         require(ImagePayloadBudget.admitsMessages(request.messages)) { "Image request exceeds memory budget" }
         return encodeInternal(request, true, onSchemaDiagnostics)
     }
 
     fun estimateRequestBytes(source: ChatRequest): Long {
-        val request = toolMediaRequest(source) { config.supportsImageInput && it == MediaKind.IMAGE }
+        val request = prepareToolMedia(source, checkAvailability = mediaReader != null)
         return encodeInternal(request, false).toByteArray(Charsets.UTF_8).size.toLong() +
         request.messages.sumOf { m -> m.mediaParts().sumOf {
             OpenAiChatCodec.IMAGE_BUDGET_BASE_BYTES + it.blob.sizeBytes / OpenAiChatCodec.IMAGE_BUDGET_SIZE_DIVISOR
@@ -97,8 +103,7 @@ class OpenAiResponsesCodec(
         }.toString()
     }
 
-    private fun history(source: ChatRequest, readMedia: Boolean): JsonArray {
-        val request = toolMediaRequest(source) { config.supportsImageInput && it == MediaKind.IMAGE }
+    private fun history(request: ChatRequest, readMedia: Boolean): JsonArray {
         val output = mutableListOf<JsonElement>()
         var pending = emptyList<ContentPart.ToolCall>()
         val ids = mutableMapOf<String, String>(); val used = mutableSetOf<String>()
