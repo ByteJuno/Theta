@@ -27,6 +27,28 @@ internal class PluginThemeLifecycle(context: Context,
         }
     }
 
+    /** Explicit choices share the manager's lifecycle mutex. Finish every older intent before
+     * committing a new choice, so cold recovery cannot mistake it for the revoked selection. */
+    suspend fun select(catalog: PluginDataCatalog, inventory: MutableList<ManagedDataRecord>,
+        pages: MutableList<ManagedPluginData>, key: String) = withContext(Dispatchers.IO) {
+        recover()
+        val page = pages.singleOrNull { it.active && it.selection.manifest.id == key.substringBefore('/') }
+        dataRequire(page != null, "Theme package is no longer active", PluginFailureReason.DATA_PAGE_REVOKED)
+        val themes = try { catalog.readThemes(requireNotNull(page).selection).themes }
+        catch (cancelled: CancellationException) { throw cancelled }
+        catch (error: Exception) {
+            quarantine(inventory, pages, requireNotNull(page), error.message ?: "Invalid theme archive")
+            throw error
+        }
+        dataRequire(themes.any { it.key == key }, "Theme is no longer available", PluginFailureReason.DATA_PAGE_REVOKED)
+        preferences.setTheme(key)
+    }
+
+    suspend fun selectPalette(dynamic: Boolean) = withContext(Dispatchers.IO) {
+        recover()
+        preferences.setDynamic(dynamic)
+    }
+
     /** Discover isolation without consulting preferences. Journal every unavailable identity
      * before any preference IO; keep pages local until recovery and reconciliation succeed. */
     suspend fun restore(catalog: PluginDataCatalog, onFailure: (String) -> Unit,

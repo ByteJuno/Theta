@@ -2,9 +2,11 @@ package io.github.bytejuno.thetacore.ui.theme
 
 import androidx.compose.runtime.*
 import androidx.compose.ui.platform.LocalContext
+import io.github.bytejuno.thetacore.plugin.PluginManager
 import kotlinx.coroutines.*
 
-internal class ThemePreferenceState(private val store: ThemePreferenceStore, private val scope: CoroutineScope) {
+internal class ThemePreferenceState(private val store: ThemePreferenceStore, private val scope: CoroutineScope,
+    private val manager: PluginManager? = null) {
     var preference by mutableStateOf(ThemePreference()); private set
     var loading by mutableStateOf(true); private set
     var saving by mutableStateOf(false); private set
@@ -26,8 +28,10 @@ internal class ThemePreferenceState(private val store: ThemePreferenceStore, pri
         }
     }
     fun setMode(mode: ThemeMode) = save { store.setMode(mode) }
-    fun setDynamic(dynamic: Boolean) { themeUnavailable = false; save { store.setDynamic(dynamic) } }
-    fun setTheme(key: String) { themeUnavailable = false; save { store.setTheme(key) } }
+    fun setDynamic(dynamic: Boolean) { themeUnavailable = false; save {
+        if (manager != null) manager.selectThemePalette(dynamic) else store.setDynamic(dynamic)
+    } }
+    fun setTheme(key: String) { themeUnavailable = false; save { requireNotNull(manager).selectTheme(key) } }
     fun clearUnavailableTheme(key: String) {
         themeUnavailable = true
         save { store.clearUnavailableTheme(key) }
@@ -47,11 +51,11 @@ internal class ThemePreferenceState(private val store: ThemePreferenceStore, pri
 internal val LocalThemePreferenceState = staticCompositionLocalOf<ThemePreferenceState> { throw IllegalStateException() }
 
 @Composable
-internal fun rememberThemePreferenceState(): ThemePreferenceState {
+internal fun rememberThemePreferenceState(manager: PluginManager? = null): ThemePreferenceState {
     val context = LocalContext.current.applicationContext
     val scope = rememberCoroutineScope()
-    val state = remember(context, scope) {
-        ThemePreferenceState(themePreferenceStore(context), scope)
+    val state = remember(context, scope, manager) {
+        ThemePreferenceState(themePreferenceStore(context), scope, manager)
     }
     LaunchedEffect(state) { state.load() }
     return state

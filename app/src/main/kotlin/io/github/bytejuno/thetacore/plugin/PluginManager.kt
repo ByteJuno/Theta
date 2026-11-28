@@ -445,6 +445,17 @@ internal class PluginManager(context: Context,
         result.sortedBy { it.key }
     }
 
+    suspend fun selectTheme(key: String) = operation {
+        // Never initialize inventory here: startup owns the safe-mode restore policy.
+        dataRequire(restored, "Theme recovery has not finished", PluginFailureReason.DATA_RECOVERY)
+        themeLifecycle.select(dataCatalog, dataInventory, dataPlugins, key)
+    }
+
+    suspend fun selectThemePalette(dynamic: Boolean) = operation {
+        dataRequire(restored, "Theme recovery has not finished", PluginFailureReason.DATA_RECOVERY)
+        themeLifecycle.selectPalette(dynamic)
+    }
+
     suspend fun activeThemes(): List<io.github.bytejuno.thetacore.ui.theme.PluginTheme> = operation {
         // Theme observers must not race the Activity's skip_plugins restore decision.
         if (!restored) return@operation emptyList()

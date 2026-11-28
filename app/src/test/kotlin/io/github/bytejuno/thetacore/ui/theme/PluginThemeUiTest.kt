@@ -119,13 +119,17 @@ class PluginThemeUiTest {
             rule.onNodeWithText("Ocean 海洋", substring = true).performScrollTo().performClick()
             await { !state.saving && state.preference.themeKey == "test.prompts/ocean" }
         }
-        suspend fun installVersion(version: Int, theme: Boolean = true, id: String = "test.prompts") {
+        suspend fun installVersion(version: Int, theme: Boolean = true, id: String = "test.prompts",
+            themeIds: List<String> = if (theme) listOf("ocean") else emptyList()) {
             val archive = context.cacheDir.resolve("$id-$version.zip")
             ZipOutputStream(archive.outputStream()).use { zip ->
                 val entries = linkedMapOf("theta-plugin.json" to
                     """{"schema":1,"type":"data","id":"$id","name":"Themes","version":"$version","versionCode":$version,"apiLevel":1}""")
-                if (theme) entries["themes/ocean.json"] = """{"id":"ocean","displayName":"Ocean 海洋","messageStyle":"compact"}"""
-                else entries["skills/read/SKILL.md"] = "# Read"
+                themeIds.forEach { themeId ->
+                    val name = if (themeId == "ocean") "Ocean 海洋" else "Forest 森林"
+                    entries["themes/$themeId.json"] = """{"id":"$themeId","displayName":"$name","messageStyle":"compact"}"""
+                }
+                if (themeIds.isEmpty()) entries["skills/read/SKILL.md"] = "# Read"
                 entries.forEach { (path, text) ->
                     zip.putNextEntry(ZipEntry(path)); zip.write(text.toByteArray()); zip.closeEntry()
                 }
@@ -469,6 +473,71 @@ class PluginThemeUiTest {
             assertDiskBrand()
             installVersion(3)
             assertEquals(1, manager.activeThemes().size)
+            assertDiskBrand()
+        }
+        assertLiveAndRecreatedBrand()
+    }
+
+    @Test fun newThemeChoiceAfterFailedUpdateRevocationSurvivesColdRestore() {
+        val failCommit = java.util.concurrent.atomic.AtomicBoolean(false)
+        screen(beforeThemeCommit = { if (failCommit.get()) throw java.io.IOException("Preference commit unavailable") }) {
+            select()
+            beforeNextFrame {
+                installVersion(2, themeIds = listOf("ocean", "forest"))
+                failCommit.set(true)
+                try { installVersion(3, themeIds = listOf("forest")); fail("Expected failed revocation commit") }
+                catch (_: java.io.IOException) { }
+                assertEquals(listOf("test.prompts"), PluginThemeRevocations(files).pending())
+                assertEquals("test.prompts/ocean", ThemePreferenceStore(context.noBackupFilesDir).current().themeKey)
+                state.setTheme("test.prompts/forest")
+                withContext(Dispatchers.Default) { withTimeout(5000) { while (state.saving) delay(1) } }
+                assertTrue("A new selection must report unfinished recovery", state.failed)
+                assertEquals("test.prompts/ocean", ThemePreferenceStore(context.noBackupFilesDir).current().themeKey)
+                assertEquals(listOf("test.prompts"), PluginThemeRevocations(files).pending())
+                failCommit.set(false)
+                // The same explicit selection entry used by the appearance screen, without
+                // giving its automatic fallback effect a frame to clear the stale selection.
+                state.setTheme("test.prompts/forest")
+                withContext(Dispatchers.Default) { withTimeout(5000) { while (state.saving) delay(1) } }
+                assertFalse(state.failed)
+                assertTrue("A successful selection must finish older intents", PluginThemeRevocations(files).pending().isEmpty())
+                val file = context.noBackupFilesDir.resolve(ThemePreferenceStore.FILE_NAME)
+                assertEquals("test.prompts/forest", ThemePreferenceSerializer().readFrom(okio.Buffer().write(file.readBytes())).themeKey)
+                val restored = PluginManager(context)
+                restored.restore()
+                assertEquals(listOf("test.prompts/forest"), restored.activeThemes().map { it.key })
+                assertEquals("A completed new choice must outlive the old revocation",
+                    "test.prompts/forest", ThemePreferenceStore(context.noBackupFilesDir).current().themeKey)
+                assertEquals("test.prompts/forest", ThemePreferenceSerializer().readFrom(okio.Buffer().write(file.readBytes())).themeKey)
+                assertTrue(PluginThemeRevocations(files).pending().isEmpty())
+            }
+            await { !choices.loading && state.preference.themeKey == "test.prompts/forest" }
+            assertEquals(MessageStyle.COMPACT, tokens.messageStyle)
+            val previous = state
+            rule.runOnIdle { appearanceGeneration++ }
+            await { state !== previous && !state.loading && !choices.loading }
+            assertEquals("test.prompts/forest", state.preference.themeKey)
+            assertEquals(MessageStyle.COMPACT, tokens.messageStyle)
+        }
+    }
+
+    @Test fun staleThemeChoiceCannotReenterAfterDisableOrSafeModeRestore() = screen {
+        select()
+        beforeNextFrame {
+            manager.setDataEnabled("test.prompts", false)
+            state.setTheme("test.prompts/ocean")
+            withContext(Dispatchers.Default) { withTimeout(5000) { while (state.saving) delay(1) } }
+            assertTrue(state.failed)
+            assertDiskBrand()
+            manager.setDataEnabled("test.prompts", true)
+            // Selection must not initialize a fresh manager ahead of startup's safe-mode flag.
+            val restored = PluginManager(context)
+            try { restored.selectTheme("test.prompts/ocean"); fail("Must await startup restore") }
+            catch (error: PluginPackageException) { assertEquals(PluginFailureReason.DATA_RECOVERY, error.reason) }
+            assertFalse(restored.dataThemesReady)
+            restored.restore(skipPlugins = true)
+            try { restored.selectTheme("test.prompts/ocean"); fail("Safe-mode themes are unavailable") }
+            catch (error: PluginPackageException) { assertEquals(PluginFailureReason.DATA_PAGE_REVOKED, error.reason) }
             assertDiskBrand()
         }
         assertLiveAndRecreatedBrand()

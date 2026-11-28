@@ -37,7 +37,7 @@ internal val LocalThetaThemeTokens = staticCompositionLocalOf { thetaTokens(thet
 internal fun ThetaTheme(systemDark: Boolean = isSystemInDarkTheme(), manager: io.github.bytejuno.thetacore.plugin.PluginManager? = null,
     content: @Composable () -> Unit) {
     val context = LocalContext.current
-    val state = rememberThemePreferenceState()
+    val state = rememberThemePreferenceState(manager)
     val dark = state.preference.isDark(systemDark)
     val choices = rememberPluginThemeChoices(manager)
     fun base(isDark: Boolean, dynamic: Boolean): ColorScheme = if (dynamic && Build.VERSION.SDK_INT >= 31) {
