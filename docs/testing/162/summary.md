@@ -27,3 +27,12 @@ Final fetched main: `7df1b70981cc555e5ea529db98a42f4f7f9e701f`
 - 新增 `ThemePreferenceStateTest` 覆盖两个页面状态的模式与配色同步、原子替换失败保持旧值及重试。最终 GPU 定向运行 `:app:testDebugUnitTest --tests '*ThemePreferenceStoreTest' --tests '*ThemePreferenceStateTest' --tests '*ThemeStorageReviewProbe'`，10 项通过、0 失败；其中 2 项为不提交的审核探针。未重复完整 preflight。
 - 保留现有原子写入方式的具体理由：实测仓库已用的 AndroidX DataStore 1.1.7 / OkioStorage 在注入 atomicMove 失败后抛出异常，但其可观察缓存已变为 DARK，磁盘仍为 LIGHT，不满足本功能“保存失败保留旧值”的要求。重试能够修复磁盘；不能宣称它无法重试。对照探针先后否定了“失败缓存回滚”和“同值重试跳过写入”的假设，修正断言后全部通过。此处仅记录摘要，探针及原始输出不进入 Git。
 - 本次未生成 APK、未运行设备或模拟器，视觉未验证；最终提交仍须由外层执行原有合并前回归，不能沿用旧提交的 APK 或设备结果。
+
+
+## 当前合并 head 的审核补充（入口 `df2d4a25af7bde0ceaf6fb0fbc3d70498fce8fef`）
+
+- 仍属第 2 轮审核，写手此前累计退回 1 次；上文 `680d2210` 的 S1 失败记录不变。已核对原 preflight 的实现树、`bd7a3d8` 主题同步修复及其定向测试摘要；合并 main 后主题和 S1 搜索脚本未变，没有重复完整测试。固定 API 扫描通过；本 PR 没有新增或升级依赖，23 对新增设置文案键一致。
+- 修复提交：`d093ef7539561d75c1c3b37b3dff18d2e38787c7`。GPU 上用真实 Compose runtime 和本 PR 的 SaveableStateProvider 切换方式复现：同一待填写工具请求，进入设置前已有 `unfinished answer`，返回后表单的 remember 状态变为空。聊天路由现在持有按请求 ID 隔离的临时输入及提交状态，请求结束时清理；不写入磁盘或 Activity saved state。
+- 修复后同一生命周期探针输出保留的 `message=unfinished answer`。GPU 定向命令 `:app:testDebugUnitTest --tests '*ToolInputDraftsTest' --tests '*ToolInputPresentationTest' --tests '*SettingsNavigationTest' --tests '*SettingsReadingReturnProbe.pendingInputSurvivesSettingsDisposal'`：12 项通过，0 失败，其中 1 项为不提交的审核探针。提交的 3 项回归覆盖输入/提交状态保留、请求结束清理及页面所有者隔离。
+- 探针使用 JVM 日志/追踪桩以运行 Compose 生命周期，不是 Android 界面渲染。初次探针未生成导致 0 项执行，以及日志/追踪桩异常和输入观察脚手架失败，均不作为产品缺陷证据。另一个阅读位置探针显示效果会重启，但真实 LazyListState 在该重建条件下条目数为 0、未触发滚动，因此没有据此报告阅读位置缺陷。
+- 本次未生成 APK、未操作设备，视觉未验证。上一轮 S1 失败是否消除、当前完整界面与交互以及最终提交的合并前回归，仍由外层在最终提交执行；本次 JVM 结果不替代设备证据。所有探针与原始输出均未提交。
