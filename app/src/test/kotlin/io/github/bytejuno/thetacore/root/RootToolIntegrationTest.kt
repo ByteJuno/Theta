@@ -110,4 +110,38 @@ class RootToolIntegrationTest {
             assertNotEquals(InstanceState.UNCONFIRMED, service.ledger.get(i.binding.callId)!!.instance!!.state)
         }
     }
+
+    @Test fun missingReceiptsRetainUnknownLedgerAndResourceUntilPositiveExitEvidence() = runBlocking {
+        val directory = Files.createTempDirectory("theta-root-missing-").toFile()
+        val client = object : java.lang.Process() {
+            override fun getInputStream() = java.io.ByteArrayInputStream(byteArrayOf())
+            override fun getErrorStream() = java.io.ByteArrayInputStream(byteArrayOf())
+            override fun getOutputStream() = java.io.ByteArrayOutputStream()
+            override fun waitFor() = 1
+            override fun exitValue() = 1
+            override fun destroy() = Unit
+        }
+        val process = SuRootProcess(client, directory)
+        val entered = CompletableDeferred<Unit>()
+        try {
+            fixture(ApprovalPolicy(mode = { ApprovalMode.FULL_AUTO }), RootBackend { entered.complete(Unit); process }) { service, d ->
+                val i = input(d)
+                try {
+                    service.prepare(i); service.dispatch(i.binding.callId)
+                    withTimeout(5_000) { entered.await() }
+                    service.cancel(i.binding.callId)
+                    val cancelled = service.ledger.get(i.binding.callId)!!
+                    assertEquals(Status.CANCELLED, cancelled.state)
+                    assertEquals(Effect.UNKNOWN, cancelled.result!!.effect)
+                    assertEquals(InstanceState.UNCONFIRMED, cancelled.instance!!.state)
+                    assertFalse(process.actualExit)
+                } finally {
+                    // Simulated backend evidence, never a claim about a real privileged worker.
+                    directory.resolve("clean").writeText("clean")
+                    withTimeout(5_000) { service.awaitObservedExit(i.binding.callId) }
+                }
+                assertEquals(Effect.UNKNOWN, service.ledger.get(i.binding.callId)!!.result!!.effect)
+            }
+        } finally { directory.deleteRecursively() }
+    }
 }

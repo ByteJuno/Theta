@@ -8,6 +8,6 @@ internal object RootRuntime {
     @Volatile var rootReady = false
         private set
     fun tool(context: Context) = HostRootTool(RootBridge(
-        SuRootBackend(File(context.cacheDir, "root-calls")), onRootConfirmed = { rootReady = it },
+        SuRootBackend(File(context.noBackupFilesDir, "root-calls")), onRootConfirmed = { rootReady = it },
     ))
 }

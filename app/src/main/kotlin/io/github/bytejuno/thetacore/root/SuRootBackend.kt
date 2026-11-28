@@ -9,7 +9,7 @@ import kotlin.concurrent.thread
 /** Android API 33 compatible: no ProcessHandle, inherited credentials or startup root check. */
 internal class SuRootBackend(private val scratch: File) : RootBackend {
     override fun start(command: String): RootProcess {
-        scratch.mkdirs()
+        if (!scratch.isDirectory && !scratch.mkdirs()) throw java.io.IOException("Root receipt directory unavailable")
         val directory = java.nio.file.Files.createTempDirectory(scratch.toPath(), "call-").toFile()
         val builder = ProcessBuilder("su", "-c", rootSupervisorScript(command, directory))
         builder.environment().clear()
@@ -38,7 +38,12 @@ internal fun rootSupervisorScript(command: String, directory: File): String {
     val dir = shellQuote(directory.absolutePath)
     val child = """
         d=$dir
-        printf '%s' "${'$'}${'$'}" > "${'$'}d/group"
+        # Fail closed: never execute without a published process-group identity.
+        if ! printf '%s' "${'$'}${'$'}" > "${'$'}d/group"; then
+            printf start_failed > "${'$'}d/rejected"
+            printf not-started > "${'$'}d/not-started"
+            exit 125
+        fi
         if [ -e "${'$'}d/stop" ]; then
             printf 125 > "${'$'}d/code"
             while :; do /system/bin/sleep 1; done
@@ -51,28 +56,38 @@ internal fun rootSupervisorScript(command: String, directory: File): String {
         d=$dir
         # Receipts must be readable by the app UID; the containing directory is app-private 0700.
         umask 022
-        if [ "${'$'}(/system/bin/id -u)" != 0 ]; then printf denied > "${'$'}d/rejected"; exit 125; fi
-        printf ready > "${'$'}d/ready"
-        if [ -e "${'$'}d/stop" ]; then printf clean > "${'$'}d/clean"; exit 125; fi
-        if ! command -v setsid >/dev/null 2>&1; then printf unavailable > "${'$'}d/rejected"; exit 125; fi
-        printf launching > "${'$'}d/launched"
+        reject() {
+            printf '%s' "${'$'}1" > "${'$'}d/rejected"
+            printf not-started > "${'$'}d/not-started"
+            exit 125
+        }
+        [ -d "${'$'}d" ] || exit 125
+        if [ "${'$'}(/system/bin/id -u)" != 0 ]; then reject denied; fi
+        printf ready > "${'$'}d/ready" || reject start_failed
+        if [ -e "${'$'}d/stop" ]; then reject cancelled; fi
+        if ! command -v setsid >/dev/null 2>&1; then reject unavailable; fi
+        printf launching > "${'$'}d/launched" || reject start_failed
         setsid -w /system/bin/sh -c ${shellQuote(child)} &
         launcher=${'$'}!
         # Explicit fd duplication avoids the shell's /dev/null stdin for asynchronous jobs.
         exec 3<&0
         ( read -r signal <&3; printf stop > "${'$'}d/stop" ) &
         watcher=${'$'}!
-        while [ ! -s "${'$'}d/group" ]; do
+        while [ ! -f "${'$'}d/group" ] || [ ! -s "${'$'}d/group" ]; do
             if ! /system/bin/kill -0 "${'$'}launcher" 2>/dev/null; then
                 wait "${'$'}launcher"
                 /system/bin/kill "${'$'}watcher" 2>/dev/null; wait "${'$'}watcher" 2>/dev/null
-                printf failed > "${'$'}d/rejected"
-                printf clean > "${'$'}d/clean"
+                # A dead launcher without an identity cannot prove child exit. Only the
+                # child's explicit not-started receipt can establish non-execution.
                 exit 125
             fi
             /system/bin/sleep 0.02
         done
         group=${'$'}(cat "${'$'}d/group")
+        case "${'$'}group" in ''|*[!0-9]*)
+            /system/bin/kill "${'$'}watcher" 2>/dev/null; wait "${'$'}watcher" 2>/dev/null
+            exit 125;;
+        esac
         while [ ! -s "${'$'}d/code" ] && [ ! -e "${'$'}d/stop" ]; do /system/bin/sleep 0.02; done
         /system/bin/kill -KILL -- -"${'$'}group" 2>/dev/null
         wait "${'$'}launcher" 2>/dev/null
@@ -112,19 +127,33 @@ internal class SuRootProcess(private val process: Process, private val directory
     private val stdout = BoundedOutput(process.inputStream)
     private val stderr = BoundedOutput(process.errorStream)
     private val stopped = AtomicBoolean()
-    override val rootConfirmed get() = directory.resolve("ready").isFile
-    override val commandStarted get() = directory.resolve("group").isFile
-    private val cleaned get() = directory.resolve("clean").isFile
+    /** Missing/unreadable receipts are unknown; reads must also survive concurrent loss. */
+    private fun receipt(name: String): String? = try {
+        directory.resolve(name).inputStream().use { stream ->
+            val bytes = ByteArray(32)
+            var size = 0
+            while (size < bytes.size) {
+                val count = stream.read(bytes, size, bytes.size - size)
+                if (count < 0) break
+                size += count
+            }
+            if (stream.read() != -1) null else String(bytes, 0, size, Charsets.UTF_8)
+        }
+    } catch (_: java.io.IOException) { null }
+    override val rootConfirmed get() = receipt("ready") == "ready"
+    // This is conservative "may have started", not an inference from a missing group file.
+    override val commandStarted get() = receipt("not-started") != "not-started"
+    private val cleaned get() = receipt("clean") == "clean"
     override val actualExit: Boolean get() {
         // A killed su client alone says nothing about its daemon-owned privileged children.
-        val safe = cleaned || !directory.resolve("launched").exists()
+        val safe = cleaned || !commandStarted
         if (stopped.get() && cleaned && process.isAlive) process.destroyForcibly()
         return safe && !process.isAlive && !stdout.reader.isAlive && !stderr.reader.isAlive
     }
-    override val exitCode: Int? get() = directory.resolve("code").takeIf { it.isFile && it.length() <= 12 }
-        ?.readText()?.toIntOrNull()
+    override val exitCode: Int? get() = receipt("code")?.toIntOrNull()
     override val outcome get() = when {
-        !rootConfirmed -> RootOutcome.DENIED
+        !commandStarted && receipt("rejected") == "denied" -> RootOutcome.DENIED
+        !rootConfirmed -> RootOutcome.START_FAILED
         !commandStarted -> RootOutcome.START_FAILED
         exitCode == null || stdout.failed || stderr.failed -> RootOutcome.START_FAILED
         else -> RootOutcome.COMPLETED
@@ -146,7 +175,7 @@ internal class SuRootProcess(private val process: Process, private val directory
         check(actualExit)
         runCatching { process.outputStream.close() }
         // Only our fixed receipt files, after confirmed exit. Never traverse root-created paths.
-        listOf("ready", "rejected", "launched", "group", "code", "stop", "clean").forEach {
+        listOf("ready", "rejected", "launched", "group", "code", "stop", "clean", "not-started").forEach {
             directory.resolve(it).delete()
         }
         directory.delete()
