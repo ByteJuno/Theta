@@ -651,7 +651,14 @@ class InvocationLedger(
         message(Role.TOOL, *records.map { r ->
             val result = r.result!!
             val text = ModelResultText.project(result)
-            toolResultPart(r.callId, text, r.state != Status.SUCCEEDED)
+            val images = result.output?.media.orEmpty().filter {
+                it.mimeType in setOf("image/jpeg", "image/png", "image/webp", "image/gif") &&
+                    it.sizeBytes in 1..io.github.bytejuno.thetacore.agent.provider.openai.ImageLimits.BYTES.toLong()
+            }.map { io.github.bytejuno.thetacore.agent.protocol.mediaPart(
+                io.github.bytejuno.thetacore.agent.protocol.MediaKind.IMAGE,
+                io.github.bytejuno.thetacore.agent.protocol.blobRef(it.id, it.mimeType, it.sizeBytes)) }
+            toolResultPart(r.callId, listOf(io.github.bytejuno.thetacore.agent.protocol.textPart(text)) + images,
+                r.state != Status.SUCCEEDED)
         }.toTypedArray())
     }
 }

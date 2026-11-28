@@ -749,7 +749,10 @@ open class SqliteRunHistory internal constructor(
         if (alreadyCommitted) {
             // After a restart the ledger's text has been through UTF-8, but this batch kept the original.
             val committed = batch(cursor()).second.map { HistoryCodec.atLedgerPrecision(HistoryCodec.encodeMessage(it)) }
-            require(committed == listOf(p.assistant, HistoryCodec.encodeMessage(results)).map(HistoryCodec::atLedgerPrecision)) {
+            val expected = listOf(p.assistant, HistoryCodec.encodeMessage(results))
+            require(committed.size == expected.size && committed.zip(expected).all { (stored, current) ->
+                HistoryCodec.agreesWithLedger(stored, current)
+            }) {
                 "Ledger/history disagreement"
             }
             clearPending()

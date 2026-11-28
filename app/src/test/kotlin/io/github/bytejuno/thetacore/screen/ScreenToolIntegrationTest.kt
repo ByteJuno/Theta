@@ -90,18 +90,23 @@ class ScreenToolIntegrationTest {
                 message(Role.USER, textPart("Look at the screen")),
                 message(Role.ASSISTANT, toolCallPart(i.binding, d.modelName, "{}")), response) }
             val projection = ScreenModelMedia(service.ledger, "session", MediaContentReader { null })
-            val projected = projection.project(request)
-            assertEquals(response, projected.messages[2])
-            val image = projected.messages.last().parts.filterIsInstance<ContentPart.Media>().single()
+            assertEquals(listOf(Role.USER, Role.ASSISTANT, Role.TOOL), request.messages.map { it.role })
+            val image = (response.parts.single() as ContentPart.ToolResult).content.filterIsInstance<ContentPart.Media>().single()
             assertArrayEquals(bytes, projection.reader.read(image.blob))
-            val codec = io.github.bytejuno.thetacore.agent.provider.openai.OpenAiChatCodec(
-                io.github.bytejuno.thetacore.agent.provider.openai.OpenAiChatConfig("test", "https://example.invalid/v1"), projection.reader)
-            val encoded = codec.encode(projected)
-            assertTrue(encoded.contains("data:image/jpeg;base64," + java.util.Base64.getEncoder().encodeToString(bytes)))
-            assertTrue(codec.estimateRequestBytes(projected) > codec.estimateRequestBytes(request))
-            assertSame(request, projection.project(request, imagesSupported = false))
+            val codec = io.github.bytejuno.thetacore.agent.provider.anthropic.AnthropicCodec(
+                io.github.bytejuno.thetacore.agent.provider.anthropic.AnthropicConfig("test", "https://example.invalid/v1"), projection.reader)
+            val encoded = codec.encode(request)
+            val last = Json.parseToJsonElement(encoded).jsonObject["messages"]!!.jsonArray.last().jsonObject
+            val toolResult = last["content"]!!.jsonArray.single().jsonObject
+            assertEquals("tool_result", toolResult["type"]!!.jsonPrimitive.content)
+            assertEquals(java.util.Base64.getEncoder().encodeToString(bytes), toolResult["content"]!!.jsonArray.last()
+                .jsonObject["source"]!!.jsonObject["data"]!!.jsonPrimitive.content)
+            val textOnly = toolMediaRequest(request) { false }
+            assertEquals(request.messages.size, textOnly.messages.size)
+            assertTrue((textOnly.messages.last().parts.single() as ContentPart.ToolResult).text.contains("Tool media unavailable"))
+            assertTrue(codec.estimateRequestBytes(request) > codec.estimateRequestBytes(textOnly))
             val foreign = ScreenModelMedia(service.ledger, "another-session", MediaContentReader { null })
-            assertSame(request, foreign.project(request)); assertNull(foreign.reader.read(image.blob))
+            assertNull(foreign.reader.read(image.blob))
         }
     }
 }

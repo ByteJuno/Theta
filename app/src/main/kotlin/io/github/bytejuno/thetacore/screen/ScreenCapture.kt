@@ -22,6 +22,7 @@ internal fun decodeScreenCapture(bytes: ByteArray): ToolResult {
     require(bounds.outWidth in 1..16384 && bounds.outHeight in 1..16384 &&
         bounds.outWidth.toLong() * bounds.outHeight <= 64_000_000)
     val options = BitmapFactory.Options().apply {
+        inSampleSize = 1
         while (maxOf(bounds.outWidth, bounds.outHeight) / inSampleSize > SCREEN_IMAGE_EDGE * 2) inSampleSize *= 2
     }
     val bitmap = requireNotNull(BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options))

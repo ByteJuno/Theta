@@ -475,11 +475,14 @@ class AgentRunLoop(
                 return result(RunState.PAUSED, "Tool execution or resource recovery unresolved")
             check(history.revision() == view.revision) { "History changed during active run" }
             val rawMessages = requestMessages(view)
-            if (!requestViewLimit.admits(rawMessages)) {
+            val outgoing = toolMediaRequest(copyRequest(config, rawMessages)) {
+                target.provider.supportsToolResultMedia(it, config.model)
+            }
+            if (!requestViewLimit.admits(outgoing.messages)) {
                 if (!irreducible(view) && compactPrior(view)) continue
                 return pauseContext(view, "Request memory budget exceeded; checkpoint required")
             }
-            val messages = cachedView(rawMessages).map { m ->
+            val messages = cachedView(outgoing.messages).map { m ->
                 if (cacheDisabled) message(m.role, *m.parts.toTypedArray()) else m
             }
             val request = copyRequest(config, messages, requestId = UUID.randomUUID().toString())

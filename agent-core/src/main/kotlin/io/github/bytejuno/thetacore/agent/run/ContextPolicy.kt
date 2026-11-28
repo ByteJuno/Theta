@@ -250,7 +250,7 @@ internal class ContextSummarizer(
         if (source.isEmpty()) return null
         // Never summarize image/media messages by storage reference alone: fail closed BEFORE
         // any billable summary attempt if the summary model cannot actually consume the media.
-        val allMedia = source.flatMap { it.parts.filterIsInstance<ContentPart.Media>() }
+        val allMedia = source.flatMap { it.mediaParts() }
         if (allMedia.any { !model.target.provider.supportsMediaInput(it.kind, model.request.model) }) return null
         val summaries = mutableListOf<String>()
         var index = 0
@@ -276,7 +276,7 @@ internal class ContextSummarizer(
             val start = index++
             if (source[start].parts.any { it is ContentPart.ToolCall }) index++
             val slice = source.subList(start, index)
-            val txMedia = slice.flatMap { it.parts.filterIsInstance<ContentPart.Media>() }
+            val txMedia = slice.flatMap { it.mediaParts() }
             val visible = slice.map(HistoryCodec::encodeMessage).map { m ->
                 m.copy(parts = m.parts.map { it.copy(replay = null) })
             }

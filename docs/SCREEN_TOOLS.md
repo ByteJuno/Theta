@@ -20,10 +20,13 @@ Coordinates are **original display pixels**, not `screen_info` physical-mode
 dimensions or scaled image pixels. Capture metadata contains original and output
 dimensions. Images are JPEG, at most 1600 pixels on the long edge and 768 KiB.
 The host stores them in the calling session's BlobStore. The outbound model
-request projects only the latest successful screen capture still present in its
-history as an explicitly labelled image observation after the tool result;
-request byte estimation uses the same projection. Providers without image input
-keep the textual result. Other sessions cannot read the image.
+request keeps each screenshot inside its original tool result, with the original
+call ID and message order. Anthropic and OpenAI Responses can send image content
+inside tool results. Chat Completions and adapters without tool-media support
+keep explicit text placeholders, independently of their user-image capability.
+The final request, including all supported tool images and user attachments, must
+fit the existing image memory budget before encoding; otherwise the run pauses
+or uses the existing checkpoint path. Other sessions cannot read the image.
 
 Trees retain visible text/description/actionable nodes, bounds, center, class and
 foreground package. Password text/descriptions are omitted. Traversal is capped

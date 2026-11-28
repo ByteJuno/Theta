@@ -121,7 +121,8 @@ dependencies {
     implementation("org.yaml:snakeyaml:2.4")
     implementation("androidx.datastore:datastore-core:1.1.7")
     implementation("androidx.datastore:datastore-core-okio:1.1.7")
-    testImplementation("org.robolectric:robolectric:4.17")
+    // 4.18 fixes native font JAR filesystem reuse across Robolectric sandboxes (#10116).
+    testImplementation("org.robolectric:robolectric:4.18.1")
     testImplementation("androidx.compose.ui:ui-test-junit4")
     testImplementation("junit:junit:4.13.2")
     // Real JSON parser for JVM policy tests, not Android's throwing stub.

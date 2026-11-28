@@ -39,15 +39,19 @@ class OpenAiResponsesCodec(
                 item.string("encrypted_content") != null) &&
             (item["status"] == null || item.string("status") in setOf("completed", "incomplete"))
 
-    fun encode(request: ChatRequest, onSchemaDiagnostics: (ToolSchemaPreparation) -> Unit = {}): String {
+    fun encode(source: ChatRequest, onSchemaDiagnostics: (ToolSchemaPreparation) -> Unit = {}): String {
+        val request = toolMediaRequest(source) { config.supportsImageInput && it == MediaKind.IMAGE }
         require(ImagePayloadBudget.admitsMessages(request.messages)) { "Image request exceeds memory budget" }
         return encodeInternal(request, true, onSchemaDiagnostics)
     }
 
-    fun estimateRequestBytes(request: ChatRequest): Long = encodeInternal(request, false).toByteArray(Charsets.UTF_8).size.toLong() +
-        request.messages.sumOf { m -> m.parts.filterIsInstance<ContentPart.Media>().sumOf {
+    fun estimateRequestBytes(source: ChatRequest): Long {
+        val request = toolMediaRequest(source) { config.supportsImageInput && it == MediaKind.IMAGE }
+        return encodeInternal(request, false).toByteArray(Charsets.UTF_8).size.toLong() +
+        request.messages.sumOf { m -> m.mediaParts().sumOf {
             OpenAiChatCodec.IMAGE_BUDGET_BASE_BYTES + it.blob.sizeBytes / OpenAiChatCodec.IMAGE_BUDGET_SIZE_DIVISOR
         } }
+    }
 
     private fun encodeInternal(request: ChatRequest, readMedia: Boolean,
         diagnostics: (ToolSchemaPreparation) -> Unit = {}): String {
@@ -93,7 +97,8 @@ class OpenAiResponsesCodec(
         }.toString()
     }
 
-    private fun history(request: ChatRequest, readMedia: Boolean): JsonArray {
+    private fun history(source: ChatRequest, readMedia: Boolean): JsonArray {
+        val request = toolMediaRequest(source) { config.supportsImageInput && it == MediaKind.IMAGE }
         val output = mutableListOf<JsonElement>()
         var pending = emptyList<ContentPart.ToolCall>()
         val ids = mutableMapOf<String, String>(); val used = mutableSetOf<String>()
@@ -107,7 +112,11 @@ class OpenAiResponsesCodec(
                 require(pending.isNotEmpty() && m.parts.size == pending.size)
                 m.parts.zip(pending).forEach { (part, call) ->
                     require(part is ContentPart.ToolResult && part.callId == call.binding.callId)
-                    output += buildJsonObject { put("type", "function_call_output"); put("call_id", ids.getValue(part.callId)); put("output", part.text) }
+                    output += buildJsonObject { put("type", "function_call_output"); put("call_id", ids.getValue(part.callId)); put("output", if (part.content.none { it is ContentPart.Media }) JsonPrimitive(part.text) else JsonArray(part.content.map { child -> when (child) {
+                        is ContentPart.Text -> buildJsonObject { put("type", "input_text"); put("text", child.text) }
+                        is ContentPart.Media -> image(child, readMedia)
+                        else -> error("Invalid tool content")
+                    } })) }
                 }
                 pending = emptyList()
             } else {
