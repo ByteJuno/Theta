@@ -1,0 +1,11 @@
+<resources>
+    <string name="screen_app_missing">No enabled launcher activity was found for this package. Use the app list to select a launchable application.</string>
+    <string name="screen_accessibility_label">Theta screen control</string>
+    <string name="screen_accessibility_description">Lets approved Theta tools read the screen and control apps. Enable only if you want to use screen tools without Root. Tool permission rules still apply.</string>
+    <string name="screen_permission_required">Screen access is unavailable. Explicitly authorize Root using the Root tool, or enable Theta screen control in Android Settings → Accessibility, then retry.</string>
+    <string name="screen_read_failed">The screen could not be read. Check that the display is unlocked and that this app permits capture, or enable Theta screen control in Accessibility settings.</string>
+    <string name="screen_focus_required">Focus an editable text field and enable Theta screen control in Accessibility settings, then retry.</string>
+    <string name="screen_action_unknown">The screen action could not be confirmed. It may have taken effect; inspect the screen before retrying.</string>
+    <string name="screen_action_sent">Screen action sent. Inspect the screen to confirm the result.</string>
+    <string name="screen_action_unavailable">Android did not accept the screen action. Check that Theta screen control is enabled.</string>
+</resources>

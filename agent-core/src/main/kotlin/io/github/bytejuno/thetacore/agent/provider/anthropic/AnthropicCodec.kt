@@ -31,15 +31,25 @@ class AnthropicCodec(private val config: AnthropicConfig, private val mediaReade
         }.toString())
     }
 
-    fun encode(request: ChatRequest, diagnostics: (ToolSchemaPreparation) -> Unit = {}): String {
+    fun prepareToolMedia(source: ChatRequest, checkAvailability: Boolean = true): ChatRequest =
+        availableToolMediaRequest(source, mediaReader, checkAvailability) {
+            it.kind == MediaKind.IMAGE && it.blob.mimeType in setOf("image/jpeg", "image/png", "image/webp", "image/gif") &&
+                it.blob.sizeBytes in 1L..ImageLimits.BYTES.toLong()
+        }
+
+    fun encode(source: ChatRequest, diagnostics: (ToolSchemaPreparation) -> Unit = {}): String {
+        val request = prepareToolMedia(source)
         require(ImagePayloadBudget.admitsMessages(request.messages))
         return encodeInternal(request, true, diagnostics)
     }
 
-    fun estimateRequestBytes(request: ChatRequest): Long = encodeInternal(request, false).toByteArray(Charsets.UTF_8).size.toLong() +
-        request.messages.sumOf { m -> m.parts.filterIsInstance<ContentPart.Media>().sumOf {
+    fun estimateRequestBytes(source: ChatRequest): Long {
+        val request = prepareToolMedia(source, checkAvailability = mediaReader != null)
+        return encodeInternal(request, false).toByteArray(Charsets.UTF_8).size.toLong() +
+        request.messages.sumOf { m -> m.mediaParts().sumOf {
             OpenAiChatCodec.IMAGE_BUDGET_BASE_BYTES + it.blob.sizeBytes / OpenAiChatCodec.IMAGE_BUDGET_SIZE_DIVISOR
         } }
+    }
 
     private fun encodeInternal(request: ChatRequest, readMedia: Boolean, diagnostics: (ToolSchemaPreparation) -> Unit = {}): String {
         require(config.models.isEmpty() || request.model in config.models)
@@ -88,7 +98,11 @@ class AnthropicCodec(private val config: AnthropicConfig, private val mediaReade
                 require(pending.isNotEmpty() && pending.size == m.parts.size)
                 m.parts.zip(pending).map { (p, call) ->
                     require(p is ContentPart.ToolResult && p.callId == call.binding.callId)
-                    buildJsonObject { put("type", "tool_result"); put("tool_use_id", ids.getValue(p.callId)); put("content", p.text); put("is_error", p.isError) }
+                    buildJsonObject { put("type", "tool_result"); put("tool_use_id", ids.getValue(p.callId)); put("content", if (p.content.none { it is ContentPart.Media }) JsonPrimitive(p.text) else JsonArray(p.content.map { child -> when (child) {
+                        is ContentPart.Text -> buildJsonObject { put("type", "text"); put("text", child.text) }
+                        is ContentPart.Media -> image(child, readMedia)
+                        else -> error("Invalid tool content")
+                    } })); put("is_error", p.isError) }
                 }.also { pending = emptyList() }
             } else {
                 require(pending.isEmpty()) { "Missing tool results" }

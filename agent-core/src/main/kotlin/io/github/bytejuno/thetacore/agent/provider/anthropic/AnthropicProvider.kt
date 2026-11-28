@@ -41,6 +41,8 @@ class AnthropicProvider(
                 }.getOrDefault(false))
         }
     override fun supportsMediaInput(kind: MediaKind, model: String) = kind == MediaKind.IMAGE
+    override fun prepareToolMedia(request: ChatRequest) = codec.prepareToolMedia(request)
+    override fun supportsToolResultMedia(kind: MediaKind, model: String) = kind == MediaKind.IMAGE
     override fun executionMode(request: ChatRequest) = if (request.extraBody.isEmpty())
         ModelExecutionMode.GENERATION_ONLY else ModelExecutionMode.MAY_EXECUTE_SERVER_TOOLS
     override fun toolNamesForExecution(request: ChatRequest) =

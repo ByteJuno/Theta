@@ -1,0 +1,11 @@
+<resources>
+    <string name="screen_app_missing">此包名没有可用的应用启动入口，请从应用列表中选择可启动的应用。</string>
+    <string name="screen_accessibility_label">Theta 屏幕控制</string>
+    <string name="screen_accessibility_description">允许已获批准的 Theta 工具读取屏幕和操作应用。需要在无 Root 时使用控屏工具才开启；工具权限规则仍然生效。</string>
+    <string name="screen_permission_required">屏幕权限不可用。请先通过 Root 工具明确授权 Root，或在 Android 设置 → 无障碍中启用 Theta 屏幕控制，然后重试。</string>
+    <string name="screen_read_failed">无法读取屏幕。请确认屏幕已解锁且当前应用允许截屏，或在无障碍设置中启用 Theta 屏幕控制。</string>
+    <string name="screen_focus_required">请先选中可编辑的输入框，并在无障碍设置中启用 Theta 屏幕控制，然后重试。</string>
+    <string name="screen_action_unknown">无法确认屏幕操作的结果。操作可能已生效，请查看屏幕后再决定是否重试。</string>
+    <string name="screen_action_sent">已发送屏幕操作，请查看屏幕确认结果。</string>
+    <string name="screen_action_unavailable">Android 未接受屏幕操作，请检查 Theta 屏幕控制是否已启用。</string>
+</resources>

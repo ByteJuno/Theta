@@ -244,13 +244,14 @@ internal class ContextSummarizer(
     // length (the same requirement as the fragment binary search).
     private val sourceReadChars = 8192
 
-    suspend fun compact(source: List<Message>, reference: String): String? {
+    suspend fun compact(original: List<Message>, reference: String): String? {
         // Called only with the durable source whose unique call index has been checked.
-        validateHistorySequence(source, false)
-        if (source.isEmpty()) return null
+        validateHistorySequence(original, false)
+        if (original.isEmpty()) return null
+        val source = model.target.provider.prepareToolMedia(copyRequest(model.request, original)).messages
         // Never summarize image/media messages by storage reference alone: fail closed BEFORE
         // any billable summary attempt if the summary model cannot actually consume the media.
-        val allMedia = source.flatMap { it.parts.filterIsInstance<ContentPart.Media>() }
+        val allMedia = source.flatMap { it.mediaParts() }
         if (allMedia.any { !model.target.provider.supportsMediaInput(it.kind, model.request.model) }) return null
         val summaries = mutableListOf<String>()
         var index = 0
@@ -276,7 +277,7 @@ internal class ContextSummarizer(
             val start = index++
             if (source[start].parts.any { it is ContentPart.ToolCall }) index++
             val slice = source.subList(start, index)
-            val txMedia = slice.flatMap { it.parts.filterIsInstance<ContentPart.Media>() }
+            val txMedia = slice.flatMap { it.mediaParts() }
             val visible = slice.map(HistoryCodec::encodeMessage).map { m ->
                 m.copy(parts = m.parts.map { it.copy(replay = null) })
             }

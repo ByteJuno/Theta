@@ -96,7 +96,10 @@ internal data class StoredPart(val kind: String, val text: String? = null, val n
     val mediaKind: ProtocolMediaKind? = null,
     @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
-    val mediaBlob: StoredMediaBlob? = null)
+    val mediaBlob: StoredMediaBlob? = null,
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val content: List<StoredPart>? = null)
 @Serializable
 internal data class StoredMessage(val role: Role, val parts: List<StoredPart>)
 @Serializable
@@ -189,6 +192,7 @@ internal object HistoryCodec {
                 )
                 if (v.mediaKind != null) base += "mediaKind" to v.mediaKind
                 if (v.mediaBlob != null) base += "mediaBlob" to v.mediaBlob
+                if (v.content != null) base += "content" to v.content
                 fields(*base.toTypedArray())
             }
             is StoredMediaBlob -> fields("id" to v.id, "mimeType" to v.mimeType, "sizeBytes" to v.sizeBytes)
@@ -254,7 +258,7 @@ internal object HistoryCodec {
         } }
         emit(value); writer.flush() // caller owns channel, force, frame footer, and commit
     }
-    fun encodeMessage(m: Message) = StoredMessage(m.role, m.parts.map { p ->
+    fun encodeMessage(m: Message): StoredMessage = StoredMessage(m.role, m.parts.map { p ->
         val replay = p.replay?.let { StoredReplay(it.protocol, it.model, it.payload) }
         when (p) {
             is ContentPart.Text -> StoredPart("text", text = p.text, replay = replay)
@@ -267,7 +271,11 @@ internal object HistoryCodec {
             is ContentPart.Reasoning -> StoredPart("reasoning", text = p.summary, replay = replay)
             is ContentPart.ToolCall -> StoredPart("call", name = p.name, args = p.argsJson, replay = replay,
                 binding = with(p.binding) { StoredBinding(provider, requestId, responseId, index, wireId, callId) })
-            is ContentPart.ToolResult -> StoredPart("result", text = p.text, callId = p.callId, error = p.isError, replay = replay)
+            is ContentPart.ToolResult -> StoredPart("result", text = p.text, callId = p.callId, error = p.isError, replay = replay,
+                content = if (p.content == listOf(textPart(p.text))) null else {
+                    require(p.content.all { it is ContentPart.Text || it is ContentPart.Media })
+                    encodeMessage(message(Role.USER, *p.content.toTypedArray())).parts
+                })
         }
     })
     /** Keep the tool admission boundary strict even when a storage codec can escape code units. */
@@ -288,8 +296,16 @@ internal object HistoryCodec {
     /** InvocationRecordCodec stores text as UTF-8, turning a lone surrogate into '?' after a restart.
      * History keeps the original, so comparing the two needs this same reduction on both sides. */
     fun atLedgerPrecision(m: StoredMessage) = m.copy(parts = m.parts.map { p ->
-        if (p.kind == "result") p.copy(text = p.text?.atLedgerPrecision()) else p
+        if (p.kind == "result") p.copy(text = p.text?.atLedgerPrecision(), content = p.content?.map { it.copy(text = it.text?.atLedgerPrecision()) }) else p
     })
+    /** Legacy text-only results stay valid after media support is introduced. Never ignore
+     * a stored attachment, changed text, call identity, error, or replay metadata. */
+    fun agreesWithLedger(stored: StoredMessage, current: StoredMessage): Boolean {
+        val expected = current.copy(parts = current.parts.mapIndexed { i, part ->
+            if (part.kind == "result" && stored.parts.getOrNull(i)?.content == null) part.copy(content = null) else part
+        })
+        return atLedgerPrecision(stored) == atLedgerPrecision(expected)
+    }
     /** Text, reasoning and opaque replay are history-only and the framed writer escapes them
      * losslessly. Validate only the source fields used for invocation identity/admission. */
     fun toolInputsAreUtf8(m: StoredMessage): Boolean = m.parts.filter { it.kind == "call" }.all { p ->
@@ -318,6 +334,10 @@ internal object HistoryCodec {
                 override val text = requireNotNull(p.text)
                 override val isError = requireNotNull(p.error)
                 override val replay = replay
+                override val content = p.content?.let {
+                    require(it.all { child -> child.kind in setOf("text", "media") && child.replay == null })
+                    decodeMessage(StoredMessage(Role.USER, it)).parts
+                } ?: listOf(textPart(text))
             }
             else -> error("Unknown history part: ${p.kind}")
         }

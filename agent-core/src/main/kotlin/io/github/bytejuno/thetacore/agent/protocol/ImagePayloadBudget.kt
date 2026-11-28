@@ -24,5 +24,5 @@ internal object ImagePayloadBudget {
     }
 
     fun admitsMessages(messages: List<Message>): Boolean = admits(messages.asSequence()
-        .flatMap { it.parts.asSequence() }.filterIsInstance<ContentPart.Media>())
+        .flatMap { it.mediaParts().asSequence() })
 }

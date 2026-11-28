@@ -19,6 +19,11 @@ interface ModelProvider {
         messages.all { canReplayMessage(it, targetModel) }
     /** True when this provider/model permits sending user media of [kind]. Default true per PROTOCOL 2.2. */
     fun supportsMediaInput(kind: MediaKind, model: String): Boolean = true
+    /** Tool-result media is independent of user image input; unknown adapters use text placeholders. */
+    fun supportsToolResultMedia(kind: MediaKind, model: String): Boolean = false
+    /** Project tool attachments before admission, replay or summary; original history is retained. */
+    fun prepareToolMedia(request: ChatRequest): ChatRequest =
+        toolMediaRequest(request) { supportsToolResultMedia(it, request.model) }
     /** Pure request-local admission view matching the adapter's outgoing tool catalog. The host
      * snapshots it before submission and persists rejected calls with their original definitions. */
     fun toolNamesForExecution(request: ChatRequest): Set<String> = request.tools.map { it.name }.toSet()
@@ -106,6 +111,11 @@ private data class MediaBlobValue(
 /** Read-only session-scoped media reader used on demand when encoding outbound multimodal requests. */
 fun interface MediaContentReader {
     fun read(blob: BlobRef): ByteArray?
+    /** Null means readable. Implementations may return a bounded, non-secret storage reason. */
+    fun unavailableReason(blob: BlobRef): String? {
+        val bytes = read(blob) ?: return "unavailable: missing or quarantined"
+        return if (bytes.size.toLong() == blob.sizeBytes) null else "unavailable: size mismatch"
+    }
 }
 
 sealed interface ContentPart {
@@ -114,7 +124,10 @@ sealed interface ContentPart {
     interface Media : ContentPart { val kind: MediaKind; val blob: BlobRef }
     interface Reasoning : ContentPart { val summary: String? }
     interface ToolCall : ContentPart { val binding: CallBinding; val name: String; val argsJson: String }
-    interface ToolResult : ContentPart { val callId: String; val text: String; val isError: Boolean }
+    interface ToolResult : ContentPart {
+        val callId: String; val text: String; val isError: Boolean
+        val content: List<ContentPart> get() = listOf(textPart(text))
+    }
 }
 fun textPart(text: String, replay: ReplayData? = null): ContentPart.Text = TextValue(text, replay)
 fun mediaPart(kind: MediaKind, blob: BlobRef, replay: ReplayData? = null): ContentPart.Media =
@@ -122,13 +135,23 @@ fun mediaPart(kind: MediaKind, blob: BlobRef, replay: ReplayData? = null): Conte
 fun reasoningPart(summary: String?, replay: ReplayData?): ContentPart.Reasoning = ReasoningValue(summary, replay)
 fun toolCallPart(binding: CallBinding, name: String, argsJson: String, replay: ReplayData? = null): ContentPart.ToolCall = CallValue(binding, name, argsJson, replay)
 fun toolResultPart(callId: String, text: String, isError: Boolean = false): ContentPart.ToolResult = ResultValue(callId, text, isError)
+fun toolResultPart(callId: String, content: List<ContentPart>, isError: Boolean = false): ContentPart.ToolResult {
+    require(content.all { it is ContentPart.Text || it is ContentPart.Media })
+    val copy = frozen(content.map { when (it) {
+        is ContentPart.Text -> textPart(it.text)
+        is ContentPart.Media -> mediaPart(it.kind, it.blob)
+        else -> error("Unsupported tool result content")
+    } })
+    return ResultValue(callId, copy.filterIsInstance<ContentPart.Text>().joinToString("\n") { it.text }, isError, content = copy)
+}
 private data class TextValue(override val text: String, override val replay: ReplayData?) : ContentPart.Text
 private data class MediaValue(override val kind: MediaKind, override val blob: BlobRef, override val replay: ReplayData?) : ContentPart.Media
 private data class ReasoningValue(override val summary: String?, override val replay: ReplayData?) : ContentPart.Reasoning
 private data class CallValue(override val binding: CallBinding, override val name: String,
     override val argsJson: String, override val replay: ReplayData? = null) : ContentPart.ToolCall
 private data class ResultValue(override val callId: String, override val text: String,
-    override val isError: Boolean, override val replay: ReplayData? = null) : ContentPart.ToolResult
+    override val isError: Boolean, override val replay: ReplayData? = null,
+    override val content: List<ContentPart> = listOf(textPart(text))) : ContentPart.ToolResult
 
 interface Message {
     val role: Role; val parts: List<ContentPart>

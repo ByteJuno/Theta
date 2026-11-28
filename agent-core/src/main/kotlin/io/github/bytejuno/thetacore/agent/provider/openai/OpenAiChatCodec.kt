@@ -40,8 +40,9 @@ class OpenAiChatCodec(
         return units
     }
 
-    fun encode(request: ChatRequest, onSchemaDiagnostics: (ToolSchemaPreparation) -> Unit = {}): String {
+    fun encode(source: ChatRequest, onSchemaDiagnostics: (ToolSchemaPreparation) -> Unit = {}): String {
         // Preflight the entire request before the first media read or base64 allocation.
+        val request = toolMediaRequest(source) { false }
         require(ImagePayloadBudget.admitsMessages(request.messages)) { "Image request exceeds memory budget" }
         return encodeInternal(request, includeMediaPayload = true, onSchemaDiagnostics)
     }
@@ -50,7 +51,8 @@ class OpenAiChatCodec(
      * Conservative byte/token budget estimate for [request] without reading media bytes or
      * allocating large base64 strings during context admission checks.
      */
-    fun estimateRequestBytes(request: ChatRequest): Long {
+    fun estimateRequestBytes(source: ChatRequest): Long {
+        val request = toolMediaRequest(source) { false }
         val structural = encodeInternal(request, includeMediaPayload = false).toByteArray(Charsets.UTF_8).size.toLong()
         val mediaCost = request.messages.sumOf { message ->
             message.parts.filterIsInstance<ContentPart.Media>().sumOf { part ->
@@ -121,7 +123,8 @@ class OpenAiChatCodec(
             putJsonObject("cache_control") { put("type", "ephemeral") }
         }) }
 
-    private fun encodeHistory(request: ChatRequest, includeMediaPayload: Boolean): JsonArray {
+    private fun encodeHistory(source: ChatRequest, includeMediaPayload: Boolean): JsonArray {
+        val request = toolMediaRequest(source) { false }
         val output = mutableListOf<JsonElement>()
         request.system?.let { output += buildJsonObject { put("role", "system"); put("content", it) } }
         var pending = emptyList<ContentPart.ToolCall>()

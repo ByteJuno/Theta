@@ -58,6 +58,13 @@ android {
     }
 }
 
+// Robolectric native assets share a JVM zipfs with other sandboxes. A cold Linux run
+// can close that filesystem while Bitmap initializes; keep every test and assertion,
+// but give each test class its own process (Windows native graphics is unsupported).
+tasks.withType<Test>().configureEach {
+    if (!System.getProperty("os.name").startsWith("Windows")) forkEvery = 1
+}
+
 // Both lintDebug (PR CI) and preBuild enforce host-owned bilingual text.
 val uiResourceParser by configurations.creating
  dependencies { uiResourceParser("org.jetbrains.kotlin:kotlin-compiler-embeddable:2.2.21") }
@@ -121,7 +128,8 @@ dependencies {
     implementation("org.yaml:snakeyaml:2.4")
     implementation("androidx.datastore:datastore-core:1.1.7")
     implementation("androidx.datastore:datastore-core-okio:1.1.7")
-    testImplementation("org.robolectric:robolectric:4.17")
+    // 4.18 fixes native font JAR filesystem reuse across Robolectric sandboxes (#10116).
+    testImplementation("org.robolectric:robolectric:4.18.1")
     testImplementation("androidx.compose.ui:ui-test-junit4")
     testImplementation("junit:junit:4.13.2")
     // Real JSON parser for JVM policy tests, not Android's throwing stub.

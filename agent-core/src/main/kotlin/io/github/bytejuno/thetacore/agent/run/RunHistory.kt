@@ -67,13 +67,14 @@ internal fun freezeMessages(messages: List<Message>): List<Message> = frozen(mes
             is ContentPart.ToolCall -> with(p.binding) {
                 toolCallPart(callBinding(provider, requestId, responseId, index, wireId, callId), p.name, p.argsJson, replay)
             }
-            is ContentPart.ToolResult -> FrozenResult(p.callId, p.text, p.isError, replay)
+            is ContentPart.ToolResult -> FrozenResult(p.callId, p.text, p.isError, replay, toolResultPart(p.callId, p.content, p.isError).content)
         }
     }.toTypedArray(), cacheBreakpoint = m.cacheBreakpoint)
 })
 
 private data class FrozenResult(override val callId: String, override val text: String,
-    override val isError: Boolean, override val replay: ReplayData?) : ContentPart.ToolResult
+    override val isError: Boolean, override val replay: ReplayData?,
+    override val content: List<ContentPart>) : ContentPart.ToolResult
 
 internal fun copyRequest(source: ChatRequest, messages: List<Message> = source.messages,
                          model: String = source.model, requestId: String = source.requestId): ChatRequest = chatRequest(model) {
