@@ -1,20 +1,21 @@
 # Issue 177 validation
 
-Implementation SHA: `da268c3ca641dea97fbe554d3c317faa598ba019`
-Tested tree: `5daf87fda983f31108951f1ec719013e27fd72fa`
+Implementation SHA: `bb3768c8d04eb6939077f938733842c91eaf9184`
+Tested tree: `3d64cdb56c120ff21c0225c81962fc712bfa7a11`
 Branch: `auto/177-data-themes`
 Base main: `49097146a429dc3a3a5cb245be928b69a37530e8`
 APK / SHA-256: 未生成。
 
-本轮修复第三次 RETURN：持久记录未完成主题撤销，冷恢复先完成撤销再接纳页面；对摘要失配但结构合法的旧 ZIP 隔离并撤销，允许经完整校验和摘要确认的新版本安装；统一生命周期与外观页旧版配色读取。重试完成后清理撤销记录，保护其他插件的新选择以及用户重新选择替换版本的主题。
+本轮处理 PR #190 第四次 RETURN（IC_kwDOVkrS_s8AAAABr67dzA）。冷启动先收集失效的插件身份，包括无法解析安装记录的目录身份；在主题偏好读写前持久记录全部撤销。恢复和主题核对成功后才接纳数据页面。失效身份与可信管理记录分开保存，不伪造状态或页面能力。恢复成功清理撤销日志，保持其他插件较新选择以及恢复完成后的重新选择。
 
-- 原实现上三项正式回归均失败，证据：`validation-issue11/issue177-8f4e0313-before-fix`。
-- 修复后首批定向 22 项通过；随后加入遗留记录清理/重新选择回归，最终完整 preflight 覆盖最终源码。
-- `python scripts/preflight.py`：passed，严格 configuration cache，169.414 秒，cache reused；app 936 项：929 通过、7 跳过，0 failures/errors，100 套件为本轮执行；其中 PluginThemeUiTest 14 项全部通过。
-- core 720 项：719 通过、1 跳过，任务 UP-TO-DATE，core 输入未变化；为已有 XML 证据，不声明本轮执行。
-- verifyUiResources、storage-fixture Kotlin 编译通过；lint 0 errors / 109 warnings。
-- 最终检查前 fetch；origin 分支 `f645539ef0babad9d58266859ea40c3008ac8ead` 与最新 main 均为实现祖先，无新增合并需要。
+- 旧实现上新增 4 条回归均失败：归档损坏+偏好提交失败、归档损坏+偏好不可读、安装记录损坏+偏好提交失败，以及其他插件新选择保护。前三项明确因撤销日志为空失败；第四项因偏好失败前已暴露健康插件页面失败。原始结果保存在 `regression-before-fix/`，不是零用例或编译失败。
+- 修复后定向 59 项全部通过，包括 PluginThemeUiTest 18 项、数据生命周期 18 项、崩溃隔离 10 项、主题 5 项、偏好存储 8 项。
+- `python scripts/preflight.py` 完整通过，严格 `--configuration-cache --configuration-cache-problems=fail`，禁用 build cache；耗时 183.863 秒，configuration cache stored。
+- app 941 项：934 通过、7 跳过，100 套件本轮实际执行，0 failures/errors；其中 PluginThemeUiTest 18 项全部通过。
+- agent-core 720 项：719 通过、1 跳过，73 套件本轮实际执行，0 failures/errors。
+- verifyUiResources、storage-fixture 编译通过；lint 0 errors / 109 warnings。实现 tree 与最终验证 tree 一致，验证后未修改源码。
+- 最终验证前 fetch；远端 PR head `3d3753c60f7b4032207524e2ce410be5ce6ef319` 和 main 均已包含，无需合并。提交前再次确认远端 head、OPEN 状态和最新 RETURN 游标未变化。
 
-未生成 APK（APK SHA 未生成），未操作手机或模拟器，视觉未验证。本轮无布局或文案变更。冻结帧 Robolectric 回归仅验证生命周期、磁盘、实时偏好与重建后的主题状态，不证明当前 APK 像素或触摸效果。新提交 CI、S1/S2 正式回归、中英文/小屏/大字体/明暗主题实际渲染、R8、签名和 API33 设备验收仍待独立审核端完成。core 输入未变化，720 项结果为 Gradle UP-TO-DATE 的既有 XML（719 通过、1 跳过），不是本轮重跑。
+未生成 APK（APK SHA 未生成）；未操作手机或模拟器，视觉未验证。本轮无布局或文案变化。冻结帧 Robolectric 验证磁盘、实时偏好和重建状态，不代表当前 APK 像素或触摸验收。新提交 CI、正式 S1/S2、中文/英文小屏大字体明暗主题实际渲染、R8、签名及 API33 设备验收仍由独立审核端完成。
 
-所有原始证据保存在 `E:\Desktop\AI研究\theta-auto-loop\event-runs\8f4e0313-ee76-4fe9-aaa1-014658cafd19`。审核 verdict/log/meta 原样保留，包括截断 ZIP 首次前置校验失败及后续三个有效失败。此前两次退回与修复证据仍保存在 `33768566-64c9-4d43-b9c9-a198e4611d02`、`fcc5a1d2-4029-482f-89bd-46fad2e67461` 以及对应 reviewer out 目录；本轮未覆盖或删除。
+所有本轮原始证据位于 `E:\Desktop\AI研究\theta-auto-loop\event-runs\68fcca79-a5c6-4697-ae63-792f5b5cb4be`。完整审核 verdict/log/meta 和失败命令输出、修复前失败日志/XML 均已保留。审核首次零用例运行是探针生成失败，不计为缺陷验证；其后 3 项有效失败保留在原始日志中。此前三次退回和修复证据仍保存在 `33768566-64c9-4d43-b9c9-a198e4611d02`、`fcc5a1d2-4029-482f-89bd-46fad2e67461`、`8f4e0313-ee76-4fe9-aaa1-014658cafd19` 及原 reviewer out 目录。未提交 Probe、日志、XML 或摘要，未删除断言、放宽超时或修改受保护文件。
