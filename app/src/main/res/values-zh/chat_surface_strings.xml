@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="chat_open_drawer">打开导航菜单</string>
+    <string name="chat_settings">设置</string>
+    <string name="chat_search_sessions">搜索会话</string>
+    <string name="chat_no_sessions">没有匹配的会话</string>
+    <string name="chat_today">今天</string>
+    <string name="chat_yesterday">昨天</string>
+    <string name="chat_earlier">更早</string>
+    <string name="chat_dynamic_color">使用壁纸动态配色</string>
+    <string name="chat_show_reasoning">展开思考过程</string>
+    <string name="chat_hide_reasoning">收起思考过程</string>
+    <string name="chat_welcome">今天一起探索什么？</string>
+    <string name="chat_welcome_hint">提出问题、分享图片，或看看可用工具。</string>
+    <string name="chat_explore_tools">探索工具</string>
+    <string name="chat_preview_image">预览图片</string>
+    <string name="chat_tool_capsule">%1$s · %2$s</string>
+</resources>

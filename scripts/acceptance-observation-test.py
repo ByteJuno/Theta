@@ -414,7 +414,7 @@ class Observations(unittest.TestCase):
             pass
 
         with patch.object(em, 'adb', side_effect=adb), \
-                patch.object(em, 'tap_text'), patch.object(em, 'screen', side_effect=screen), \
+                patch.object(em, 'tap_text'), patch.object(em, 'open_plugins'), patch.object(em, 'screen', side_effect=screen), \
                 patch.object(em, 'crashed', return_value=False), \
                 patch.object(em, 'install_plugin', side_effect=ReadyForPlugin) as install, \
                 patch.object(em.time, 'monotonic', side_effect=lambda: state['clock']), \
@@ -449,7 +449,7 @@ class Observations(unittest.TestCase):
                 self.assertFalse(matches('Theta'))
                 self.assertTrue(kwargs.get('sweep', False), 'Hello card is below language controls')
                 raise ReachedReturn()
-        with patch.object(em, 'adb'), patch.object(em, 'install_plugin'), patch.object(em, 'tap_card'), patch.object(em, 'tap_text'), patch.object(em, 'wait_for', side_effect=waiting):
+        with patch.object(em, 'adb'), patch.object(em, 'install_plugin'), patch.object(em, 'tap_card'), patch.object(em, 'tap_text'), patch.object(em, 'open_plugins'), patch.object(em, 'wait_for', side_effect=waiting):
             with self.assertRaises(ReachedReturn):
                 em.run('host.apk', 'probe.apk', 'hello.apk')
 
@@ -464,7 +464,7 @@ class Observations(unittest.TestCase):
                 raise ReachedRestore()
             return ET.Element('node', text='PASS 18/18')
         with patch.object(em, 'adb', return_value='onDisable\ncleanup:second\ncleanup:first'), patch.object(em, 'install_plugin'), \
-                patch.object(em, 'tap_card'), patch.object(em, 'tap_text'), \
+                patch.object(em, 'tap_card'), patch.object(em, 'tap_text'), patch.object(em, 'open_plugins'), \
                 patch.object(em, 'absent'), patch.object(em, 'wait_for', side_effect=waiting):
             with self.assertRaises(ReachedRestore):
                 em.run('host.apk', 'probe.apk', 'hello.apk')
@@ -573,6 +573,24 @@ class ChatNavigation(unittest.TestCase):
                 patch.object(lc.em, 'screen', side_effect=[[entry], [ready]]), patch.object(lc.em, 'tap') as tap:
             lc.start()
         tap.assert_called_once_with(entry)
+
+    def test_start_opens_drawer_then_plugins_from_observed_nodes(self):
+        menu = ET.Element('node', {'content-desc': 'Open navigation menu', 'bounds': '[0,0][48,48]'})
+        entry = ET.Element('node', text='Plugins and diagnostics', bounds='[0,80][240,128]')
+        ready = ET.Element('node', text='Import code APK')
+        def immediate_wait(label, predicate, **kwargs):
+            self.assertFalse(predicate())
+            self.assertFalse(predicate())
+            self.assertTrue(predicate())
+        with patch.object(lc, 'adb'), patch.object(lc, 'wait', side_effect=immediate_wait), \
+                patch.object(lc.em, 'screen', side_effect=[[menu], [entry], [ready]]), patch.object(lc.em, 'tap') as tap:
+            lc.start()
+        self.assertEqual([menu, entry], [call.args[0] for call in tap.call_args_list])
+
+    def test_emulator_navigation_uses_same_drawer_path(self):
+        with patch.object(em, 'plugin_entry_ready', side_effect=[False, True]), \
+                patch.object(em, 'crashed', return_value=False), patch.object(em.time, 'sleep'):
+            em.open_plugins()
 
     def test_start_keeps_existing_plugins_and_recovery_navigation(self):
         ready = ET.Element('node', text='Import code APK')
