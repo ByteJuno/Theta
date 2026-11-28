@@ -41,7 +41,8 @@ class ThetaApplication : Application() {
     internal val modelTransport by lazy {
         io.github.bytejuno.thetacore.agent.transport.OkHttpModelTransport()
     }
-    internal val chatTaskPresence by lazy { io.github.bytejuno.thetacore.chat.AndroidChatTaskPresence(this, plugins.outputSurfaces::present) }
+    internal val floatingProgress by lazy { io.github.bytejuno.thetacore.overlay.FloatingProgressRuntime(this) }
+    internal val chatTaskPresence by lazy { io.github.bytejuno.thetacore.overlay.floatingTaskPresence(this) }
     internal val chat by lazy {
         io.github.bytejuno.thetacore.chat.ChatSessionOwner(hostToolsOwner, ::hostTools,
             providerSettings::snapshotForNewRun, diagnostic = { error ->
@@ -76,6 +77,7 @@ class ThetaApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         if (io.github.bytejuno.thetacore.chat.isDocumentParserProcess()) return
+        floatingProgress.install()
         crashRecovery = PluginCrashRecovery(
             FilePluginRecoveryStorage(File(noBackupFilesDir, "plugin-crash-recovery")),
             object : PluginRecoveryClock {

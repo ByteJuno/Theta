@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="floating_progress_title">Screen control progress overlay</string>
+    <string name="floating_progress_description">Show a draggable progress capsule during screen control, background tasks, or when your input is needed. Drag the text to move it; tap it to open Theta. Stop requests cancellation immediately; an already running tool may take time to exit.</string>
+    <string name="floating_progress_fallback">Without overlay permission, task progress remains in notifications. Enable notifications in system settings to see it.</string>
+    <string name="floating_progress_granted">Overlay permission granted. Turning this switch off removes the capsule immediately.</string>
+    <string name="floating_progress_grant">Allow display over other apps</string>
+    <string name="floating_progress_settings_failed">Could not open system settings. Open Theta’s app settings to allow display over other apps.</string>
+    <string name="floating_progress_model">Thinking…</string>
+    <string name="floating_progress_tool">Running %1$s</string>
+    <string name="floating_progress_approval">Approval needed · Tap to open</string>
+    <string name="floating_progress_recovery">Review recovery · Tap to open</string>
+    <string name="floating_progress_stop">Stop</string>
+    <string name="floating_progress_open">%1$s. Open Theta</string>
+</resources>
