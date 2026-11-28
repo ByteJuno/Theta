@@ -23,7 +23,7 @@ internal fun ChatMessage(message: Message, snapshot: ChatUiSnapshot, actions: Ch
     val body: @Composable () -> Unit = {
         Column(verticalArrangement = Arrangement.spacedBy(tokens.smallGap)) {
             message.parts.forEach { part -> when (part) {
-                is ContentPart.Text -> if (message.role == Role.USER) SelectionContainer { Text(part.text) } else MarkdownText(part.text)
+                is ContentPart.Text -> if (message.role == Role.USER) SentDocumentText(part.text) else MarkdownText(part.text)
                 is ContentPart.Media -> UserChatImage(part.blob, state.sessionId, actions.userImage)
                 is ContentPart.Reasoning -> part.summary?.let { ChatReasoning(it) }
                 is ContentPart.ToolCall -> ToolCard(part, state.records[part.binding.callId], state.toolProgress[part.binding.callId],

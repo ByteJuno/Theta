@@ -51,6 +51,8 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    testOptions.unitTests.isIncludeAndroidResources = true
+
     buildFeatures {
         compose = true
     }
@@ -108,6 +110,7 @@ dependencies {
     // BOM 2026.09.00 selects 1.4.0, where MotionScheme is internal.
     // 1.5.0 exposes the supported expressive API; retain the BOM for other Compose modules.
     implementation("androidx.compose.material3:material3:1.5.0")
+    implementation("com.tom-roush:pdfbox-android:2.0.27.0") // Apache-2.0; document text extraction.
     implementation("org.commonmark:commonmark:0.33.0")
     implementation("org.commonmark:commonmark-ext-gfm-strikethrough:0.33.0")
     implementation(libs.kotlinx.serialization.json)
@@ -118,6 +121,7 @@ dependencies {
     implementation("org.yaml:snakeyaml:2.4")
     implementation("androidx.datastore:datastore-core:1.1.7")
     implementation("androidx.datastore:datastore-core-okio:1.1.7")
+    testImplementation("org.robolectric:robolectric:4.17")
     testImplementation("junit:junit:4.13.2")
     // Real JSON parser for JVM policy tests, not Android's throwing stub.
     testImplementation("org.json:json:20240303")

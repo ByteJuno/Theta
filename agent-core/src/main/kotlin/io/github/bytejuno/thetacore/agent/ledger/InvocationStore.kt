@@ -20,6 +20,7 @@ interface InvocationStore : Closeable {
         save(record, expectedRevision)
     }
     fun readBlob(ref: BlobRef, offset: Long, limit: Int): ByteArray = error("Store does not support blobs")
+    fun readDocumentBlob(sessionId: String, id: String, offset: Long, limit: Int): Pair<BlobRef, ByteArray>? = null
     /** Durable per-run frozen tool catalog store, when supported by the backing database. */
     fun runCatalogStore(): RunCatalogStore? = null
 }
