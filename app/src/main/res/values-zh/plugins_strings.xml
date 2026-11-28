@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="plugins_title">扩展与插件</string>
+    <string name="plugins_filter_all">全部</string>
+    <string name="plugins_filter_code">代码</string>
+    <string name="plugins_filter_data">数据</string>
+    <string name="plugins_filter_environment">环境与 Hook</string>
+    <string name="plugins_expanded">已展开</string>
+    <string name="plugins_collapsed">已折叠</string>
+    <string name="plugins_expand">展开</string>
+    <string name="plugins_collapse">收起</string>
+    <string name="plugins_show_hook">展开 Hook 诊断</string>
+    <string name="plugins_hide_hook">收起 Hook 诊断</string>
+</resources>

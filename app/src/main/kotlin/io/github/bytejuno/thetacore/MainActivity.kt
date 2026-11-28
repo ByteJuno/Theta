@@ -9,9 +9,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -21,14 +18,11 @@ import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -43,27 +37,22 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import io.github.bytejuno.thetacore.ui.plugins.PluginManifestEnvironmentSummary
 import io.github.bytejuno.thetacore.hook.HookHost
 import io.github.bytejuno.thetacore.plugin.AndroidHostEnvironmentDetector
-import io.github.bytejuno.thetacore.plugin.EnvironmentReadiness
 import io.github.bytejuno.thetacore.plugin.HostEnvironmentStatus
-import io.github.bytejuno.thetacore.plugin.HostRequirementKey
 import io.github.bytejuno.thetacore.plugin.ManagedPluginData
 import io.github.bytejuno.thetacore.plugin.PluginDataPage
 import io.github.bytejuno.thetacore.plugin.PluginImportRequests
-import io.github.bytejuno.thetacore.plugin.ManagedDataRecord
 import io.github.bytejuno.thetacore.plugin.StagedPluginData
 import io.github.bytejuno.thetacore.plugin.ManagedPlugin
 import io.github.bytejuno.thetacore.plugin.PluginManager
-import io.github.bytejuno.thetacore.plugin.PluginManifest
 import io.github.bytejuno.thetacore.plugin.PluginCrashRecovery
 import io.github.bytejuno.thetacore.plugin.PluginPackageException
 import io.github.bytejuno.thetacore.plugin.StagedPlugin
 import io.github.bytejuno.thetacore.plugin.detectHostEnvironmentSafely
-import io.github.bytejuno.thetacore.plugin.evaluate
 import io.github.bytejuno.thetacore.plugin.openAccessibilitySettings
 import io.github.bytejuno.thetacore.sdk.SettingsPage
-import io.github.bytejuno.thetacore.sdk.THETA_API_LEVEL
 import java.io.IOException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.CoroutineStart
@@ -279,19 +268,18 @@ private fun ThetaCoreApp(
                     io.github.bytejuno.thetacore.chat.ChatScreen(application, drafts, resumed) { showPlugins = true }
                 } else {
                     BackHandler { showPlugins = false }
-                    TextButton(onClick = { showPlugins = false }) { Text(strings.get(R.string.chat_back)) }
-                    if (restorePolicy.skipCode || restorePolicy.skipData || restorePolicy.suspects.isNotEmpty()) {
-                        Text(if (restorePolicy.skipData) strings.get(R.string.safe_mode_all)
-                            else if (restorePolicy.skipCode) strings.get(R.string.safe_mode_code)
-                            else strings.get(R.string.suspects_quarantined))
-                        if (restorePolicy.suspects.isNotEmpty()) Text(strings.get(R.string.suspect_plugins, restorePolicy.suspects.sorted().joinToString()))
-                        TextButton(enabled = !resumeRequested, onClick = {
+                    io.github.bytejuno.thetacore.ui.plugins.PluginsScreen(
+                        plugins = manager.plugins,
+                        dataInventory = manager.dataInventory,
+                        failures = manager.failures,
+                        rejectedIds = manager.rejectedIds,
+                        restorePolicy = restorePolicy,
+                        resumeRequested = resumeRequested,
+                        onBack = { showPlugins = false },
+                        onResume = {
                             if (crashRecovery.requestResumeNextColdStart()) resumeRequested = true
                             else error = uiText(R.string.recovery_save_failed)
-                        }) { Text(if (resumeRequested) strings.get(R.string.resume_saved) else strings.get(R.string.resume_next_start)) }
-                    }
-                    PluginList(
-                        manager = manager,
+                        },
                         error = error,
                         recovery = recovery,
                         staging = staging,
@@ -495,239 +483,5 @@ private fun ThetaCoreApp(
                 )
             }
         }
-    }
-}
-
-@Composable
-private fun PluginList(
-    manager: PluginManager,
-    error: UiText?,
-    recovery: Boolean,
-    staging: Boolean,
-    dataRecoveryBlocked: Boolean,
-    hostEnvironment: HostEnvironmentStatus,
-    onRefreshEnvironment: () -> Unit,
-    onOpenAccessibility: () -> Unit,
-    onTool: (HostToolSelection) -> Unit,
-    onCancelReading: () -> Unit,
-    onRetryCleanup: () -> Unit,
-    onOpen: (SettingsPage) -> Unit,
-    onPick: () -> Unit,
-    onPickData: () -> Unit,
-    onOpenData: (ManagedPluginData) -> Unit,
-    onToggleData: (ManagedDataRecord) -> Unit,
-    onUninstallData: (ManagedDataRecord) -> Unit,
-    onToggle: (ManagedPlugin) -> Unit,
-    onUninstall: (ManagedPlugin) -> Unit,
-    onRollback: (ManagedPlugin) -> Unit,
-    onRemoveRejected: (String) -> Unit,
-) {
-    val strings = uiStrings()
-    Column(
-        modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        Text(stringResource(R.string.app_name), style = MaterialTheme.typography.headlineMedium)
-        Text(stringResource(R.string.api_level, THETA_API_LEVEL))
-        io.github.bytejuno.thetacore.web.WebSearchSettingsEntry()
-        HostEnvironmentSummaryBar(hostEnvironment, onRefreshEnvironment, onOpenAccessibility)
-        if (recovery) Text(strings.get(R.string.recovery_requested))
-        Button(onClick = onPick, enabled = !staging) { Text(strings.get(R.string.import_code)) }
-        Button(onClick = onPickData, enabled = !staging && !dataRecoveryBlocked) { Text(strings.get(R.string.import_data)) }
-        if (dataRecoveryBlocked) Text(strings.get(R.string.data_recovery_notice))
-        if (staging) TextButton(onClick = onCancelReading) { Text(strings.get(R.string.cancel_reading)) }
-        TextButton(onClick = onRetryCleanup) { Text(strings.get(R.string.retry_import_cleanup)) }
-        error?.let { Text(strings.get(it), color = MaterialTheme.colorScheme.error) }
-        if (manager.failures.isNotEmpty()) {
-            LaunchedEffect(manager.failures.toList()) { manager.failures.forEach(::logUiDiagnostic) }
-            Text(strings.get(R.string.plugin_diagnostics_failed, manager.failures.size), color = MaterialTheme.colorScheme.error)
-        }
-        manager.rejectedIds.forEach { id ->
-            TextButton(onClick = { onRemoveRejected(id) }) { Text(strings.get(R.string.rejected_uninstall, id)) }
-        }
-        Text(strings.get(R.string.data_packages), style = MaterialTheme.typography.titleLarge)
-        Text(strings.get(R.string.data_ownership_notice))
-        if (manager.dataInventory.isEmpty()) Text(strings.get(R.string.no_data_packages))
-        manager.dataInventory.forEach { plugin ->
-            val manifest = plugin.record.selection?.manifest
-            Text(manifest?.let { strings.get(R.string.package_name_version, it.name, it.version) }
-                ?: strings.get(R.string.recorded_version, plugin.id, plugin.state.version))
-            Text(plugin.id)
-            if (manifest != null) {
-                Text(strings.get(
-                    R.string.package_capabilities,
-                    manifest.provides.takeIf { it.isNotEmpty() }?.joinToString() ?: strings.get(R.string.none),
-                    manifest.declares.takeIf { it.isNotEmpty() }?.joinToString() ?: strings.get(R.string.none),
-                ))
-                Text(strings.get(R.string.plugin_env_none_required))
-            }
-            Text(strings.get(plugin.status))
-            if (manifest == null) Text(strings.get(R.string.recorded_digest, plugin.state.sha256))
-            Row {
-                TextButton(enabled = !plugin.state.pendingDelete && (plugin.state.enabled || (!dataRecoveryBlocked && plugin.canEnable)),
-                    onClick = { onToggleData(plugin) }) {
-                    Text(if (plugin.state.enabled) strings.get(R.string.disable_data) else strings.get(R.string.enable_data))
-                }
-                TextButton(onClick = { onUninstallData(plugin) }) {
-                    Text(if (plugin.state.pendingDelete) strings.get(R.string.retry_data_uninstall) else strings.get(R.string.uninstall_data))
-                }
-            }
-            plugin.page?.takeIf { it.active }?.let { page ->
-                TextButton(onClick = { onOpenData(page) }) { Text(strings.get(R.string.view_data_content)) }
-            }
-        }
-        Text(strings.get(R.string.code_packages), style = MaterialTheme.typography.titleLarge)
-        if (manager.plugins.isEmpty()) Text(stringResource(R.string.no_plugins))
-        manager.plugins.forEach { plugin ->
-            Text(strings.get(R.string.package_name_version, plugin.manifest.name, plugin.manifest.version), style = MaterialTheme.typography.titleMedium)
-            PluginManifestEnvironmentSummary(
-                manifest = plugin.manifest,
-                environment = hostEnvironment,
-                onOpenAccessibility = onOpenAccessibility,
-                showAdvisoryNotice = false,
-            )
-            Text(strings.get(plugin.status))
-            Row {
-                TextButton(
-                    onClick = { onToggle(plugin) },
-                    enabled = !plugin.busy && !plugin.pendingDelete,
-                ) { Text(strings.get(R.string.toggle_plugin, if (plugin.enabled) strings.get(R.string.disable) else strings.get(R.string.enable), plugin.manifest.name)) }
-                TextButton(
-                    onClick = { onUninstall(plugin) },
-                    enabled = !plugin.busy && !plugin.pendingDelete,
-                ) { Text(strings.get(R.string.uninstall_plugin_named, plugin.manifest.name)) }
-            }
-            if (plugin.canRollback) {
-                TextButton(
-                    onClick = { onRollback(plugin) },
-                    enabled = !plugin.busy && !plugin.pendingDelete,
-                ) { Text(strings.get(R.string.rollback_plugin_named, plugin.manifest.name)) }
-            }
-            plugin.updateObservation?.let { HostUpdateObservation(it) }
-            if (plugin.entryCapacityExceeded) Text(strings.get(R.string.entry_capacity_notice))
-            val entries = plugin.entries
-            if (entries.isNotEmpty()) Text(strings.get(R.string.entry_backend_notice))
-            entries.forEachIndexed { index, entry -> HostEntryState(entry, index) }
-            plugin.tools.forEachIndexed { index, tool ->
-                TextButton(enabled = !plugin.busy && !plugin.pendingDelete,
-                    onClick = { onTool(HostToolSelection(plugin.manifest.id, index, tool)) }) {
-                    // No Tool.id/spec (or other plugin getter) on Main.
-                    Text(strings.get(R.string.invoke_tool, index + 1))
-                }
-            }
-            plugin.pages.forEach { page ->
-                Text(
-                    text = page.title,
-                    style = MaterialTheme.typography.titleMedium,
-                    modifier = Modifier.fillMaxWidth().clickable { onOpen(page) }.padding(vertical = 12.dp),
-                )
-            }
-        }
-        Text(strings.get(R.string.plugin_env_advisory_notice), style = MaterialTheme.typography.bodySmall)
-        io.github.bytejuno.thetacore.hook.HookDiagnosticsPanel()
-    }
-}
-
-@Composable
-private fun HostEnvironmentSummaryBar(
-    environment: HostEnvironmentStatus,
-    onRefresh: () -> Unit,
-    onOpenAccessibility: () -> Unit,
-) {
-    val strings = uiStrings()
-    fun readinessText(key: HostRequirementKey): String = strings.get(when (environment.readiness(key)) {
-        EnvironmentReadiness.READY -> R.string.plugin_env_state_ready
-        EnvironmentReadiness.DETECTED_UNVERIFIED -> R.string.plugin_env_state_unverified
-        EnvironmentReadiness.UNAVAILABLE -> R.string.plugin_env_state_unavailable
-    })
-    Column {
-        Text(strings.get(R.string.plugin_env_host_title), style = MaterialTheme.typography.titleMedium)
-        Text(strings.get(
-            R.string.plugin_env_host_summary,
-            readinessText(HostRequirementKey.ACCESSIBILITY),
-            readinessText(HostRequirementKey.SHIZUKU),
-            readinessText(HostRequirementKey.ROOT),
-            readinessText(HostRequirementKey.LSPOSED),
-        ))
-        Row {
-            TextButton(onClick = onRefresh) { Text(strings.get(R.string.plugin_env_refresh)) }
-            if (!environment.accessibilityEnabled) {
-                TextButton(onClick = onOpenAccessibility) {
-                    Text(strings.get(R.string.plugin_env_open_accessibility))
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun PluginManifestEnvironmentSummary(
-    manifest: PluginManifest,
-    environment: HostEnvironmentStatus,
-    onOpenAccessibility: () -> Unit,
-    showAdvisoryNotice: Boolean = true,
-) {
-    val strings = uiStrings()
-    val evaluation = manifest.requires.evaluate(environment)
-    Text(
-        strings.get(
-            R.string.package_capabilities,
-            manifest.provides.takeIf { it.isNotEmpty() }?.joinToString() ?: strings.get(R.string.none),
-            manifest.declares.takeIf { it.isNotEmpty() }?.joinToString() ?: strings.get(R.string.none),
-        ),
-        style = MaterialTheme.typography.bodySmall,
-    )
-    if (!evaluation.hasRequirements) {
-        Text(strings.get(R.string.plugin_env_none_required), style = MaterialTheme.typography.bodySmall)
-    } else {
-        if (evaluation.isRootFree) {
-            Text(strings.get(R.string.plugin_env_root_free), style = MaterialTheme.typography.bodySmall)
-        }
-        val tags = evaluation.checks.map { check ->
-            when (check.key) {
-                HostRequirementKey.ACCESSIBILITY -> strings.get(when (check.readiness) {
-                    EnvironmentReadiness.READY -> R.string.plugin_req_accessibility_ready
-                    EnvironmentReadiness.DETECTED_UNVERIFIED, EnvironmentReadiness.UNAVAILABLE ->
-                        R.string.plugin_req_accessibility_missing
-                })
-                HostRequirementKey.SHIZUKU -> strings.get(when (check.readiness) {
-                    EnvironmentReadiness.READY -> R.string.plugin_req_shizuku_ready
-                    EnvironmentReadiness.DETECTED_UNVERIFIED -> R.string.plugin_req_shizuku_unverified
-                    EnvironmentReadiness.UNAVAILABLE -> R.string.plugin_req_shizuku_missing
-                })
-                HostRequirementKey.ROOT -> strings.get(when (check.readiness) {
-                    EnvironmentReadiness.READY -> R.string.plugin_req_root_ready
-                    EnvironmentReadiness.DETECTED_UNVERIFIED -> R.string.plugin_req_root_unverified
-                    EnvironmentReadiness.UNAVAILABLE -> R.string.plugin_req_root_missing
-                })
-                HostRequirementKey.LSPOSED -> strings.get(when (check.readiness) {
-                    EnvironmentReadiness.READY -> R.string.plugin_req_lsposed_ready
-                    EnvironmentReadiness.DETECTED_UNVERIFIED, EnvironmentReadiness.UNAVAILABLE ->
-                        R.string.plugin_req_lsposed_missing
-                })
-            }
-        }
-        Text(tags.joinToString(), style = MaterialTheme.typography.bodySmall)
-        if (evaluation.missingAccessibility) {
-            Text(strings.get(R.string.plugin_env_accessibility_guide), style = MaterialTheme.typography.bodySmall)
-            TextButton(onClick = onOpenAccessibility) {
-                Text(strings.get(R.string.plugin_env_open_accessibility))
-            }
-        }
-        when (evaluation.shizukuReadiness) {
-            EnvironmentReadiness.DETECTED_UNVERIFIED -> Text(strings.get(R.string.plugin_env_shizuku_unverified_guide), style = MaterialTheme.typography.bodySmall)
-            EnvironmentReadiness.UNAVAILABLE -> Text(strings.get(R.string.plugin_env_shizuku_guide), style = MaterialTheme.typography.bodySmall)
-            EnvironmentReadiness.READY, null -> Unit
-        }
-        if (evaluation.rootReadiness == EnvironmentReadiness.DETECTED_UNVERIFIED) {
-            Text(strings.get(R.string.plugin_env_root_unverified_guide), style = MaterialTheme.typography.bodySmall)
-        }
-        if (evaluation.rootReadiness == EnvironmentReadiness.UNAVAILABLE ||
-            evaluation.lsposedReadiness == EnvironmentReadiness.UNAVAILABLE) {
-            Text(strings.get(R.string.plugin_env_privileged_guide), style = MaterialTheme.typography.bodySmall)
-        }
-    }
-    if (showAdvisoryNotice) {
-        Text(strings.get(R.string.plugin_env_advisory_notice), style = MaterialTheme.typography.bodySmall)
     }
 }
