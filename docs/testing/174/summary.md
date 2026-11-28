@@ -1,15 +1,19 @@
 # Issue 174 validation
 
-Implementation commit: `eee5c67d84aa333481e70609fd039ae9dc6f1fd8`
-Tested tree: `efb9a42b4892d8bbcd1f41483ea073cb67a33e80`
-Branch: `auto/174-root-bridge`
-APK: not generated; APK SHA256: not applicable.
+Implementation SHA: `fbc80d0117e901e1f01f9d6f7694346888bd7816`
+Tested Git tree: `b7ce5c44309e1f181db72fecb91aa09dcf71d64f`
+PR: #183; branch: `auto/174-root-bridge`.
 
-- Full preflight passed in 150.41s with `--configuration-cache --configuration-cache-problems=fail`: storage fixture source/compile, UI resources (610 paired keys), lint and unit-test tasks.
-- App: 827 tests, 0 failures/errors, 4 skipped (3 Linux supervisor cases plus 1 existing platform case). Unchanged agent-core: 663 tests, 0 failures/errors, 1 skipped; final task UP-TO-DATE, initial preflight FROM-CACHE.
-- GPU Linux entry: 14 tests, 0 failures, 62.61s. Covers real process exit/status/stdout/stderr, process-group timeout cleanup, output capture bounds, cancellation retention, cold-start zero calls, approval modes, deny/unattended rules, root permanent-grant switch, SQLite BlobStore and cross-session rejection.
-- Final local and GPU source manifests match this implementation. No original test assertion was removed or timeout widened.
-- Failures retained: targeted-second compiled against `InvocationRecord.effect` instead of `result.effect` and failed before tests; corrected. First GPU run hung because shell builtin kill rejected its arguments; process ownership was verified before stopping only this run's worker/group. Original logs and receipts remain outside Git. System kill fixed the defect and the 14-test retry passed. The initial full preflight belongs to the earlier source and is not final evidence.
-- 未生成 APK；未操作手机或模拟器，视觉未验证且本轮无布局改动。未验证真实 Android su、Magisk、KernelSU、APatch、API33 运行、R8 或硬件。Linux 测试只把系统可执行路径及 UID 检查适配为无特权进程，不能充当真实 Root 验收。命令输出捕获每路最多 1 MiB，超出明确截断；捕获部分超过 32 KiB 时走现有会话 BlobStore。故意 setsid/守护进程化逃逸的任意 Root 代码不保证终止；授权/退出证据缺失时保留 worker 和资源租约，外层按未知副作用暂停，而不声称已退出。独立审核、最终 head CI 及正式模拟器回归仍待发布后执行。
+Root supervisor receipts now live in the app-private no-backup directory. Failed ready, launch or group receipt writes stop the command before execution. Missing/invalid/unreadable receipts never prove exit or no effects; only a valid clean or explicit not-started receipt permits release after the client and output readers exit. Unknown execution remains conservative even after other receipt loss.
 
-Publication resume verification (2026-11-27T17:18:22.389846+00:00): fetched origin/main `40330df3a2758b752f90ac495e1aca69f8483e66`, already included in implementation `eee5c67d84aa333481e70609fd039ae9dc6f1fd8`. Current HEAD and tree remain unchanged. All 558 local preflight source hashes match; the GPU archive matches the same sources, with gradlew using the exact committed LF blob and executable mode. Reused the original passing evidence; no tests, implementation edits or commits were repeated in this resume. Repository has one open PR (#172), no existing branch/PR for issue 174, and capacity for this handoff. Independent PR172 RETURN remains pending.
+Validation:
+- Full `python scripts/preflight.py` passed with `--configuration-cache --configuration-cache-problems=fail`; 215.0 seconds. App: 834 tests, 0 failures/errors, 6 skips (5 Linux-only supervisor tests and 1 existing platform skip). Agent-core: 663 tests, 0 failures/errors, 1 skip, restored FROM-CACHE on unchanged code. Lint, UI-resource and storage-fixture checks passed.
+- Existing `/opt/homelab-report/theta-gpu-test` entry: 21 Root tests, 0 failures, 58.0 seconds, including real POSIX directory/write failures and a live command group after client death/receipt deletion. Ledger test checks UNKNOWN/UNCONFIRMED until explicit simulated exit evidence.
+- Final fetch: both remote PR branch and origin/main already included. Source hashes unchanged during both validations; exact tested sources committed.
+- Initial failures retained locally: first test compile rejected Redirect.DISCARD; next baseline had 4/18 failures on unchanged production code. No assertions or timeouts weakened. Reviewer diagnosis retained in reviewer-verdict.txt.
+
+APK SHA256: not generated.
+
+未生成 APK；未操作手机或模拟器，视觉未验证（本轮无 UI 改动）。真实 Android su、Magisk、KernelSU、APatch、API33 运行、R8 和硬件未测。GPU 为 Linux JVM/POSIX 测试，适配系统路径及 UID 检查，不等于真实 Root 验收。无法取得有效退出或明确未启动回执时保留 worker/资源租约和 UNKNOWN；可能需要后续诊断，不能据客户端死亡宣称子进程已退出。故意脱离进程组的 Root 代码仍不保证终止。最终发布 head 的独立审核、CI 及正式模拟器回归待发布器与审核端执行。
+
+Local evidence: `E:\Desktop\AI研究\theta-auto-loop\event-runs\8a9ec8e0-dc82-4592-8b4c-c878923a6922`. Raw logs/XML/tar and interim evidence are not committed.
